@@ -27,6 +27,7 @@ import { loadingFromAssumption, planFromAssumption, type PlanFrom } from './plan
 import { searchAssumptions, searchOptionOf, searchResultText, type SearchOption, type SearchReport } from './search-mode';
 import { loadPallets, manifestPalletTotals, manifestTotalText, palletLimitText, palletsExact, palletsOverBays, palletText, type LoadPallets } from './pallets';
 import { helpersText } from './load-helpers';
+import { windowRuleText, type WindowRule } from './window-rule';
 
 /** The SUMMARY row with the invoices (distinct sales orders) of the day. */
 export const INVOICES_LABEL = 'Invoices (sales orders)';
@@ -124,6 +125,8 @@ export interface SolverRules {
   newOvertimeOnly: boolean;
   /** Unloading finished by closing (owner rule 29 Sep 2026); absent/false = it only had to start by closing. */
   finishByClosing?: boolean;
+  /** The receiving-hours rule the solver echoed (START = closing is the latest arrival); absent/null = an older plan. */
+  windowRule?: WindowRule | null;
   /** The driver break the plan was made with (the solver's echo); absent/null = none planned. */
   breakRule?: { lengthMin: number; startFromMin: number; startToMin: number } | null;
   /**
@@ -139,6 +142,7 @@ export function solverRules(d: Pick<PlanDetail, 'scenarios'>): SolverRules {
     weightsToTenthKg: option?.weightUnitKg === 0.1,
     newOvertimeOnly: option?.newOvertimeOnly === true,
     finishByClosing: option?.windowRule === 'FINISH',
+    windowRule: option?.windowRule ?? null,
     breakRule: option?.breakRule ?? null,
     pallets: option?.palletRule ?? null,
   };
@@ -1250,9 +1254,7 @@ export function tenantAssumptions(
         } and the payload - their case capacity is not used; trucks without bays: cases and payload; a payload of 0 is no weight limit. A load's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet). Orders, invoices and the stops stay in cases`
       : 'cases and payload (no truck of this plan was planned by pallets); a payload of 0 is no weight limit',
     // Worded by the rules the solver REPORTED this plan was made with (review FIX 9), never by the settings.
-    'Receiving hours': solver.finishByClosing
-      ? 'unloading must be finished by the end of the receiving hours'
-      : 'earlier rule: unloading had to start by closing and could run past it',
+    'Receiving hours': windowRuleText(solver.finishByClosing ? 'FINISH' : solver.windowRule === 'START' ? 'START' : null),
     'Driver break': solver.breakRule
       ? `${solver.breakRule.lengthMin} min, starting between ${fmtHhmm(solver.breakRule.startFromMin)} and ${fmtHhmm(solver.breakRule.startToMin)}, between stops or at the depot (it may overlap reloading and loading), never while unloading; inside the ${fmtDuration(cfg.driverShiftMaxMinutes)} shift maximum; paid driver time. Truck-days back for good by ${fmtHhmm(solver.breakRule.startToMin)}, or leaving for the first time at ${fmtHhmm(solver.breakRule.startFromMin)} or later, have none`
       : 'not planned',

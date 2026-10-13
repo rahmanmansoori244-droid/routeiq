@@ -48,6 +48,7 @@ import { loadCustomerCount, loadPallets, palletText, palletUnits, plannedLoadRoo
 import { CUSTOMER_DATA_REASONS, idleTrucksNote, unservedNowPlannable } from './left-out-note';
 import { hadTimeHere } from './cross-depot';
 import { isSmallTruck, smallTruckMaxBaysOf } from './small-truck';
+import { echoedWindowRule, windowRuleAskedText, type WindowRule } from './window-rule';
 
 export interface DetailStop {
   sequence: number;
@@ -386,8 +387,11 @@ export interface PlanDetail {
     weightUnitKg: number | null;
     /** true: only new overtime counted when this option chose trucks (audit E4); null: an optimizer before it. */
     newOvertimeOnly: boolean | null;
-    /** The receiving-hours rule this option was made with (the solver's echo); null: unloading only had to start by closing. */
-    windowRule?: 'FINISH' | null;
+    /**
+     * The receiving-hours rule this option was made with (the solver's echo): FINISH = unloading finished
+     * by closing, START = closing was the latest arrival; null: an older plan (unloading only had to start by closing).
+     */
+    windowRule?: WindowRule | null;
     /** The driver-break rule this option was made with (the solver's echo); null: no break was planned. */
     breakRule?: { lengthMin: number; startFromMin: number; startToMin: number } | null;
     /** The pallet rule this option was made with (the solver's echo: trucks with bays checked by pallets at this fill); null: by cases only. */
@@ -1054,7 +1058,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         feasibility: d.feasibility ? { status: d.feasibility.status, timing: d.feasibility.timing, violations: d.feasibility.violations?.length ?? 0 } : null,
         weightUnitKg: typeof d.weight_unit_kg === 'number' ? d.weight_unit_kg : null,
         newOvertimeOnly: typeof d.new_overtime_only === 'boolean' ? d.new_overtime_only : null,
-        windowRule: d.window_rule === 'FINISH' ? 'FINISH' : null,
+        windowRule: echoedWindowRule(d.window_rule),
         breakRule: d.break_rule && d.break_rule.length_min > 0
           ? { lengthMin: d.break_rule.length_min, startFromMin: d.break_rule.start_from_min, startToMin: d.break_rule.start_to_min }
           : null,
@@ -1277,12 +1281,17 @@ type OutdatedLoad = {
  * A plan asked for with the finish-by-closing rule (owner rule 29 Sep 2026) but made by a planner
  * without it (the planner and the web are updated one after the other): its loads keep the earlier
  * rule, which the solver's echo shows (DispatchScenario.window_rule absent). Null when it was
- * planned with the rule, or never asked for it.
+ * planned with the rule, or never asked for it. The latest-arrival rule (START, the company setting
+ * of 13 Oct 2026) is noted only when the echo names another rule: a planner without the echo plans
+ * START anyway (its default, the earlier rule).
  */
 export function plannerRulesNote(d: { window_rule?: string | null; break_rule?: unknown; inputs?: unknown }): string | null {
   const cfg = readPlanInputs(d.inputs)?.config;
   const missing: string[] = [];
-  if (cfg?.window_rule === 'FINISH' && d.window_rule !== 'FINISH') missing.push('that unloading must be finished by closing');
+  const asked = echoedWindowRule(cfg?.window_rule);
+  const echoed = echoedWindowRule(d.window_rule);
+  if (asked === 'FINISH' && echoed !== 'FINISH') missing.push(windowRuleAskedText('FINISH'));
+  if (asked === 'START' && echoed !== null && echoed !== 'START') missing.push(windowRuleAskedText('START'));
   if ((cfg?.break_min ?? 0) > 0 && !d.break_rule) missing.push('the driver break');
   if (!missing.length) return null;
   return `Made by a planner without the rule${missing.length > 1 ? 's' : ''} ${missing.join(' and ')} (an update was being installed): these loads keep the earlier rules. Re-plan in a few minutes to use ${missing.length > 1 ? 'them' : 'it'}.`;

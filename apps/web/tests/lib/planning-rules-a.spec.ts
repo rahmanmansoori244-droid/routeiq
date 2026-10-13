@@ -80,7 +80,9 @@ describe('the rules each load was planned with come only from the echo', () => {
   it("the asked config never sets the rule; the solver's echo does", () => {
     expect(rulesFrom({ ...cfg, window_rule: 'FINISH' } as never, depot, {})).not.toHaveProperty('windowRule');
     expect(rulesFrom(cfg, depot, {}, { window_rule: 'FINISH' })).toMatchObject({ windowRule: 'FINISH' });
-    expect(rulesFrom(cfg, depot, {}, { window_rule: 'START' })).not.toHaveProperty('windowRule');
+    // The latest-arrival rule (company setting, 13 Oct 2026) is kept from the echo too.
+    expect(rulesFrom(cfg, depot, {}, { window_rule: 'START' })).toMatchObject({ windowRule: 'START' });
+    expect(rulesFrom(cfg, depot, {}, { window_rule: 'OTHER' })).not.toHaveProperty('windowRule');
     expect(rulesFrom(cfg, depot, {}, null)).toEqual(rulesFrom(cfg, depot, {}));
   });
 
@@ -93,8 +95,8 @@ describe('the rules each load was planned with come only from the echo', () => {
   });
 });
 
-describe('the request asks for finish by closing', () => {
-  it('dispatchConfigFromTenant sends window_rule FINISH (an owner rule, not a setting)', () => {
+describe('the request asks for finish by closing by default', () => {
+  it('dispatchConfigFromTenant sends window_rule FINISH unless the company setting says START (13 Oct 2026)', () => {
     const t = {
       shiftStartMin: 420, driverShiftMaxMinutes: 660, overtimeAfterMin: 540, overtimeCostPerHour: 4, reloadMinutes: 30, loadingMinPerCase: 0,
       serviceMinPerCase: 0, maxTripsPerTruck: 3, splitDeliveries: true, defaultServiceTimeMin: 20, fuelPricePerLitre: 0, driverCostPerHour: 0,
@@ -102,6 +104,8 @@ describe('the request asks for finish by closing', () => {
       avgSpeedKmh: 40, roadTimeFactor: 1.25, planningCutoffMin: 1080, dateOrder: 'DMY', timezone: 'Asia/Muscat', serviceAreaJson: null,
     } as unknown as TenantPlannerConfig;
     expect(dispatchConfigFromTenant(t, 'OM', ['RECOMMENDED']).config.window_rule).toBe('FINISH');
+    expect(dispatchConfigFromTenant({ ...t, windowRule: 'FINISH' }, 'OM', ['RECOMMENDED']).config.window_rule).toBe('FINISH');
+    expect(dispatchConfigFromTenant({ ...t, windowRule: 'START' }, 'OM', ['RECOMMENDED']).config.window_rule).toBe('START');
   });
 });
 

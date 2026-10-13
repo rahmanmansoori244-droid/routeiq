@@ -15,8 +15,10 @@
  *   the load is over its payload, which blocks like any overload (CAPACITY_KG_NEW_WEIGHT);
  * - service starts inside the hard receiving window, and the stored "within hours" flag; a load
  *   planned under the finish-by-closing rule (PlanRules.windowRule 'FINISH', owner rule 29 Sep 2026)
- *   must also FINISH unloading by closing. A load planned before it keeps its own earlier rule, so it
- *   is never blocked after the fact;
+ *   must also FINISH unloading by closing. A load planned under the latest-arrival rule (windowRule
+ *   'START', the company setting of 13 Oct 2026: "14:00 IS the latest arrival") must START unloading by
+ *   closing and may finish after it, like a load planned before the rule, which keeps its own earlier
+ *   rule, so it is never blocked after the fact;
  * - the driver break (BREAK, owner rule 29-30 Sep 2026), when the truck-day's latest load was
  *   planned with it (PlanRules.break, from the solver's echo): a truck-day whose first departure is
  *   before the window start and whose last return is after the window end holds one break - a
@@ -242,6 +244,8 @@ export function inputHash(input: FeasibilityInput): string {
             // Only when set, so the hash of every plan made without it is unchanged.
             ...(typeof l.rules.loadingFromMin === 'number' ? [l.rules.loadingFromMin] : []),
             ...(l.rules.windowRule === 'FINISH' ? ['FINISH'] : []),
+            // A load planned under the latest-arrival rule (13 Oct 2026): every older load keeps its hash.
+            ...(l.rules.windowRule === 'START' ? ['START'] : []),
           ]
         : null,
       [...l.stops]
@@ -423,7 +427,15 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
         }
         if (outside) {
           const w = hs !== undefined || he !== undefined ? ` ${hs === null || hs === undefined ? '--:--' : hhmm(hs)}-${he === null || he === undefined ? '--:--' : hhmm(he)}` : '';
-          v({ ...at(l), code: 'HARD_WINDOW', message: `${code} load ${l.loadNo}: ${s.label} is served at ${start === null ? '--:--' : hhmm(start)}, outside its receiving hours${w}.` });
+          // Planned under the latest-arrival rule and starting after closing: say it in the rule's words.
+          const lateArrival = l.rules?.windowRule === 'START' && start !== null && he !== undefined && he !== null && start > he;
+          v({
+            ...at(l),
+            code: 'HARD_WINDOW',
+            message: lateArrival
+              ? `${code} load ${l.loadNo}: ${s.label} starts unloading at ${hhmm(start!)}, after its latest arrival ${hhmm(he!)} (receiving hours${w}).`
+              : `${code} load ${l.loadNo}: ${s.label} is served at ${start === null ? '--:--' : hhmm(start)}, outside its receiving hours${w}.`,
+          });
         }
         if (start !== null && s.departureMin !== null && s.departureMin < start) {
           v({ ...at(l), code: 'STOP_TIMES', message: `${code} load ${l.loadNo}: ${s.label} leaves (${hhmm(s.departureMin)}) before it is served (${hhmm(start)}).` });

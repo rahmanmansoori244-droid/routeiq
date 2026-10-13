@@ -45,12 +45,14 @@ export interface PlanRules {
   loadingFromMin?: number | null;
   /**
    * Planning rules (owner decision 29 Sep 2026): 'FINISH' = the load was planned with unloading
-   * FINISHED by the end of each customer's receiving hours. Absent: the earlier rule (unloading had
-   * to start by closing). Set ONLY from the solver's echo (DispatchScenario.window_rule), never from
-   * what the web asked for, so a load planned by an older solver is never checked by a rule it was
-   * not planned with.
+   * FINISHED by the end of each customer's receiving hours. 'START' (the company setting, owner request
+   * 13 Oct 2026): the end of the receiving hours was the latest arrival - unloading had to start by then
+   * and may run past it. Absent: a load planned before the echo was kept, by the earlier rule (unloading
+   * had to start by closing: checked like START). Set ONLY from the solver's echo
+   * (DispatchScenario.window_rule), never from what the web asked for, so a load planned by an older
+   * solver is never checked by a rule it was not planned with.
    */
-  windowRule?: 'FINISH';
+  windowRule?: 'START' | 'FINISH';
   /**
    * The driver-break rule the load was planned with (owner rule 29-30 Sep 2026), ONLY from the
    * solver's echo (DispatchScenario.break_rule). Absent: planned without a break rule - such a load
@@ -197,8 +199,12 @@ export interface PlanSettings {
    * the customer's full stop time (web-side). Absent: parts shared the stop time by cases (earlier).
    */
   splitStopTime?: 'FULL';
-  /** 'FINISH': the web asked for unloading finished by closing. What each load was planned with is its PlanRules.windowRule (the echo). */
-  windowRule?: 'FINISH';
+  /**
+   * The receiving-hours rule the web asked for (TenantConfig.windowRule): 'FINISH' = unloading finished by
+   * closing, 'START' = closing is the latest arrival. What each load was planned with is its
+   * PlanRules.windowRule (the echo).
+   */
+  windowRule?: 'START' | 'FINISH';
   /** The driver break the web asked for (0 = none). What each load was planned with is its PlanRules.break (the echo). */
   driverBreak?: { lengthMin: number; startFromMin: number; startToMin: number };
 }
@@ -310,8 +316,9 @@ export function rulesFrom(
     // Only on a plan made on its delivery day, so the rules of every other plan stay as they were.
     ...(typeof config.loading_from_min === 'number' ? { loadingFromMin: config.loading_from_min } : {}),
     // From the echo only (never config.window_rule, which is what was ASKED): absent keeps every
-    // older load's rules - and its feasibility hash - exactly as they were.
-    ...(echo?.window_rule === 'FINISH' ? { windowRule: 'FINISH' as const } : {}),
+    // older load's rules - and its feasibility hash - exactly as they were. START is kept since the
+    // company setting (13 Oct 2026); before it, the web never asked for START.
+    ...(echo?.window_rule === 'FINISH' || echo?.window_rule === 'START' ? { windowRule: echo.window_rule } : {}),
     ...(echo?.break_rule && echo.break_rule.length_min > 0
       ? { break: { lengthMin: echo.break_rule.length_min, startFromMin: echo.break_rule.start_from_min, startToMin: echo.break_rule.start_to_min } }
       : {}),
