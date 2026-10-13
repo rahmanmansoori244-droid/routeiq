@@ -120,6 +120,12 @@ export interface DetailStop {
    */
   cancelled: boolean;
   /**
+   * The cancelled orders of this stop (of `orderIds`): a stop can hold several orders of its customer,
+   * and only these are marked (the warehouse sheet per invoice, the sheets' stop line "1 of 2 orders
+   * CANCELLED", the driver page per order). Empty when `cancelled` is false.
+   */
+  cancelledOrderIds: string[];
+  /**
    * The order lines of this stop as planned: one entry per order line (a split part's own cases), no
    * aggregation - from the same row lines as `skus` (rowLinesKg). The driver page lists them per
    * order, and a partly-delivered result names their line ids (owner request 4 Oct 2026). The Excel
@@ -619,7 +625,10 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       if (s) {
         if (cameFrom && (!s.carriedFrom || cameFrom < s.carriedFrom)) s.carriedFrom = cameFrom;
         if (wentTo && (!s.carriedTo || wentTo > s.carriedTo)) s.carriedTo = wentTo;
-        if (isCancelled) s.cancelled = true;
+        if (isCancelled) {
+          s.cancelled = true;
+          if (!s.cancelledOrderIds.includes(o.id)) s.cancelledOrderIds.push(o.id);
+        }
         s.cases += cases;
         s.weightKg += weightKg;
         s.orderIds.push(o.id);
@@ -697,6 +706,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         carriedFrom: cameFrom,
         carriedTo: wentTo,
         cancelled: isCancelled,
+        cancelledOrderIds: isCancelled ? [o.id] : [],
         orderLines,
         plannedHours: snap
           ? { hardStart: snap.hardStartMin, hardEnd: snap.hardEndMin, prefStart: snap.prefStartMin, prefEnd: snap.prefEndMin }

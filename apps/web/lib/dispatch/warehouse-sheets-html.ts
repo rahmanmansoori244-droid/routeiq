@@ -124,6 +124,11 @@ ${
     ? `<div class="banner">${s.carriedAway} order(s) on this load were brought forward to ${esc(s.carriedToDays)}: do not load them from this paper (unload them if already loaded) - ask the dispatcher. They are marked CARRIED OVER below.</div>`
     : ''
 }
+${
+  s.cancelledHere > 0
+    ? `<div class="banner">${s.cancelledHere} cancelled order(s) on this load: do not load them (unload them if already loaded); their cases are still in the products below. Their invoices are marked CANCELLED below. Re-plan the day to take them off.</div>`
+    : ''
+}
 <h2>1. Products to load</h2>
 <table><thead><tr><th>Product code</th><th>Product</th><th class="n">Cases</th><th>Loaded ✓</th></tr></thead>
 <tbody>${products}<tr class="total"><td colspan="2">Total</td><td class="n">${s.totalCases}</td><td></td></tr></tbody></table>

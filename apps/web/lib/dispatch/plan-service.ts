@@ -1332,15 +1332,21 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   }
 
   // Cancel order (owner request 12 Oct 2026): an option of this version made before an order of it was
-  // cancelled would put that order on a truck again. The job applies its own result (a cancel is
-  // refused while the day is optimized); a dispatcher's "Use instead" re-plans instead.
+  // cancelled, or moved to another day (postponed or brought forward: its copy is planned there), would
+  // put that order on a truck of this day again. The job applies its own result (a cancel or postpone
+  // is refused while the day is optimized); a dispatcher's "Use instead" re-plans instead.
   if (opts.requireOptimized && d.scope.orderIds.length) {
-    const cancelled = await tx.order.count({ where: { tenantId, id: { in: [...d.scope.orderIds] }, cancelledAt: { not: null } } });
-    if (cancelled > 0) {
+    const ids = [...d.scope.orderIds];
+    const [cancelled, moved] = await Promise.all([
+      tx.order.count({ where: { tenantId, id: { in: ids }, cancelledAt: { not: null } } }),
+      tx.order.count({ where: { tenantId, id: { in: ids }, carriedToOrderId: { not: null } } }),
+    ]);
+    if (cancelled > 0 || moved > 0) {
+      const what = [cancelled ? `${cancelled} cancelled` : '', moved ? `${moved} moved to another day (postponed or brought forward)` : ''].filter(Boolean).join(' and ');
       throw new PlanError(
-        `${cancelled} order(s) of this option were cancelled after it was made: it cannot be used. RE-PLAN the day instead (the cancelled orders are left out).`,
+        `${cancelled + moved} order(s) of this option were ${what} after it was made: it cannot be used. RE-PLAN the day instead (those orders are left out).`,
         409,
-        { code: 'ORDERS_CANCELLED' },
+        { code: cancelled > 0 ? 'ORDERS_CANCELLED' : 'ORDERS_CARRIED' },
       );
     }
   }

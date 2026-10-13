@@ -47,6 +47,8 @@ export interface CancelledRow {
   by: string | null;
   at: string;
   onPlannedLoads: string[];
+  /** A planned load holding it also holds other orders of the day: RE-PLAN takes it off (absent on an older answer = yes). */
+  replan?: boolean;
   canUndo: boolean;
 }
 
@@ -95,6 +97,9 @@ export function OrderActionDialog({
 
   const verb = action === 'CANCEL' ? 'Cancel' : 'Postpone';
   const several = target ? severalInvoicesNote(target.salesOrders, action) : null;
+  // The day is over (before the company's today): Undo cancel is refused there (409 DAY_OVER), so the
+  // dialog says the cancel is final instead of promising Undo.
+  const dayOver = date < today;
 
   async function send() {
     if (!target || busy) return;
@@ -133,9 +138,16 @@ export function OrderActionDialog({
           <DialogDescription>
             {target ? who(target) : ''}, {fmtDayMonth(date)}.{' '}
             {action === 'CANCEL'
-              ? 'The order is taken out of planning and the counts; it stays in the Cancelled list of this day, where Undo brings it back.'
+              ? dayOver
+                ? 'The order is taken out of the counts and stays in the Cancelled list of this day.'
+                : 'The order is taken out of planning and the counts; it stays in the Cancelled list of this day, where Undo brings it back.'
               : 'The order moves to the day you choose, marked "Carried over from this day". Undo is on that day\'s screen (Bring forward) until it is planned there.'}
           </DialogDescription>
+          {action === 'CANCEL' && dayOver ? (
+            <p className="text-sm font-medium text-red-700" data-testid="cancel-final">
+              This day is over: a cancel here cannot be undone. Use it only for an order that will never be delivered (to deliver it later, use Bring forward on today&apos;s screen instead).
+            </p>
+          ) : null}
         </DialogHeader>
         {target ? (
           <div className="space-y-1 rounded-md border bg-muted/30 p-2 text-sm" data-testid="order-action-invoices">
@@ -226,7 +238,7 @@ export function CancelledOrdersList({ rows, canPlan, disabled, onDone }: { rows:
     onDone();
   }
   return (
-    <details className="rounded-md border border-dashed p-2 text-sm text-muted-foreground" data-testid="cancelled-orders" open={rows.some((c) => c.onPlannedLoads.length > 0)}>
+    <details className="rounded-md border border-dashed p-2 text-sm text-muted-foreground" data-testid="cancelled-orders" open={rows.some((c) => c.onPlannedLoads.length > 0 && c.replan !== false)}>
       <summary className="cursor-pointer">
         Cancelled orders — {rows.length} ({rows.reduce((a, c) => a + c.cases, 0).toLocaleString()} cases): not planned or counted
       </summary>
@@ -237,7 +249,13 @@ export function CancelledOrdersList({ rows, canPlan, disabled, onDone }: { rows:
               <s>{c.customerName}</s> {c.customerCode}
               {c.branchCode ? ` / ${c.branchCode}` : ''} · {invoicesText(c.salesOrders, c.linesWithoutInvoice)} · {c.cases} cases · {c.reasonText} · {c.by ?? 'a removed user'},{' '}
               {new Date(c.at).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-              {c.onPlannedLoads.length ? <b className="text-amber-800"> · still on {c.onPlannedLoads.join(', ')}: RE-PLAN to take it off</b> : null}
+              {c.onPlannedLoads.length ? (
+                c.replan !== false ? (
+                  <b className="text-amber-800"> · still on {c.onPlannedLoads.join(', ')}: RE-PLAN to take it off</b>
+                ) : (
+                  <span> · still shown on {c.onPlannedLoads.join(', ')}, which holds nothing else: leave it as it is (never loaded)</span>
+                )
+              ) : null}
             </span>
             {canPlan && c.canUndo ? (
               <Button size="sm" variant="outline" disabled={disabled || busy !== null} onClick={() => void undo(c)} data-testid={`uncancel-${c.orderId}`}>

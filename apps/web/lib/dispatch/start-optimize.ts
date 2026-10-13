@@ -613,7 +613,7 @@ export async function replan(
   expect?: ExpectedDay,
   clock: { now?: Date } = {},
   searchMode?: SearchMode,
-  pre: { ticket?: SolveTicket } = {},
+  pre: { ticket?: SolveTicket; keepReason?: boolean } = {},
 ): Promise<StartResult> {
   const handed = { done: false };
   try {
@@ -634,7 +634,7 @@ async function replanInner(
   expect: ExpectedDay | undefined,
   clock: { now?: Date },
   searchMode: SearchMode | undefined,
-  pre: { ticket?: SolveTicket },
+  pre: { ticket?: SolveTicket; keepReason?: boolean },
   handed: { done: boolean },
 ): Promise<StartResult> {
   const found = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
@@ -664,14 +664,17 @@ async function replanInner(
   if (refused) return refused;
   // A late order waiting to be added makes this a late-order re-plan (the other orders keep their
   // trucks) whichever button started it; an order cancelled or moved to a later day while on a PLANNED
-  // load makes it a manual adjustment (the other orders keep their trucks too, owner request 12 Oct
-  // 2026); only with neither is it a full re-optimize.
+  // load makes the dispatcher's RE-PLAN a manual adjustment (the other orders keep their trucks too,
+  // owner request 12 Oct 2026); only with neither is it a full re-optimize. `pre.keepReason`: a caller
+  // that wants the full re-optimize it asked for - the hire suggestion's re-plan with the trucks it just
+  // rented (plan continuity would keep orders off them, unlike the what-if it showed) - never becomes a
+  // manual adjustment.
   const effectiveReason =
     reason !== 'REOPTIMIZE'
       ? reason
       : (await pendingLateOrderIds(tenantId, run)).length
         ? 'LATE_ORDER'
-        : (await ordersTakenOffPlannedLoads(runId))
+        : !pre.keepReason && (await ordersTakenOffPlannedLoads(runId))
           ? 'MANUAL_ADJUSTMENT'
           : reason;
   // Admission before the version exists: a 429 must never leave a new version behind. Reserved for

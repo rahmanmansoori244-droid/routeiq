@@ -518,7 +518,11 @@ export function carryCandidates(orders: readonly CarryOrderIn[], plans: Readonly
     const ck = custKeyOf.get(c.orderId)!;
     for (const l of c.lines) {
       if (!normSalesOrder(l.salesOrderNo)) continue;
-      const later = [...(where.get(identity(l.salesOrderNo!, ck, l.productCode))?.values() ?? [])].filter((x) => x.orderId !== c.orderId && x.date > c.date);
+      // A cancelled later order is never delivered: it does not hold the line (Cancel order, owner
+      // request 12 Oct 2026) - except on day D itself, whose intake key it keeps (ALREADY_ON_DAY below).
+      const later = [...(where.get(identity(l.salesOrderNo!, ck, l.productCode))?.values() ?? [])].filter(
+        (x) => x.orderId !== c.orderId && x.date > c.date && (!x.cancelled || x.date === target.date),
+      );
       if (later.length) {
         enteredAgain.set(c.orderId, { line: l, later: later.sort((a, b) => a.date.localeCompare(b.date) || a.orderId.localeCompare(b.orderId)) });
         break;
@@ -532,7 +536,13 @@ export function carryCandidates(orders: readonly CarryOrderIn[], plans: Readonly
     const { line, later } = hit;
     const so = `Sales order ${line.salesOrderNo} (${line.productCode})`;
     const latest = later[later.length - 1]!;
-    if (later.some((x) => x.date === target.date)) {
+    const onTarget = later.filter((x) => x.date === target.date);
+    if (onTarget.length && onTarget.every((x) => x.cancelled)) {
+      c.blocked = {
+        code: 'ALREADY_ON_DAY',
+        text: `${so} is on a cancelled order of ${fmtDayMonth(target.date)}: not brought forward. To deliver it on ${fmtDayMonth(target.date)}, undo that cancel (Cancelled orders, Step 1).`,
+      };
+    } else if (onTarget.length) {
       c.blocked = { code: 'ALREADY_ON_DAY', text: `${so} is already confirmed for ${fmtDayMonth(target.date)}: not brought forward. Check whether it was entered again for that day.` };
     } else if (carriers.has(latest.orderId)) {
       c.blocked = carriers.get(latest.orderId)!.ofToday
@@ -916,7 +926,7 @@ async function laterLinesOf(db: Db, tenantId: string, orders: Awaited<ReturnType
   return out;
 }
 
-/** lineDupKey of every sales-order line confirmed for `date` (any depot, like the file intake). Also Postpone's duplicate check. */
+/** lineDupKey of every sales-order line confirmed for `date` (any depot, like the file intake). Postpone has its own (order-cancel confirmedLinesOn: it names a cancelled one). */
 export async function confirmedKeysOn(db: Db, tenantId: string, date: string): Promise<Set<string>> {
   const rows = await db.orderLine.findMany({
     where: { salesOrderNo: { not: null }, order: { tenantId, deliveryDate: dateOnly(date) } },
@@ -1444,6 +1454,15 @@ export async function undoCheck(
   const dayPlan = await currentPlan(tenantId, copy.depotId, copyDate, db);
   if (dayPlan?.status === 'OPTIMIZING') {
     return { ok: false, code: 'PLAN_BUSY', text: `The ${day} plan is being optimized right now: wait for it to finish, then try again.`, copyId: copy.id, copyDate };
+  }
+  // The original's own day too (Postpone moves orders of today and later days, so that day can be the
+  // one being re-planned): its running job was built without the original and replaces the PLANNED
+  // loads when it finishes, so an undo now would leave the original on no load. lockForUndo holds that
+  // day's lock.
+  const fromDate = isoOf(original.deliveryDate);
+  const fromPlan = fromDate === copyDate && original.depotId === copy.depotId ? null : await currentPlan(tenantId, original.depotId, fromDate, db);
+  if (fromPlan?.status === 'OPTIMIZING') {
+    return { ok: false, code: 'PLAN_BUSY', text: `The ${fmtDayMonth(fromDate)} plan is being optimized right now: wait for it to finish, then try again.`, copyId: copy.id, copyDate };
   }
   return { ok: true, original: { id: original.id, deliveryDate: original.deliveryDate, depotId: original.depotId }, copy };
 }

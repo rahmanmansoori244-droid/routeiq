@@ -139,10 +139,17 @@ export function orderActionRefusal(action: 'CANCEL' | 'POSTPONE', o: OrderStateN
       text: `This order is on ${where(frozen)} (${frozen.status.toLowerCase()}). A locked load never changes: unlock the load first (a loading load goes Back to locked first), then ${verb} the order and re-plan the day. Unload its cases if they are already on the truck.`,
     };
   }
-  if (o.planStatus === 'OPTIMIZING') {
-    return { status: 409, code: 'PLAN_OPTIMIZING', text: `The ${fmtDayMonth(o.date)} plan is being optimized right now: try again when it finishes.` };
-  }
+  if (o.planStatus === 'OPTIMIZING') return { status: 409, code: 'PLAN_OPTIMIZING', text: planOptimizingText(o.date) };
   return null;
+}
+
+/**
+ * The refusal while the day's plan is being optimized (Cancel, Postpone and Undo cancel): the running
+ * job was built from the orders as they were and replaces the PLANNED loads when it finishes, so a
+ * change now would be answered for a plan that is about to be replaced.
+ */
+export function planOptimizingText(date: string): string {
+  return `The ${fmtDayMonth(date)} plan is being optimized right now: try again when it finishes.`;
 }
 
 /** The PLANNED loads of the latest plan version still holding the order ("T05 L2"), each once. */
@@ -154,8 +161,13 @@ export function plannedLoadsOf(placements: readonly OrderPlacementNow[]): string
 // Dates
 // ---------------------------------------------------------------------------------------
 
-/** The days an order of `orderDate` may be postponed to: [max(next day, today), orderDate + 14]; null = none. */
+/**
+ * The days an order of `orderDate` may be postponed to: [max(next day, today), orderDate + 14]; null =
+ * none. An order of a day that is over (before today) has none: Bring forward moves it (the server
+ * answers ORDER_DAY_OVER, postponeDateRefusal), so the dialog never offers dates it would refuse.
+ */
 export function postponeRange(orderDate: string, today: string): { from: string; to: string } | null {
+  if (orderDate < today) return null;
   const next = addDaysIso(orderDate, 1);
   const from = next < today ? today : next;
   const to = addDaysIso(orderDate, POSTPONE_MAX_DAYS);
@@ -210,12 +222,37 @@ export function severalInvoicesNote(salesOrders: readonly string[], action: 'CAN
   return `This ${verb} all ${salesOrders.length} invoices of this order together. Cancelling or postponing one invoice of several is not possible yet (a later step).`;
 }
 
-/** The answer after a cancel. */
-export function cancelDoneText(r: { customer: string; invoices: string; cases: number; onPlannedLoads: readonly string[]; unserved: boolean; planned: boolean }): string {
+/**
+ * The PLANNED loads still holding the order that now hold nothing else of the day (every other order on
+ * them cancelled or moved to another day): " T02 L1 holds nothing else now: leave it as it is ...".
+ * Such a load is not work for a re-plan (carry-view holdsOnlyGone; the server answers NOTHING_TO_PLAN
+ * when nothing else is open), so the answer never says RE-PLAN because of it.
+ */
+function idleLoadsText(idle: readonly string[]): string {
+  if (!idle.length) return '';
+  const one = idle.length === 1;
+  return ` ${idle.join(', ')} ${one ? 'holds' : 'hold'} nothing else now: leave ${one ? 'it' : 'them'} as ${one ? 'it is' : 'they are'} (never loaded, kept in the plan for the record).`;
+}
+
+/**
+ * The answer after a cancel. `onPlannedLoads`: the PLANNED loads still holding it that also hold an
+ * order still of the day (RE-PLAN takes it off them); `idleLoads`: those holding nothing else now.
+ */
+export function cancelDoneText(r: {
+  customer: string;
+  invoices: string;
+  cases: number;
+  onPlannedLoads: readonly string[];
+  idleLoads?: readonly string[];
+  unserved: boolean;
+  planned: boolean;
+}): string {
   const what = `Order of ${r.customer} (${r.invoices}; ${r.cases} cases) cancelled.`;
+  const idle = idleLoadsText(r.idleLoads ?? []);
   if (r.onPlannedLoads.length) {
-    return `${what} It is still on ${r.onPlannedLoads.join(', ')} (planned): RE-PLAN the day to take it off. Until then ${r.onPlannedLoads.length > 1 ? 'those loads' : 'that load'} cannot be locked, loaded or dispatched.`;
+    return `${what} It is still on ${r.onPlannedLoads.join(', ')} (planned): RE-PLAN the day to take it off. Until then ${r.onPlannedLoads.length > 1 ? 'those loads' : 'that load'} cannot be locked, loaded or dispatched.${idle}`;
   }
+  if (idle) return `${what}${idle} Nothing else to do.`;
   if (r.unserved) return `${what} It was on the unserved list: nothing else to do.`;
   return `${what} ${r.planned ? 'It is not on any load of the plan in use' : 'It was not planned yet'}: nothing else to do.`;
 }
@@ -229,12 +266,22 @@ export function undoCancelDoneText(r: { customer: string; cases: number; onPlann
 }
 
 /** The answer after a postpone. */
-export function postponeDoneText(r: { customer: string; cases: number; fromDate: string; toDate: string; onPlannedLoads: readonly string[]; toHasPlan: boolean; toOptimizing: boolean }): string {
+export function postponeDoneText(r: {
+  customer: string;
+  cases: number;
+  fromDate: string;
+  toDate: string;
+  onPlannedLoads: readonly string[];
+  idleLoads?: readonly string[];
+  toHasPlan: boolean;
+  toOptimizing: boolean;
+}): string {
   const to = fmtDayMonth(r.toDate);
   const what = `Order of ${r.customer} (${r.cases} cases) postponed from ${fmtDayMonth(r.fromDate)} to ${to}.`;
-  const here = r.onPlannedLoads.length
-    ? ` It is still on ${r.onPlannedLoads.join(', ')} of ${fmtDayMonth(r.fromDate)} (planned): RE-PLAN ${fmtDayMonth(r.fromDate)} to take it off; until then that load cannot be locked.`
-    : '';
+  const here =
+    (r.onPlannedLoads.length
+      ? ` It is still on ${r.onPlannedLoads.join(', ')} of ${fmtDayMonth(r.fromDate)} (planned): RE-PLAN ${fmtDayMonth(r.fromDate)} to take it off; until then that load cannot be locked.`
+      : '') + idleLoadsText(r.idleLoads ?? []);
   const there = r.toOptimizing
     ? ` The ${to} plan is being optimized without it: when it finishes, RE-PLAN ${to} to add it.`
     : r.toHasPlan
@@ -266,3 +313,23 @@ export const CANCELLED_BADGE = 'CANCELLED - re-plan';
 
 /** The mark of a cancelled order on the driver sheet, the warehouse sheet and the Excel load sheet. */
 export const CANCELLED_STOP_TEXT = 'CANCELLED - do not load or deliver (re-plan the day)';
+
+/**
+ * The mark of a stop holding a cancelled order (plan-detail DetailStop). A stop is one customer's
+ * visit and can hold several orders (a file order and a late order, say): when only some of them are
+ * cancelled, the mark names those and says the rest is delivered - never "do not deliver" for the
+ * whole stop. Every order cancelled (or no per-order facts): CANCELLED_STOP_TEXT.
+ */
+export function stopCancelledText(s: {
+  orderIds?: readonly string[];
+  cancelledOrderIds?: readonly string[];
+  orderLines?: readonly { orderId: string; salesOrderNo: string | null }[];
+}): string {
+  const all = new Set(s.orderIds ?? []);
+  const gone = new Set(s.cancelledOrderIds ?? []);
+  if (!gone.size || gone.size >= all.size) return CANCELLED_STOP_TEXT;
+  const lines = (s.orderLines ?? []).filter((l) => gone.has(l.orderId));
+  const sos = [...new Set(lines.map((l) => l.salesOrderNo?.trim()).filter((x): x is string => !!x))].sort();
+  const what = invoicesText(sos, lines.filter((l) => !l.salesOrderNo?.trim()).length);
+  return `${gone.size} of ${all.size} orders CANCELLED (${what}) - do not load or deliver ${gone.size > 1 ? 'those' : 'it'}; the rest of this stop is delivered (re-plan the day)`;
+}

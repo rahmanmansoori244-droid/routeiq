@@ -96,6 +96,9 @@ export function DeliveryTimesPanel({
   const [edit, setEdit] = useState<{ c: DeliveryTimesCustomer; o: DayOrderTimeRow } | null>(null);
   const [act, setAct] = useState<{ action: 'CANCEL' | 'POSTPONE'; target: OrderActionTarget } | null>(null);
   const canAct = canPlan && !!date && !!today && !!onOrderChanged;
+  // Postpone only while the order's day is not over (the server answers ORDER_DAY_OVER otherwise):
+  // an earlier day's order is moved with Bring forward on today's screen.
+  const canPostpone = canAct && date! >= today!;
   const targetOf = (c: DeliveryTimesCustomer, o: DayOrderTimeRow): OrderActionTarget => ({
     orderId: o.orderId,
     customerName: c.name,
@@ -114,7 +117,7 @@ export function DeliveryTimesPanel({
     <details className="rounded-md border p-2 text-sm" data-testid="delivery-times">
       <summary className="cursor-pointer">
         Orders and delivery times — {orders} order(s){timed ? `, ${timed} with an urgent or promised time` : ''}. Each order uses its customer&apos;s receiving hours unless you change it.
-        {canAct ? ' Cancel or postpone an order here.' : ''}
+        {canPostpone ? ' Cancel or postpone an order here.' : canAct ? ' Cancel an order here.' : ''}
       </summary>
       <div className="mt-2 max-h-96 space-y-2 overflow-y-auto">
         {list.map((c) => (
@@ -138,9 +141,11 @@ export function DeliveryTimesPanel({
                       </Button>
                       {canAct ? (
                         <>
-                          <Button size="sm" variant="outline" onClick={() => setAct({ action: 'POSTPONE', target: targetOf(c, o) })} data-testid={`postpone-${o.orderId}`}>
-                            <CalendarClock className="mr-1 h-3 w-3" /> Postpone...
-                          </Button>
+                          {canPostpone ? (
+                            <Button size="sm" variant="outline" onClick={() => setAct({ action: 'POSTPONE', target: targetOf(c, o) })} data-testid={`postpone-${o.orderId}`}>
+                              <CalendarClock className="mr-1 h-3 w-3" /> Postpone...
+                            </Button>
+                          ) : null}
                           <Button size="sm" variant="outline" className="text-red-700" onClick={() => setAct({ action: 'CANCEL', target: targetOf(c, o) })} data-testid={`cancel-${o.orderId}`}>
                             <XCircle className="mr-1 h-3 w-3" /> Cancel...
                           </Button>

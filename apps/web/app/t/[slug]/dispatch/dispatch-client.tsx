@@ -101,8 +101,10 @@ interface Day {
     palletFactorCases?: number;
     trucksInactive?: number;
     unservedNowPlannable?: number;
-    /** Cancel order (owner request 12 Oct 2026): cancelled orders still on planned loads (they cannot be locked). */
+    /** Cancel order (owner request 12 Oct 2026): cancelled orders still on planned loads that hold other orders of the day (they cannot be locked). */
     cancelledOnPlan?: number;
+    /** Postpone order (owner request 12 Oct 2026): orders moved to a later day still on such planned loads (Lock refused: ORDERS_CARRIED). */
+    movedOnPlan?: number;
   };
   plan: null | {
     id: string;
@@ -458,7 +460,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const toApply = day.weightsToApply ?? [];
   const casesOf = (list: WeightGap[]) => list.reduce((a, g) => a + g.cases, 0);
   const running = day.plan?.status === 'OPTIMIZING' || day.plan?.job?.status === 'RUNNING' || day.plan?.job?.status === 'QUEUED';
-  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0, cancelledOnPlan: 0 };
+  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0, cancelledOnPlan: 0, movedOnPlan: 0 };
   const planOutdated =
     !!day.plan?.chosen &&
     (outdated.weightCases > 0 ||
@@ -470,7 +472,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       (outdated.palletFactorCases ?? 0) > 0 ||
       (outdated.trucksInactive ?? 0) > 0 ||
       (outdated.unservedNowPlannable ?? 0) > 0 ||
-      (outdated.cancelledOnPlan ?? 0) > 0);
+      (outdated.cancelledOnPlan ?? 0) > 0 ||
+      (outdated.movedOnPlan ?? 0) > 0);
   // Review of 9 Oct 2026 (ui-dispatch-2): orders the plan in use leaves unserved: Step 3 says how many,
   // never "up to date with all orders". It keeps RE-PLAN on, and the step not done, only for those a
   // re-plan could place now (`unserved.replan`, review of 5614ba9), for example after a truck was added
@@ -612,8 +615,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         ) : null}
         {day.carriedOut?.orders ? (
           <p className="text-xs text-muted-foreground" data-testid="carried-out">
-            {day.carriedOut.orders} order(s) ({day.carriedOut.cases.toLocaleString()} cases) of this day were not delivered and were brought forward to{' '}
-            {day.carriedOut.toDates.map(fmtDayMonth).join(', ')}: they are planned there, not on this day.
+            {day.carriedOut.orders} order(s) ({day.carriedOut.cases.toLocaleString()} cases) of this day were moved to{' '}
+            {day.carriedOut.toDates.map(fmtDayMonth).join(', ')} (postponed, or brought forward when not delivered): they are planned there, not on this day.
           </p>
         ) : null}
         <CancelledOrdersList rows={day.cancelled ?? []} canPlan={canPlan} disabled={!dayReady || optimizing || planBusy || running} onDone={() => void afterOrderChanged()} />
@@ -730,6 +733,10 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               // Cancel order (owner request 12 Oct 2026): their loads cannot be locked until RE-PLAN takes them off.
               outdated.cancelledOnPlan
                 ? `${outdated.cancelledOnPlan} of its order(s) on planned loads were cancelled (those loads cannot be locked until RE-PLAN takes them off)`
+                : '',
+              // Postpone order: the same for orders moved to a later day (Lock answers ORDERS_CARRIED).
+              outdated.movedOnPlan
+                ? `${outdated.movedOnPlan} of its order(s) on planned loads were moved to a later day (postponed or brought forward; those loads cannot be locked until RE-PLAN takes them off)`
                 : '',
               // Audit E1: locked and dispatched loads keep the pin they were planned from; RE-PLAN moves the rest.
               outdated.depotMoved ? `the depot pin was moved (${outdated.depotMoved} planned load(s) still start from the old pin)` : '',

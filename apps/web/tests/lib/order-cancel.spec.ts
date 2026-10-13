@@ -13,12 +13,14 @@ import {
   NOT_CANCELLED,
   orderActionReasonText,
   orderActionRefusal,
+  planOptimizingText,
   plannedLoadsOf,
   postponeDateRefusal,
   postponeDoneText,
   postponeLateReason,
   postponeRange,
   severalInvoicesNote,
+  stopCancelledText,
   undoCancelDayOver,
   undoCancelDoneText,
   type OrderStateNow,
@@ -30,6 +32,9 @@ import { cancelledLineNote, customerKey, lineDupKey, resolveOrderLines } from '@
 import { orderActionBlockedText } from '@/app/t/[slug]/dispatch/delivery-times';
 import { UP_TO_DATE } from '@/lib/dispatch/day-overview';
 import { AUDIT_ACTIONS } from '@/lib/audit-catalog';
+import { stopInvoices } from '@/lib/dispatch/warehouse-sheets';
+import { whatsappText } from '@/lib/dispatch/driver-links';
+import { fixture, stop } from './plan-detail-fixture';
 
 const state = (over: Partial<OrderStateNow> = {}): OrderStateNow => ({
   status: 'VALIDATED',
@@ -133,6 +138,9 @@ describe('dates', () => {
     const r = postponeDateRefusal('2026-10-12', '2026-10-14', '2026-10-13');
     expect(r).toMatchObject({ code: 'ORDER_DAY_OVER' });
     expect(r!.text).toContain('Bring forward');
+    // The dialog offers no dates the server refuses (review: 12 Oct order seen on 13 Oct offered 13-26 Oct).
+    expect(postponeRange('2026-10-12', '2026-10-13')).toBeNull();
+    expect(postponeRange('2026-09-28', '2026-10-13')).toBeNull();
   });
 
   it('undo cancel while the day is not over', () => {
@@ -158,6 +166,23 @@ describe('the words on screen', () => {
     );
     expect(cancelDoneText({ customer: 'A', invoices: 'SO 1', cases: 1, onPlannedLoads: [], unserved: false, planned: false })).toMatch(/It was not planned yet: nothing else to do\.$/);
     expect(cancelDoneText({ customer: 'A', invoices: 'SO 1', cases: 1, onPlannedLoads: [], unserved: true, planned: true })).toMatch(/unserved list: nothing else to do/);
+  });
+
+  it('after a cancel: a planned load holding nothing else now is left as it is, never "RE-PLAN"', () => {
+    const idle = cancelDoneText({ customer: 'A', invoices: 'SO 1', cases: 4, onPlannedLoads: [], idleLoads: ['T02 L1'], unserved: false, planned: true });
+    expect(idle).toBe('Order of A (SO 1; 4 cases) cancelled. T02 L1 holds nothing else now: leave it as it is (never loaded, kept in the plan for the record). Nothing else to do.');
+    expect(idle).not.toContain('RE-PLAN');
+    const both = cancelDoneText({ customer: 'A', invoices: 'SO 1', cases: 4, onPlannedLoads: ['T01 L1'], idleLoads: ['T02 L1', 'T03 L1'], unserved: false, planned: true });
+    expect(both).toContain('It is still on T01 L1 (planned): RE-PLAN the day');
+    expect(both).toContain('T02 L1, T03 L1 hold nothing else now: leave them as they are');
+    const p = postponeDoneText({ customer: 'A', cases: 5, fromDate: '2026-10-13', toDate: '2026-10-15', onPlannedLoads: [], idleLoads: ['T1 L1'], toHasPlan: false, toOptimizing: false });
+    expect(p).not.toContain('RE-PLAN 13 Oct');
+    expect(p).toContain('T1 L1 holds nothing else now');
+  });
+
+  it('undo cancel, cancel and postpone answer the same while the day is being optimized', () => {
+    expect(planOptimizingText('2026-10-13')).toBe('The 13 Oct plan is being optimized right now: try again when it finishes.');
+    expect(orderActionRefusal('CANCEL', state({ planStatus: 'OPTIMIZING' }))).toEqual({ status: 409, code: 'PLAN_OPTIMIZING', text: planOptimizingText('2026-10-13') });
   });
 
   it('after an undo and a postpone', () => {
@@ -220,6 +245,33 @@ describe('a cancelled order is left out everywhere it is planned, counted or off
     expect(carriedStopText({ carriedFrom: null, carriedTo: null, cancelled: false })).toBeNull();
   });
 
+  it('a stop with two orders, one cancelled: only that order is marked, on every paper', () => {
+    const lines = [
+      { orderId: 'A', salesOrderNo: 'SO-1' },
+      { orderId: 'B', salesOrderNo: 'SO-2' },
+      { orderId: 'B', salesOrderNo: null },
+    ];
+    const one = { cancelled: true, orderIds: ['A', 'B'], cancelledOrderIds: ['B'], orderLines: lines };
+    expect(stopCancelledText(one)).toBe('1 of 2 orders CANCELLED (SO SO-2 and 1 line(s) with no invoice no.) - do not load or deliver it; the rest of this stop is delivered (re-plan the day)');
+    expect(carriedStopText({ carriedFrom: null, carriedTo: null, ...one })).toBe(stopCancelledText(one));
+    expect(stopCancelledText({ ...one, cancelledOrderIds: ['A', 'B'] })).toBe('CANCELLED - do not load or deliver (re-plan the day)');
+    // The warehouse sheet: per invoice, only the cancelled order's invoice.
+    const s = stop('o1', 1, 5, 5, 480);
+    s.orderIds = ['o1', 'oX'];
+    s.orderLines = [...s.orderLines, { orderId: 'oX', lineId: 'oX-l1', salesOrderNo: 'SO-9', productCode: 'TAN-5G', productName: 'Tanuf 5G', cases: 3 }];
+    s.cancelled = true;
+    s.cancelledOrderIds = ['oX'];
+    const inv = stopInvoices(s);
+    expect(inv.map((i) => [i.invoiceNo, i.carried])).toEqual([
+      ['SO-1001', null],
+      ['SO-9', 'CANCELLED - do not load or deliver (re-plan the day)'],
+    ]);
+    // WhatsApp: the stop line says it too (a planned load's message can go out before the re-plan).
+    const d = fixture();
+    const l = { ...d.loads[0]!, stops: [s] };
+    expect(whatsappText(d.run, l, 1)).toContain('! 1 of 2 orders CANCELLED (SO SO-9)');
+  });
+
   it('Step 3: a day whose open orders were all cancelled has nothing left to plan, and says why', () => {
     const text = dayNothingLeftText({ orders: 0, openOrders: 0, pending: 0, chosen: true, carriedOut: null, loadsByStatus: { PLANNED: 1 }, cancelled: 2 });
     expect(text).toMatch(/^Nothing left to plan: 2 order\(s\) of this day were cancelled\./);
@@ -229,6 +281,7 @@ describe('a cancelled order is left out everywhere it is planned, counted or off
 
   it('a plan with a cancelled order on a planned load is out of date (RE-PLAN on); the audit actions are in the catalog', () => {
     expect(UP_TO_DATE.cancelledOnPlan).toBe(0);
+    expect(UP_TO_DATE.movedOnPlan).toBe(0);
     for (const a of ['ORDER_CANCELLED', 'ORDER_CANCEL_UNDONE', 'ORDER_POSTPONED'] as const) expect(AUDIT_ACTIONS[a].label).toBeTruthy();
   });
 });

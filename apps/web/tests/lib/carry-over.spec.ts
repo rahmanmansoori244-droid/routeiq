@@ -1371,6 +1371,16 @@ describe('PR9 second review: a sales-order line entered again for a later day is
     expect(blockOf(onD, 'O1')?.code).toBe('ALREADY_ON_DAY');
   });
 
+  it('Cancel order: a cancelled later re-entry is never delivered, so it blocks nothing; a cancelled one on day D keeps its key (ALREADY_ON_DAY, with the way out)', () => {
+    const out = carryCandidates([O1()], noPlans, at28([later({ cancelled: true })]));
+    expect(blockOf(out, 'O1')).toBeNull();
+    const onD = carryCandidates([O1()], noPlans, at28([later({ orderId: 'OD', date: D, status: 'VALIDATED', cancelled: true })]));
+    expect(blockOf(onD, 'O1')).toEqual({
+      code: 'ALREADY_ON_DAY',
+      text: `Sales order SO-9 (W500) is on a cancelled order of ${fmtDayMonth(D)}: not brought forward. To deliver it on ${fmtDayMonth(D)}, undo that cancel (Cancelled orders, Step 1).`,
+    });
+  });
+
   it('the newer order is blocked itself (its day is being optimized): the older one is not carried either', () => {
     const optimizing = plan({ status: 'OPTIMIZING', scopeOrderIds: ['O2'] });
     const out = carryCandidates([O1(), O2()], new Map([['2026-09-25', null], [D2, optimizing]]), at28());

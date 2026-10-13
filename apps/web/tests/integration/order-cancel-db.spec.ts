@@ -9,9 +9,10 @@
  *     cancelled with its reason and who; OPTIMIZE plans the other order only; the same invoice
  *     re-uploaded for that day stays skipped and the message says it was cancelled; Undo opens it
  *     again (pending for RE-PLAN). Audited both ways.
- *  2. Cancel an order on a PLANNED load: that load is refused Lock (409 ORDERS_CANCELLED), the day
- *     and the plan screen say so; RE-PLAN (sent as REOPTIMIZE) becomes MANUAL_ADJUSTMENT, leaves the
- *     cancelled order out, and the other order's new load locks.
+ *  2. Cancel an order on a PLANNED load that holds another order of the day: that load is refused
+ *     Lock (409 ORDERS_CANCELLED), "Use instead" of the old option too, the day and the plan screen say
+ *     so; RE-PLAN (sent as REOPTIMIZE) becomes MANUAL_ADJUSTMENT, leaves the cancelled order out, and
+ *     the other orders' new loads lock. A delivery time for the cancelled order is refused.
  *  3. An order on a LOCKED load: Cancel and Postpone are refused (409 ORDER_ON_LOCKED_LOAD, naming the
  *     truck and load: unlock first); nothing changes.
  *  4. Postpone an order of a future day: the copy is on the later day (carried mark, intake keys, late
@@ -21,6 +22,13 @@
  *  5. A cancel after the request of an OPTIMIZE was built: its start is refused (409 ORDERS_CHANGED).
  *  6. Another company's order id answers 404 on all three routes and is not touched; a VIEWER is
  *     refused (403).
+ *  7. Review of the branch: the only order of a PLANNED load cancelled while the rest of the day is
+ *     locked - the load is left as it is (no "RE-PLAN" anywhere, the day is not out of date) and the
+ *     server answers NOTHING_TO_PLAN; Undo cancel while the day is being optimized is refused
+ *     (PLAN_OPTIMIZING); Undo refused when the invoice was entered again on another day
+ *     (SAME_LINE_ELSEWHERE); Postpone refused when an invoice line was entered again for a later day
+ *     (SAME_LINE_LATER) or is on a cancelled order of the target day (ALREADY_ON_DAY_CANCELLED); an
+ *     order on a LOADING load is refused like a locked one.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
@@ -77,7 +85,7 @@ vi.mock('@/lib/solver-client', () => {
 
 import { prisma as libPrisma } from '@/lib/db';
 import { PlanError } from '@/lib/dispatch/plan-errors';
-import { buildDispatchRequest, getOrCreatePlan, updateLoad } from '@/lib/dispatch/plan-service';
+import { buildDispatchRequest, chooseScenario, getOrCreatePlan, updateLoad } from '@/lib/dispatch/plan-service';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { getDayOverview } from '@/lib/dispatch/day-overview';
 import { undoCarry } from '@/lib/dispatch/carry-over';
@@ -88,6 +96,7 @@ import { addDaysIso } from '@/lib/dispatch/time';
 import { POST as cancelRoute } from '@/app/api/dispatch/orders/[id]/cancel/route';
 import { POST as uncancelRoute } from '@/app/api/dispatch/orders/[id]/uncancel/route';
 import { POST as postponeRoute } from '@/app/api/dispatch/orders/[id]/postpone/route';
+import { PUT as deliveryTimeRoute } from '@/app/api/dispatch/delivery-time/route';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 
 const slug = `cancel-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
@@ -257,28 +266,40 @@ describe('cancel and postpone one order (owner request 12 Oct 2026)', () => {
     asPlanner();
     const DAY = isoPlus(32);
     const a = await addOrder('C3', DAY, 30, ['SO-A']);
+    // Two orders of one customer (a file order and another invoice): one stop, so one load holds both.
     const b = await addOrder('C4', DAY, 40, ['SO-B']);
+    const b2 = await addOrder('C4', DAY, 10, ['SO-B2']);
     const v1 = await optimize(DAY);
     const lb = await loadOf(v1.id, b.id);
+    expect((await loadOf(v1.id, b2.id)).id).toBe(lb.id);
 
     const res = await cancel(b.id, { reason: 'NO_ACCESS_SMALL_TRUCK' });
     expect(res.status).toBe(200);
-    expect(res.body.data).toMatchObject({ replanNeeded: true, onPlannedLoads: [`${lb.truck.code} L${lb.loadNo}`] });
+    expect(res.body.data).toMatchObject({ replanNeeded: true, onPlannedLoads: [`${lb.truck.code} L${lb.loadNo}`], idleLoads: [] });
     expect(res.body.data.message).toMatch(/RE-PLAN the day to take it off/);
 
     const refused = await updateLoad(tenantId, v1.id, lb.id, { status: 'LOCKED' }, user(), everyRole).catch((e: unknown) => e);
     expect(refused).toBeInstanceOf(PlanError);
     expect((refused as PlanError).status).toBe(409);
     expect((refused as PlanError).details).toMatchObject({ code: 'ORDERS_CANCELLED', orderIds: [b.id] });
-    expect((refused as PlanError).message).toMatch(/holds 1 cancelled order\(s\): C4\. .*holds nothing else/);
+    expect((refused as PlanError).message).toMatch(/holds 1 cancelled order\(s\): C4\. .*Re-plan the day: the cancelled order is taken off\.$/);
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: lb.id } })).status).toBe('PLANNED');
+
+    // "Use instead" of the option made before the cancel would put it on a truck again: refused.
+    const chosen = await chooseScenario(tenantId, v1.id, v1.chosenScenarioId!, userId).catch((e: unknown) => e);
+    expect((chosen as PlanError).details).toMatchObject({ code: 'ORDERS_CANCELLED' });
+    // A delivery time for a cancelled order is refused (undo the cancel first).
+    const dt = await deliveryTimeRoute(new Request('http://localhost/api/dispatch/delivery-time', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ orderId: b.id, clear: true }) }));
+    expect(dt.status).toBe(409);
+    expect(JSON.stringify(await dt.json())).toContain('ORDER_CANCELLED');
 
     const day = await getDayOverview(tenantId, { date: DAY, depotId });
     expect(day.outdated.cancelledOnPlan).toBe(1);
-    expect(day.cancelled[0]).toMatchObject({ orderId: b.id, onPlannedLoads: [`${lb.truck.code} L${lb.loadNo}`] });
+    expect(day.cancelled[0]).toMatchObject({ orderId: b.id, onPlannedLoads: [`${lb.truck.code} L${lb.loadNo}`], replan: true });
     const detail = (await getPlanDetail(tenantId, v1.id))!;
     const dl = detail.loads.find((l) => l.id === lb.id)!;
-    expect([dl.cancelledHere, dl.stops[0]!.cancelled]).toEqual([1, true]);
+    // Only the cancelled order of the stop is marked (the other invoice is delivered).
+    expect([dl.cancelledHere, dl.stops[0]!.cancelled, dl.stops[0]!.cancelledOrderIds]).toEqual([1, true, [b.id]]);
 
     // RE-PLAN as the day screen sends it: the other orders keep their trucks (MANUAL_ADJUSTMENT).
     const rp = await replan(tenantId, v1.id, 'REOPTIMIZE', null, user(), null);
@@ -286,7 +307,7 @@ describe('cancel and postpone one order (owner request 12 Oct 2026)', () => {
     expect(rp.body.reason).toBe('MANUAL_ADJUSTMENT');
     const v2 = await jobsDone(String(rp.body.runId));
     expect(v2.status).toBe('READY');
-    expect((await prisma.routeAssignment.findMany({ where: { runId: v2.id } })).map((x) => x.orderId)).toEqual([a.id]);
+    expect((await prisma.routeAssignment.findMany({ where: { runId: v2.id } })).map((x) => x.orderId).sort()).toEqual([a.id, b2.id].sort());
     const la2 = await loadOf(v2.id, a.id);
     await updateLoad(tenantId, v2.id, la2.id, { status: 'LOCKED' }, user(), everyRole);
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: la2.id } })).status).toBe('LOCKED');
@@ -330,7 +351,9 @@ describe('cancel and postpone one order (owner request 12 Oct 2026)', () => {
 
     const res = await postpone(o.id, { date: TO, reason: 'POSTPONED_BY_SALES', note: 'customer asked' });
     expect(res.status).toBe(201);
-    expect(res.body.data).toMatchObject({ orderId: o.id, fromDate: DAY, toDate: TO, cases: 24, onPlannedLoads: [`${l.truck.code} L${l.loadNo}`], replanTo: false });
+    // Alone on its planned load: that load holds nothing else now, so it is left as it is (no RE-PLAN of DAY).
+    expect(res.body.data).toMatchObject({ orderId: o.id, fromDate: DAY, toDate: TO, cases: 24, onPlannedLoads: [], idleLoads: [`${l.truck.code} L${l.loadNo}`], replanTo: false });
+    expect(res.body.data.message).not.toContain(`RE-PLAN `);
     const copy = await prisma.order.findUniqueOrThrow({ where: { id: res.body.data.copyId }, include: { lines: true } });
     expect(copy.deliveryDate.toISOString().slice(0, 10)).toBe(TO);
     expect([copy.carriedFromOrderId, copy.carriedFromDate?.toISOString().slice(0, 10), copy.totalCases, copy.lateReason]).toEqual([
@@ -408,5 +431,76 @@ describe('cancel and postpone one order (owner request 12 Oct 2026)', () => {
     expect((await uncancel(mine.id)).status).toBe(403);
     expect((await postpone(mine.id, { date: addDaysIso(DAY, 1), reason: 'POSTPONED_BY_SALES' })).status).toBe(403);
     expect((await prisma.order.findUniqueOrThrow({ where: { id: mine.id } })).cancelledAt).toBeNull();
+  });
+
+  it('7. review of the branch: an idle planned load, undo while optimizing, invoices entered again, a loading load', async () => {
+    asPlanner();
+    // (a) The only order of a PLANNED load cancelled while the rest of the day is locked.
+    const DAY = isoPlus(42);
+    const kept = await addOrder('C1', DAY, 10, ['SO-I1']);
+    const alone = await addOrder('C2', DAY, 10, ['SO-I2']);
+    const v1 = await optimize(DAY);
+    const lk = await loadOf(v1.id, kept.id);
+    const la = await loadOf(v1.id, alone.id);
+    expect(la.id).not.toBe(lk.id);
+    await updateLoad(tenantId, v1.id, lk.id, { status: 'LOCKED' }, user(), everyRole);
+    const res = await cancel(alone.id);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ replanNeeded: false, onPlannedLoads: [], idleLoads: [`${la.truck.code} L${la.loadNo}`] });
+    expect(res.body.data.message).toContain('holds nothing else now: leave it as it is');
+    expect(res.body.data.message).not.toContain('RE-PLAN');
+    const day = await getDayOverview(tenantId, { date: DAY, depotId });
+    expect(day.outdated.cancelledOnPlan).toBe(0);
+    expect(day.cancelled[0]).toMatchObject({ orderId: alone.id, onPlannedLoads: [`${la.truck.code} L${la.loadNo}`], replan: false });
+    const rp = await replan(tenantId, v1.id, 'REOPTIMIZE', null, user(), null);
+    expect(rp.status).toBe(409);
+    expect(rp.body.code).toBe('NOTHING_TO_PLAN');
+
+    // (b) Undo cancel while the day is being optimized: refused, nothing changes.
+    await prisma.runPlan.update({ where: { id: v1.id }, data: { status: 'OPTIMIZING' } });
+    const busy = await uncancel(alone.id);
+    await prisma.runPlan.update({ where: { id: v1.id }, data: { status: 'READY' } });
+    expect(busy.status).toBe(409);
+    expect(busy.body.error).toMatchObject({ code: 'PLAN_OPTIMIZING' });
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: alone.id } })).cancelledAt).not.toBeNull();
+
+    // (c) Undo refused when its invoice line was entered again for another day.
+    await addOrder('C2', addDaysIso(DAY, 1), 10, ['SO-I2']);
+    const twice = await uncancel(alone.id);
+    expect(twice.status).toBe(409);
+    expect(twice.body.error).toMatchObject({ code: 'SAME_LINE_ELSEWHERE' });
+
+    // (d) Postpone refused when an invoice line was entered again for a later day (any later day).
+    const D2 = isoPlus(46);
+    const early = await addOrder('C3', D2, 10, ['SO-Z']);
+    await addOrder('C3', addDaysIso(D2, 4), 10, ['SO-Z']);
+    const later = await postpone(early.id, { date: addDaysIso(D2, 1), reason: 'POSTPONED_BY_SALES' });
+    expect(later.status).toBe(409);
+    expect(later.body.error).toMatchObject({ code: 'SAME_LINE_LATER' });
+    expect(later.body.error.error).toContain(`entered again for `);
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: early.id } })).carriedToOrderId).toBeNull();
+
+    // (e) Postpone onto a day whose order with the same invoice was cancelled: says so, and how.
+    const own = await addOrder('C4', D2, 10, ['SO-Y']);
+    const dupOnTo = await addOrder('C4', addDaysIso(D2, 2), 10, ['SO-Y']);
+    // Cancelled as a duplicate: its intake key stays on that day, so the line cannot go there twice.
+    expect((await cancel(dupOnTo.id, { reason: 'WRONG_OR_DUPLICATE' })).status).toBe(200);
+    const onTo = await postpone(own.id, { date: addDaysIso(D2, 2), reason: 'POSTPONED_BY_SALES' });
+    expect(onTo.status).toBe(409);
+    expect(onTo.body.error).toMatchObject({ code: 'ALREADY_ON_DAY_CANCELLED' });
+    expect(onTo.body.error.error).toContain('that was cancelled on ');
+    expect(onTo.body.error.error).toContain('by Planner Salim');
+
+    // (f) An order on a LOADING load: refused like a locked one.
+    const D3 = isoPlus(54);
+    const ld = await addOrder('C5', D3, 10, ['SO-LD']);
+    const v3 = await optimize(D3);
+    const l3 = await loadOf(v3.id, ld.id);
+    await updateLoad(tenantId, v3.id, l3.id, { status: 'LOCKED' }, user(), everyRole);
+    await updateLoad(tenantId, v3.id, l3.id, { status: 'LOADING' }, user(), everyRole);
+    const c = await cancel(ld.id);
+    expect(c.status).toBe(409);
+    expect(c.body.error).toMatchObject({ code: 'ORDER_ON_LOCKED_LOAD' });
+    expect(c.body.error.error).toContain('(loading)');
   });
 });

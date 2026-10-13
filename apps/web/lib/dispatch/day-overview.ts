@@ -163,10 +163,19 @@ export interface DayOutdated {
    */
   unservedNowPlannable: number;
   /**
-   * Cancel order (owner request 12 Oct 2026): cancelled orders still on PLANNED loads of the plan in use.
-   * Those loads cannot be locked (plan-service cancelledOrdersGate); RE-PLAN takes the orders off.
+   * Cancel order (owner request 12 Oct 2026): cancelled orders still on PLANNED loads of the plan in use
+   * that also hold an order still of the day (not cancelled, not moved to another day). Those loads
+   * cannot be locked (plan-service cancelledOrdersGate); RE-PLAN takes the orders off. A load holding
+   * nothing else is not counted: it is no work for a re-plan (carry-view holdsOnlyGone; the server
+   * answers NOTHING_TO_PLAN when nothing else is open) and is left as it is, never loaded.
    */
   cancelledOnPlan: number;
+  /**
+   * Postpone order (owner request 12 Oct 2026), and Bring forward of today's orders: orders moved to a
+   * later day that are still on PLANNED loads of the plan in use holding an order still of the day, as
+   * cancelledOnPlan. Those loads are refused Lock (ORDERS_CARRIED) until RE-PLAN takes the orders off.
+   */
+  movedOnPlan: number;
 }
 export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({
   weightCases: 0,
@@ -179,6 +188,7 @@ export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({
   trucksInactive: 0,
   unservedNowPlannable: 0,
   cancelledOnPlan: 0,
+  movedOnPlan: 0,
 });
 
 /** The orders the plan in use leaves unserved (the chosen option's unserved orders still open on this day). */
@@ -226,8 +236,13 @@ export interface CancelledOrder {
   by: string | null;
   /** When (ISO time). */
   at: string;
-  /** PLANNED loads of the plan in use still holding it ("T05 L2"): RE-PLAN takes it off. */
+  /** PLANNED loads of the plan in use still holding it ("T05 L2"). */
   onPlannedLoads: string[];
+  /**
+   * One of those loads also holds an order still of the day: RE-PLAN takes it off (until then that load
+   * cannot be locked). False = every load holding it holds nothing else now: left as it is, never loaded.
+   */
+  replan: boolean;
   /** The day is not over: Undo is offered. */
   canUndo: boolean;
 }
@@ -668,9 +683,22 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     plan && cancelledRows.length
       ? await prisma.routeAssignment.findMany({
           where: { runId: plan.id, orderId: { in: cancelledRows.map((o) => o.id) } },
-          select: { orderId: true, load: { select: { status: true, loadNo: true, truck: { select: { code: true, onlyOnDate: true } } } } },
+          select: { orderId: true, load: { select: { id: true, status: true, loadNo: true, truck: { select: { code: true, onlyOnDate: true } } } } },
         })
       : [];
+  // The PLANNED loads of the plan in use that hold an order still of the day, and the orders on them
+  // that left the day (cancelled, or moved to a later day): only those make the plan out of date. A
+  // load holding nothing else is no work for a re-plan (carry-view holdsOnlyGone), so Step 3 never says
+  // RE-PLAN because of it next to "nothing needs to be re-planned". A day that is over is not re-planned.
+  const plannedRows = plan?.chosenScenarioId && date >= base.today
+    ? await prisma.routeAssignment.findMany({
+        where: { runId: plan.id, load: { is: { status: 'PLANNED' } } },
+        select: { orderId: true, loadId: true, order: { select: { cancelledAt: true, carriedToOrderId: true } } },
+      })
+    : [];
+  const loadsWithDayOrders = new Set(plannedRows.filter((a) => a.loadId && !a.order.cancelledAt && !a.order.carriedToOrderId).map((a) => a.loadId!));
+  const goneOnBusyLoads = (pick: (o: { cancelledAt: Date | null; carriedToOrderId: string | null }) => boolean) =>
+    new Set(plannedRows.filter((a) => a.loadId && loadsWithDayOrders.has(a.loadId) && pick(a.order)).map((a) => a.orderId)).size;
   const cancelled: CancelledOrder[] = cancelledRows.map((o) => {
     const onPlanned = [
       ...new Set(
@@ -693,10 +721,12 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       by: o.cancelledBy?.name ?? null,
       at: o.cancelledAt!.toISOString(),
       onPlannedLoads: onPlanned,
+      replan: cancelledPlaced.some((a) => a.orderId === o.id && a.load?.status === 'PLANNED' && loadsWithDayOrders.has(a.load.id)),
       canUndo: date >= base.today,
     };
   });
-  outdated.cancelledOnPlan = cancelled.filter((c) => c.onPlannedLoads.length > 0).length;
+  outdated.cancelledOnPlan = goneOnBusyLoads((o) => !!o.cancelledAt);
+  outdated.movedOnPlan = goneOnBusyLoads((o) => !o.cancelledAt && !!o.carriedToOrderId);
   const carriedOut: CarriedOut | null = away.length
     ? {
         orders: away.length,

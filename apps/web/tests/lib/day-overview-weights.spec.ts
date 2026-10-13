@@ -151,8 +151,8 @@ describe('day overview: case weights of a split order partly on a frozen load (P
     // depotMoved: audit A6 (E1), PLANNED loads still drawn from a depot pin moved since.
     // palletFactorCases: pallets review, cases per pallet corrected since planning (day-overview-pallets.spec).
     // trucksInactive, unservedNowPlannable: review of 9 Oct 2026 (below).
-    // cancelledOnPlan: Cancel order (owner request 12 Oct 2026), cancelled orders still on planned loads.
-    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0, cancelledOnPlan: 0 });
+    // cancelledOnPlan / movedOnPlan: Cancel and Postpone order (owner request 12 Oct 2026), orders off the day still on planned loads.
+    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0, cancelledOnPlan: 0, movedOnPlan: 0 });
     state.orders = [order(10)];
     state.assignments = [part('PLANNED', 1000, 0, 0)];
     expect(Object.keys((await day()).outdated).sort()).toEqual(Object.keys(UP_TO_DATE).sort());

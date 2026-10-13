@@ -288,11 +288,14 @@ export async function validateIntake(
   for (const part of inParts(fileSos)) {
     const keys = await prisma.intakeLineKey.findMany({
       where: { tenantId, salesOrderNorm: { in: part } },
-      select: { salesOrderNorm: true, customerId: true, deliveryDate: true },
+      select: { salesOrderNorm: true, customerId: true, deliveryDate: true, orderLine: { select: { order: { select: { cancelledAt: true } } } } },
     });
     for (const k of keys) {
-      const date = isoOf(k.deliveryDate);
-      if (fileDates.has(date)) continue;
+      const day = isoOf(k.deliveryDate);
+      if (fileDates.has(day)) continue;
+      // Cancel order (owner request 12 Oct 2026): that order was cancelled, so the warning says so - it
+      // is not "the same order sent twice" for delivery.
+      const date = k.orderLine?.order?.cancelledAt ? `${day} (cancelled)` : day;
       const c = custById.get(k.customerId);
       if (!c) continue;
       const key = `${k.salesOrderNorm}|${customerKey(c.code, c.branchKey)}`;

@@ -25,7 +25,9 @@ const schema = z
 // The same load rules as Cancel (409 ORDER_ON_LOCKED_LOAD, ORDER_LEFT, ORDER_CARRIED, PLAN_OPTIMIZING,
 // ORDER_CANCELLED); a day outside the range answers 409 POSTPONE_DATE, an order of a day that is over
 // 409 ORDER_DAY_OVER (use Bring forward), a deactivated customer 409 CUSTOMER_INACTIVE, an invoice line
-// already confirmed for that day 409 ALREADY_ON_DAY. Another company's id answers 404. Undo: Undo bring
+// already confirmed for that day 409 ALREADY_ON_DAY (on a cancelled order of that day:
+// ALREADY_ON_DAY_CANCELLED), an invoice line entered again for a later day 409 SAME_LINE_LATER.
+// Another company's id answers 404. Undo: Undo bring
 // forward (POST /api/dispatch/carry-over/undo) on that day's screen. Audited ORDER_POSTPONED. PLANNER.
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(

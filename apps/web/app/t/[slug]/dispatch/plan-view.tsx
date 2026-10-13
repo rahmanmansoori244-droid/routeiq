@@ -951,8 +951,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           ))}
           {d.carriedOut?.orders ? (
             <p className="mt-1 text-slate-700" data-testid="carried-out">
-              {d.carriedOut.orders} order(s) ({d.carriedOut.cases.toLocaleString()} cases) of this plan were not delivered and were brought forward to{' '}
-              {d.carriedOut.dates.map(fmtDayMonth).join(', ')}: they are planned on that day now (this plan keeps them as history, not as a problem).
+              {d.carriedOut.orders} order(s) ({d.carriedOut.cases.toLocaleString()} cases) of this plan were moved to{' '}
+              {d.carriedOut.dates.map(fmtDayMonth).join(', ')} (postponed, or brought forward when not delivered): they are planned on that day now (this plan keeps them as history, not as a problem).
             </p>
           ) : null}
           {d.carriedIn?.orders ? (

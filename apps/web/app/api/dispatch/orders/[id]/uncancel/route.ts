@@ -9,7 +9,8 @@ interface Params { params: { id: string } }
 // POST /api/dispatch/orders/:id/uncancel - "Undo" in the day's Cancelled list (owner request 12 Oct
 // 2026): the order is open again while its day is not over (409 DAY_OVER otherwise); the next OPTIMIZE
 // or RE-PLAN plans it. Refused when one of its invoice lines was entered again on another day (409
-// SAME_LINE_ELSEWHERE) and for an order that is not cancelled (409 NOT_CANCELLED). Another company's id
+// SAME_LINE_ELSEWHERE), while the day is being optimized (409 PLAN_OPTIMIZING, as Cancel) and for an
+// order that is not cancelled (409 NOT_CANCELLED). Another company's id
 // answers 404. No body. Audited ORDER_CANCEL_UNDONE. PLANNER, like Cancel.
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(

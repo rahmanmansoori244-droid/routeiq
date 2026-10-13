@@ -5,7 +5,7 @@
  */
 import type { CarryWhyKind } from './carry-over';
 import { fmtDayMonth } from './time';
-import { CANCELLED_STOP_TEXT } from './order-cancel-rules';
+import { stopCancelledText } from './order-cancel-rules';
 
 /** Badge of an order brought forward from an earlier day: "Carried over from 26 Sep" (the date it was first due). */
 export function carriedFromBadge(firstDateIso: string): string {
@@ -239,8 +239,16 @@ export function carryDoneText(
  * null. A stop holding a cancelled order (Cancel order, owner request 12 Oct 2026) says so first: such a
  * load cannot be locked until the day is re-planned, but a PLANNED load's sheet may already be printed.
  */
-export function carriedStopText(s: { carriedFrom: string | null; carriedTo: string | null; cancelled?: boolean }): string | null {
-  if (s.cancelled) return CANCELLED_STOP_TEXT;
+export function carriedStopText(s: {
+  carriedFrom: string | null;
+  carriedTo: string | null;
+  cancelled?: boolean;
+  orderIds?: readonly string[];
+  cancelledOrderIds?: readonly string[];
+  orderLines?: readonly { orderId: string; salesOrderNo: string | null }[];
+}): string | null {
+  // Only the cancelled orders of the stop, when it holds others too (stopCancelledText).
+  if (s.cancelled) return stopCancelledText(s);
   if (s.carriedTo) return `CARRIED OVER to ${fmtDayMonth(s.carriedTo)} - not delivered on this day`;
   if (s.carriedFrom) return `CARRIED OVER from ${fmtDayMonth(s.carriedFrom)} (not delivered that day)`;
   return null;

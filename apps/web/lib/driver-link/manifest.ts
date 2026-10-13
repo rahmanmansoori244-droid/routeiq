@@ -48,8 +48,9 @@ export function navUrl(lat: number | null, lng: number | null): string | null {
 
 function ordersOf(s: DetailStop): ManifestOrder[] {
   const out = new Map<string, ManifestOrder>();
+  const cancelled = new Set(s.cancelledOrderIds ?? []);
   for (const ln of s.orderLines ?? []) {
-    const o = out.get(ln.orderId) ?? { orderId: ln.orderId, salesOrders: [], lines: [] };
+    const o = out.get(ln.orderId) ?? { orderId: ln.orderId, salesOrders: [], lines: [], ...(cancelled.has(ln.orderId) ? { cancelled: true } : {}) };
     if (ln.salesOrderNo && !o.salesOrders.includes(ln.salesOrderNo)) o.salesOrders.push(ln.salesOrderNo);
     o.lines.push({ lineId: ln.lineId, productCode: ln.productCode, productName: ln.productName, cases: ln.cases });
     out.set(ln.orderId, o);
