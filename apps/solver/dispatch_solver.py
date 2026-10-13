@@ -1178,7 +1178,9 @@ def full_truck(stop: DispatchStop, tds: list[TruckDay]) -> bool:
     trucks) at bays x Pallet fill, but fits one alone at bays x config.single_customer_fill_pct. It rides
     ALONE, on a truck whose one-customer room holds it: the route search keeps it so (its "Solo"
     dimension and allowed vehicles), the repack and the checks by the load's room (load_room). Never
-    without the rule (the two rooms are then the same)."""
+    without the rule (the two rooms are then the same). The route search decides "alone" per truck as
+    well: a stop that fits a big truck at the fill but a small one only alone may ride the small one,
+    alone (_solve_scenario's per-truck Pallets / Solo demands)."""
     return not any(_fits_shared(stop, td) for td in tds) and any(_fits_capacity(stop, td) for td in tds)
 
 
@@ -2006,12 +2008,26 @@ def _solve_scenario(
         routing.SetFixedCostOfVehicle(_vehicle_fixed_units(td, w, tier.get(td.truck.id, 0) * mult), v)
 
     # --- capacity with reload reset (cases and / or pallets, kg when any payload is set) -----
-    def add_capacity(name_: str, demand: list[int], caps: list[int]) -> None:
-        vec = list(demand)
-        for r, v in enumerate(reload_owner):
-            vec[1 + len(stops) + r] = -caps[v]
-        cb = routing.RegisterUnaryTransitVector(vec)
-        routing.AddDimensionWithVehicleCapacity(cb, max(caps), caps, True, name_)
+    def add_capacity(name_: str, demand: list[int] | list[list[int]], caps: list[int]) -> None:
+        """One demand vector for every truck, or (a list of vectors) one per truck: what a node counts may
+        depend on the truck (the one-customer rule below)."""
+        def vec_of(d: list[int]) -> list[int]:
+            vec = list(d)
+            for r, v in enumerate(reload_owner):
+                vec[1 + len(stops) + r] = -caps[v]
+            return vec
+        if demand and isinstance(demand[0], list):
+            cbs: dict[tuple[int, ...], int] = {}
+            per_vehicle = []
+            for d in demand:  # type: ignore[union-attr]
+                key = tuple(d)
+                if key not in cbs:
+                    cbs[key] = routing.RegisterUnaryTransitVector(vec_of(d))
+                per_vehicle.append(cbs[key])
+            routing.AddDimensionWithVehicleTransitAndCapacity(per_vehicle, max(caps), caps, True, name_)
+        else:
+            cb = routing.RegisterUnaryTransitVector(vec_of(demand))  # type: ignore[arg-type]
+            routing.AddDimensionWithVehicleCapacity(cb, max(caps), caps, True, name_)
         dim = routing.GetDimensionOrDie(name_)
         for node in range(1, N):
             if not m.is_reload(node):
@@ -2025,18 +2041,32 @@ def _solve_scenario(
     if any(not td.by_pallets for td in vehicles):
         add_capacity("Cases", [0] + [s.demand_cases for s in stops] + [0] * len(reload_owner),
                      [td.max_cases for td in vehicles])
-    # One customer fills a truck (owner rule 13 Oct 2026, full_truck): such a stop counts 0 in Pallets
-    # and rides ALONE on its load - the "Solo" dimension: it needs BIG, every other stop 1, a load holds
-    # BIG (reload nodes reset it like the others) - on a truck whose one-customer room holds it (its
-    # allowed vehicles below). Only when the day has one: every other day keeps its model exactly.
-    full = [cfg.single_customer_fill_pct is not None and full_truck(s, vehicles) for s in stops]
+    # One customer fills a truck (owner rule 13 Oct 2026), decided PER TRUCK: on truck v a stop that does
+    # not fit at bays x Pallet fill (_fits_shared) but fits alone at every bay (_fits_capacity) - alone[v][k]
+    # - counts 0 in v's Pallets and rides ALONE on its load: the "Solo" dimension, where it needs BIG on v,
+    # every other stop 1, a load holds BIG (reload nodes reset it like the others). The same stop may fit
+    # a bigger truck at the fill, where it counts its pallets and may share (review 13 Oct 2026: deciding
+    # "alone" for the whole fleet kept a part sized for a 6-bay truck's every bay off that truck, though
+    # the load re-check and the checks accept it there). A stop that fits no truck at the fill (full) goes
+    # only on the trucks whose one-customer room holds it (its allowed vehicles below). Only when some
+    # truck has such a stop: every other day keeps its model exactly (one Pallets vector, no Solo).
+    rule = cfg.single_customer_fill_pct is not None
+    alone = [[rule and td.by_pallets and not _fits_shared(s, td) and _fits_capacity(s, td) for s in stops]
+             for td in vehicles]
+    full = [rule and full_truck(s, vehicles) for s in stops]
+    solo = any(any(row) for row in alone)
+    tail = [0] * len(reload_owner)
     if any(td.by_pallets for td in vehicles):
-        units = [0 if full[k] else (s.demand_pallet_units or 0) for k, s in enumerate(stops)]
-        add_capacity("Pallets", [0] + units + [0] * len(reload_owner),
-                     [td.max_pallet_units if td.by_pallets else sum(units) + 1 for td in vehicles])
-    if any(full):
+        units = [s.demand_pallet_units or 0 for s in stops]
+        pallet_caps = [td.max_pallet_units if td.by_pallets else sum(units) + 1 for td in vehicles]
+        if solo:
+            add_capacity("Pallets", [[0] + [0 if a else u for a, u in zip(row, units)] + tail for row in alone],
+                         pallet_caps)
+        else:
+            add_capacity("Pallets", [0] + units + tail, pallet_caps)
+    if solo:
         big = len(stops) + 1
-        add_capacity("Solo", [0] + [big if f else 1 for f in full] + [0] * len(reload_owner), [big] * nv)
+        add_capacity("Solo", [[0] + [big if a else 1 for a in row] + tail for row in alone], [big] * nv)
     # Kg in 0.1 kg units, each stop to the nearest unit, the payload rounded down (audit F08): a load
     # that weighs exactly the payload fits it. A truck without a payload gets room for the whole day.
     demand_u = [kg_units(s.demand_kg) for s in stops]
@@ -4849,7 +4879,9 @@ def _pv_start(req: DispatchRequest, solvable: list[DispatchStop], control: Solve
     elif _full_truck_day(req, solvable):
         # Owner rule 13 Oct 2026: a stop that fills a truck alone (full_truck) must ride alone, on a truck big
         # enough - which the second search does not model (its loads are at bays x Pallet fill). Such a day
-        # is planned by the engine's own search alone (SearchReport.pyvrp: SKIPPED / FULL_TRUCK).
+        # is planned by the engine's own search alone (SearchReport.pyvrp: SKIPPED / FULL_TRUCK). A stop that
+        # fits some truck at the fill is no reason to skip: the second search keeps it to bays x fill on every
+        # truck (stricter than the engine, which may also put it alone on a smaller truck), and its plan is checked.
         pv.fail("SKIPPED", "FULL_TRUCK")
     elif main_pool:
         try:

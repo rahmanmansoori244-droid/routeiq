@@ -158,6 +158,36 @@ def test_the_route_search_alone_keeps_a_full_truck_stop_alone(name):
     assert_rule_holds(r, sc)
 
 
+@pytest.mark.parametrize("name", ["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"])
+def test_the_route_search_decides_alone_per_truck(name):
+    """Review 13 Oct 2026: "rides alone" is decided per truck. A 12-bay truck and two 6-bay trucks, one trip
+    each; one customer split into 6,000 + 6,000 + 1,000 (parts sized for a 6-bay truck's every bay). A
+    6,000 part fits the 12-bay truck at 90% (10,800), so it is no full-truck stop for the fleet - but on a
+    6-bay truck (5,400 at 90%, 6,000 alone) it may ride, alone. The route search itself (not only the load
+    re-check afterwards) serves all three; another customer never joins a 6-bay load holding a part."""
+    parts = [pstop(sid, 23.62, 58.47, cases=300, units=u).model_copy(update={"customer_id": "c-BIG"})
+             for sid, u in (("P1", 6_000), ("P2", 6_000), ("P3", 1_000))]
+    trucks = [btruck("R12", bays=12, max_trips=1), btruck("S6A", bays=6, cap=570, max_trips=1),
+              btruck("S6B", bays=6, cap=570, max_trips=1)]
+    r = rq(parts, trucks)
+    tds, solvable, drops, mx, _ = _day_of(r)
+    usable = [td for td in tds if td.usable]
+    assert not any(ds.full_truck(s, usable) for s in parts)  # no stop is full for the whole fleet
+    sc = ds._solve_scenario(name, r, solvable, tds, mx, 2, list(drops))
+    assert served_ids(sc) == {"P1", "P2", "P3"}, unserved_map(sc)
+    assert_rule_holds(r, sc)
+    # With a small customer that only a 6-bay truck can still take, a 6,000 part never shares a 6-bay load.
+    o = others(1, units=2_000)
+    r2 = rq(parts + o, trucks)
+    tds, solvable, drops, mx, _ = _day_of(r2)
+    sc2 = ds._solve_scenario(name, r2, solvable, tds, mx, 2, list(drops))
+    stops = {s.stop_id: s for s in r2.stops}
+    for ld in sc2.loads:
+        if ld.truck_id.startswith("S6"):
+            assert ld.pallet_units <= 5_400 or len({stops[st.stop_id].customer_id for st in ld.stops}) == 1, ld
+    assert_rule_holds(r2, sc2)
+
+
 def test_two_full_truck_customers_each_get_a_truck_of_their_own():
     """Two customers of 11.5 pallets: one each on the two 12-bay trucks (one trip each), never together,
     never on the 11-bay; the small stops ride the 11-bay truck."""
