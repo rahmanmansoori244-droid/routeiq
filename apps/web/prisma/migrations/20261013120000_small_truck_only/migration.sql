@@ -10,12 +10,15 @@
 -- - UnservedReasonCode NO_ALLOWED_TRUCK: the optimizer's reason for a small-truck-only order no small truck
 --   could take (none today, none big enough, or none with room or time). ADD VALUE is not used in this
 --   migration's own statements (PostgreSQL 12+ allows it inside the migration's transaction then).
--- Code from before this release never reads the columns and never writes the enum value, so an app
--- rollback is safe.
+-- Code from before this release never reads the columns. An app rollback is safe only while no
+-- UnservedOrder row has reasonCode NO_ALLOWED_TRUCK: the previous release's Prisma client does not know the
+-- value and fails reading such a row (the plan screen and the day overview read them). Before rolling the
+-- app back:  UPDATE "UnservedOrder" SET "reasonCode" = 'INFEASIBLE' WHERE "reasonCode" = 'NO_ALLOWED_TRUCK';
+-- (the reason message keeps the words "Needs a small truck ...").
 -- Rollback: ALTER TABLE "Customer" DROP COLUMN "smallTruckOnly";
 --           ALTER TABLE "TenantConfig" DROP CONSTRAINT "TenantConfig_smallTruckMaxBays_range";
 --           ALTER TABLE "TenantConfig" DROP COLUMN "smallTruckMaxBays";
---           (an enum value cannot be dropped; unused, it is harmless).
+--           (an enum value cannot be dropped; unused after the UPDATE above, it is harmless).
 
 -- AlterEnum
 ALTER TYPE "UnservedReasonCode" ADD VALUE 'NO_ALLOWED_TRUCK';
