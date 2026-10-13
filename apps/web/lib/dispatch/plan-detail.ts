@@ -27,7 +27,7 @@ import {
 } from './snapshots';
 import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
-import { isHandSetHelpers } from './load-helpers';
+import { helperChangeWarnings, isHandSetHelpers } from './load-helpers';
 import { driverChangeWarnings, noteParts } from './driver-links';
 import { leaveOnDay, loadLeaveNote } from './driver-leave';
 import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
@@ -1047,6 +1047,11 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
               ...driverChangeWarnings(
                 (run.summaryJson as unknown as DailySummary | null)?.driverChanges ?? [],
                 loads.map((l) => ({ truckId: l.truckId, loadNo: l.loadNo, driverId: l.driverId, driverSet: driverSetByDispatcher(l) })),
+              ),
+              // A helper set by hand that the applied plan dropped (planHelpers), until he is on a load again.
+              ...helperChangeWarnings(
+                (run.summaryJson as unknown as DailySummary | null)?.helperChanges ?? [],
+                loads.map((l) => ({ truckId: l.truckId, loadNo: l.loadNo, helperIds: (l.helpers ?? []).map((h) => h.helper.id), helpersSetAt: l.helpersSetAt ?? null })),
               ),
               ...(chosenDetails.response_warnings ?? []),
               ...(chosenDetails.warnings ?? []),

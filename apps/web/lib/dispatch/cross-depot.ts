@@ -16,6 +16,9 @@
  *   numbers, as the driver page expects (both depots' plans may give the truck a Load 1).
  * - Drivers (planDrivers in load-state.ts): RouteIQ never gives a driver who is on a load of another
  *   depot's live plan at an overlapping time, the drive between the depots included (driverTripsElsewhere).
+ *   Helpers (owner request 13 Oct 2026): the truck's usual helper is not given a trip here that overlaps
+ *   his load on another depot's live plan either (helperTripsElsewhere, planHelpers in load-helpers.ts).
+ *   The LOCK / LOADING / DISPATCH gate below is for trucks and drivers only.
  * - LOCK, LOADING and DISPATCH (changeStatusTx): refused with 409 TRUCK_BUSY_ELSEWHERE /
  *   DRIVER_BUSY_ELSEWHERE when the load's truck or driver is on a LOCKED, LOADING, DISPATCHED or
  *   COMPLETED load of another depot's live plan that day and both cannot be driven - their times
@@ -30,6 +33,7 @@
  */
 import type { Prisma } from '@prisma/client';
 import type { OtherDepotTrip } from './load-state';
+import type { HelperTimeElsewhere } from './load-helpers';
 import { distanceM } from './snapshots';
 import { fmtHhmm } from './time';
 
@@ -75,28 +79,28 @@ function turnaroundMin(cfg: Pick<CrossDepotSettings, 'reloadMinutes' | 'loadingM
 
 /**
  * The loads of the OTHER depots' live plan versions of the run's day that are on one of `truckIds` or
- * have one of `driverIds` ('ANY': any driver). `frozenOnly`: LOCKED, LOADING, DISPATCHED and COMPLETED
+ * have one of `driverIds` ('ANY': any driver); `all`: every load. `frozenOnly`: LOCKED, LOADING, DISPATCHED and COMPLETED
  * only. Each with its depot's name and the drive from it to the run's depot.
  */
 export async function loadsOnOtherDepots(
   db: Db,
   tenantId: string,
   run: { depotId: string; runDate: Date },
-  who: { truckIds?: readonly string[]; driverIds?: readonly string[] | 'ANY' },
+  who: { truckIds?: readonly string[]; driverIds?: readonly string[] | 'ANY'; all?: boolean },
   opts: { frozenOnly?: boolean } = {},
 ): Promise<OtherDepotLoad[]> {
   const or: Prisma.PlanLoadWhereInput[] = [];
   if (who.truckIds?.length) or.push({ truckId: { in: [...who.truckIds] } });
   if (who.driverIds === 'ANY') or.push({ driverId: { not: null } });
   else if (who.driverIds?.length) or.push({ driverId: { in: [...who.driverIds] } });
-  if (!or.length) return [];
+  if (!or.length && !who.all) return [];
   const runs = await db.runPlan.findMany({
     where: { tenantId, runDate: run.runDate, depotId: { not: run.depotId }, status: { notIn: ['SUPERSEDED', 'ARCHIVED'] }, supersededAt: null },
     select: { id: true, depotId: true },
   });
   if (!runs.length) return [];
   const loads = await db.planLoad.findMany({
-    where: { tenantId, runId: { in: runs.map((r) => r.id) }, OR: or, ...(opts.frozenOnly ? { status: { not: 'PLANNED' } } : {}) },
+    where: { tenantId, runId: { in: runs.map((r) => r.id) }, ...(who.all ? {} : { OR: or }), ...(opts.frozenOnly ? { status: { not: 'PLANNED' } } : {}) },
     select: { id: true, runId: true, truckId: true, loadNo: true, status: true, driverId: true, departMin: true, returnMin: true, cases: true },
     orderBy: [{ departMin: 'asc' }, { id: 'asc' }],
   });
@@ -246,6 +250,25 @@ export async function driverTripsElsewhere(db: Db, tenantId: string, run: { depo
       ? [{ truckId: f.truckId, driverId: f.driverId, loadNo: f.loadNo, departMin: f.departMin - f.driveMin, returnMin: f.returnMin + f.driveMin, truckCode: `${f.truckCode} (${f.depotName})` }]
       : [],
   );
+}
+
+/**
+ * The helpers on the other depots' live plans of the run's day (any status), as planHelpers takes them:
+ * one entry per helper and load, the times widened by the drive between the depots.
+ */
+export async function helperTripsElsewhere(
+  db: Db & Pick<Prisma.TransactionClient, 'planLoadHelper'>,
+  tenantId: string,
+  run: { depotId: string; runDate: Date },
+): Promise<HelperTimeElsewhere[]> {
+  const away = await loadsOnOtherDepots(db, tenantId, run, { all: true });
+  if (!away.length) return [];
+  const byId = new Map(away.map((f) => [f.id, f]));
+  const rows = await db.planLoadHelper.findMany({ where: { tenantId, loadId: { in: away.map((f) => f.id) } }, select: { loadId: true, helperId: true } });
+  return rows.flatMap((r) => {
+    const f = byId.get(r.loadId);
+    return f ? [{ helperId: r.helperId, departMin: f.departMin - f.driveMin, returnMin: f.returnMin + f.driveMin }] : [];
+  });
 }
 
 /** Both loads cannot be driven by one truck or driver: their times overlap once the drive between the depots is added. */

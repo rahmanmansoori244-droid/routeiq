@@ -47,7 +47,7 @@ import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { leaveOnDay, onLeaveMoveRefusal } from './driver-leave';
 import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
-import { driverTripsElsewhere, loadsOnOtherDepots, otherDepotClash, truckHoursAround, type TruckHoursAround } from './cross-depot';
+import { driverTripsElsewhere, helperTripsElsewhere, loadsOnOtherDepots, otherDepotClash, truckHoursAround, type TruckHoursAround } from './cross-depot';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   caseHeavierThanAnyTruck,
@@ -98,7 +98,7 @@ import { appliedPlanStatus } from './plan-status';
 import { carriedLoadRemedy } from './carry-view';
 import { hiredTruckDriver, shownTruckCode, trucksOfDayWhere } from './hire';
 import { copyRowData } from './prisma-copy';
-import { planHelpers } from './load-helpers';
+import { planHelpers, type HelperChangeNote } from './load-helpers';
 import { copyLoadHelpers, deleteHelpersOfLoads, helperEvidenceOf, setHelpersTx, writeLoadHelpers } from './load-helpers-service';
 import { lockWarningsOf } from '../delivery/carry-conflicts';
 import {
@@ -1386,10 +1386,13 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   );
   // Helpers (owner request 13 Oct 2026; rules: planHelpers in load-helpers.ts): frozen loads keep theirs,
   // helpers set by hand stay on their truck and trip, every other trip gets the truck's usual helper when
-  // he is active and free at that time. Read before the PLANNED loads (and their helper rows) are deleted.
+  // he is active and free at that time (here and on the other depots' plans that day). Read before the
+  // PLANNED loads (and their helper rows) are deleted. A hand-set helper the plan drops is a helper note
+  // (as a driver note): kept in the summary (helperChanges, plan warnings), audited and returned.
   const helperEv = await helperEvidenceOf(tx, tenantId, runId);
-  const activeHelpers = new Set((await tx.helper.findMany({ where: { tenantId, active: true }, select: { id: true } })).map((h) => h.id));
-  const helpersOf = planHelpers(
+  const tenantHelpers = await tx.helper.findMany({ where: { tenantId }, select: { id: true, name: true, active: true } });
+  const activeHelpers = new Set(tenantHelpers.filter((h) => h.active).map((h) => h.id));
+  const { helpers: helpersOf, notes: helperNotes } = planHelpers(
     d.loads.map((ld) => ({
       key: loadKey(ld.truck_id, ld.load_no),
       truckId: ld.truck_id,
@@ -1400,9 +1403,22 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     })),
     helperEv.evidence,
     activeHelpers,
+    await helperTripsElsewhere(tx, tenantId, run),
   );
   const truckCode = (id: string) => truckById.get(id)?.code ?? id;
   const person = (id: string) => ({ id, name: driverName.get(id) ?? 'Unknown driver' });
+  const helperName = new Map(tenantHelpers.map((h) => [h.id, h.name]));
+  const appliedAt = new Date().toISOString();
+  const helperChanges: HelperChangeNote[] = helperNotes.map((n) => ({
+    truckId: n.truckId,
+    truckCode: truckCode(n.truckId),
+    loadNo: n.loadNo,
+    departMin: n.departMin,
+    returnMin: n.returnMin,
+    helper: { id: n.helperId, name: helperName.get(n.helperId) ?? 'Unknown helper' },
+    reason: n.reason,
+    at: appliedAt,
+  }));
   const driverChanges: DriverChangeNote[] = notes.map((n) => ({
     truckId: n.truckId,
     truckCode: truckCode(n.truckId),
@@ -1545,7 +1561,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     data: { chosenScenarioId: scenarioId, status: next, finalizedAt: next === 'DISPATCHED' ? (run.finalizedAt ?? new Date()) : null },
   });
   if (wrote.count !== 1) throw new PlanError('This plan version was superseded by a newer version. Open the latest version.', 409, { code: 'SUPERSEDED' });
-  await refreshPlanFacts(tx, tenantId, runId, { driverChanges });
+  await refreshPlanFacts(tx, tenantId, runId, { driverChanges, helperChanges });
   await audit(
     {
       tenantId,
@@ -1562,13 +1578,16 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         ...(driverChanges.length
           ? { driverChanges: driverChanges.map((c) => ({ truckId: c.truckId, loadNo: c.loadNo, from: c.from?.id ?? null, to: c.to?.id ?? null, reason: c.reason })) }
           : {}),
+        ...(helperChanges.length
+          ? { helperChanges: helperChanges.map((c) => ({ truckId: c.truckId, loadNo: c.loadNo, helperId: c.helper.id, helper: c.helper.name, reason: c.reason })) }
+          : {}),
       } as never,
     },
     tx,
   );
   if (kgMismatches.length) console.warn('applyScenario: load kg differs from its orders', { runId, kgMismatches });
   if (palletMismatches.length) console.warn('applyScenario: load pallets differ from its rows', { runId, palletMismatches });
-  return { driverChanges };
+  return { driverChanges, helperChanges };
 }
 
 /**
@@ -1772,12 +1791,14 @@ function pickPalletFacts(ts: TruckSnapshot | null) {
  * `driverChanges`: the driver notes of the plan just applied (applyScenario), kept in the summary
  * (`summaryJson.driverChanges`, shown as plan warnings). A refresh without them (a load change)
  * keeps the ones already there. Anything else an older summary held (`parkedDrivers`) is dropped.
+ * `helperChanges`: the same for the helper notes (planHelpers).
  */
-export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, opts: { driverChanges?: DriverChangeNote[] } = {}) {
+export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, opts: { driverChanges?: DriverChangeNote[]; helperChanges?: HelperChangeNote[] } = {}) {
   const run = await tx.runPlan.findFirstOrThrow({ where: { id: runId, tenantId } });
   if (!run.chosenScenarioId) return;
-  const stored = run.summaryJson as { driverChanges?: unknown } | null;
+  const stored = run.summaryJson as { driverChanges?: unknown; helperChanges?: unknown } | null;
   const driverChanges = opts.driverChanges ?? (Array.isArray(stored?.driverChanges) ? (stored.driverChanges as DriverChangeNote[]) : []);
+  const helperChanges = opts.helperChanges ?? (Array.isArray(stored?.helperChanges) ? (stored.helperChanges as HelperChangeNote[]) : []);
   const sc = await tx.scenarioResult.findFirstOrThrow({ where: { id: run.chosenScenarioId }, include: { unservedOrders: true } });
   const d = sc.detailsJson as unknown as ScenarioDetails;
   const scopeIds = [...new Set([...d.scope.orderIds, ...d.scope.frozenOrderIds])];
@@ -1888,7 +1909,7 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
       ...(d.search ? { search: d.search } : {}),
     },
   });
-  const summary: DailySummary = { ...facts, ...(driverChanges.length ? { driverChanges } : {}) };
+  const summary: DailySummary = { ...facts, ...(driverChanges.length ? { driverChanges } : {}), ...(helperChanges.length ? { helperChanges } : {}) };
   let change = null;
   if (run.parentRunId) {
     const parent = await tx.runPlan.findFirst({ where: { id: run.parentRunId, tenantId } });

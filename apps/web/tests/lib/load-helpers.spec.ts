@@ -36,12 +36,15 @@ import { helperChangesRefused, truckFieldsRefused } from '@/lib/rbac';
 import { codeTakenMessage, isUniqueViolation } from '@/lib/unique-code';
 import {
   checkHelpersChange,
+  helperChangeText,
+  helperChangeWarnings,
   helperClashes,
   helperDeactivatedWarning,
   helpersText,
   isHandSetHelpers,
   planHelpers,
   usualHelperChangedMessage,
+  type HelperChangeNote,
   type HelperEvidence,
   type HelperTrip,
 } from '@/lib/dispatch/load-helpers';
@@ -146,7 +149,7 @@ describe('planHelpers: the usual helper, the dispatcher\'s pick, never two trips
   const active = new Set(['SAIF', 'OMAR', 'NASR']);
 
   it('a new trip gets the truck\'s usual helper; both trips of one truck get him (they never overlap)', () => {
-    const out = planHelpers([trip('T1', 1, 360, 480, 'SAIF'), trip('T1', 2, 500, 620, 'SAIF'), trip('T2', 1, 360, 480, null)], [], active);
+    const { helpers: out } = planHelpers([trip('T1', 1, 360, 480, 'SAIF'), trip('T1', 2, 500, 620, 'SAIF'), trip('T2', 1, 360, 480, null)], [], active);
     expect(out.get('T1:1')).toEqual({ helperIds: ['SAIF'], helpersSetById: null, helpersSetAt: null });
     expect(out.get('T1:2')!.helperIds).toEqual(['SAIF']);
     expect(out.get('T2:1')!.helperIds).toEqual([]);
@@ -154,7 +157,7 @@ describe('planHelpers: the usual helper, the dispatcher\'s pick, never two trips
 
   it('helpers set by hand stay on their truck and trip with the marker (the inactive ones dropped); RouteIQ\'s are re-decided', () => {
     const evidence = [ev('T1', 1, 'PLANNED', ['OMAR', 'NASR'], true), ev('T1', 2, 'PLANNED', ['OLD'], true), ev('T2', 1, 'PLANNED', ['NASR'], false)];
-    const out = planHelpers([trip('T1', 1, 380, 500, 'SAIF'), trip('T1', 2, 520, 640, 'SAIF'), trip('T2', 1, 700, 800, 'SAIF')], evidence, active);
+    const { helpers: out } = planHelpers([trip('T1', 1, 380, 500, 'SAIF'), trip('T1', 2, 520, 640, 'SAIF'), trip('T2', 1, 700, 800, 'SAIF')], evidence, active);
     expect(out.get('T1:1')).toMatchObject({ helperIds: ['OMAR', 'NASR'], helpersSetById: 'u1' });
     // Only an inactive helper was picked: the trip is filled in like any other.
     expect(out.get('T1:2')).toEqual({ helperIds: ['SAIF'], helpersSetById: null, helpersSetAt: null });
@@ -162,21 +165,60 @@ describe('planHelpers: the usual helper, the dispatcher\'s pick, never two trips
   });
 
   it('"No helpers" set by hand is not kept (as "No driver"): the usual helper again', () => {
-    const out = planHelpers([trip('T1', 1, 360, 480, 'SAIF')], [ev('T1', 1, 'PLANNED', [], true)], active);
+    const { helpers: out } = planHelpers([trip('T1', 1, 360, 480, 'SAIF')], [ev('T1', 1, 'PLANNED', [], true)], active);
     expect(out.get('T1:1')!.helperIds).toEqual(['SAIF']);
   });
 
   it('a usual helper inactive, on a frozen load or on a hand-set trip at an overlapping time is not given', () => {
-    expect(planHelpers([trip('T1', 1, 360, 480, 'OLD')], [], active).get('T1:1')!.helperIds).toEqual([]);
+    expect(planHelpers([trip('T1', 1, 360, 480, 'OLD')], [], active).helpers.get('T1:1')!.helperIds).toEqual([]);
     // T2's frozen load 06:00-08:00 has Saif: T1's trip 07:00 does not get him; 08:00 does (back at 08:00).
     const frozen = [ev('T2', 1, 'LOCKED', ['SAIF'], false, 360, 480)];
-    expect(planHelpers([trip('T1', 1, 420, 540, 'SAIF')], frozen, active).get('T1:1')!.helperIds).toEqual([]);
-    expect(planHelpers([trip('T1', 1, 480, 540, 'SAIF')], frozen, active).get('T1:1')!.helperIds).toEqual(['SAIF']);
+    expect(planHelpers([trip('T1', 1, 420, 540, 'SAIF')], frozen, active).helpers.get('T1:1')!.helperIds).toEqual([]);
+    expect(planHelpers([trip('T1', 1, 480, 540, 'SAIF')], frozen, active).helpers.get('T1:1')!.helperIds).toEqual(['SAIF']);
     // Two trucks with the same usual helper at the same time: the first trip listed gets him.
-    const two = planHelpers([trip('T1', 1, 360, 480, 'SAIF'), trip('T2', 1, 400, 500, 'SAIF')], [], active);
+    const { helpers: two } = planHelpers([trip('T1', 1, 360, 480, 'SAIF'), trip('T2', 1, 400, 500, 'SAIF')], [], active);
     expect([two.get('T1:1')!.helperIds, two.get('T2:1')!.helperIds]).toEqual([['SAIF'], []]);
   });
 
+  it('a usual helper on a load of another depot at that time (the drive included) is not given', () => {
+    const away = [{ helperId: 'SAIF', departMin: 330, returnMin: 500 }];
+    expect(planHelpers([trip('T1', 1, 420, 540, 'SAIF')], [], active, away).helpers.get('T1:1')!.helperIds).toEqual([]);
+    expect(planHelpers([trip('T1', 1, 500, 600, 'SAIF')], [], active, away).helpers.get('T1:1')!.helperIds).toEqual(['SAIF']);
+    // A helper set by hand stays (the dispatcher's choice), as a hand-set driver.
+    expect(planHelpers([trip('T1', 1, 420, 540, 'OMAR')], [ev('T1', 1, 'PLANNED', ['SAIF'], true)], active, away).helpers.get('T1:1')!.helperIds).toEqual(['SAIF']);
+  });
+
+  it('a hand-set helper the plan drops is a note: TRIP_GONE (no such trip now) or INACTIVE; the usual helper RouteIQ gave is no note', () => {
+    const evidence = [
+      ev('T2', 2, 'PLANNED', ['SAIF', 'NASR'], true, 600, 700),
+      ev('T1', 1, 'PLANNED', ['OMAR', 'OLD'], true),
+      ev('T1', 2, 'PLANNED', ['NASR'], false, 500, 620),
+    ];
+    const { helpers, notes } = planHelpers([trip('T1', 1, 360, 480, 'SAIF')], evidence, active);
+    expect(helpers.get('T1:1')!.helperIds).toEqual(['OMAR']);
+    expect(notes).toEqual([
+      { truckId: 'T1', loadNo: 1, departMin: 360, returnMin: 480, helperId: 'OLD', reason: 'INACTIVE' },
+      { truckId: 'T2', loadNo: 2, departMin: 600, returnMin: 700, helperId: 'SAIF', reason: 'TRIP_GONE' },
+      { truckId: 'T2', loadNo: 2, departMin: 600, returnMin: 700, helperId: 'NASR', reason: 'TRIP_GONE' },
+    ]);
+  });
+
+  it('helper notes are plan warnings until the helper is on a load again (or the trip is back / its helpers set again)', () => {
+    const at = '2026-10-13T10:00:00.000Z';
+    const gone: HelperChangeNote = { truckId: 'T2', truckCode: 'T02', loadNo: 2, departMin: 600, returnMin: 700, helper: { id: 'SAIF', name: 'Saif' }, reason: 'TRIP_GONE', at };
+    const inactive: HelperChangeNote = { ...gone, truckId: 'T1', truckCode: 'T01', loadNo: 1, departMin: 360, returnMin: 480, helper: { id: 'OLD', name: 'Old' }, reason: 'INACTIVE' };
+    const t11 = { truckId: 'T1', loadNo: 1, helperIds: ['OMAR'], helpersSetAt: new Date('2026-10-13T09:00:00Z') };
+    expect(helperChangeWarnings([gone, inactive], [t11])).toEqual([
+      'Helper Saif was set by hand on T02 · L2 (10:00–11:40). This plan has no such trip, so he is on no load: set him on a load if he goes out.',
+      'Helper Old was set by hand on T01 · L1 (06:00–08:00) but is inactive, so this plan left him off. Check the helpers of that load.',
+    ]);
+    expect(helperChangeText(gone)).toContain('Saif');
+    // Saif is on a load again; the dispatcher set T01 L1's helpers after the plan.
+    const later = { ...t11, helperIds: ['OMAR', 'SAIF'], helpersSetAt: new Date('2026-10-13T11:00:00Z') };
+    expect(helperChangeWarnings([gone, inactive], [later])).toEqual([]);
+    // The trip is back in a later load change: the TRIP_GONE note ends.
+    expect(helperChangeWarnings([gone], [{ truckId: 'T2', loadNo: 2, helperIds: [], helpersSetAt: null }])).toEqual([]);
+  });
   it('checkHelpersChange: as the driver - any time until dispatch; the same list is no change', () => {
     expect(checkHelpersChange({ status: 'PLANNED', helperIds: ['A'] }, ['A'])).toEqual({ ok: true, unchanged: true });
     for (const s of ['PLANNED', 'LOCKED', 'LOADING'] as const) expect(checkHelpersChange({ status: s, helperIds: [] }, ['A'])).toEqual({ ok: true, unchanged: false });
