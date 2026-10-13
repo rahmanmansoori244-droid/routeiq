@@ -330,6 +330,40 @@ describe('tenantDb isolation (Phase 1 scope)', () => {
     expect(await tenantDb(tenantBId).driverLeave.count()).toBe(1);
   });
 
+  it('Helper and PlanLoadHelper (owner request 13 Oct 2026) are scoped both ways: reads and writes', async () => {
+    const seedHelpers = async (tid: string, tag: string) => {
+      const db = tenantDb(tid);
+      // The same helper code in both companies.
+      const helper = await db.helper.create({ data: { code: 'H-1', name: `${tag} helper` } as Any });
+      const depot = await db.depot.create({ data: { code: `HD-${tag}`, name: `${tag} depot`, lat: 23.6, lng: 58.4 } as Any });
+      const truck = await db.truck.create({ data: { code: `HT-${tag}`, depotId: depot.id, defaultHelperId: helper.id } as Any });
+      const run = await db.runPlan.create({ data: { depotId: depot.id, runDate: new Date('2026-10-14T00:00:00Z'), createdById: tid === tenantAId ? userAId : userBId } as Any });
+      const load = await db.planLoad.create({
+        data: { runId: run.id, truckId: truck.id, loadNo: 1, departMin: 360, returnMin: 480, distanceKm: 1, durationMin: 60, cases: 1, weightKg: 1, utilizationPct: 1 } as Any,
+      });
+      const row = await db.planLoadHelper.create({ data: { loadId: load.id, helperId: helper.id, position: 1 } as Any });
+      return { helper, row };
+    };
+    const a = await seedHelpers(tenantAId, 'A');
+    const b = await seedHelpers(tenantBId, 'B');
+    for (const [tid, own, other] of [
+      [tenantAId, a, b],
+      [tenantBId, b, a],
+    ] as const) {
+      const db = tenantDb(tid);
+      expect((await db.helper.findMany()).map((h) => h.id)).toEqual([own.helper.id]);
+      expect(await db.helper.findUnique({ where: { id: other.helper.id } })).toBeNull();
+      expect((await db.planLoadHelper.findMany()).map((r) => r.id)).toEqual([own.row.id]);
+      expect(await db.planLoadHelper.findUnique({ where: { id: other.row.id } })).toBeNull();
+    }
+    await tenantDb(tenantAId).helper.updateMany({ data: { name: 'changed by A' } });
+    expect((await tenantDb(tenantBId).helper.findFirst())?.name).toBe('B helper');
+    await tenantDb(tenantAId).planLoadHelper.deleteMany({});
+    expect(await tenantDb(tenantBId).planLoadHelper.count()).toBe(1);
+    // A load's truck is RESTRICT: the loads go before afterAll deletes the companies.
+    await prisma.planLoad.deleteMany({ where: { tenantId: { in: [tenantAId, tenantBId] } } });
+  });
+
   it('tenantDb refuses an empty tenantId', () => {
     expect(() => tenantDb('')).toThrow(/tenantId/i);
   });

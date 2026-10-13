@@ -93,6 +93,8 @@ const REL: Record<string, Record<string, (r: Row) => unknown>> = {
   },
   runPlan: { depot: (r) => (tables.depot ?? []).find((d) => d.id === r.depotId) ?? { id: r.depotId, code: 'D', name: 'D', lat: 23.6, lng: 58.4 } },
   routeAssignment: { load: (r) => (tables.planLoad ?? []).find((l) => l.id === r.loadId) ?? null, order: (r) => orderOf(r.orderId) },
+  // Helpers (13 Oct 2026): a load's helper row with its helper (the crew report selects it).
+  planLoadHelper: { helper: (r) => (tables.helper ?? []).find((h) => h.id === r.helperId) ?? null },
 };
 
 /**
@@ -128,7 +130,7 @@ function orderOf(id: string) {
  * Relations a `select` reads like an include (the delivery outcome code selects a route assignment's
  * order). Only these: other tests rely on the fake ignoring `select` (the whole row, no relation).
  */
-const SELECTED_RELATIONS: Record<string, string[]> = { routeAssignment: ['order'] };
+const SELECTED_RELATIONS: Record<string, string[]> = { routeAssignment: ['order'], planLoadHelper: ['helper'] };
 
 function relSelect(model: string, select?: Row): Row | undefined {
   if (!select) return undefined;
