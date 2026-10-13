@@ -193,7 +193,7 @@ describe('the texts follow the rule', () => {
     const start = row({ ...TENANT, windowRule: 'START' }, 'Receiving hours');
     expect(start).toMatchObject({ value: windowRuleText('START'), source: 'SETTING' });
     expect(start.value).toMatch(/latest arrival/);
-    expect(start.note).toMatch(/13:50 for a 14:00 close/);
+    expect(start.note).toMatch(/up to 14:00 for a 14:00 close, e\.g\. 13:50/);
     expect(row(TENANT, 'Preferred-window penalty').note).toMatch(/finishes after the preferred end/);
     expect(row({ ...TENANT, windowRule: 'START' }, 'Preferred-window penalty').note).toMatch(/starts after the preferred end/);
   });

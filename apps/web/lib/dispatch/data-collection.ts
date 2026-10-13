@@ -500,7 +500,7 @@ export const MASTER_COLUMNS: readonly MasterColumn[] = [
   { key: 'location_source', width: 14, imported: false, text: 'Where the saved point came from.' },
   { key: 'location_confirmed_by', width: 16, imported: false, text: 'Who confirmed the location.' },
   { key: 'location_confirmed_at', width: 17, imported: false, text: 'When (company time).' },
-  { key: 'hard_from', width: 9, imported: true, text: "The customer's own receiving hours - HARD (never outside): from, HH:MM." },
+  { key: 'hard_from', width: 9, imported: true, text: "The customer's own receiving hours - HARD (no truck arrives after the end; Settings > Receiving hours decides if unloading must also finish by then): from, HH:MM." },
   { key: 'hard_to', width: 9, imported: true, text: 'HARD hours: to, HH:MM.' },
   { key: 'preferred_from', width: 9, imported: true, text: 'Preferred hours (soft): from, HH:MM.' },
   { key: 'preferred_to', width: 9, imported: true, text: 'Preferred hours: to, HH:MM.' },

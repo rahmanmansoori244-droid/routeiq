@@ -187,7 +187,7 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
             ) : null}
           </div>
           <div className="space-y-1">
-            <Label htmlFor="cd-hs">Receiving hours — HARD (never outside)</Label>
+            <Label htmlFor="cd-hs">Receiving hours — HARD (no truck arrives after the end; see Settings → Receiving hours)</Label>
             <div className="flex items-center gap-1">
               <Input id="cd-hs" placeholder="06:00" value={form.hardStart} disabled={!!form.openAllDay} onChange={(e) => set('hardStart')(e.target.value)} />
               <span>–</span>

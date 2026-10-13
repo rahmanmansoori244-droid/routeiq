@@ -62,7 +62,7 @@ export default async function CustomerImportPage({ params }: { params: { slug: s
               hint="yes = the unloading area takes small trucks only (3-ton): planned only on trucks with at most the bays set in Settings (Small truck = at most N bays). no = any truck. Also read from a small truck only, small_truck or small truck column. A blank cell keeps the saved value."
             />
             <Field name="priority_confirmed" hint="yes = confirmed. Blank = not confirmed yet: an unchanged priority stays as it is, a changed one is confirmed by you. no = store without confirming. Without this column every priority in the file is confirmed." />
-            <Field name="hard_from / hard_to" hint="Receiving hours, HARD (never outside), HH:MM." />
+            <Field name="hard_from / hard_to" hint="Receiving hours, HARD (no truck arrives after the end; see Settings → Receiving hours), HH:MM." />
             <Field name="preferred_from / preferred_to" hint="Preferred hours (soft), HH:MM. When any of the four hour cells is filled in, the four are the customer's own hours (a blank one = no limit)." />
             <Field name="open_all_day" hint="yes = the customer accepts deliveries at any time (leave the hours blank)." />
             <Field name="hours_confirmed" hint="yes = confirmed with the customer: write yes when the hours already in the file are right (left blank, they stay not confirmed). Hours entered or changed here are confirmed by you unless this says no. Nothing un-confirms hours that did not change." />

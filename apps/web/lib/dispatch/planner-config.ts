@@ -311,7 +311,7 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       source: 'SETTING',
       note:
         windowRule === 'START'
-          ? 'a truck may arrive up to the end of the receiving hours (13:50 for a 14:00 close) and unload after it'
+          ? 'a truck may arrive up to the end of the receiving hours (up to 14:00 for a 14:00 close, e.g. 13:50) and unload after it'
           : 'a customer whose unloading takes longer than its receiving hours cannot be planned',
     },
     { label: 'Max loads per truck per day', value: String(cfg.maxTripsPerTruck), source: 'SETTING', note: "a truck's own limit wins" },

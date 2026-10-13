@@ -65,7 +65,7 @@ export default async function HelpPage({ params }: { params: { slug: string } })
           </CardHeader>
           <CardContent className="space-y-1 text-sm">
             <p>
-              <b>Hard hours</b>: the customer cannot receive outside them; the plan never delivers outside. <b>Preferred hours</b>: soft; used when
+              <b>Hard hours</b>: no truck arrives after their end. Settings → Receiving hours decides whether unloading must also be finished by the end (the default) or may continue after it. <b>Preferred hours</b>: soft; used when
               possible.
             </p>
             <p>
