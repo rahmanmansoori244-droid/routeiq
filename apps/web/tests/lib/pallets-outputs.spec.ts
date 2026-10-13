@@ -162,7 +162,8 @@ describe('Excel workbook with pallets', () => {
     const wb = await render(palletFixture());
     const ws = wb.getWorksheet('LOAD PLAN')!;
     const heads = rowOf(ws, 4);
-    expect(heads.slice(7, 11)).toEqual(['Cases', 'Capacity (cases)', 'Pallets / bays', 'Weight kg']);
+    // Helper(s) beside Driver since 13 Oct 2026: the columns after it moved one to the right.
+    expect(heads.slice(8, 12)).toEqual(['Cases', 'Capacity (cases)', 'Pallets / bays', 'Weight kg']);
     const col = heads.indexOf('Pallets / bays') + 1;
     expect(ws.getCell(5, col).text).toBe('1.6 / 2 (limit 1.9 at 95% fill)');
     expect(ws.getCell(5, col - 1).text).toBe('by pallets'); // the case capacity is not used
@@ -177,7 +178,7 @@ describe('Excel workbook with pallets', () => {
     const wb = await render(fixture());
     const heads = rowOf(wb.getWorksheet('LOAD PLAN')!, 4);
     expect(heads).not.toContain('Pallets / bays');
-    expect(heads.slice(7, 10)).toEqual(['Cases', 'Capacity (cases)', 'Weight kg']);
+    expect(heads.slice(8, 11)).toEqual(['Cases', 'Capacity (cases)', 'Weight kg']);
   });
 
   it('a load sheet planned by pallets: cases · pallets / bays in the header, the manifest per product in pallets + loose cases, the TOTAL words', async () => {

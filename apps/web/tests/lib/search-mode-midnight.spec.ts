@@ -29,7 +29,7 @@ vi.mock('@/app/t/[slug]/dispatch/client-api', async (importActual) => {
       requests.push({ url, json: init?.json });
       if (url.startsWith('/api/dispatch/day')) return ok(structuredClone(answers.day));
       if (url.endsWith('/plan') && !init?.json) return ok(structuredClone(answers.plan));
-      if (url === '/api/drivers') return ok([]);
+      if (url === '/api/drivers' || url === '/api/helpers') return ok([]);
       return ok({ runId: 'run1', searchMode: (init?.json as any)?.searchMode, queued: false });
     },
   };

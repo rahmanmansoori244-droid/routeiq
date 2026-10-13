@@ -23,6 +23,7 @@ import { DEFAULT_TZ, daysBetween, fmtHhmm, isoOf, localDateIso, localMinutes } f
 import { arrivalIsObserved, arrivedInsideWindow, deliveryKpis, inOutcomeScope, minutesFromDayStart, type DeliveryKpis, type KpiVisit } from './kpis';
 import { ACTUALS_MAX_DAYS, actualMinutes, arrivalByText, OUTCOME_LABEL, POSITION_TEXT, reasonLabel, timedByText } from './office-text';
 import { cameraCountsByTruckDay, keyOfVisit, kpiVisitOf, liveRunsInRange, loadsOfRuns, outcomeSettings, photoWaitOverOf, stopsOfLoads, truckDaysWithLinkOrVisit, visitKey, visitsInRange } from './day-results';
+import { helpersText } from '../dispatch/load-helpers';
 import { CAMERA_ALERT_PER_DAY, cameraShareText, noPhotoAfterText, noPhotoKind, truckDayKey } from './camera-exceptions';
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -42,6 +43,8 @@ export interface ActualsRow {
   customer: string;
   driver: string | null;
   dailyDriver: string;
+  /** The load's helpers in order, "Saif, Omar" (owner request 13 Oct 2026); null without one. */
+  helpers: string | null;
   plannedEta: string | null;
   window: string | null;
   actualArrival: string | null;
@@ -92,6 +95,7 @@ export const ACTUALS_COLUMNS: { key: keyof ActualsRow; header: string; width: nu
   { key: 'customer', header: 'Customer', width: 26 },
   { key: 'driver', header: 'Driver', width: 16 },
   { key: 'dailyDriver', header: 'Daily driver', width: 8 },
+  { key: 'helpers', header: 'Helper(s)', width: 18 },
   { key: 'plannedEta', header: 'Planned ETA', width: 8 },
   { key: 'window', header: 'Window', width: 12 },
   { key: 'actualArrival', header: 'Actual arrival', width: 8 },
@@ -275,7 +279,7 @@ const AMBER: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb
 
 /** One row from a stop and its visit (pure: tests feed it). */
 export function actualsRowOf(
-  stop: { date: string; depot: string; truck: string; hired: boolean; loadNo: number; sequence: number; customerCode: string; branch: string | null; customer: string; driver: string | null; dailyDriver: boolean; etaMin: number | null; windowStartMin: number | null; windowEndMin: number | null; plannedServiceMin: number | null; casesPlanned: number; broughtForwardTo: string | null; linkCameraCount?: number },
+  stop: { date: string; depot: string; truck: string; hired: boolean; loadNo: number; sequence: number; customerCode: string; branch: string | null; customer: string; driver: string | null; dailyDriver: boolean; helpers?: string | null; etaMin: number | null; windowStartMin: number | null; windowEndMin: number | null; plannedServiceMin: number | null; casesPlanned: number; broughtForwardTo: string | null; linkCameraCount?: number },
   v:
     | (KpiVisit & {
         autoBasis: string | null;
@@ -339,6 +343,7 @@ export function actualsRowOf(
     customer: stop.customer,
     driver: stop.driver,
     dailyDriver: yesNo(stop.dailyDriver),
+    helpers: stop.helpers ?? null,
     plannedEta: stop.etaMin === null ? null : fmtHhmm(stop.etaMin),
     window,
     actualArrival: v?.arrivedAt ? fmtHhmm(localMinutes(new Date(v.arrivedAt), tz)) : null,
@@ -400,7 +405,7 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
   // The visits' photos and the brought-forward orders are asked for in parts of IN_LIST_PART ids: a
   // month of every depot has more visits and orders than PostgreSQL's 32,767 bind parameters, and
   // Prisma cannot split a list that comes with other conditions (review of 8 Oct 2026: 500).
-  const [photos, users, carried, cameraCounts] = await Promise.all([
+  const [photos, users, carried, cameraCounts, crew] = await Promise.all([
     findInParts(
       visits.map((v) => v.id),
       (part) => db.deliveryPhoto.findMany({ where: { tenantId, visitId: { in: part } }, select: { visitId: true, positionStatus: true, distanceM: true, takenAt: true }, orderBy: [{ takenAt: 'asc' }] }),
@@ -415,7 +420,15 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
     ),
     // Per driver link (truck-day), every depot: a truck that loads at two depots has one link.
     visits.some((v) => noPhotoKind(v, waitOver.has(v.id))) ? cameraCountsByTruckDay(db, tenantId, range.from, range.to, { now }) : new Map<string, number>(),
+    // The helpers on each load, in their order (as the driver: the load's own crew).
+    findInParts(
+      loads.map((l) => l.id),
+      (part) => db.planLoadHelper.findMany({ where: { tenantId, loadId: { in: part } }, orderBy: [{ loadId: 'asc' }, { position: 'asc' }], select: { loadId: true, position: true, helper: { select: { name: true } } } }),
+    ),
   ]);
+  const helpersOf = new Map<string, { position: number; name: string }[]>();
+  for (const h of crew) helpersOf.set(h.loadId, [...(helpersOf.get(h.loadId) ?? []), { position: h.position, name: h.helper.name }]);
+  const helpersTextOf = (loadId: string) => helpersText((helpersOf.get(loadId) ?? []).sort((a, b) => a.position - b.position).map((h) => h.name));
   const userName = new Map(users.map((u) => [u.id, u.name]));
   const carriedTo = new Map(carried.map((c) => [c.id, c.carriedTo ? isoOf(c.carriedTo.deliveryDate) : null]));
   // A visit's photos, oldest first, grouped once (never every photo of the range scanned per stop: a
@@ -449,6 +462,7 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
             customer: s.customerName,
             driver: l.driverName,
             dailyDriver: l.driverCasual,
+            helpers: helpersTextOf(l.id),
             etaMin: s.etaMin,
             windowStartMin: v?.windowStartMin ?? s.windowStartMin,
             windowEndMin: v?.windowEndMin ?? s.windowEndMin,

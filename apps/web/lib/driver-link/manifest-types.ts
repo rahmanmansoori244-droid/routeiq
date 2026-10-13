@@ -207,6 +207,11 @@ export interface DriverManifest {
   truck: { id: string; code: string; hired: boolean };
   /** Distinct drivers of the truck-day's loads. */
   drivers: { name: string; casual: boolean }[];
+  /**
+   * Distinct helpers of the truck-day's loads, in trip order (owner request 13 Oct 2026). Absent on a
+   * manifest kept on the phone from before.
+   */
+  helpers?: string[];
   depot: { code: string; name: string; lat: number; lng: number };
   settings: { radiusM: number; photoRequired: boolean; maxPhotos: 3; locationRetentionDays: number; photoRetentionDays: number; dispatcherPhone: string | null };
   /** Set when a signed-in RouteIQ user opened the page: results are then recorded as the office. */

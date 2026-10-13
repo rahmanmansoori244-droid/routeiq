@@ -103,6 +103,15 @@
  *   PUT /api/dispatch/delivery-time (409 ORDER_CANCELLED), POST /api/dispatch/carry-over/undo (409
  *   COPY_CANCELLED), GET /api/orders (status=CANCELLED) and the optimize / re-plan routes (cancelled
  *   orders are never planned).
+ * - Helpers (truck crew), owner request 13 Oct 2026, kept like drivers: GET /api/helpers and GET
+ *   /api/helpers/[id] are readable by every role (the plan screen's Helper(s) picker), POST
+ *   /api/helpers and PATCH /api/helpers/[id] are PLANNER (a new code stays the admin's inside the
+ *   route: helperChangesRefused, 403 ADMIN_ONLY_HELPER_FIELD; a code already used: 409 CODE_TAKEN, also
+ *   for drivers). The "Crew report" Excel (GET /api/dispatch/crew-report) is readable by every role,
+ *   like the plan's Excel and PDF (names and times, no money). Roles unchanged on PATCH
+ *   /api/trucks/[id] (PLANNER may also send `defaultHelperId` alone), POST /api/trucks
+ *   (`defaultHelperId`), PATCH /api/runs/[id]/loads/[loadId] (`helperIds`) and GET /api/runs/[id]/plan
+ *   (a load's `helpers`).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -145,6 +154,8 @@ const EXPECTED: Record<string, string> = {
   'PATCH /api/depots/[id]': 'TENANT_ADMIN',
   'DELETE /api/depots/[id]': 'TENANT_ADMIN',
   'GET /api/dispatch/carry-over': 'ANY',
+  // Owner request 13 Oct 2026: who were the driver and the helpers on each load (every role, as the plan's Excel).
+  'GET /api/dispatch/crew-report': 'ANY',
   'POST /api/dispatch/carry-over': 'PLANNER',
   'POST /api/dispatch/carry-over/undo': 'PLANNER',
   'POST /api/dispatch/casual-driver': 'PLANNER',
@@ -181,6 +192,11 @@ const EXPECTED: Record<string, string> = {
   'DELETE /api/drivers/[id]/leave/[leaveId]': 'PLANNER',
   'POST /api/drivers/[id]/pin': 'GONE',
   'GET /api/health': 'PUBLIC',
+  // Owner request 13 Oct 2026: helpers (truck crew), kept like drivers (a new code stays the admin's in the route).
+  'GET /api/helpers': 'ANY',
+  'POST /api/helpers': 'PLANNER',
+  'GET /api/helpers/[id]': 'ANY',
+  'PATCH /api/helpers/[id]': 'PLANNER',
   'GET /api/health/live': 'PUBLIC',
   // Owner request 6 Oct 2026: the trucks a depot can hire for a day (company admin edits them).
   'GET /api/hire-options': 'ANY',

@@ -27,6 +27,7 @@ import {
 } from './snapshots';
 import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
+import { helperChangeWarnings, isHandSetHelpers } from './load-helpers';
 import { driverChangeWarnings, noteParts } from './driver-links';
 import { leaveOnDay, loadLeaveNote } from './driver-leave';
 import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
@@ -170,6 +171,15 @@ export interface DetailOrderLine {
   cases: number;
 }
 
+/** A helper on a load (owner request 13 Oct 2026). */
+export interface DetailHelper {
+  id: string;
+  code: string;
+  name: string;
+  phone: string | null;
+  active: boolean;
+}
+
 export interface DetailLoad {
   id: string;
   truckId: string;
@@ -185,6 +195,13 @@ export interface DetailLoad {
    * False: RouteIQ filled it in, or there is no driver.
    */
   driverHandSet: boolean;
+  /**
+   * The helpers on this load, in their order (owner request 13 Oct 2026, lib/dispatch/load-helpers.ts),
+   * with their names as they are now. Always set by getPlanDetail; optional for older fixtures.
+   */
+  helpers?: DetailHelper[];
+  /** The dispatcher set these helpers by hand: a re-plan keeps them on this truck and trip. */
+  helpersHandSet?: boolean;
   loadNo: number;
   status: string;
   /** Kept unchanged from the previous version: carried by a re-plan and frozen (isCarriedFrozen). */
@@ -512,6 +529,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     include: {
       truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true, hired: true, onlyOnDate: true, defaultDriverId: true, active: true } },
       driver: { select: { name: true, phone: true } },
+      helpers: { orderBy: { position: 'asc' }, select: { helper: { select: { id: true, code: true, name: true, phone: true, active: true } } } },
       assignments: {
         orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
         include: {
@@ -770,6 +788,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       driverName: l.driver?.name ?? null,
       driverPhone: l.driver?.phone ?? null,
       driverHandSet: isHandSetDriver(l),
+      helpers: (l.helpers ?? []).map((h) => h.helper),
+      helpersHandSet: isHandSetHelpers({ helperIds: (l.helpers ?? []).map((h) => h.helper.id), helpersSetById: l.helpersSetById, helpersSetAt: l.helpersSetAt }),
       loadNo: l.loadNo,
       status: l.status,
       carried: isCarriedFrozen(l),
@@ -1075,6 +1095,11 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
               ...driverChangeWarnings(
                 (run.summaryJson as unknown as DailySummary | null)?.driverChanges ?? [],
                 loads.map((l) => ({ truckId: l.truckId, loadNo: l.loadNo, driverId: l.driverId, driverSet: driverSetByDispatcher(l) })),
+              ),
+              // A helper set by hand that the applied plan dropped (planHelpers), until he is on a load again.
+              ...helperChangeWarnings(
+                (run.summaryJson as unknown as DailySummary | null)?.helperChanges ?? [],
+                loads.map((l) => ({ truckId: l.truckId, loadNo: l.loadNo, helperIds: (l.helpers ?? []).map((h) => h.helper.id), helpersSetAt: l.helpersSetAt ?? null })),
               ),
               ...(chosenDetails.response_warnings ?? []),
               ...(chosenDetails.warnings ?? []),

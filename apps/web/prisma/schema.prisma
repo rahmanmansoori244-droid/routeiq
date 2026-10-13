@@ -193,6 +193,9 @@ model Tenant {
   hireOptions          HireOption[]
   hireSuggestions      HireSuggestion[]
   driverLeaves         DriverLeave[]
+  // Helpers (truck crew), owner request 13 Oct 2026.
+  helpers              Helper[]
+  planLoadHelpers      PlanLoadHelper[]
 }
 
 model TenantConfig {
@@ -348,6 +351,7 @@ model User {
   deliveryPhotos       DeliveryPhoto[]      @relation("DeliveryPhotoUser")
   driverLeavesAdded    DriverLeave[]        @relation("DriverLeaveCreatedBy")
   driverLeavesChanged  DriverLeave[]        @relation("DriverLeaveUpdatedBy")
+  loadHelpersSet       PlanLoad[]           @relation("PlanLoadHelpersSetBy")
 
   @@index([tenantId])
 }
@@ -425,6 +429,10 @@ model Truck {
   defaultDriverId  String?
   /// NO ACTION (audit F20): a driver still set as a truck's default is never deleted (drivers are deactivated).
   defaultDriver    Driver?           @relation("TruckDefaultDriver", fields: [defaultDriverId], references: [id], onDelete: NoAction)
+  /// The helper who usually goes out on this truck (owner request 13 Oct 2026): new loads get him, as
+  /// they get the default driver. NO ACTION like the default driver: helpers are deactivated, never deleted.
+  defaultHelperId  String?
+  defaultHelper    Helper?           @relation("TruckDefaultHelper", fields: [defaultHelperId], references: [id], onDelete: NoAction)
   active           Boolean           @default(true)
   /// Hired from outside (owner request 4 Oct 2026): a badge on the plan, the driver sheets and the
   /// driver page. The planner never reads it.
@@ -537,6 +545,48 @@ model Driver {
 
   @@unique([tenantId, code])
   @@index([tenantId])
+}
+
+/// A helper (truck crew), owner request 13 Oct 2026: "management asked to track helpers in each truck,
+/// so add that like drivers too. We need to know who were the helpers in each truck and load." NMWC
+/// trucks go out with a driver plus a helper. Kept like a driver: code (unique per company), name,
+/// optional phone, active; never deleted (deactivated), so every load keeps who went on it. The
+/// planner never reads helpers: they change who is on a load, not the plan.
+model Helper {
+  id            String           @id @default(cuid())
+  tenantId      String
+  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code          String
+  name          String
+  phone         String?
+  active        Boolean          @default(true)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  defaultTrucks Truck[]          @relation("TruckDefaultHelper")
+  loads         PlanLoadHelper[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+/// The helpers on one load (0 to 3), in the order shown (position 1-3). Copied with the load into
+/// every new plan version, like the driver (lib/dispatch/load-helpers.ts).
+model PlanLoadHelper {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  loadId    String
+  load      PlanLoad @relation(fields: [loadId], references: [id], onDelete: Cascade)
+  helperId  String
+  /// NO ACTION, as a driver on a load: a helper on a load is never deleted (helpers are deactivated).
+  helper    Helper   @relation(fields: [helperId], references: [id], onDelete: NoAction)
+  position  Int
+  createdAt DateTime @default(now())
+
+  @@unique([loadId, helperId])
+  /// One helper per place: with the CHECK (position 1-3) of the migration, at most 3 helpers on a load.
+  @@unique([loadId, position])
+  @@index([tenantId, helperId])
 }
 
 /// A driver's leave (owner request 6 Oct 2026: the dispatcher follows who is away). From and until
@@ -1008,8 +1058,15 @@ model PlanLoad {
   /// leave ends early, another cover is named or he drives another truck that day. Copied by a
   /// re-plan's copies; false for every other driver and once the dispatcher sets the driver.
   driverIsCover       Boolean           @default(false)
+  /// (13 Oct 2026, helpers) Who last set the helpers in the plan screen's Helper(s) picker, and when
+  /// ("No helpers" too). With at least one helper it is the dispatcher's choice: a re-plan keeps those
+  /// helpers on this truck and trip (lib/dispatch/load-helpers.ts). Null: RouteIQ filled them in.
+  helpersSetById      String?
+  helpersSetBy        User?             @relation("PlanLoadHelpersSetBy", fields: [helpersSetById], references: [id], onDelete: SetNull)
+  helpersSetAt        DateTime?
   createdAt           DateTime          @default(now())
   assignments         RouteAssignment[]
+  helpers             PlanLoadHelper[]
 
   @@unique([runId, truckId, loadNo])
   @@index([tenantId, runId])

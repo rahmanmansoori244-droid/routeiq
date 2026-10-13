@@ -110,6 +110,7 @@ function loadSheetHtml(h: SheetHead, s: LoadSheet): string {
 ${headCells(h, [
   ['Status', s.statusText],
   ['Driver', s.driverName ?? 'not set'],
+  ['Helper(s)', s.helpers ?? 'none'],
   ['Departure', s.depart],
   ['Back', `~${s.back}`],
   ['Cases', String(s.totalCases)],
@@ -175,6 +176,7 @@ function returnNoteHtml(h: SheetHead, r: ReturnNote): string {
 <h1>RETURN NOTE · gate pass · ${esc(r.truckCode)} · trip ${r.trip} of ${r.trips}</h1>
 ${headCells(h, [
   ['Driver', r.driverName ?? 'not set'],
+  ['Helper(s)', r.helpers ?? 'none'],
   ['Departure', r.depart],
   ['Back at depot', r.backAt ?? 'not recorded'],
   ['Status', r.status],

@@ -5,6 +5,7 @@ import { DRIVER_PUBLIC_SELECT } from '@/lib/driver-fields';
 import { driverDeactivatedWarning } from '@/lib/master-data-delete';
 import type { TenantDb } from '@/lib/tenant';
 import { driverChangesRefused } from '@/lib/rbac';
+import { codeTaken, withCodeCheck } from '@/lib/unique-code';
 
 interface Params { params: { id: string } }
 
@@ -48,7 +49,10 @@ export const PATCH = (req: Request, { params }: Params) =>
           403,
         );
       }
-      const after = await db.driver.update({ where: { id: params.id }, data: input, select: DRIVER_PUBLIC_SELECT });
+      // A new code another driver has: 409 CODE_TAKEN with the code (live bug of 12 Oct 2026), nothing saved.
+      const newCode = input.code !== undefined && input.code !== before.code ? input.code : undefined;
+      if (newCode && (await db.driver.findFirst({ where: { code: newCode, id: { not: params.id } }, select: { id: true } }))) throw codeTaken('Driver', newCode);
+      const after = await withCodeCheck('Driver', newCode, () => db.driver.update({ where: { id: params.id }, data: input, select: DRIVER_PUBLIC_SELECT }));
       await audit({
         tenantId: user.tenantId,
         userId: user.id,

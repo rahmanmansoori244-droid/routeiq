@@ -18,7 +18,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { TruckFormDialog, type TruckRow, type DepotOption, type DriverOption } from './truck-form';
+import { TruckFormDialog, type TruckRow, type DepotOption, type DriverOption, type HelperOption } from './truck-form';
 import { unitShort, fmtMoney } from '@/lib/format';
 import { oneDayBadge, truckCapacityText, truckDescriptionText } from '@/lib/dispatch/hire';
 import { errorMessage } from '@/lib/error-message';
@@ -27,13 +27,15 @@ interface Props {
   initial: TruckRow[];
   depots: DepotOption[];
   drivers: DriverOption[];
+  helpers?: HelperOption[];
   canManage: boolean;
   primaryUnit: CapacityUnit;
   currency: string;
 }
 
-export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, currency }: Props) {
+export function TrucksTable({ initial, depots, drivers, helpers = [], canManage, primaryUnit, currency }: Props) {
   const driverName = new Map(drivers.map((d) => [d.id, d.name]));
+  const helperName = new Map(helpers.map((h) => [h.id, h.name]));
   const router = useRouter();
   const [editing, setEditing] = useState<TruckRow | null>(null);
   const [confirming, setConfirming] = useState<TruckRow | null>(null);
@@ -74,6 +76,7 @@ export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, 
               <TableHead className="text-right">Fixed/day</TableHead>
               <TableHead className="text-right">Per km</TableHead>
               <TableHead>Default driver</TableHead>
+              <TableHead>Default helper</TableHead>
               <TableHead>Status</TableHead>
               {canManage ? <TableHead className="w-[1%]"></TableHead> : null}
             </TableRow>
@@ -108,6 +111,7 @@ export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, 
                 <TableCell className="text-right tabular-nums">{fmtMoney(t.fixedCostPerDay, currency)}</TableCell>
                 <TableCell className="text-right tabular-nums">{fmtMoney(t.costPerKm, currency)}</TableCell>
                 <TableCell className="text-muted-foreground">{(t.defaultDriverId && driverName.get(t.defaultDriverId)) || '—'}</TableCell>
+                <TableCell className="text-muted-foreground">{(t.defaultHelperId && helperName.get(t.defaultHelperId)) || '—'}</TableCell>
                 <TableCell>
                   {t.active ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Inactive</Badge>}
                 </TableCell>
@@ -134,6 +138,7 @@ export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, 
         truck={editing ?? undefined}
         depots={depots}
         drivers={drivers}
+        helpers={helpers}
         primaryUnit={primaryUnit}
         currency={currency}
         onSaved={() => {

@@ -370,6 +370,27 @@ describe('a result whose named photo never arrived is counted like "Camera not w
 describe('the "Delivery actuals" Excel', () => {
   beforeEach(seed);
 
+  it('a Helper(s) column beside the driver: the load\'s helpers in order (owner request 13 Oct 2026)', async () => {
+    tables.helper = [
+      { id: 'h1', tenantId: T, code: 'H01', name: 'Saif', active: true },
+      { id: 'h2', tenantId: T, code: 'H02', name: 'Omar', active: true },
+    ];
+    tables.planLoadHelper = [
+      { id: 'p2', tenantId: T, loadId: 'L1', helperId: 'h2', position: 2 },
+      { id: 'p1', tenantId: T, loadId: 'L1', helperId: 'h1', position: 1 },
+    ];
+    const res = await readActuals(T, { from: D, to: D }, null);
+    expect(res.rows.map((r) => [r.truck, r.stop, r.helpers])).toEqual([
+      ['T05', 1, 'Saif, Omar'],
+      ['T05', 2, 'Saif, Omar'],
+      ['T05', 3, 'Saif, Omar'],
+      ['T05', 4, 'Saif, Omar'],
+      ['T06', 1, null],
+    ]);
+    const headers = ACTUALS_COLUMNS.map((c) => c.header);
+    expect(headers.indexOf('Helper(s)')).toBe(headers.indexOf('Daily driver') + 1);
+  });
+
   it('a clear column per stop, the link count, the rows filled, a "Without photo" sheet and the Summary lines', async () => {
     const res = await readActuals(T, { from: D, to: D }, null);
     expect(res.rows.map((r) => [r.truck, r.stop, r.cameraException, r.linkCameraCount])).toEqual([
