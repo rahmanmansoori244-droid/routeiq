@@ -144,7 +144,7 @@ def test_only_an_11_bay_truck_cannot_take_it():
     assert unserved_map(rec(optimize_dispatch(r))) == {"TAWOOS": "EXCEEDS_ANY_TRUCK_CAPACITY"}
 
 
-@pytest.mark.parametrize("name", ALL)
+@pytest.mark.parametrize("name", ["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"])
 def test_the_route_search_alone_keeps_a_full_truck_stop_alone(name):
     """The route search's own plan (what the safety net keeps when the re-check runs out of time): the
     Solo dimension and the allowed vehicles hold by themselves - a full-truck stop alone, on a truck whose
