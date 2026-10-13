@@ -15,7 +15,9 @@ seconds to minutes in dispatch_solver._min_of):
   0.1 kg units, each stop to the nearest unit, the payload rounded down - no margin (audit F08);
   on a truck with bays (owner decision 4 Oct 2026) its pallets instead of its cases: the request's
   stops' demand_pallet_units (1/1000 pallet) added up, at most bays x config.pallet_fill_pct x 10
-  (CAPACITY_PALLETS), and a load's recorded pallet_units must be that sum (LOAD_TOTALS);
+  (CAPACITY_PALLETS) - or, for a load whose stops are all ONE customer (customer_id) with
+  config.single_customer_fill_pct, bays x that % x 10 (owner rule 13 Oct 2026: every bay for one
+  customer) - and a load's recorded pallet_units must be that sum (LOAD_TOTALS);
 * hard receiving windows: service starts at or after opening, and unloading is finished by
   closing (departure <= closing) under config.window_rule FINISH; under START (the earlier rule,
   the default) service starts inside the window;
@@ -51,7 +53,7 @@ from dispatch_models import (
     FeasibilityViolation,
     kg_text,
     kg_units,
-    pallet_room_units,
+    load_room_units,
     pallet_text,
     payload_units,
 )
@@ -64,8 +66,9 @@ log = logging.getLogger("routeiq.dispatch.feasibility")
 TOL_MIN = 1  # minutes: every emitted time is rounded to a whole minute
 # 2: the receiving-hours rule FINISH (unloading finished by closing) and the driver break;
 # 3: pallets on trucks with bays (CAPACITY_PALLETS, the load's pallet units in LOAD_TOTALS);
-# 4: a stop only on the trucks it may go on (TRUCK_NOT_ALLOWED: DispatchStop.allowed_truck_ids).
-CHECK_VERSION = 4
+# 4: a stop only on the trucks it may go on (TRUCK_NOT_ALLOWED: DispatchStop.allowed_truck_ids);
+# 5: a load of one customer by config.single_customer_fill_pct (CAPACITY_PALLETS at that room).
+CHECK_VERSION = 5
 
 
 def _hhmm(m: float | int | None) -> str:
@@ -181,11 +184,16 @@ def check_scenario(
                 add("LOAD_TOTALS", f"{code} load {lno} records {pallet_text(ld.pallet_units)} pallets but its stops add up to "
                                    f"{pallet_text(units)}.", truck_id=tid, load_no=lno)
             if t.bays is not None:
-                # A truck with bays: pallets (and kg), never its case capacity.
-                room = pallet_room_units(t.bays, cfg.pallet_fill_pct)
+                # A truck with bays: pallets (and kg), never its case capacity. A load of ONE customer may
+                # fill bays x config.single_customer_fill_pct (owner rule 13 Oct 2026), from the request's
+                # stops (their customer_id), not from the engine's own room.
+                customers = len({s.customer_id for s in known if s is not None})
+                room = load_room_units(t.bays, cfg.pallet_fill_pct, cfg.single_customer_fill_pct, customers)
+                solo = cfg.single_customer_fill_pct is not None and customers == 1
+                pct = max(cfg.pallet_fill_pct, cfg.single_customer_fill_pct or 0) if solo else cfg.pallet_fill_pct
                 if units > room:
                     add("CAPACITY_PALLETS", f"{code} load {lno} needs {pallet_text(units)} pallets; the truck takes "
-                                            f"{pallet_text(room)} ({t.bays} bays at {cfg.pallet_fill_pct}% fill).",
+                                            f"{pallet_text(room)} ({t.bays} bays at {pct}% fill{', one customer' if solo else ''}).",
                         truck_id=tid, load_no=lno, short=(units - room) / 1000)
             elif cases > t.capacity_cases:
                 add("CAPACITY_CASES", f"{code} load {lno} carries {cases} cases; the truck takes {t.capacity_cases}.",

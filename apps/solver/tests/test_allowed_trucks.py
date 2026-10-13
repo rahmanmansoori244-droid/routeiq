@@ -279,7 +279,7 @@ def test_the_independent_check_flags_a_stop_on_a_truck_it_may_not_use():
     stops = [pstop("A", 23.60, 58.45, cases=50, units=1_000), pstop("B", 23.61, 58.46, cases=50, units=1_000)]
     r = req(stops, [btruck("BIG", bays=12, max_trips=1)])
     sc = rec(optimize_dispatch(r))
-    assert sc.feasibility.status == "VERIFIED" and sc.feasibility.checked_at_version == FZ.CHECK_VERSION == 4
+    assert sc.feasibility.status == "VERIFIED" and sc.feasibility.checked_at_version == FZ.CHECK_VERSION == 5
     # The same plan checked against a request where B takes the 6-bay trucks only (a limit set later).
     later = r.model_copy(deep=True)
     later.stops[1].allowed_truck_ids = ["SMALL"]

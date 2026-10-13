@@ -119,6 +119,7 @@ from dispatch_models import (
     UnservedStop,
     kg_text,
     kg_units,
+    load_room_units,
     pallet_room_units,
     pallet_text,
     payload_units,
@@ -895,6 +896,10 @@ class TruckDay:
     # (CASES_FREE: no case limit, so every case comparison holds unchanged). 0 / None: by cases.
     bays: int | None = None
     max_pallet_units: int = 0
+    # One customer on the truck (owner rule 13 Oct 2026, config.single_customer_fill_pct): a load whose
+    # stops are all one customer may fill bays x that % x 10 (load_room); never less than
+    # max_pallet_units, which it equals without the rule (derived when not given).
+    solo_pallet_units: int = 0
     # A full truck in cases for the search's turnaround estimate (_approx_gap_s): max_cases, or on a
     # bay truck its pallet room x the day's cases per pallet. Derived from max_cases when not given.
     full_cases: int = -1
@@ -904,6 +909,8 @@ class TruckDay:
             self.max_kg_units = payload_units(self.max_kg)
         if self.full_cases < 0:
             self.full_cases = self.max_cases
+        if self.solo_pallet_units < self.max_pallet_units:
+            self.solo_pallet_units = self.max_pallet_units
 
     @property
     def by_pallets(self) -> bool:
@@ -980,7 +987,8 @@ def _truck_days(req: DispatchRequest) -> list[TruckDay]:
         if t.bays is not None:
             room = pallet_room_units(t.bays, cfg.pallet_fill_pct)
             full = int(round(room * day_cases / day_units)) if day_units > 0 else 0
-            pal = dict(bays=t.bays, max_pallet_units=room, full_cases=full)
+            pal = dict(bays=t.bays, max_pallet_units=room, full_cases=full,
+                       solo_pallet_units=load_room_units(t.bays, cfg.pallet_fill_pct, cfg.single_customer_fill_pct, 1))
         out.append(
             TruckDay(
                 truck=t,
@@ -1093,6 +1101,25 @@ def _room(td: TruckDay) -> int:
     return td.max_pallet_units if td.by_pallets else td.max_cases
 
 
+def _solo_room(td: TruckDay) -> int:
+    """A truck's space for a load whose stops are all ONE customer (owner rule 13 Oct 2026: "let a truck
+    that carries only one customer be filled to 100%"): bays x config.single_customer_fill_pct on a truck
+    with bays (TruckDay.solo_pallet_units; the fill room without the rule), else its cases (_room)."""
+    return td.solo_pallet_units if td.by_pallets else td.max_cases
+
+
+def one_customer(stops) -> bool:
+    """Every stop of a load belongs to one customer (customer_id): the load may use _solo_room."""
+    return len({s.customer_id for s in stops}) == 1
+
+
+def load_room(td: TruckDay, stops) -> int:
+    """The room of one load of ``stops`` on ``td`` in its own measure: _solo_room when they are all one
+    customer, else _room (bays x Pallet fill). One rule for the search's checks, the echo and the
+    repack (load_repack.fits_truck); feasibility.py re-derives it from the request on its own."""
+    return _solo_room(td) if one_customer(stops) else _room(td)
+
+
 def _space_text(by_pallets: bool, amount: int) -> str:
     """An amount of space for a message: "11.4 pallets" or "570 cases"."""
     return f"{pallet_text(amount)} pallets" if by_pallets else f"{amount} cases"
@@ -1125,14 +1152,75 @@ def _allowed_label(stop: DispatchStop) -> str:
 
 def _fits_capacity(stop: DispatchStop, td: TruckDay) -> bool:
     """The stop alone fits the truck and may go on it (truck_allowed): its pallets (a truck with bays)
-    or cases, and its kg."""
+    or cases, and its kg. Alone it is one customer's load, so its room is _solo_room (owner rule 13
+    Oct 2026: every bay with config.single_customer_fill_pct 100)."""
+    return _fits_in(stop, td, _solo_room(td))
+
+
+def _fits_shared(stop: DispatchStop, td: TruckDay) -> bool:
+    """The stop fits the truck at the room of a load of several customers (bays x Pallet fill), and may
+    go on it: a stop that fits no truck this way can only ride alone (full_truck)."""
+    return _fits_in(stop, td, _room(td))
+
+
+def _fits_in(stop: DispatchStop, td: TruckDay, room: int) -> bool:
     if not truck_allowed(stop, td.truck):
         return False
-    if _need_in(stop, td.by_pallets) > _room(td):
+    if _need_in(stop, td.by_pallets) > room:
         return False
     if td.max_kg_units > 0 and kg_units(stop.demand_kg) > td.max_kg_units:
         return False
     return True
+
+
+def full_truck(stop: DispatchStop, tds: list[TruckDay]) -> bool:
+    """One customer fills a truck (owner rule 13 Oct 2026): the stop fits none of ``tds`` (the usable
+    trucks) at bays x Pallet fill, but fits one alone at bays x config.single_customer_fill_pct. It rides
+    ALONE, on a truck whose one-customer room holds it: the route search keeps it so (its "Solo"
+    dimension and allowed vehicles), the repack and the checks by the load's room (load_room). Never
+    without the rule (the two rooms are then the same)."""
+    return not any(_fits_shared(stop, td) for td in tds) and any(_fits_capacity(stop, td) for td in tds)
+
+
+def _full_truck_day(req: DispatchRequest, stops: list[DispatchStop]) -> bool:
+    """A stop of ``stops`` fills a truck alone today (full_truck over the trucks that can still take a load)."""
+    if req.config.single_customer_fill_pct is None:
+        return False
+    usable = [td for td in _truck_days(req) if td.usable]
+    return any(full_truck(s, usable) for s in stops)
+
+
+def _space_charges(stops: list[DispatchStop], tds: list[TruckDay]) -> dict[str, int] | None:
+    """What each stop counts, in pallet units, against the trucks' rooms at Pallet fill in the shortage
+    proofs (_fleet, _mixed_space_proven, _no_packing_fits, _no_room_reason, _hire_room_short), with the
+    one-customer rule on (owner rule 13 Oct 2026); None = the rule gives no truck more room (every stop
+    counts its own pallets, as before). A proof says "no packing carries these stops" when their charges
+    exceed what the trips hold at Pallet fill, so every charge must keep each possible load of a truck t
+    within bays x fill of t:
+    - a customer with ONE stop: its pallets, but at most the fill room of the smallest truck it may ride
+      alone (where it uses that whole trip) - an 11.0-pallet stop that rides alone on a 12-bay truck
+      counts 10.8 at 90% (adversarial review: counting 11.0 claimed a shortage that did not exist);
+    - a customer with several stops (the parts of a split delivery, which may share a one-customer load
+      of up to bays x 100%): its pallets x the smallest fill / one-customer ratio (90%), rounded down.
+    Lower charges only weaken a proof; no shortage is ever claimed that a packing could avoid."""
+    bay = [td for td in tds if td.by_pallets and td.solo_pallet_units > 0]
+    if not any(td.solo_pallet_units > td.max_pallet_units for td in bay):
+        return None
+    ratio = min(Fraction(td.max_pallet_units, td.solo_pallet_units) for td in bay)
+    count = Counter(s.customer_id for s in stops)
+    out: dict[str, int] = {}
+    for s in stops:
+        u = s.demand_pallet_units or 0
+        if count[s.customer_id] > 1:
+            out[s.stop_id] = math.floor(u * ratio)
+        else:
+            out[s.stop_id] = min([u] + [td.max_pallet_units for td in bay if td.max_pallet_units < u and _fits_capacity(s, td)])
+    return out
+
+
+def _charged(stop_id: str, units: int | None, charge: dict[str, int] | None) -> int:
+    """A stop's pallet units as a shortage proof counts them (_space_charges; its own units without the rule)."""
+    return charge.get(stop_id, units or 0) if charge else (units or 0)
 
 
 def _unserved(stop: DispatchStop, code: str, msg: str) -> UnservedStop:
@@ -1177,10 +1265,19 @@ class _Fleet:
     kg_bound: bool
     fill_pct: int = PALLET_FILL_DEFAULT
     trips: int = 0
+    # What a shortage proof compares with cap_space (_space_charges: a stop that may ride alone counts at
+    # most the fill room it uses, owner rule 13 Oct 2026); -1 = demand_space (no such rule). demand_space
+    # stays the real need, for the words.
+    charged_space: int = -1
 
     @property
     def by_pallets(self) -> bool:
         return self.space == "pallets"
+
+    @property
+    def short_of_space(self) -> bool:
+        """A space total that no packing of the trips passes (cases, or pallets on an all-bay fleet)."""
+        return self.space is not None and (self.charged_space if self.charged_space >= 0 else self.demand_space) > self.cap_space
 
     def stop_space(self, s: DispatchStop) -> int:
         return _need_in(s, self.by_pallets)
@@ -1196,8 +1293,10 @@ def _fleet(stops: list[DispatchStop], tds: list[TruckDay], fill_pct: int = PALLE
     demand_u = sum(kg_units(s.demand_kg) for s in stops)
     trips = sum(td.trips_left for td in usable_tds)
     if usable_tds and all(td.by_pallets for td in usable_tds):
+        charge = _space_charges(stops, usable_tds)
         return _Fleet("pallets", sum(td.max_pallet_units * td.trips_left for td in usable_tds),
-                      sum(s.demand_pallet_units or 0 for s in stops), cap_u, demand_u, kg_bound, fill_pct, trips)
+                      sum(s.demand_pallet_units or 0 for s in stops), cap_u, demand_u, kg_bound, fill_pct, trips,
+                      charged_space=sum(_charged(s.stop_id, s.demand_pallet_units, charge) for s in stops))
     if not any(td.by_pallets for td in usable_tds):
         return _Fleet("cases", sum(td.max_cases * td.trips_left for td in usable_tds), sum(s.demand_cases for s in stops),
                       cap_u, demand_u, kg_bound, fill_pct, trips)
@@ -1288,12 +1387,13 @@ Room = tuple[bool, int, float]  # (by pallets, space left in that measure, kg le
 
 
 def _rooms(usable_tds: list[TruckDay], loads: list[PlannedLoad],
-           takes_room: Callable[[PlannedStop], bool] | None = None) -> list[Room]:
+           takes_room: Callable[[PlannedStop], bool] | None = None, charge: dict[str, int] | None = None) -> list[Room]:
     """The room left on each load of the plan and on each load slot a truck did not use (a full
     truck's room): (by pallets, space - pallet units on a truck with bays, else cases -, kg in 0.1 kg
     units; inf when the truck has no payload). takes_room: which planned stops count as taking room
     (all by default; _no_room_reason counts only the stops of the same or a higher priority, since
-    strict priorities drop lower ones first)."""
+    strict priorities drop lower ones first). charge: the planned stops' pallets as the proofs count them
+    (_space_charges; their own without the one-customer rule)."""
     by_truck: dict[str, list[PlannedLoad]] = {}
     for ld in loads:
         by_truck.setdefault(ld.truck_id, []).append(ld)
@@ -1304,23 +1404,30 @@ def _rooms(usable_tds: list[TruckDay], loads: list[PlannedLoad],
         bp, cap = td.by_pallets, _room(td)
         for ld in mine:
             taken = ld.stops if takes_room is None else [st for st in ld.stops if takes_room(st)]
-            used = sum((st.pallet_units or 0) for st in taken) if bp else sum(st.cases for st in taken)
+            used = sum(_charged(st.stop_id, st.pallet_units, charge) for st in taken) if bp else sum(st.cases for st in taken)
             rooms.append((bp, cap - used, kg_cap - sum(kg_units(st.kg) for st in taken)))
         rooms += [(bp, cap, kg_cap)] * max(0, td.trips_left - len(mine))
     return rooms
 
 
-def _fits_room_left(left: list[DispatchStop], usable_tds: list[TruckDay], loads: list[PlannedLoad]) -> bool:
+def _fits_room_left(left: list[DispatchStop], usable_tds: list[TruckDay], loads: list[PlannedLoad],
+                    charge: dict[str, int] | None = None) -> bool:
     """Whether any of the unserved stops fits, by space (cases, or pallets on a truck with bays) AND
     by kg, the room left on a load of the plan or on a load slot a truck did not use (a full truck's
     room). False: every unserved stop is bigger than the room left anywhere, so a fleet shortage
     explains all of it, however many loads the room is spread over. In 0.1 kg units, with no margin
     (audit F08)."""
-    rooms = _rooms(usable_tds, loads)
-    return any(_need_in(s, bp) <= rs and kg_units(s.demand_kg) <= rk for s in left for bp, rs, rk in rooms)
+    rooms = _rooms(usable_tds, loads, charge=charge)
+    return any(_charged_need(s, bp, charge) <= rs and kg_units(s.demand_kg) <= rk for s in left for bp, rs, rk in rooms)
 
 
-def _no_packing_fits(s: DispatchStop, usable_tds: list[TruckDay], kept: list[PlannedStop]) -> bool:
+def _charged_need(s: DispatchStop, by_pallets: bool, charge: dict[str, int] | None) -> int:
+    """_need_in as the shortage proofs count it (_space_charges on a truck with bays)."""
+    return _charged(s.stop_id, s.demand_pallet_units, charge) if by_pallets else s.demand_cases
+
+
+def _no_packing_fits(s: DispatchStop, usable_tds: list[TruckDay], kept: list[PlannedStop],
+                     charge: dict[str, int] | None = None) -> bool:
     """Whether a sound check proves that no packing of the usable trips carries the stop together
     with `kept` (the stops of its priority or higher the plan serves). The room left on each load
     says only that THIS packing has none (A6 second review: 1,000 + 1,500 + 1,500 + 1,000 + 1,000 kg
@@ -1334,7 +1441,7 @@ def _no_packing_fits(s: DispatchStop, usable_tds: list[TruckDay], kept: list[Pla
     truck, the same two checks in shares - pallets review: a stop no load could take was told to
     "re-plan to search again").
     Times and hours are not checked: a check that passes proves the stop cannot go, one that fails
-    proves nothing."""
+    proves nothing. Pallets as _space_charges counts them (the one-customer rule, owner rule 13 Oct 2026)."""
     if not usable_tds:
         return True
     trips = sum(td.trips_left for td in usable_tds)
@@ -1347,11 +1454,12 @@ def _no_packing_fits(s: DispatchStop, usable_tds: list[TruckDay], kept: list[Pla
             [st.cases for st in kept] + [s.demand_cases], [(td.max_cases, td.trips_left) for td in usable_tds]):
         return True
     if all(td.by_pallets for td in usable_tds) and proven(
-            [st.pallet_units or 0 for st in kept] + [s.demand_pallet_units or 0],
+            [_charged(st.stop_id, st.pallet_units, charge) for st in kept] + [_charged(s.stop_id, s.demand_pallet_units, charge)],
             [(td.max_pallet_units, td.trips_left) for td in usable_tds]):
         return True
     if any(td.by_pallets for td in usable_tds) and not all(td.by_pallets for td in usable_tds) and _mixed_space_proven(
-            [(st.cases, st.pallet_units) for st in kept] + [(s.demand_cases, s.demand_pallet_units)], usable_tds, halves=True):
+            [(st.cases, _charged(st.stop_id, st.pallet_units, charge)) for st in kept]
+            + [(s.demand_cases, _charged(s.stop_id, s.demand_pallet_units, charge))], usable_tds, halves=True):
         return True
     # kg bounds every packing only when every usable truck has a payload (0 = kg not limited).
     return all(td.max_kg_units > 0 for td in usable_tds) and proven(
@@ -1359,7 +1467,7 @@ def _no_packing_fits(s: DispatchStop, usable_tds: list[TruckDay], kept: list[Pla
 
 
 def _no_room_reason(s: DispatchStop, usable_tds: list[TruckDay], loads: list[PlannedLoad],
-                    priority_of: dict[str, int]) -> str | None:
+                    priority_of: dict[str, int], charge: dict[str, int] | None = None) -> str | None:
     """The true reason a stop that no load and no free trip has room for is left out (audit F08
     verifiers: such a stop said "the optimizer found no truck, trip or time slot ... Re-plan to
     search again", as if more search time could serve it). The room on a load counts only its stops
@@ -1371,11 +1479,11 @@ def _no_room_reason(s: DispatchStop, usable_tds: list[TruckDay], loads: list[Pla
     def same_or_higher(st: PlannedStop) -> bool:
         return priority_of[st.stop_id] <= s.priority
 
-    rooms = _rooms(usable_tds, loads, same_or_higher)
+    rooms = _rooms(usable_tds, loads, same_or_higher, charge)
     u = kg_units(s.demand_kg)
-    if any(_need_in(s, bp) <= rs and u <= rk for bp, rs, rk in rooms):
+    if any(_charged_need(s, bp, charge) <= rs and u <= rk for bp, rs, rk in rooms):
         return None
-    if not _no_packing_fits(s, usable_tds, [st for ld in loads for st in ld.stops if same_or_higher(st)]):
+    if not _no_packing_fits(s, usable_tds, [st for ld in loads for st in ld.stops if same_or_higher(st)], charge):
         return None
     # "Lowest priorities first" only when the day has lower-priority stops and none of them rides.
     lower_served = any(priority_of[st.stop_id] > s.priority for ld in loads for st in ld.stops)
@@ -1395,7 +1503,7 @@ def _no_room_reason(s: DispatchStop, usable_tds: list[TruckDay], loads: list[Pla
 
 
 def _not_placed_on_allowed(s: DispatchStop, usable_tds: list[TruckDay], loads: list[PlannedLoad],
-                           priority_of: dict[str, int]) -> str:
+                           priority_of: dict[str, int], charge: dict[str, int] | None = None) -> str:
     """Why a limited stop (allowed_truck_ids) the plan does not serve is left out: the trucks it may go on
     had no room (proven, _no_room_reason on those trucks alone) or no room or time the search found."""
     label = _allowed_label(s)
@@ -1405,7 +1513,7 @@ def _not_placed_on_allowed(s: DispatchStop, usable_tds: list[TruckDay], loads: l
                 "Add or hire such a truck, or deliver it another day.")
     ids = {td.truck.id for td in mine}
     codes = ", ".join(sorted(td.truck.code or td.truck.id for td in mine))
-    no_room = _no_room_reason(s, mine, [ld for ld in loads if ld.truck_id in ids], priority_of)
+    no_room = _no_room_reason(s, mine, [ld for ld in loads if ld.truck_id in ids], priority_of, charge)
     if no_room is not None:
         return f"Needs {label}: no such truck had room ({codes}); the other trucks may not deliver here. {no_room}"
     return (f"Needs {label}: no such truck had room or time left for this P{s.priority} stop ({codes}); the other "
@@ -1487,9 +1595,13 @@ def _size_detail(s: DispatchStop, tds: list[TruckDay], fill_pct: int) -> str:
     kg_trucks = [td.max_kg_units for td in tds if td.max_kg_units > 0]
     parts = []
     if bay_tds:  # the measure of the largest trucks, pallets and / or cases (mixed fleet)
-        big = max(bay_tds, key=lambda td: td.max_pallet_units)
+        # Alone, the order is one customer's load: the room it is measured against is _solo_room (owner
+        # rule 13 Oct 2026: every bay for one customer), else bays x Pallet fill.
+        big = max(bay_tds, key=_solo_room)
+        solo = big.solo_pallet_units > big.max_pallet_units
+        pct = big.solo_pallet_units // (big.bays * 10) if solo and big.bays else fill_pct
         parts.append(f"{pallet_text(s.demand_pallet_units or 0)} pallets vs largest truck "
-                     f"{pallet_text(big.max_pallet_units)} pallets: {big.bays} bays at {fill_pct}% fill")
+                     f"{pallet_text(_solo_room(big))} pallets: {big.bays} bays at {pct}% fill{' (one customer)' if solo else ''}")
     if case_tds:
         parts.append(f"{s.demand_cases} cases vs largest truck{' without bays' if bay_tds else ''} "
                      f"{max(td.max_cases for td in case_tds)} cases")
@@ -1913,10 +2025,18 @@ def _solve_scenario(
     if any(not td.by_pallets for td in vehicles):
         add_capacity("Cases", [0] + [s.demand_cases for s in stops] + [0] * len(reload_owner),
                      [td.max_cases for td in vehicles])
+    # One customer fills a truck (owner rule 13 Oct 2026, full_truck): such a stop counts 0 in Pallets
+    # and rides ALONE on its load - the "Solo" dimension: it needs BIG, every other stop 1, a load holds
+    # BIG (reload nodes reset it like the others) - on a truck whose one-customer room holds it (its
+    # allowed vehicles below). Only when the day has one: every other day keeps its model exactly.
+    full = [cfg.single_customer_fill_pct is not None and full_truck(s, vehicles) for s in stops]
     if any(td.by_pallets for td in vehicles):
-        units = [s.demand_pallet_units or 0 for s in stops]
+        units = [0 if full[k] else (s.demand_pallet_units or 0) for k, s in enumerate(stops)]
         add_capacity("Pallets", [0] + units + [0] * len(reload_owner),
                      [td.max_pallet_units if td.by_pallets else sum(units) + 1 for td in vehicles])
+    if any(full):
+        big = len(stops) + 1
+        add_capacity("Solo", [0] + [big if f else 1 for f in full] + [0] * len(reload_owner), [big] * nv)
     # Kg in 0.1 kg units, each stop to the nearest unit, the payload rounded down (audit F08): a load
     # that weighs exactly the payload fits it. A truck without a payload gets room for the whole day.
     demand_u = [kg_units(s.demand_kg) for s in stops]
@@ -1949,12 +2069,14 @@ def _solve_scenario(
         if s.pref_start_min is not None and pref_coeff > 0:
             tdim.SetCumulVarSoftLowerBound(idx, s.pref_start_min * 60, pref_coeff)
         routing.AddDisjunction([idx], penalties[k])
-        if s.allowed_truck_ids is not None:
+        if s.allowed_truck_ids is not None or full[k]:
             # Owner request 13 Oct 2026 ("small truck only" customers): only the trucks it may go on, or left
             # out (-1, the disjunction). Each routing vehicle is one truck with all its loads, so this holds
             # for every load of the truck. SetValues, not SetAllowedVehiclesForIndex: that binding refuses a
-            # Python list in the OR-Tools this solver pins (9.15).
-            allowed = [v for v, td in enumerate(vehicles) if truck_allowed(s, td.truck)]
+            # Python list in the OR-Tools this solver pins (9.15). A stop that fills a truck alone (full)
+            # only on the trucks whose one-customer room holds it (_fits_capacity, which keeps the
+            # allowed trucks too): one list, the intersection of both rules.
+            allowed = [v for v, td in enumerate(vehicles) if (_fits_capacity(s, td) if full[k] else truck_allowed(s, td.truck))]
             if len(allowed) < nv:
                 routing.VehicleVar(idx).SetValues([-1] + allowed)
 
@@ -2282,7 +2404,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 trip_cost=parts["trip"], driver_cost=parts["time"], overtime_cost=parts["overtime"],
                 driver_paid_min=_min_of(c.paid_s), paid_from_min=_min_of(c.paid_from_s), overtime_min=_min_of(c.overtime_s),
                 estimated_legs=est_legs, driver_break=_planned_break(tl.brk, td),
-                pallet_units=units, pallet_room_units=td.max_pallet_units if td.by_pallets else None,
+                pallet_units=units, pallet_room_units=load_room(td, [stops[k] for k in tl.stops]) if td.by_pallets else None,
             ))
         loads += mine
         planned_brk = next((ld.driver_break for ld in mine if ld.driver_break is not None), None)
@@ -2301,6 +2423,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     unserved = list(pre_drops)
     usable_tds = [td for td in tds if td.usable]
     fleet = _fleet(stops, tds, cfg.pallet_fill_pct)
+    charge = _space_charges(stops, usable_tds)  # the one-customer rule in the shortage proofs
     demand_cases = sum(s.demand_cases for s in stops)
     short_space, short_kg = _fleet_shortage(stops, tds)
     shortage = short_space or short_kg
@@ -2332,7 +2455,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         elif _limited(s, usable_tds):
             # Owner request 13 Oct 2026: a "small truck only" stop left out says so (its trucks were full or
             # out of time), before the fleet-wide reasons - a big truck with room cannot take it.
-            unserved.append(_unserved(s, "NO_ALLOWED_TRUCK", _not_placed_on_allowed(s, usable_tds, loads, priority_of)))
+            unserved.append(_unserved(s, "NO_ALLOWED_TRUCK", _not_placed_on_allowed(s, usable_tds, loads, priority_of, charge)))
         elif shortage:
             # "Lower priorities are left out first" only when no lower priority rides (s3-shortage-hire-2).
             lower_served = sum(1 for ld in loads for st in ld.stops if priority_of[st.stop_id] > s.priority)
@@ -2340,7 +2463,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY",
                                       _shortage_reason(s.priority, fleet, short_space, short_kg, demand_cases,
                                                        lower_served, lower_on_day)))
-        elif (no_room := _no_room_reason(s, usable_tds, loads, priority_of)) is not None:
+        elif (no_room := _no_room_reason(s, usable_tds, loads, priority_of, charge)) is not None:
             # No load of this plan and no free trip has room for it (cases / pallets or kg), even without
             # its lower-priority stops, and a check proves no other packing could carry it (A6
             # second review): say so, not "re-plan to search again" (audit F08 verifiers).
@@ -2384,7 +2507,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     explained = (short_space and fleet.space is not None
                  and left_space <= short_by_space + max((fleet.stop_space(s) for s in left), default=0)) or (
         short_kg and left_u <= short_by_u + max((kg_units(s.demand_kg) for s in left), default=0)) or (
-        shortage and not _fits_room_left(left, usable_tds, loads))
+        shortage and not _fits_room_left(left, usable_tds, loads, charge))
     if shortage and not explained:
         # Not everything: the rest did not fit by time, hours or the search's limit.
         kg_short = [f"{kg_text(short_by_u / 10)} kg"] if short_kg else []
@@ -2458,9 +2581,11 @@ def _fleet_shortage(stops: list[DispatchStop], tds: list[TruckDay]) -> tuple[boo
     f = _fleet(stops, tds)
     if f.space is None:
         usable = [td for td in tds if td.usable]
-        short_space = _mixed_space_proven([(s.demand_cases, s.demand_pallet_units) for s in stops], usable, halves=False)
+        charge = _space_charges(stops, usable)
+        short_space = _mixed_space_proven([(s.demand_cases, _charged(s.stop_id, s.demand_pallet_units, charge)) for s in stops],
+                                          usable, halves=False)
     else:
-        short_space = f.demand_space > f.cap_space
+        short_space = f.short_of_space
     return short_space, f.kg_bound and f.demand_kg_u > f.cap_kg_u
 
 
@@ -2468,9 +2593,12 @@ def _pallet_echo(req: DispatchRequest, loads: list[PlannedLoad] | None = None) -
     """The pallet rule a plan was made with (DispatchScenario.pallet_*): set when a truck of the
     request has bays, else None (the web marks loads as planned by pallets ONLY from this echo)."""
     if not any(t.bays is not None for t in req.trucks):
-        return dict(pallet_unit=None, pallet_fill_pct=None, total_pallet_units=None)
+        return dict(pallet_unit=None, pallet_fill_pct=None, total_pallet_units=None, single_customer_fill_pct=None)
+    # The one-customer rule (owner rule 13 Oct 2026), echoed so the web keeps it with each load (and
+    # warns when an older solver ignored it).
     return dict(pallet_unit=PALLET_UNIT, pallet_fill_pct=req.config.pallet_fill_pct,
-                total_pallet_units=sum(ld.pallet_units or 0 for ld in loads or []))
+                total_pallet_units=sum(ld.pallet_units or 0 for ld in loads or []),
+                single_customer_fill_pct=req.config.single_customer_fill_pct)
 
 
 def _frozen_truck_ids(tds: list[TruckDay]) -> set[str]:
@@ -2780,7 +2908,10 @@ def _hire_room_short(tds: list[TruckDay], keep: set[str], stops: list[DispatchSt
     without a solve (seventh review of the hire branch)."""
     days = [td for td in tds if td.usable and (not td.truck.hire_candidate or td.truck.id in keep)]
     if all(td.by_pallets for td in days) and all(s.demand_pallet_units is not None for s in stops):
-        if sum(s.demand_pallet_units or 0 for s in stops) > sum(td.trips_left * td.max_pallet_units for td in days):
+        # A stop that may ride alone counts the fill room it uses at most (_space_charges, owner rule 13 Oct
+        # 2026): a set of trucks is never ruled out for a shortage the one-customer rule removes.
+        charge = _space_charges(stops, days)
+        if sum(_charged(s.stop_id, s.demand_pallet_units, charge) for s in stops) > sum(td.trips_left * td.max_pallet_units for td in days):
             return True
     elif not any(td.by_pallets for td in days):
         if sum(s.demand_cases for s in stops) > sum(td.trips_left * td.max_cases for td in days):
@@ -4679,7 +4810,7 @@ class _PvRun:
     def fail(self, status: str, reason: str, detail: str = "") -> None:
         """SKIPPED / FAILED / NOT_CHOSEN with ``reason``: one log line, and its process stops."""
         self.report.update(status=status, reason=reason)
-        quiet = reason in ("OFF", "NOTHING_TO_PLAN", "ALLOWED_TRUCKS")
+        quiet = reason in ("OFF", "NOTHING_TO_PLAN", "ALLOWED_TRUCKS", "FULL_TRUCK")
         (log.info if quiet else log.warning)("pyvrp run=%s %s: %s%s%s", self.run_id,
                                             {"SKIPPED": "skipped", "FAILED": "failed"}.get(status, "not used"), reason,
                                             f" ({detail})" if detail else "", "" if quiet else "; the engine's plans are used")
@@ -4715,6 +4846,11 @@ def _pv_start(req: DispatchRequest, solvable: list[DispatchStop], control: Solve
         # Only the trucks that can still take a load count (as in _limited elsewhere): a limit that leaves
         # out only a truck with no trip or hours left today decides nothing, and the second search runs.
         pv.fail("SKIPPED", "ALLOWED_TRUCKS")
+    elif _full_truck_day(req, solvable):
+        # Owner rule 13 Oct 2026: a stop that fills a truck alone (full_truck) must ride alone, on a truck big
+        # enough - which the second search does not model (its loads are at bays x Pallet fill). Such a day
+        # is planned by the engine's own search alone (SearchReport.pyvrp: SKIPPED / FULL_TRUCK).
+        pv.fail("SKIPPED", "FULL_TRUCK")
     elif main_pool:
         try:
             pv.proc = _PvProcess(control, run_id=req.run_id)
