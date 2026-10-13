@@ -17,6 +17,10 @@
  * plan's still-open unserved orders are counted (`unserved`) for Step 3. Review of 5614ba9: of them,
  * `unserved.replan` counts only those a re-plan could place now (not a customer still without a pin,
  * cases still heavier than any truck, nor any on a day that is over), the ones that keep RE-PLAN on.
+ *
+ * Small truck only (owner request 13 Oct 2026): a customer marked "Small truck only (3-ton)", or the
+ * company's "small truck" bays lowered, after planning, while it sits on a PLANNED load whose truck is not
+ * small (`outdated.smallTruckBlocked`): LOCK refuses that load (SMALL_TRUCK_ONLY), so RE-PLAN is offered.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { addDaysIso, todayIso } from '@/lib/dispatch/time';
@@ -32,6 +36,8 @@ interface State {
   unserved: unknown[];
   /** The depot's trucks of the day (default: one truck of 600 cases, no payload). */
   trucks?: unknown[];
+  /** TenantConfig.smallTruckMaxBays (undefined: the default, 6). */
+  smallTruckMaxBays?: number;
 }
 const state: State = { orders: [], assignments: [], scope: [], plannedLoads: [], unserved: [] };
 
@@ -52,7 +58,7 @@ vi.mock('@/lib/db', () => ({
 }));
 vi.mock('@/lib/tenant', () => ({
   tenantDb: () => ({
-    tenantConfig: { findUniqueOrThrow: async () => ({ timezone: 'Asia/Muscat', planningCutoffMin: 1080, serviceAreaJson: null, defaultServiceTimeMin: 10 }) },
+    tenantConfig: { findUniqueOrThrow: async () => ({ timezone: 'Asia/Muscat', planningCutoffMin: 1080, serviceAreaJson: null, defaultServiceTimeMin: 10, smallTruckMaxBays: state.smallTruckMaxBays }) },
     depot: { findMany: async () => [{ id: 'D1', code: 'D1', name: 'Depot', lat: 23.6, lng: 58.4 }] },
     customerTypeProfile: { findMany: async () => [] },
     runJob: { findFirst: async () => null },
@@ -103,6 +109,7 @@ beforeEach(() => {
   state.inputs = undefined;
   state.unserved = [];
   state.trucks = undefined;
+  state.smallTruckMaxBays = undefined;
 });
 
 describe('day overview: case weights of a split order partly on a frozen load (PR4 review)', () => {
@@ -150,8 +157,8 @@ describe('day overview: case weights of a split order partly on a frozen load (P
   it('`outdated` has exactly the keys of UP_TO_DATE on every path (the integration specs compare against it)', async () => {
     // depotMoved: audit A6 (E1), PLANNED loads still drawn from a depot pin moved since.
     // palletFactorCases: pallets review, cases per pallet corrected since planning (day-overview-pallets.spec).
-    // trucksInactive, unservedNowPlannable: review of 9 Oct 2026 (below).
-    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0 });
+    // trucksInactive, unservedNowPlannable: review of 9 Oct 2026 (below). smallTruckBlocked: small truck only (below).
+    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0, smallTruckBlocked: 0 });
     state.orders = [order(10)];
     state.assignments = [part('PLANNED', 1000, 0, 0)];
     expect(Object.keys((await day()).outdated).sort()).toEqual(Object.keys(UP_TO_DATE).sort());
@@ -381,5 +388,39 @@ describe('day overview: which unserved orders a re-plan could place now (review 
     state.unserved = left('SOLVER_DROPPED_LOW_PRIORITY');
     expect((await day(addDaysIso(todayIso('Asia/Muscat'), -1))).unserved).toEqual({ orders: 1, cases: 1000, replan: 0 });
     expect((await day(todayIso('Asia/Muscat'))).unserved).toEqual({ orders: 1, cases: 1000, replan: 1 });
+  });
+});
+
+describe('day overview: a small-truck-only customer on a PLANNED load whose truck is not small (owner request 13 Oct 2026)', () => {
+  // O1 with a known weight (nothing else out of date); its customer marked or not, on a truck of `bays` bays.
+  const marked = (smallTruckOnly: boolean) => ({ ...order(10, 10000), customer: { ...customer, smallTruckOnly } });
+  const on = (status: string, bays: number | null) => ({ orderId: 'O1', portionLinesJson: null, portionWeightKg: 10000, stopSnapshotJson: null, load: { status, truck: { bays } } });
+
+  it('marked after planning while on a 12-bay truck: out of date, so RE-PLAN is offered (LOCK refuses the load)', async () => {
+    state.orders = [marked(true)];
+    state.assignments = [on('PLANNED', 12)];
+    expect((await day()).outdated).toEqual({ ...UP_TO_DATE, smallTruckBlocked: 1 });
+    // A truck without bays is never small (owner decision); two parts of one customer count once.
+    state.assignments = [on('PLANNED', null), on('PLANNED', 12)];
+    expect((await day()).outdated).toEqual({ ...UP_TO_DATE, smallTruckBlocked: 1 });
+  });
+
+  it('the setting lowered after planning: a 6-bay truck is not small at "at most 4 bays"', async () => {
+    state.orders = [marked(true)];
+    state.assignments = [on('PLANNED', 6)];
+    expect((await day()).outdated).toEqual(UP_TO_DATE); // 6 bays: small by the default
+    state.smallTruckMaxBays = 4;
+    expect((await day()).outdated).toEqual({ ...UP_TO_DATE, smallTruckBlocked: 1 });
+  });
+
+  it('not a customer that is not marked, nor one on a locked load (kept as it is), nor one on a small truck', async () => {
+    state.orders = [marked(false)];
+    state.assignments = [on('PLANNED', 12)];
+    expect((await day()).outdated).toEqual(UP_TO_DATE);
+    state.orders = [marked(true)];
+    state.assignments = [on('LOCKED', 12)];
+    expect((await day()).outdated.smallTruckBlocked).toBe(0);
+    state.assignments = [on('PLANNED', 5)];
+    expect((await day()).outdated).toEqual(UP_TO_DATE);
   });
 });

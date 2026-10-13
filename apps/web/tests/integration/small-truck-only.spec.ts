@@ -7,7 +7,8 @@
  *    allowed_truck_ids = the small trucks, the optimizer echoes the rule, and the plan screen marks the stop
  *    SMALL TRUCK ONLY (not red: its truck is small);
  *  - a customer marked AFTER planning, on the 12-bay truck: LOCK of its load is refused with 409
- *    SMALL_TRUCK_ONLY naming it, and the plan screen shows the mark red; unmarked again, the load locks;
+ *    SMALL_TRUCK_ONLY naming it, the plan screen shows the mark red and the day screen's step 3 calls the
+ *    plan out of date (outdated.smallTruckBlocked: RE-PLAN on); unmarked again, the load locks;
  *  - the setting lowered after planning (a small truck = at most 4 bays): LOCK of the 6-bay load is
  *    refused the same way; raised again, it locks.
  *
@@ -51,6 +52,11 @@ async function addOrders(date: string, rows: string[][]) {
   expect(v.validation.errorRows).toBe(0);
   const c = await fetchWith(t.cookieJar, `${BASE}/api/orders/${v.batchId}/confirm`, j(v.validation.late.isLate ? { lateReason: 'Test' } : {}));
   expect(c.status).toBe(200);
+}
+
+/** The day screen's overview (GET /api/dispatch/day). */
+async function dayScreen() {
+  return (await json(await fetchWith(t.cookieJar, `${BASE}/api/dispatch/day?date=${day}&depotId=${depotId}`))).data;
 }
 
 async function waitForPlan(runId: string, max = 120) {
@@ -149,9 +155,12 @@ describe('small truck only customers', () => {
       expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: bigLoad.id } })).status).toBe('PLANNED');
       const again = (await plan()).loads.find((l: any) => l.id === bigLoad.id);
       expect(again.stops.find((s: any) => s.customerCode === victim)).toMatchObject({ smallTruckOnly: true, smallTruckBreach: true });
+      // Step 3: the plan is out of date (RE-PLAN on), not "up to date" while LOCK is refused.
+      expect((await dayScreen()).outdated.smallTruckBlocked).toBe(1);
     } finally {
       await mark(victim, false);
     }
+    expect((await dayScreen()).outdated.smallTruckBlocked).toBe(0);
     expect((await lock(bigLoad.id)).status).toBe(200);
   });
 

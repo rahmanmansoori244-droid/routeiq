@@ -100,6 +100,7 @@ interface Day {
     palletFactorCases?: number;
     trucksInactive?: number;
     unservedNowPlannable?: number;
+    smallTruckBlocked?: number;
   };
   plan: null | {
     id: string;
@@ -453,7 +454,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const toApply = day.weightsToApply ?? [];
   const casesOf = (list: WeightGap[]) => list.reduce((a, g) => a + g.cases, 0);
   const running = day.plan?.status === 'OPTIMIZING' || day.plan?.job?.status === 'RUNNING' || day.plan?.job?.status === 'QUEUED';
-  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0 };
+  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0, smallTruckBlocked: 0 };
   const planOutdated =
     !!day.plan?.chosen &&
     (outdated.weightCases > 0 ||
@@ -464,7 +465,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       (outdated.depotMoved ?? 0) > 0 ||
       (outdated.palletFactorCases ?? 0) > 0 ||
       (outdated.trucksInactive ?? 0) > 0 ||
-      (outdated.unservedNowPlannable ?? 0) > 0);
+      (outdated.unservedNowPlannable ?? 0) > 0 ||
+      (outdated.smallTruckBlocked ?? 0) > 0);
   // Review of 9 Oct 2026 (ui-dispatch-2): orders the plan in use leaves unserved: Step 3 says how many,
   // never "up to date with all orders". It keeps RE-PLAN on, and the step not done, only for those a
   // re-plan could place now (`unserved.replan`, review of 5614ba9), for example after a truck was added
@@ -710,6 +712,10 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               // Owner's location rule (A5 second review): their loads cannot be locked meanwhile.
               outdated.locationBlocked
                 ? `the location of ${outdated.locationBlocked} customer(s) on planned loads can no longer be used (drop the pin on each one, or RE-PLAN to leave their orders unserved)`
+                : '',
+              // Small truck only (owner request 13 Oct 2026): a customer marked, or the setting lowered, since.
+              outdated.smallTruckBlocked
+                ? `${outdated.smallTruckBlocked} small-truck-only customer(s) on planned loads sit on a truck that is not small (their loads cannot be locked; RE-PLAN puts them on a small truck)`
                 : '',
             ]
               .filter(Boolean)
