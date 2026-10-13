@@ -247,7 +247,7 @@ export const helperSchema = z
 export type HelperInput = z.infer<typeof helperSchema>;
 export const helperPatchSchema = helperSchema.partial().strict();
 
-/** At most this many helpers go out on one load (the database CHECK of migration 20261013150000). */
+/** At most this many helpers go out on one load (the database CHECK position 1-3 and UNIQUE (loadId, position) of migration 20261013150000). */
 export const MAX_HELPERS_PER_LOAD = 3;
 
 /**

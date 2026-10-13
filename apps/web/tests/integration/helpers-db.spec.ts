@@ -11,7 +11,8 @@
  *     (TRUCK_USUAL_HELPER_SET); a VIEWER changes nothing.
  *  2. OPTIMIZE: each load gets its truck's usual helper.
  *  3. The dispatcher sets two helpers on one load (LOAD_HELPERS_CHANGED with names); a fourth helper
- *     or a helper twice is refused; the database refuses position 4 and a helper twice on a load.
+ *     or a helper twice is refused; the database refuses position 4, a helper twice on a load and two
+ *     helpers in one position.
  *  4. A re-plan (new version): the locked load and the helpers picked by hand stay, the other trips
  *     get the usual helper again; the plan detail and the exports show them.
  *  5. The Crew report: one row per load of the plan in use with driver and helpers; the Excel.
@@ -99,6 +100,7 @@ import { getOrCreatePlan, updateLoad } from '@/lib/dispatch/plan-service';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { replan, startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { readCrewReport } from '@/lib/dispatch/crew-report';
+import { CREW_COLUMNS } from '@/lib/dispatch/crew-report-view';
 import { loadSheetModel } from '@/lib/dispatch/warehouse-sheets';
 import { driverPackModel } from '@/lib/dispatch/driver-pack';
 import { addDaysIso, todayIso } from '@/lib/dispatch/time';
@@ -252,6 +254,8 @@ describe('helpers on each truck and load, like drivers', () => {
     expect((await helpersOf(v1))['T02:1']).toBe('Nasr, Omar (by hand)');
     await expect(prisma.planLoadHelper.create({ data: { tenantId: ids.tenant, loadId: l.id, helperId: ids.saif, position: 4 } })).rejects.toThrow(/PlanLoadHelper_position_range/);
     await expect(prisma.planLoadHelper.create({ data: { tenantId: ids.tenant, loadId: l.id, helperId: ids.nasr, position: 3 } })).rejects.toThrow(/Unique constraint/);
+    // Two helpers in one place (so a fourth helper at position 3): refused by the unique (loadId, position).
+    await expect(prisma.planLoadHelper.create({ data: { tenantId: ids.tenant, loadId: l.id, helperId: ids.saif, position: 1 } })).rejects.toThrow(/Unique constraint/);
   });
 
   let v2 = '';
@@ -283,20 +287,27 @@ describe('helpers on each truck and load, like drivers', () => {
     const { rows } = await readCrewReport(ids.tenant, { from: D, to: D }, null);
     const v2loads = await prisma.planLoad.count({ where: { runId: v2 } });
     expect(rows).toHaveLength(v2loads);
-    expect(rows[0]).toMatchObject({ date: D, depot: 'MCT', truck: 'T01', trip: 1, status: 'LOCKED', driver: 'Ali', helper1: 'Saif', helper2: 'Nasr', helper3: '', departedBasis: 'Planned' });
-    expect(rows.find((r) => r.truck === 'T02' && r.trip === 1)).toMatchObject({ helper1: 'Nasr', helper2: 'Omar', stops: 1, cases: 10 });
+    expect(rows[0]).toMatchObject({ date: D, depot: 'MCT', truck: 'T01', trip: 1, status: 'LOCKED', driver: 'Ali (D01)', helper1: 'Saif (H01)', helper2: 'Nasr (H03)', helper3: '', departedBasis: 'Planned' });
+    expect(rows.find((r) => r.truck === 'T02' && r.trip === 1)).toMatchObject({ helper1: 'Nasr (H03)', helper2: 'Omar (H02)', stops: 1, cases: 10 });
     as('VIEWER');
     const res = await getCrewReport(new Request(`http://localhost/api/dispatch/crew-report?from=${D}&to=${D}&depotId=${ids.depot}`));
     expect(res.status).toBe(200);
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(Buffer.from(await res.arrayBuffer()) as unknown as ExcelJS.Buffer);
     const ws = wb.getWorksheet('Loads')!;
-    expect([4, 5, 6, 7, 8].map((c) => ws.getCell(4, c).text)).toEqual(['LOCKED', 'Ali', 'Saif', 'Nasr', '']);
+    // Each column found by its key (CREW_COLUMNS), never by a fixed number.
+    const col = (key: (typeof CREW_COLUMNS)[number]['key']) => CREW_COLUMNS.findIndex((c) => c.key === key) + 1;
+    expect(ws.getCell(3, col('status')).text).toBe('Load status');
+    expect((['trip', 'status', 'driver', 'helper1', 'helper2', 'helper3'] as const).map((k) => ws.getCell(4, col(k)).text)).toEqual(['1', 'LOCKED', 'Ali (D01)', 'Saif (H01)', 'Nasr (H03)', '']);
+    const hs = wb.getWorksheet('Helpers')!;
+    expect([1, 2, 3].map((r) => `${hs.getCell(r + 1, 1).text} ${hs.getCell(r + 1, 2).text}`)).toEqual(['H03 Nasr', 'H02 Omar', 'H01 Saif']);
   });
 
   it('6. another company: its helper cannot go on a load or be read; its depot is not found', async () => {
     as('PLANNER');
-    const l = await loadOf(v2, ids.t2, 2);
+    // v2: T01 L1 (locked) and the 3 other orders on T01 L2, T02 L1, T01 L3 (the fake optimizer); T01 L2 is PLANNED.
+    const l = await loadOf(v2, ids.t1, 2);
+    expect(l.status).toBe('PLANNED');
     const refused = await answer(await patchLoad(send('PATCH', { helperIds: [ids.otherHelper] }), { params: { id: v2, loadId: l.id } }));
     expect(refused.status).toBe(400);
     expect(refused.body.error).toMatchObject({ code: 'HELPER_NOT_FOUND' });

@@ -4,8 +4,9 @@
  * each depot and day of a range (31 days at most), whatever its status (planned, locked, loading,
  * dispatched, completed): date, depot, truck, trip, load status, driver, helpers 1-3, when it left
  * (the time it was marked Dispatched in RouteIQ, else the planned departure), Back at depot (the
- * driver's tap) when recorded, stops and cases. A second sheet totals each helper's loads, days and
- * trucks. Reads only; every query names the company. No money.
+ * driver's tap) when recorded, stops and cases. People are shown "Name (CODE)": names are not unique.
+ * A second sheet totals each helper's loads, days and trucks, by helper (code and name). Reads only;
+ * every query names the company. No money.
  */
 import ExcelJS from 'exceljs';
 import type { Prisma } from '@prisma/client';
@@ -14,7 +15,7 @@ import { findInParts } from '../in-parts';
 import { backAtDepot, backKey, liveRunsInRange } from '../delivery/day-results';
 import { shownTruckCode } from './hire';
 import { daysBetween, DEFAULT_TZ, fmtHhmm, localDateIso, localMinutes } from './time';
-import { CREW_COLUMNS, CREW_MAX_DAYS, helperTotals, NO_DRIVER_TEXT, type CrewRow } from './crew-report-view';
+import { CREW_COLUMNS, CREW_MAX_DAYS, helperTotals, NO_DRIVER_TEXT, personText, type CrewRow } from './crew-report-view';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -101,23 +102,24 @@ export async function readCrewReport(
   const driverIds = [...new Set(loads.map((l) => l.driverId).filter((x): x is string => !!x))];
   const [trucks, drivers, crew, stopsRows, backs, dispatched] = await Promise.all([
     db.truck.findMany({ where: { tenantId, id: { in: truckIds } }, select: { id: true, code: true, onlyOnDate: true } }),
-    driverIds.length ? db.driver.findMany({ where: { tenantId, id: { in: driverIds } }, select: { id: true, name: true } }) : [],
+    driverIds.length ? db.driver.findMany({ where: { tenantId, id: { in: driverIds } }, select: { id: true, code: true, name: true } }) : [],
     findInParts(loadIds, (part) =>
-      db.planLoadHelper.findMany({ where: { tenantId, loadId: { in: part } }, orderBy: [{ loadId: 'asc' }, { position: 'asc' }], select: { loadId: true, position: true, helper: { select: { name: true } } } }),
+      db.planLoadHelper.findMany({ where: { tenantId, loadId: { in: part } }, orderBy: [{ loadId: 'asc' }, { position: 'asc' }], select: { loadId: true, position: true, helper: { select: { id: true, code: true, name: true } } } }),
     ),
     findInParts(loadIds, (part) => db.routeAssignment.findMany({ where: { loadId: { in: part } }, select: { loadId: true, sequenceInTruck: true } })),
     backAtDepot(db, tenantId, range.from, range.to, depotId),
     dispatchedAt(db, tenantId, loads.filter((l) => LEFT.has(l.status))),
   ]);
   const truckOf = new Map(trucks.map((t) => [t.id, t]));
-  const driverName = new Map(drivers.map((d) => [d.id, d.name]));
-  const crewOf = new Map<string, { position: number; name: string }[]>();
+  // Names with codes: two people may share a name (the code is unique per company).
+  const driverText = new Map(drivers.map((d) => [d.id, personText(d)]));
+  const crewOf = new Map<string, { position: number; id: string; code: string; name: string }[]>();
   for (const h of crew) {
     const list = crewOf.get(h.loadId) ?? [];
-    list.push({ position: h.position, name: h.helper.name });
+    list.push({ position: h.position, id: h.helper.id, code: h.helper.code, name: h.helper.name });
     crewOf.set(h.loadId, list);
   }
-  const helpersOf = new Map([...crewOf].map(([id, list]) => [id, list.sort((a, b) => a.position - b.position).map((x) => x.name)]));
+  const helpersOf = new Map([...crewOf].map(([id, list]) => [id, list.sort((a, b) => a.position - b.position).map(({ id: hid, code, name }) => ({ id: hid, code, name }))]));
   const stopsOf = new Map<string, Set<number>>();
   for (const r of stopsRows) {
     if (!r.loadId) continue;
@@ -138,15 +140,16 @@ export async function readCrewReport(
       truck: truck ? shownTruckCode(snapCode, truck) : (snapCode ?? '?'),
       trip: l.loadNo,
       status: l.status,
-      driver: (l.driverId && driverName.get(l.driverId)) || NO_DRIVER_TEXT,
-      helper1: helpers[0] ?? '',
-      helper2: helpers[1] ?? '',
-      helper3: helpers[2] ?? '',
+      driver: (l.driverId && driverText.get(l.driverId)) || NO_DRIVER_TEXT,
+      helper1: helpers[0] ? personText(helpers[0]) : '',
+      helper2: helpers[1] ? personText(helpers[1]) : '',
+      helper3: helpers[2] ? personText(helpers[2]) : '',
       departed: left ? crewTimeText(left, run.date, tz) : fmtHhmm(l.departMin),
       departedBasis: left ? 'Dispatched in RouteIQ' : 'Planned',
       backAtDepot: back ? crewTimeText(back, run.date, tz) : '',
       stops: stopsOf.get(l.id)?.size ?? 0,
       cases: l.cases,
+      crew: helpers,
     };
   });
   rows.sort((a, b) => a.date.localeCompare(b.date) || a.depot.localeCompare(b.depot) || a.truck.localeCompare(b.truck) || a.trip - b.trip);
@@ -185,6 +188,7 @@ export async function buildCrewWorkbook(rows: readonly CrewRow[], meta: CrewMeta
 
   const hs = wb.addWorksheet('Helpers', { views: [{ state: 'frozen', ySplit: 1 }] });
   hs.columns = [
+    { header: 'Code', key: 'code', width: 10 },
     { header: 'Helper', key: 'helper', width: 24 },
     { header: 'Loads', key: 'loads', width: 8 },
     { header: 'Days', key: 'days', width: 8 },
@@ -192,7 +196,7 @@ export async function buildCrewWorkbook(rows: readonly CrewRow[], meta: CrewMeta
   ];
   hs.getRow(1).font = { bold: true };
   const totals = helperTotals(rows);
-  if (!totals.length) hs.addRow({ helper: 'No helpers on these loads.' });
+  if (!totals.length) hs.addRow({ code: 'No helpers on these loads.' });
   for (const t of totals) hs.addRow(t);
   return Buffer.from(await wb.xlsx.writeBuffer());
 }

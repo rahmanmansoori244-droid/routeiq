@@ -44,7 +44,7 @@ function seed() {
     { id: 'T1', tenantId: T, code: 'T01', onlyOnDate: null },
     { id: 'T2', tenantId: T, code: 'T02', onlyOnDate: null },
   ];
-  tables.driver = [{ id: 'ALI', tenantId: T, name: 'Ali' }];
+  tables.driver = [{ id: 'ALI', tenantId: T, code: 'D01', name: 'Ali' }];
   tables.helper = [
     { id: 'SAIF', tenantId: T, code: 'H01', name: 'Saif', active: true },
     { id: 'OMAR', tenantId: T, code: 'H02', name: 'Omar', active: true },
@@ -118,17 +118,18 @@ describe('readCrewReport: one row per load of the plan in use', () => {
     expect(depot).toBeNull();
     expect(rows).toEqual<CrewRow[]>([
       {
-        date: '2026-10-13', depot: 'MCT', truck: 'T01', trip: 1, status: 'COMPLETED', driver: 'Ali', helper1: 'Saif', helper2: 'Omar', helper3: '',
+        date: '2026-10-13', depot: 'MCT', truck: 'T01', trip: 1, status: 'COMPLETED', driver: 'Ali (D01)', helper1: 'Saif (H01)', helper2: 'Omar (H02)', helper3: '',
         departed: '07:12', departedBasis: 'Dispatched in RouteIQ', backAtDepot: '11:58', stops: 2, cases: 100,
+        crew: [{ id: 'SAIF', code: 'H01', name: 'Saif' }, { id: 'OMAR', code: 'H02', name: 'Omar' }],
       },
       {
         date: '2026-10-13', depot: 'MCT', truck: 'T01', trip: 2, status: 'PLANNED', driver: 'Not assigned', helper1: '', helper2: '', helper3: '',
-        departed: '12:00', departedBasis: 'Planned', backAtDepot: '', stops: 1, cases: 200,
+        departed: '12:00', departedBasis: 'Planned', backAtDepot: '', stops: 1, cases: 200, crew: [],
       },
       {
         // A locked load has not left: its planned departure.
-        date: '2026-10-14', depot: 'SOH', truck: 'T02', trip: 1, status: 'LOCKED', driver: 'Ali', helper1: 'Saif', helper2: '', helper3: '',
-        departed: '09:00', departedBasis: 'Planned', backAtDepot: '', stops: 0, cases: 100,
+        date: '2026-10-14', depot: 'SOH', truck: 'T02', trip: 1, status: 'LOCKED', driver: 'Ali (D01)', helper1: 'Saif (H01)', helper2: '', helper3: '',
+        departed: '09:00', departedBasis: 'Planned', backAtDepot: '', stops: 0, cases: 100, crew: [{ id: 'SAIF', code: 'H01', name: 'Saif' }],
       },
     ]);
   });
@@ -144,8 +145,22 @@ describe('readCrewReport: one row per load of the plan in use', () => {
   it('the Helpers sheet totals: loads, days and trucks per helper', async () => {
     const { rows } = await readCrewReport(T, { from: '2026-10-13', to: '2026-10-14' }, null, { db: fakePrisma as never });
     expect(helperTotals(rows)).toEqual([
-      { helper: 'Omar', loads: 1, days: 1, trucks: 'T01' },
-      { helper: 'Saif', loads: 2, days: 2, trucks: 'T01, T02' },
+      { code: 'H02', helper: 'Omar', loads: 1, days: 1, trucks: 'T01' },
+      { code: 'H01', helper: 'Saif', loads: 2, days: 2, trucks: 'T01, T02' },
+    ]);
+  });
+
+  it('two helpers who share a name stay two people: the code in every cell, two lines on the Helpers sheet', async () => {
+    tables.helper!.push({ id: 'SAIF2', tenantId: T, code: 'H07', name: 'Saif', active: true });
+    tables.planLoadHelper = [
+      { id: 'h2', tenantId: T, loadId: 'B1', helperId: 'SAIF', position: 1 },
+      { id: 'h3', tenantId: T, loadId: 'C1', helperId: 'SAIF2', position: 1 },
+    ];
+    const { rows } = await readCrewReport(T, { from: '2026-10-13', to: '2026-10-14' }, null, { db: fakePrisma as never });
+    expect(rows.map((r) => r.helper1)).toEqual(['Saif (H01)', '', 'Saif (H07)']);
+    expect(helperTotals(rows)).toEqual([
+      { code: 'H01', helper: 'Saif', loads: 1, days: 1, trucks: 'T01' },
+      { code: 'H07', helper: 'Saif', loads: 1, days: 1, trucks: 'T02' },
     ]);
   });
 
@@ -158,11 +173,12 @@ describe('readCrewReport: one row per load of the plan in use', () => {
     expect(ws.getCell(1, 1).text).toBe('NMWC · Crew report · 2026-10-13 to 2026-10-14 · every depot');
     const heads = CREW_COLUMNS.map((_, i) => ws.getCell(3, i + 1).text);
     expect(heads).toEqual(['Date', 'Depot', 'Truck', 'Trip', 'Load status', 'Driver', 'Helper 1', 'Helper 2', 'Helper 3', 'Departed', 'Departed from', 'Back at depot', 'Stops', 'Cases']);
-    expect(CREW_COLUMNS.map((_, i) => ws.getCell(4, i + 1).value)).toEqual(['2026-10-13', 'MCT', 'T01', 1, 'COMPLETED', 'Ali', 'Saif', 'Omar', '', '07:12', 'Dispatched in RouteIQ', '11:58', 2, 100]);
+    expect(CREW_COLUMNS.map((_, i) => ws.getCell(4, i + 1).value)).toEqual(['2026-10-13', 'MCT', 'T01', 1, 'COMPLETED', 'Ali (D01)', 'Saif (H01)', 'Omar (H02)', '', '07:12', 'Dispatched in RouteIQ', '11:58', 2, 100]);
     expect(ws.getCell(6, 1).text).toBe('2026-10-14');
     expect(ws.getCell(7, 1).text).toBe('');
     const hs = wb.getWorksheet('Helpers')!;
-    expect([hs.getCell(2, 1).text, hs.getCell(2, 2).value, hs.getCell(3, 1).text, hs.getCell(3, 4).text]).toEqual(['Omar', 1, 'Saif', 'T01, T02']);
+    expect([1, 2, 3, 4, 5].map((c) => hs.getCell(1, c).text)).toEqual(['Code', 'Helper', 'Loads', 'Days', 'Trucks']);
+    expect([hs.getCell(2, 1).text, hs.getCell(2, 2).text, hs.getCell(2, 3).value, hs.getCell(3, 2).text, hs.getCell(3, 5).text]).toEqual(['H02', 'Omar', 1, 'Saif', 'T01, T02']);
   });
 });
 

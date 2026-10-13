@@ -5,8 +5,9 @@
 -- change. No existing row needs a value: a truck without a usual helper, a load without helpers.
 -- Code from before this release never reads them, so an app rollback is safe.
 --   Helper           the company's helpers (code unique per company), deactivated, never deleted.
---   PlanLoadHelper   the helpers on one load (0 to 3, position 1-3), copied with the load into every
---                    new plan version; removed with its load (CASCADE).
+--   PlanLoadHelper   the helpers on one load (0 to 3: position 1-3 by the CHECK below, each position
+--                    once by UNIQUE (loadId, position), each helper once by UNIQUE (loadId, helperId)),
+--                    copied with the load into every new plan version; removed with its load (CASCADE).
 --   Truck.defaultHelperId          the truck's usual helper: new loads get him (NO ACTION, as the
 --                                  default driver).
 --   PlanLoad.helpersSetById / At   the dispatcher set the helpers by hand: a re-plan keeps them.
@@ -58,6 +59,9 @@ CREATE INDEX "PlanLoadHelper_tenantId_helperId_idx" ON "PlanLoadHelper"("tenantI
 -- CreateIndex
 CREATE UNIQUE INDEX "PlanLoadHelper_loadId_helperId_key" ON "PlanLoadHelper"("loadId", "helperId");
 
+-- CreateIndex
+CREATE UNIQUE INDEX "PlanLoadHelper_loadId_position_key" ON "PlanLoadHelper"("loadId", "position");
+
 -- AddForeignKey
 ALTER TABLE "Truck" ADD CONSTRAINT "Truck_defaultHelperId_fkey" FOREIGN KEY ("defaultHelperId") REFERENCES "Helper"("id") ON DELETE NO ACTION ON UPDATE CASCADE;
 
@@ -77,6 +81,7 @@ ALTER TABLE "PlanLoadHelper" ADD CONSTRAINT "PlanLoadHelper_helperId_fkey" FOREI
 ALTER TABLE "PlanLoad" ADD CONSTRAINT "PlanLoad_helpersSetById_fkey" FOREIGN KEY ("helpersSetById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 
--- At most three helpers on a load, shown in this order. Prisma's schema has no CHECK constraints;
--- `prisma migrate diff` leaves this alone. (The API refuses a fourth helper first: lib/schemas.ts.)
+-- At most three helpers on a load (with the unique (loadId, position) above), shown in this order.
+-- Prisma's schema has no CHECK constraints; `prisma migrate diff` leaves this alone. (The API
+-- refuses a fourth helper first: lib/schemas.ts.)
 ALTER TABLE "PlanLoadHelper" ADD CONSTRAINT "PlanLoadHelper_position_range" CHECK ("position" BETWEEN 1 AND 3);
