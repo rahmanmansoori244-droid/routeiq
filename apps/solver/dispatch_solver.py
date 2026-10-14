@@ -2017,12 +2017,17 @@ def _solve_scenario(
                 vec[1 + len(stops) + r] = -caps[v]
             return vec
         if demand and isinstance(demand[0], list):
+            # Per-truck demands go in as transit MATRICES (row i = what node i counts, to every node), not
+            # unary vectors: with one unary evaluator per truck, OR-Tools 9.15 refuses every unperformed
+            # node (an empty plan is infeasible), so a day where any stop must be left out found no plan at
+            # all (15 Oct 2026: ROUTING_FAIL in 0.1 s, all 94 stops INFEASIBLE). Binary evaluators do not
+            # have this (test_single_customer_fill.py: a day that must leave stops out).
             cbs: dict[tuple[int, ...], int] = {}
             per_vehicle = []
             for d in demand:  # type: ignore[union-attr]
                 key = tuple(d)
                 if key not in cbs:
-                    cbs[key] = routing.RegisterUnaryTransitVector(vec_of(d))
+                    cbs[key] = routing.RegisterTransitMatrix([[x] * N for x in vec_of(d)])
                 per_vehicle.append(cbs[key])
             routing.AddDimensionWithVehicleTransitAndCapacity(per_vehicle, max(caps), caps, True, name_)
         else:

@@ -188,6 +188,38 @@ def test_the_route_search_decides_alone_per_truck(name):
     assert_rule_holds(r2, sc2)
 
 
+@pytest.mark.parametrize("name", ["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"])
+def test_a_day_that_must_leave_stops_out_still_plans(name):
+    """Production 14 Oct 2026 (the 15 Oct plan): with the rule on, the route search counts per truck (the
+    Pallets per truck and the Solo dimension). While those per-truck demands were unary vectors, OR-Tools
+    9.15 refused every unperformed stop, so a day where any stop had to be left out found NO plan at all
+    (ROUTING_FAIL in 0.1 s, every stop INFEASIBLE). One trip per truck, Tawoos and ten small customers of
+    2.4 pallets: the three trucks cannot carry everything (Tawoos alone fills a 12-bay truck, the other
+    two hold four small ones each), so the route search must leave some out - and still plans the rest."""
+    r = rq([tawoos()] + others(10), fleet(max_trips=1))
+    tds, solvable, drops, mx, _ = _day_of(r)
+    sc = ds._solve_scenario(name, r, solvable, tds, mx, 2, list(drops))
+    assert sc.status == "OPTIMIZED", (sc.status, sc.solver_status)
+    served = served_ids(sc)
+    assert len(served) >= 5 and 0 < len(sc.unserved) <= 7, unserved_map(sc)
+    assert "INFEASIBLE" not in set(unserved_map(sc).values()), unserved_map(sc)
+    if "TAWOOS" in served:  # MIN_DISTANCE may leave Tawoos out instead of two small customers
+        ld = load_of(sc, "TAWOOS")
+        assert [st.stop_id for st in ld.stops] == ["TAWOOS"] and ld.truck_id != "R11"
+    assert_rule_holds(r, sc)
+
+
+def test_the_whole_engine_plans_a_day_that_must_leave_stops_out():
+    """The same day through optimize_dispatch: a plan (not NO_SOLUTION), Tawoos alone, the rest checked."""
+    r = rq([tawoos()] + others(10), fleet(max_trips=1))
+    sc = rec(optimize_dispatch(r))
+    assert sc.status == "OPTIMIZED", (sc.status, sc.solver_status)
+    assert "TAWOOS" in served_ids(sc) and sc.unserved, unserved_map(sc)
+    assert "INFEASIBLE" not in set(unserved_map(sc).values()), unserved_map(sc)
+    assert [st.stop_id for st in load_of(sc, "TAWOOS").stops] == ["TAWOOS"]
+    assert_rule_holds(r, sc)
+
+
 def test_two_full_truck_customers_each_get_a_truck_of_their_own():
     """Two customers of 11.5 pallets: one each on the two 12-bay trucks (one trip each), never together,
     never on the 11-bay; the small stops ride the 11-bay truck."""
