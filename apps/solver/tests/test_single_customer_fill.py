@@ -294,7 +294,7 @@ def test_the_independent_check_measures_each_load_by_its_customers():
         tl.pallet_units += st.pallet_units
     caps = [v for v in FZ.check_scenario(r, bad).violations if v.code == "CAPACITY_PALLETS"]
     assert len(caps) == 1 and caps[0].message.endswith("(12 bays at 90% fill)."), caps
-    # Without the rule (an older web's request), the same plan's truckload load alone is over its room.
+    # Without the rule (an older web's request), the truckload's load in the same plan is over its room on its own.
     old = r.model_copy(deep=True)
     old.config.single_customer_fill_pct = None
     v = [v for v in FZ.check_scenario(old, sc).violations if v.code == "CAPACITY_PALLETS"]

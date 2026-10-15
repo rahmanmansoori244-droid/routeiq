@@ -302,7 +302,7 @@ describe('driver sheets and drivers per load', () => {
 
   it('a re-plan keeps each trip its own driver: the same trip in the previous version beats the carried trip 1', async () => {
     // One more driver, so each truck has its own and no guess is refused for a clash.
-    const r4 = await fetchWith(t.cookieJar, `${BASE}/api/drivers`, j({ code: 'D4', name: 'Khalid Al Amri', phone: '+968 9777 0104', active: true }));
+    const r4 = await fetchWith(t.cookieJar, `${BASE}/api/drivers`, j({ code: 'D4', name: 'Khalid Al Fulani', phone: '+968 9777 0104', active: true }));
     expect(r4.status).toBe(201);
     drivers.D4 = (await json(r4)).data.id;
 

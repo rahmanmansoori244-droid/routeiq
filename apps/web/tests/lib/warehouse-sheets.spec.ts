@@ -255,11 +255,11 @@ describe('the printable page', () => {
   it('escapes every text from the data and keeps Arabic names as they are', () => {
     const d = fixture();
     d.loads[0].stops[0] = { ...d.loads[0].stops[0], customerName: '<script>alert(1)</script> & "x"' };
-    d.loads[0].stops[1] = { ...d.loads[0].stops[1], customerName: 'هايبر ماركت النور' };
+    d.loads[0].stops[1] = { ...d.loads[0].stops[1], customerName: 'هايبر ماركت النمر' };
     const html = renderLoadSheetHtml(loadSheetModel(d, OPTS));
     expect(html).not.toContain('<script>alert(1)');
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;x&quot;');
-    expect(html).toContain('<bdi>هايبر ماركت النور</bdi>');
+    expect(html).toContain('<bdi>هايبر ماركت النمر</bdi>');
     expect(esc("a'b")).toBe('a&#39;b');
   });
 

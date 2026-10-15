@@ -145,7 +145,7 @@ describe('a quote that is never closed refuses the file, naming the line (web-in
 });
 
 describe('the bytes are decoded explicitly; Arabic text is never garbled without a word (web-intake-3, s6-messy-intake-3)', () => {
-  const NAME = 'مؤسسة النور التجارية';
+  const NAME = 'مؤسسة النمر التجارية';
   const NOTE = 'اتصل قبل الوصول';
   const text = `code,name,notes\r\nC1,${NAME},${NOTE}\r\n`;
   const WANT = [{ code: 'C1', name: NAME, notes: NOTE }];
@@ -324,9 +324,9 @@ describe('Excel\'s "sep=" first line names the separator and is not the header (
 
   it('the separator named is used where Papa would guess another; any one character, after a byte-order mark too', async () => {
     // Guessing, Papa splits these lines at the commas (two values on every line either way).
-    const tie = await parseUpload(file('sep=;\ncode;address, area\nC1;Noor, Ruwi\nC2;Seeb, Muscat\n', 'customers.csv', 'text/csv'));
+    const tie = await parseUpload(file('sep=;\ncode;address, area\nC1;Nimr, Ruwi\nC2;Seeb, Muscat\n', 'customers.csv', 'text/csv'));
     expect(tie.rows).toEqual([
-      { code: 'C1', 'address, area': 'Noor, Ruwi' },
+      { code: 'C1', 'address, area': 'Nimr, Ruwi' },
       { code: 'C2', 'address, area': 'Seeb, Muscat' },
     ]);
     for (const sep of ['|', '\t', ',', ';']) {
@@ -343,7 +343,7 @@ describe('Excel\'s "sep=" first line names the separator and is not the header (
 });
 
 describe('a UTF-8 file with a few bytes that are not UTF-8 stays UTF-8 (follow-up: one stray byte garbled the whole file)', () => {
-  const NAME = 'مؤسسة النور التجارية';
+  const NAME = 'مؤسسة النمر التجارية';
   const NOTE = 'اتصل قبل الوصول';
   const enc = (s: string) => [...new TextEncoder().encode(s)];
   const places = (n: number, word: string, verb: string) =>
@@ -354,12 +354,12 @@ describe('a UTF-8 file with a few bytes that are not UTF-8 stays UTF-8 (follow-u
     'if they look wrong, save the file in Excel as "CSV UTF-8 (Comma delimited)" and upload that.';
 
   it.each(['text/csv', XLS])('sent as "%s": one stray byte (0xA0) reads as U+FFFD, the Arabic as written, with a warning naming 1 character', async (type) => {
-    const bytes = Uint8Array.from([...enc(`code,name,notes\r\nC1,${NAME},${NOTE}\r\nC2,Al Noor`), 0xa0, ...enc('Store,ok\r\n')]);
+    const bytes = Uint8Array.from([...enc(`code,name,notes\r\nC1,${NAME},${NOTE}\r\nC2,Al Nimr`), 0xa0, ...enc('Store,ok\r\n')]);
     const parsed = await parseUpload(file(bytes, 'customers.csv', type));
     // Before: the whole file was read as windows-1256, every Arabic letter garbled ("ظ…ط¤ط³ط³ط©").
     expect(parsed.rows).toEqual([
       { code: 'C1', name: NAME, notes: NOTE },
-      { code: 'C2', name: 'Al Noor\uFFFDStore', notes: 'ok' },
+      { code: 'C2', name: 'Al Nimr\uFFFDStore', notes: 'ok' },
     ]);
     expect(parsed.warnings).toEqual([places(1, 'character in it is', 'was')]);
   });
@@ -388,9 +388,9 @@ describe('a UTF-8 file with a few bytes that are not UTF-8 stays UTF-8 (follow-u
   });
 
   it('a file that is clearly not UTF-8 is still read as windows-1256: Arabic with commas that make a UTF-8 letter by chance, Latin letters', async () => {
-    const arabic = 'code,name,notes\r\nC1,مسقط، روي،,النور، الخوض؛ اتصل؟\r\n';
+    const arabic = 'code,name,notes\r\nC1,مسقط، روي،,النمر، الخوض؛ اتصل؟\r\n';
     const parsed = await parseUpload(file(cp1256(arabic), 'customers.csv', XLS));
-    expect([parsed.rows, parsed.warnings]).toEqual([[{ code: 'C1', name: 'مسقط، روي،', notes: 'النور، الخوض؛ اتصل؟' }], [ARABIC_WINDOWS]]);
+    expect([parsed.rows, parsed.warnings]).toEqual([[{ code: 'C1', name: 'مسقط، روي،', notes: 'النمر، الخوض؛ اتصل؟' }], [ARABIC_WINDOWS]]);
     const latin = await parseUpload(file(cp1256('code,name\r\nC1,Café Muscat\r\n'), 'customers.csv', 'text/csv'));
     expect([latin.rows, latin.warnings]).toEqual([[{ code: 'C1', name: 'Café Muscat' }], [ARABIC_WINDOWS]]);
   });

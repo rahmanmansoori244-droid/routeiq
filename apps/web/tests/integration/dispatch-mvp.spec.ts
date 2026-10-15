@@ -97,7 +97,7 @@ beforeAll(async () => {
   const spots: [string, string | null, string, number, number, string][] = [
     ['C100', 'B01', 'Hyper Bawshar', 23.571, 58.397, 'HYPERMARKET'],
     ['C100', 'B02', 'Hyper Seeb', 23.668, 58.19, 'HYPERMARKET'],
-    ['C101', null, 'Noor Grocery Khuwair', 23.589, 58.41, 'GROCERY'],
+    ['C101', null, 'Nimr Grocery Khuwair', 23.589, 58.41, 'GROCERY'],
     ['C102', null, 'Qurum Supermarket', 23.614, 58.476, 'SUPERMARKET'],
     ['C103', null, 'Ghubrah Trading', 23.6, 58.372, 'TRADING'],
     ['C104', null, 'Amerat Grocery', 23.52, 58.497, 'GROCERY'],
@@ -141,7 +141,7 @@ describe('NMWC dispatch MVP workflow', () => {
       ['SO-1', d, d, 'C100', 'B01', 'Hyper Bawshar', 'TAN-500-24', '', '60', '120', '20'],
       ['SO-1', d, d, 'C100', 'B01', 'Hyper Bawshar', 'TAN-1500-6', '', '40', '80', '12'],
       ['SO-2', d, d, 'C100', 'B02', 'Hyper Seeb', 'TAN-500-24', '', '50', '100', '15'],
-      ['SO-3', d, d, 'C101', '', 'Noor Grocery Khuwair', 'JAB-500-24', '', '20', '40', '6'],
+      ['SO-3', d, d, 'C101', '', 'Nimr Grocery Khuwair', 'JAB-500-24', '', '20', '40', '6'],
       ['SO-4', d, d, 'C102', '', 'Qurum Supermarket', 'TAN-500-24', '', '45', '90', '13'],
       ['SO-4', d, d, 'C102', '', 'Qurum Supermarket', 'JAB-500-24', '', '15', '30', '5'],
       ['SO-5', d, d, 'C103', '', 'Ghubrah Trading', 'TAN-1500-6', '', '30', '60', '9'],
