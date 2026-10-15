@@ -423,7 +423,7 @@ const NAME_POOLS: Record<string, { words: string[]; suffixes: string[] }> = {
   GROCERY: {
     words: [
       'Al Salam', 'Al Barakah', 'Al Rahma', 'Al Fajr', 'Al Huda', 'Al Iman', 'Al Khair', 'Al Sabah', 'Al Nakheel', 'Al Wadi',
-      'Al Shams', 'Al Qamar', 'Al Bader', 'Al Hilal', 'Al Manar', 'Al Rawdha', 'Al Safa', 'Al Marwa', 'Al Yusr', 'Al Anwar',
+      'Al Shams', 'Al Qamar', 'Al Bader', 'Al Hilal', 'Al Manar', 'Al Rawdha', 'Al Masa', 'Al Marwa', 'Al Yusr', 'Al Anwar',
       'Al Ghaith', 'Al Sahwa', 'Al Nujoom', 'Al Rayan', 'Al Tawfiq', 'Al Bashayer', 'Al Ikhlas', 'Al Shifa', 'Al Mustaqbal',
     ],
     suffixes: ['Grocery', 'Mini Mart', 'Foodstuff', 'Baqala', 'Shopping Centre'],
