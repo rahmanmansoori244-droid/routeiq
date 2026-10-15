@@ -128,7 +128,7 @@ describe('PUT /api/customers/:id/location: a reading is read again on the server
 
   it('a directions link read as its start, and a classic ?ll= link (the map centre), sent as read: 422 PIN_REQUIRED (A5 third review)', async () => {
     const before = stored('K1');
-    const dir = 'https://www.google.com/maps/dir/23.6100123,58.5400456/Lulu+Hypermarket+Bawshar/@23.59,58.42,13z/data=!4m8!4m7!1m0!1m5!1m1!1s0x3e8dfd:0x1!2m2!1d58.4059!2d23.5859';
+    const dir = 'https://www.google.com/maps/dir/23.6100123,58.5400456/Lumo+Hypermarket+Bawshar/@23.59,58.42,13z/data=!4m8!4m7!1m0!1m5!1m1!1s0x3e8dfd:0x1!2m2!1d58.4059!2d23.5859';
     const cases: [string, Record<string, unknown>][] = [
       // Before: 200, the start of the route (the salesman's own position) stored as verified HIGH.
       ['directions link', { lat: 23.610012, lng: 58.540046, source: 'GOOGLE_MAPS_URL', input: dir }],
@@ -136,7 +136,7 @@ describe('PUT /api/customers/:id/location: a reading is read again on the server
       ['short link that led to a directions link', { lat: 23.610012, lng: 58.540046, source: 'GOOGLE_MAPS_URL', input: 'https://maps.app.goo.gl/abc123', resolvedUrl: dir }],
       // Before: 200, the centre of the view stored as verified HIGH.
       ['?ll=', { lat: 23.585912, lng: 58.405912, source: 'GOOGLE_MAPS_URL', input: 'https://maps.google.com/maps?ll=23.585912,58.405912&z=15' }],
-      ['?q=<place>&ll=', { lat: 23.585912, lng: 58.405912, source: 'GOOGLE_MAPS_URL', input: 'https://maps.google.com/maps?q=Lulu+Hypermarket&ll=23.585912,58.405912&z=15' }],
+      ['?q=<place>&ll=', { lat: 23.585912, lng: 58.405912, source: 'GOOGLE_MAPS_URL', input: 'https://maps.google.com/maps?q=Lumo+Hypermarket&ll=23.585912,58.405912&z=15' }],
     ];
     for (const [what, body] of cases) {
       const r = await put('K1', body);

@@ -145,7 +145,7 @@ describe('POST /api/orders/upload keeps the skipped-sheet note with the check', 
 // ---------------------------------------------------------------------------------------
 
 const customer = {
-  id: 'c1', tenantId: T, code: 'C1', branchCode: null, branchKey: '__MAIN__', name: 'Lulu Bausher', customerType: null, address: 'Bausher',
+  id: 'c1', tenantId: T, code: 'C1', branchCode: null, branchKey: '__MAIN__', name: 'Lumo Bausher', customerType: null, address: 'Bausher',
   accessNotes: null, lat: 23.6, lng: 58.4, priority: 3, priorityConfirmed: true, avgServiceTimeMin: 20, serviceTimeConfirmed: true,
   hardWindowStartMin: 360, hardWindowEndMin: 840, prefWindowStartMin: null, prefWindowEndMin: null, active: true, locationVerified: true, createdFromUpload: false,
 };

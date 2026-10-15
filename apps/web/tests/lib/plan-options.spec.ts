@@ -225,7 +225,7 @@ describe('N1: what each option gains', () => {
 // getPlanDetail + workbook on the in-memory database
 // ---------------------------------------------------------------------------------------
 
-const customer = { id: 'c1', tenantId: T, code: 'C1', branchCode: null, name: 'Lulu', customerType: null, address: null, accessNotes: null, lat: 23.6, lng: 58.4,
+const customer = { id: 'c1', tenantId: T, code: 'C1', branchCode: null, name: 'Lumo', customerType: null, address: null, accessNotes: null, lat: 23.6, lng: 58.4,
   priority: 2, avgServiceTimeMin: 20, serviceTimeConfirmed: true, hardWindowStartMin: null, hardWindowEndMin: null, prefWindowStartMin: null, prefWindowEndMin: null, active: true };
 
 function planLoad(id: string, truckId: string, loadNo: number, status: string, operatingCost: number, carriedFromLoadId: string | null = null) {

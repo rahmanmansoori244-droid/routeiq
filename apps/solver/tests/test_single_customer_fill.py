@@ -1,6 +1,6 @@
 """One customer on a truck may use every bay (config.single_customer_fill_pct).
 
-Owner rule 13 Oct 2026, after a production order was split in two: "keep 90% for trucks with several
+Owner rule 13 Oct 2026, after a large single-customer order was split in two: "keep 90% for trucks with several
 customers, but let a truck that carries only one customer be filled to 100%. A big single order then
 goes whole on one truck." The order: 300 cases of a 143-per-pallet product + 500 of a 56-per-pallet one =
 2,098 + 8,929 = 11,027 units (11.03 pallets). At Pallet fill 90% the largest truck (12 bays) holds 10,800,
@@ -26,11 +26,11 @@ from dispatch_solver import optimize_dispatch
 from tests.test_dispatch import assert_reconciled, rec, req, served_ids, unserved_map
 from tests.test_pallets import ALL, _day_of, _pyvrp_in_process, btruck, pstop  # noqa: F401
 
-TAWOOS_UNITS = 2_098 + 8_929  # SS250ML 300 @ 143 + JA1.5L 500 @ 56, each line rounded up
+TRUCKLOAD_UNITS = 2_098 + 8_929  # SS250ML 300 @ 143 + JA1.5L 500 @ 56, each line rounded up
 FILL = 90
 
 
-def tawoos(units: int = TAWOOS_UNITS, sid: str = "TAWOOS", **kw):
+def truckload(units: int = TRUCKLOAD_UNITS, sid: str = "TRUCKLOAD", **kw):
     return pstop(sid, 23.62, 58.47, cases=800, units=units, **kw)
 
 
@@ -40,7 +40,7 @@ def others(n: int = 5, units: int = 2_400):
 
 
 def fleet(max_trips: int = 2):
-    """An 11-bay truck and two 12-bay trucks (NMWC: 7713-RH and the 10-ton trucks), no payload."""
+    """An 11-bay truck and two 12-bay trucks (as NMWC's 11-bay truck and its 10-ton trucks), no payload."""
     return [btruck("R11", bays=11, cap=1_045, max_trips=max_trips), btruck("R12A", bays=12, max_trips=max_trips),
             btruck("R12B", bays=12, max_trips=max_trips)]
 
@@ -78,7 +78,7 @@ def assert_rule_holds(r, sc) -> None:
 # ---------------------------------------------------------------------------------------------
 
 def test_room_of_a_load_by_its_customers():
-    assert TAWOOS_UNITS == 11_027
+    assert TRUCKLOAD_UNITS == 11_027
     assert load_room_units(12, 90, 100, 1) == 12_000  # one customer: every bay
     assert load_room_units(12, 90, 100, 2) == 10_800  # several customers: the fill
     assert load_room_units(11, 90, 100, 1) == 11_000  # the 11-bay truck is too small for 11,027
@@ -87,7 +87,7 @@ def test_room_of_a_load_by_its_customers():
     assert DispatchConfig().single_customer_fill_pct is None
     with pytest.raises(ValueError):
         DispatchConfig(pallet_fill_pct=95, single_customer_fill_pct=90)
-    r = rq([tawoos()], fleet())
+    r = rq([truckload()], fleet())
     r11, r12, _ = ds._truck_days(r)
     assert (r11.max_pallet_units, r11.solo_pallet_units) == (9_900, 11_000)
     assert (r12.max_pallet_units, r12.solo_pallet_units) == (10_800, 12_000)
@@ -95,33 +95,33 @@ def test_room_of_a_load_by_its_customers():
     assert ds._fits_capacity(r.stops[0], r12) and not ds._fits_capacity(r.stops[0], r11)
     assert not ds._fits_shared(r.stops[0], r12)
     # Without the rule nothing changes: same rooms, no full truck.
-    old = ds._truck_days(rq([tawoos()], fleet(), single=None))
+    old = ds._truck_days(rq([truckload()], fleet(), single=None))
     assert [(td.max_pallet_units, td.solo_pallet_units) for td in old] == [(9_900, 9_900), (10_800, 10_800), (10_800, 10_800)]
 
 
-def test_tawoos_goes_whole_alone_on_a_12_bay_truck_in_every_option():
-    """The production order: 11,027 units, one stop, planned alone on a 12-bay truck (never the 11-bay,
+def test_the_truckload_goes_whole_alone_on_a_12_bay_truck_in_every_option():
+    """The truckload order: 11,027 units, one stop, planned alone on a 12-bay truck (never the 11-bay,
     never with another customer) in every option; every mixed load stays at or under 90%; the check
     agrees, and the load's room is echoed as 12,000."""
-    r = rq([tawoos()] + others(), fleet(), scenarios=ALL)
+    r = rq([truckload()] + others(), fleet(), scenarios=ALL)
     resp = optimize_dispatch(r)
     assert len(resp.scenarios) == 3
     for sc in resp.scenarios:
         assert served_ids(sc) == {s.stop_id for s in r.stops}, (sc.name, unserved_map(sc))
-        ld = load_of(sc, "TAWOOS")
-        assert [st.stop_id for st in ld.stops] == ["TAWOOS"], (sc.name, [st.stop_id for st in ld.stops])
+        ld = load_of(sc, "TRUCKLOAD")
+        assert [st.stop_id for st in ld.stops] == ["TRUCKLOAD"], (sc.name, [st.stop_id for st in ld.stops])
         assert ld.truck_id in ("R12A", "R12B"), (sc.name, ld.truck_id)
         assert (ld.pallet_units, ld.pallet_room_units) == (11_027, 12_000)
         assert ld.utilization_pct == pytest.approx(91.9, abs=0.05)  # against the physical bays
         assert_rule_holds(r, sc)
 
 
-def test_without_the_rule_tawoos_is_larger_than_any_truck():
+def test_without_the_rule_the_truckload_is_larger_than_any_truck():
     """An older web sends no single_customer_fill_pct: exactly the old rule (bays x 90% for every load),
     so the 11,027-unit stop fits no truck, and nothing echoes the rule."""
-    r = rq([tawoos()] + others(2), fleet(), single=None)
+    r = rq([truckload()] + others(2), fleet(), single=None)
     sc = rec(optimize_dispatch(r))
-    assert unserved_map(sc) == {"TAWOOS": "EXCEEDS_ANY_TRUCK_CAPACITY"}
+    assert unserved_map(sc) == {"TRUCKLOAD": "EXCEEDS_ANY_TRUCK_CAPACITY"}
     msg = next(u.reason_message for u in sc.unserved)
     assert "11.0 pallets vs largest truck 10.8 pallets: 12 bays at 90% fill" in msg, msg
     assert sc.single_customer_fill_pct is None
@@ -131,17 +131,17 @@ def test_without_the_rule_tawoos_is_larger_than_any_truck():
 
 def test_an_order_over_every_bay_is_still_larger_than_any_truck():
     """12,100 units do not fit 12 bays even at 100%: refused before the search, naming the one-customer room."""
-    r = rq([tawoos(12_100)] + others(2), fleet())
+    r = rq([truckload(12_100)] + others(2), fleet())
     sc = rec(optimize_dispatch(r))
-    assert unserved_map(sc) == {"TAWOOS": "EXCEEDS_ANY_TRUCK_CAPACITY"}
+    assert unserved_map(sc) == {"TRUCKLOAD": "EXCEEDS_ANY_TRUCK_CAPACITY"}
     msg = next(u.reason_message for u in sc.unserved)
     assert "12.1 pallets vs largest truck 12.0 pallets: 12 bays at 100% fill (one customer)" in msg, msg
 
 
 def test_only_an_11_bay_truck_cannot_take_it():
     """With only the 11-bay truck (11,000 at 100%) the order is larger than any truck."""
-    r = rq([tawoos()], [btruck("R11", bays=11, cap=1_045, max_trips=3)])
-    assert unserved_map(rec(optimize_dispatch(r))) == {"TAWOOS": "EXCEEDS_ANY_TRUCK_CAPACITY"}
+    r = rq([truckload()], [btruck("R11", bays=11, cap=1_045, max_trips=3)])
+    assert unserved_map(rec(optimize_dispatch(r))) == {"TRUCKLOAD": "EXCEEDS_ANY_TRUCK_CAPACITY"}
 
 
 @pytest.mark.parametrize("name", ["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"])
@@ -149,12 +149,12 @@ def test_the_route_search_alone_keeps_a_full_truck_stop_alone(name):
     """The route search's own plan (what the safety net keeps when the re-check runs out of time): the
     Solo dimension and the allowed vehicles hold by themselves - a full-truck stop alone, on a truck whose
     one-customer room holds it; mixed loads at bays x 90%."""
-    r = rq([tawoos()] + others(6), fleet())
+    r = rq([truckload()] + others(6), fleet())
     tds, solvable, drops, mx, _ = _day_of(r)
     sc = ds._solve_scenario(name, r, solvable, tds, mx, 2, list(drops))
     assert sc.status == "OPTIMIZED"
-    ld = load_of(sc, "TAWOOS")
-    assert [st.stop_id for st in ld.stops] == ["TAWOOS"] and ld.truck_id != "R11"
+    ld = load_of(sc, "TRUCKLOAD")
+    assert [st.stop_id for st in ld.stops] == ["TRUCKLOAD"] and ld.truck_id != "R11"
     assert_rule_holds(r, sc)
 
 
@@ -193,30 +193,30 @@ def test_a_day_that_must_leave_stops_out_still_plans(name):
     """Production 14 Oct 2026 (the 15 Oct plan): with the rule on, the route search counts per truck (the
     Pallets per truck and the Solo dimension). While those per-truck demands were unary vectors, OR-Tools
     9.15 refused every unperformed stop, so a day where any stop had to be left out found NO plan at all
-    (ROUTING_FAIL in 0.1 s, every stop INFEASIBLE). One trip per truck, Tawoos and ten small customers of
-    2.4 pallets: the three trucks cannot carry everything (Tawoos alone fills a 12-bay truck, the other
+    (ROUTING_FAIL in 0.1 s, every stop INFEASIBLE). One trip per truck, the truckload and ten small customers of
+    2.4 pallets: the three trucks cannot carry everything (the truckload alone fills a 12-bay truck, the other
     two hold four small ones each), so the route search must leave some out - and still plans the rest."""
-    r = rq([tawoos()] + others(10), fleet(max_trips=1))
+    r = rq([truckload()] + others(10), fleet(max_trips=1))
     tds, solvable, drops, mx, _ = _day_of(r)
     sc = ds._solve_scenario(name, r, solvable, tds, mx, 2, list(drops))
     assert sc.status == "OPTIMIZED", (sc.status, sc.solver_status)
     served = served_ids(sc)
     assert len(served) >= 5 and 0 < len(sc.unserved) <= 7, unserved_map(sc)
     assert "INFEASIBLE" not in set(unserved_map(sc).values()), unserved_map(sc)
-    if "TAWOOS" in served:  # MIN_DISTANCE may leave Tawoos out instead of two small customers
-        ld = load_of(sc, "TAWOOS")
-        assert [st.stop_id for st in ld.stops] == ["TAWOOS"] and ld.truck_id != "R11"
+    if "TRUCKLOAD" in served:  # MIN_DISTANCE may leave the truckload out instead of two small customers
+        ld = load_of(sc, "TRUCKLOAD")
+        assert [st.stop_id for st in ld.stops] == ["TRUCKLOAD"] and ld.truck_id != "R11"
     assert_rule_holds(r, sc)
 
 
 def test_the_whole_engine_plans_a_day_that_must_leave_stops_out():
-    """The same day through optimize_dispatch: a plan (not NO_SOLUTION), Tawoos alone, the rest checked."""
-    r = rq([tawoos()] + others(10), fleet(max_trips=1))
+    """The same day through optimize_dispatch: a plan (not NO_SOLUTION), the truckload alone, the rest checked."""
+    r = rq([truckload()] + others(10), fleet(max_trips=1))
     sc = rec(optimize_dispatch(r))
     assert sc.status == "OPTIMIZED", (sc.status, sc.solver_status)
-    assert "TAWOOS" in served_ids(sc) and sc.unserved, unserved_map(sc)
+    assert "TRUCKLOAD" in served_ids(sc) and sc.unserved, unserved_map(sc)
     assert "INFEASIBLE" not in set(unserved_map(sc).values()), unserved_map(sc)
-    assert [st.stop_id for st in load_of(sc, "TAWOOS").stops] == ["TAWOOS"]
+    assert [st.stop_id for st in load_of(sc, "TRUCKLOAD").stops] == ["TRUCKLOAD"]
     assert_rule_holds(r, sc)
 
 
@@ -234,7 +234,7 @@ def test_two_full_truck_customers_each_get_a_truck_of_their_own():
 def test_a_small_truck_only_customer_may_fill_its_small_truck():
     """Composes with "small truck only" (allowed_truck_ids): 5.6 pallets on a 6-bay truck is over 90%
     (5.4) but within every bay (6.0): one stop, alone on the 6-bay truck, never on a 12-bay one."""
-    s = pstop("CARREFOUR", 23.61, 58.43, cases=300, units=5_600, allowed_truck_ids=["S6"],
+    s = pstop("HYPER", 23.61, 58.43, cases=300, units=5_600, allowed_truck_ids=["S6"],
               allowed_trucks_label="a small truck (at most 6 bays)")
     trucks = [btruck("R12A", bays=12, max_trips=2, fixed_cost=5), btruck("S6", bays=6, cap=570, max_trips=2, fixed_cost=40)]
     r = rq([s] + others(3), trucks)
@@ -242,8 +242,8 @@ def test_a_small_truck_only_customer_may_fill_its_small_truck():
     usable = [td for td in tds if td.usable]
     assert ds.full_truck(s, usable)  # judged on the trucks it may go on: 12 bays at 90% would hold it
     sc = rec(optimize_dispatch(r))
-    ld = load_of(sc, "CARREFOUR")
-    assert (ld.truck_id, [st.stop_id for st in ld.stops], ld.pallet_room_units) == ("S6", ["CARREFOUR"], 6_000)
+    ld = load_of(sc, "HYPER")
+    assert (ld.truck_id, [st.stop_id for st in ld.stops], ld.pallet_room_units) == ("S6", ["HYPER"], 6_000)
     assert_rule_holds(r, sc)
 
 
@@ -252,10 +252,10 @@ def test_a_small_truck_only_customer_may_fill_its_small_truck():
 # ---------------------------------------------------------------------------------------------
 
 def test_repack_never_adds_a_stop_to_a_full_truck_load():
-    r = rq([tawoos()] + others(3), fleet())
+    r = rq([truckload()] + others(3), fleet())
     tds, solvable, _, mx, ctx = _day_of(r)
     day = ctx.day
-    k = next(i for i, s in enumerate(day.stops) if s.stop_id == "TAWOOS")
+    k = next(i for i, s in enumerate(day.stops) if s.stop_id == "TRUCKLOAD")
     small = next(i for i, s in enumerate(day.stops) if s.stop_id == "O0")
     r11, r12 = day.trucks[0], day.trucks[1]
     assert LR.facts(day, (k,)).customers == 1
@@ -267,22 +267,22 @@ def test_repack_never_adds_a_stop_to_a_full_truck_load():
     # Two loads of different customers are judged at 90% each, as before.
     a, b = (i for i, s in enumerate(day.stops) if s.stop_id in ("O1", "O2"))
     assert LR.fits_truck(LR.facts(day, (a, b)), r12) and LR.facts(day, (a, b)).customers == 2
-    # The same truck days without the rule: Tawoos fits nowhere.
-    _, _, _, _, old = _day_of(rq([tawoos(10_700)] + others(3), fleet(), single=None))
+    # The same truck days without the rule: the truckload fits nowhere.
+    _, _, _, _, old = _day_of(rq([truckload(10_700)] + others(3), fleet(), single=None))
     assert getattr(old.day.trucks[1], "solo_pallet_units") == old.day.trucks[1].max_pallet_units == 10_800
 
 
 def test_the_independent_check_measures_each_load_by_its_customers():
-    """feasibility.check_scenario re-derives the room from the request's stops: Tawoos alone is fine at
+    """feasibility.check_scenario re-derives the room from the request's stops: the truckload alone is fine at
     11.0 / 12.0; the same load with another customer is CAPACITY_PALLETS at 10.8; without the rule its
     load alone is over 10.8."""
-    r = rq([tawoos()] + others(2), fleet())
+    r = rq([truckload()] + others(2), fleet())
     sc = rec(optimize_dispatch(r))
     assert sc.feasibility.status == "VERIFIED" and sc.feasibility.checked_at_version == FZ.CHECK_VERSION == 5
     assert FZ.check_scenario(r, sc).violations == []
-    # Move O0 onto Tawoos' load (the totals kept right): two customers, 13.4 pallets > 10.8.
+    # Move O0 onto the truckload's load (the totals kept right): two customers, 13.4 pallets > 10.8.
     bad = sc.model_copy(deep=True)
-    tl = load_of(bad, "TAWOOS")
+    tl = load_of(bad, "TRUCKLOAD")
     ol = load_of(bad, "O0")
     st = next(x for x in ol.stops if x.stop_id == "O0")
     if ol is not tl:
@@ -294,23 +294,23 @@ def test_the_independent_check_measures_each_load_by_its_customers():
         tl.pallet_units += st.pallet_units
     caps = [v for v in FZ.check_scenario(r, bad).violations if v.code == "CAPACITY_PALLETS"]
     assert len(caps) == 1 and caps[0].message.endswith("(12 bays at 90% fill)."), caps
-    # Without the rule (an older web's request), the same plan's Tawoos load alone is over its room.
+    # Without the rule (an older web's request), the truckload's load in the same plan is over its room on its own.
     old = r.model_copy(deep=True)
     old.config.single_customer_fill_pct = None
     v = [v for v in FZ.check_scenario(old, sc).violations if v.code == "CAPACITY_PALLETS"]
     assert len(v) == 1 and "needs 11.0 pallets; the truck takes 10.8 (12 bays at 90% fill)" in v[0].message, v
     # A load of one customer over every bay: named with the one-customer room.
     over = r.model_copy(deep=True)
-    next(s for s in over.stops if s.stop_id == "TAWOOS").demand_pallet_units = 12_100
+    next(s for s in over.stops if s.stop_id == "TRUCKLOAD").demand_pallet_units = 12_100
     over_sc = sc.model_copy(deep=True)
-    load_of(over_sc, "TAWOOS").pallet_units = 12_100
-    next(x for x in load_of(over_sc, "TAWOOS").stops if x.stop_id == "TAWOOS").pallet_units = 12_100
+    load_of(over_sc, "TRUCKLOAD").pallet_units = 12_100
+    next(x for x in load_of(over_sc, "TRUCKLOAD").stops if x.stop_id == "TRUCKLOAD").pallet_units = 12_100
     v = [v for v in FZ.check_scenario(over, over_sc).violations if v.code == "CAPACITY_PALLETS"]
     assert len(v) == 1 and "the truck takes 12.0 (12 bays at 100% fill, one customer)" in v[0].message, v
 
 
 def test_the_second_search_is_skipped_on_a_full_truck_day(_pyvrp_in_process):
-    r = rq([tawoos()] + others(3), fleet(), time_limit_sec=2)
+    r = rq([truckload()] + others(3), fleet(), time_limit_sec=2)
     resp = optimize_dispatch(r)
     assert (resp.search.pyvrp.status, resp.search.pyvrp.reason) == ("SKIPPED", "FULL_TRUCK")
     assert_rule_holds(r, rec(resp))

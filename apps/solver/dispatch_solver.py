@@ -3245,7 +3245,7 @@ def _in_chain(ctx: _StageCtx, plan: LR.Plan, d: int, untimed: set[int],
     """Stop ``d`` (a P1-P3 stop ``plan`` leaves out) into a load of ``plan`` in place of ONE other stop of
     that load, of any priority, and the stops of that load it outranks (as _outranks ranks them together) -
     the stop taken out going on another place where it fits (_swap_riders): a chain of two moves (thirteenth
-    review of the hire branch: in a replay of the real day under load, CAA8362 - 1.95 pallets - fitted no
+    review of the hire branch: in a replay of the real day under load, one P3 order - 1.95 pallets - fitted no
     load even with every P4/P5 order of a truck's day off, and went into an own truck's last load in place
     of its P4 order and a 0.14-pallet P3 order, which fitted on another load). The places: the smallest stop
     taken out first, then the truck, the load and the fewest metres added; each timed exactly with the

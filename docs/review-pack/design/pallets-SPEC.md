@@ -261,7 +261,7 @@ planned with.
   units), ceil(kg / cap kg))` for a bay size; a truck "carries" a size only in the same measure
   (mixed fleets: conservative trips count). A customer that fits one truck is never split.
 - Each visit keeps the full stop time + its own per-case unloading (owner rule, unchanged).
-- Split note: "CUST-B (1,020 cases, 16.3 pallets, 15,355 kg) in 2 parts sized for R1-5187".
+- Split note: "CUST-B (1,020 cases, 16.3 pallets, 15,355 kg) in 2 parts sized for T-01".
 
 ### 5.6 `pyvrp_candidate.py` (second search)
 - Delivery vector = `[cases]` if any case truck + `[pallet units]` if any bay truck + `[kg]` if kg
@@ -507,9 +507,9 @@ What it shows:
   11.4 pallets (needing 6 trucks / 14 loads instead of 5 / 11).
 - No load of any run passed 100% of its bays under the pallet rule; every option was VERIFIED by
   the independent check.
-- Data warning: R4-1808 (3-ton, 6 bays in `trucks.csv`) carried 5.6 pallets = 5,286 kg in the
+- Data warning: T-04 (3-ton, 6 bays in `trucks.csv`) carried 5.6 pallets = 5,286 kg in the
   stress run - 176% of its 3,000 kg payload. Six bays cannot be filled on a 3-ton truck with these
-  products; the owner's "3-ton = 2 bays" (only R0-2415 in `trucks.csv`) needs checking (Q2).
+  products; the owner's "3-ton = 2 bays" (only the bus in `trucks.csv`) needs checking (Q2).
 
 Scratch script and raw results (not in git):
 `C:/Users/abdulr/AppData/Local/Temp/claude/C--Users-abdulr-IVMS-PROFILE/32145790-5637-43a2-90bb-af05f02c9fef/scratchpad/pallets/`
@@ -524,8 +524,8 @@ Part A repeats this with the real code (bays and factors in the DB) as its accep
 1. **JA 0.5 factor.** You said 84 cases per pallet; `products.csv` says JA0.5L = **96** (84 is
    SS0.5L, TN0.5L, STR0.5L and SH0.5L). Which is right? Every SKU's factor should come from the ERP
    pallet factor before the pilot.
-2. **Bays per truck.** You said 3-ton trucks have 2 bays (~190 cases); `trucks.csv` gives R0-2415 2
-   bays but R4-1808, R10-3832 and R11-5587 (also 3-ton) **6 bays / 570 cases**. Please confirm bays
+2. **Bays per truck.** You said 3-ton trucks have 2 bays (~190 cases); `trucks.csv` gives the bus 2
+   bays but T-04, T-10 and T-11 (also 3-ton) **6 bays / 570 cases**. Please confirm bays
    for all 13 trucks and the hired ones.
 3. **Fill on small trucks.** At 95% a 2-bay truck takes at most 1.9 pallets, so two full pallets of
    one product never go on it (and a 12-bay truck at most 11.4). Keep one company-wide fill, or add a
@@ -684,7 +684,7 @@ does not hold it back (17.5 pallets on 12 bays).
 Part B outputs of the pallets RECOMMENDED plan, rendered by the real code (`plan-2026-09-26-pallets.xlsx`,
 `driver-sheets-2026-09-26-pallets.pdf`, `whatsapp-2026-09-26-pallets.txt` in `scratchpad/pallets-a/b`):
 143.9 pallets planned, average bay fill 85.7%, reconciliation 12,482 = 12,482. Per load, e.g.
-R1-5187 L1 "540 cases = 8.9 pallets (7 full pallets + 120 loose cases on mixed pallets)" with
-JA1.5L 325 cases at 56 = "5 pallets + 45 cases"; R1-5187 L3 "599 cases = 10.5 pallets" at 9,997.7 kg
-(weight binds); R3-9413 L1 "1,059 cases = 11.0 pallets (6 full pallets + 428 loose cases ...)". PDF
+T-01 L1 "540 cases = 8.9 pallets (7 full pallets + 120 loose cases on mixed pallets)" with
+JA1.5L 325 cases at 56 = "5 pallets + 45 cases"; T-01 L3 "599 cases = 10.5 pallets" at 9,997.7 kg
+(weight binds); T-03 L1 "1,059 cases = 11.0 pallets (6 full pallets + 428 loose cases ...)". PDF
 header "1 stop · 599 cases · 10.5 / 12 pallets"; WhatsApp "Depart 06:00 · 4 stops · 540 cases · 8.9 pallets".

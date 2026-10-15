@@ -384,7 +384,7 @@ const CHAINS: ChainDef[] = [
   { brand: 'Crescent Hypermarket', type: 'HYPERMARKET', areas: ['Qurum', 'Al Hail'] },
   { brand: 'Sahil Fresh Supermarket', type: 'SUPERMARKET', areas: ['Azaiba', 'Wadi Kabir', 'Mawaleh'] },
   { brand: 'Bustan Supermarket', type: 'SUPERMARKET', areas: ['Ghubrah', 'Muttrah'] },
-  { brand: 'Al Noor Grocery', type: 'GROCERY', areas: ['Ruwi', 'Al Ansab'] },
+  { brand: 'Al Nimr Grocery', type: 'GROCERY', areas: ['Ruwi', 'Al Ansab'] },
 ];
 
 // Single-branch customers per type. With the 15 chain branches: 180 branches,
@@ -423,7 +423,7 @@ const NAME_POOLS: Record<string, { words: string[]; suffixes: string[] }> = {
   GROCERY: {
     words: [
       'Al Salam', 'Al Barakah', 'Al Rahma', 'Al Fajr', 'Al Huda', 'Al Iman', 'Al Khair', 'Al Sabah', 'Al Nakheel', 'Al Wadi',
-      'Al Shams', 'Al Qamar', 'Al Bader', 'Al Hilal', 'Al Manar', 'Al Rawdha', 'Al Safa', 'Al Marwa', 'Al Yusr', 'Al Anwar',
+      'Al Shams', 'Al Qamar', 'Al Bader', 'Al Hilal', 'Al Manar', 'Al Rawdha', 'Al Masa', 'Al Marwa', 'Al Yusr', 'Al Anwar',
       'Al Ghaith', 'Al Sahwa', 'Al Nujoom', 'Al Rayan', 'Al Tawfiq', 'Al Bashayer', 'Al Ikhlas', 'Al Shifa', 'Al Mustaqbal',
     ],
     suffixes: ['Grocery', 'Mini Mart', 'Foodstuff', 'Baqala', 'Shopping Centre'],

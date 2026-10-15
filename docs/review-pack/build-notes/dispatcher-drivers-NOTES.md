@@ -16,7 +16,7 @@ Afterwards, every process was stopped, `routeiq_dv_demo` was dropped, the scratc
   - `dispatcher@wadi-drivers-demo.local`: PLANNER, "Khalid Hamdan".
   - `admin@wadi-drivers-demo.local`: TENANT_ADMIN, "Maryam Al Rawahi".
   - Both have random passwords that were never used. Sessions were minted locally with a copy of `.dev/mint-session.ts` that adds the `authTime` and `pwf` claims.
-- **Depot:** MCT-GHALA (Ghala, 23.57623, 58.37174), open 06:00-20:00.
+- **Depot:** MCT-GHALA (Ghala, 23.58, 58.37), open 06:00-20:00.
 - **Settings:** first departure 07:00, 11 h shift, 2 loads per truck, turnaround 30 min.
 - **Products:**
   - WW-500 (500ml x24): 80 cases per pallet.

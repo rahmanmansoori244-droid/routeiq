@@ -71,7 +71,7 @@ const UNCONFIRMED = {
   customerId: 'c1',
   code: 'C001',
   branchCode: null,
-  name: 'Lulu Bawshar',
+  name: 'Lumo Bawshar',
   customerType: 'HYPERMARKET',
   priority: 3,
   prioritySource: 'DEFAULT',
@@ -82,7 +82,7 @@ const UNCONFIRMED = {
   prefWindowStartMin: null,
   prefWindowEndMin: null,
 };
-const CONFIRMED = { ...UNCONFIRMED, customerId: 'c2', name: 'Carrefour Seeb', priority: 2, prioritySource: 'CUSTOMER', serviceMin: 25, serviceSource: 'CUSTOMER' };
+const CONFIRMED = { ...UNCONFIRMED, customerId: 'c2', name: 'Caravan Seeb', priority: 2, prioritySource: 'CUSTOMER', serviceMin: 25, serviceSource: 'CUSTOMER' };
 
 describe('the Details form helpers (customer-details.ts)', () => {
   it('opens with defaults shown as defaults (blank), and own values as typed values', () => {
@@ -272,7 +272,7 @@ describe('CustomerDialog (audit F07)', () => {
     await t.host.settle();
     expect(t.host.props.open).toBe(true);
     expect(t.saved).toHaveBeenCalledTimes(1);
-    expect(toasts.at(-1)).toBe('success: Details saved for Lulu Bawshar.');
+    expect(toasts.at(-1)).toBe('success: Details saved for Lumo Bawshar.');
     // The other customer's form is untouched.
     expect(t.field('cd-he').props.value).toBe('10:00');
     expect(t.field('cd-svc').props.value).toBe('25');

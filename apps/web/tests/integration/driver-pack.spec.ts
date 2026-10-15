@@ -95,10 +95,10 @@ beforeAll(async () => {
   }
   await prisma.product.create({ data: { tenantId: t.tenantId, code: 'TAN-500-24', name: 'Tanuf 500ml x24', weightPerCaseKg: 12.8 } });
   const customers: [string, string, number, number, string, string | null][] = [
-    ['C1', 'Lulu Bausher', 23.588, 58.41, 'Bausher, Sultan Qaboos St', 'Back gate; forklift until 14:00'],
-    ['C2', 'Al Fair Qurum', 23.6, 58.372, 'Qurum, Al Qurum St', null],
+    ['C1', 'Lumo Bausher', 23.588, 58.41, 'Bausher, Sultan Qaboos St', 'Back gate; forklift until 14:00'],
+    ['C2', 'Al Fawz Qurum', 23.6, 58.372, 'Qurum, Al Qurum St', null],
     ['C3', 'Seeb Trading', 23.62, 58.3, 'Seeb souq', null],
-    ['C4', 'Nesto Mabela', 23.64, 58.25, 'Mabela South', 'Call the manager before arrival'],
+    ['C4', 'Nexus Mabela', 23.64, 58.25, 'Mabela South', 'Call the manager before arrival'],
     ['C5', 'Ruwi Mart', 23.59, 58.54, 'Ruwi High St', null],
     ['C6', 'Amerat Store', 23.52, 58.5, 'Amerat roundabout', null],
   ];
@@ -167,10 +167,10 @@ describe('driver sheets and drivers per load', () => {
 
   it('a new plan puts each truck default driver on its loads', async () => {
     await upload(day, [
-      ['SO-1', 'C1', 'Lulu Bausher', 'TAN-500-24', '60'],
-      ['SO-2', 'C2', 'Al Fair Qurum', 'TAN-500-24', '50'],
+      ['SO-1', 'C1', 'Lumo Bausher', 'TAN-500-24', '60'],
+      ['SO-2', 'C2', 'Al Fawz Qurum', 'TAN-500-24', '50'],
       ['SO-3', 'C3', 'Seeb Trading', 'TAN-500-24', '55'],
-      ['SO-4', 'C4', 'Nesto Mabela', 'TAN-500-24', '45'],
+      ['SO-4', 'C4', 'Nexus Mabela', 'TAN-500-24', '45'],
       ['SO-5', 'C5', 'Ruwi Mart', 'TAN-500-24', '40'],
       ['SO-6', 'C6', 'Amerat Store', 'TAN-500-24', '35'],
     ]);
@@ -302,7 +302,7 @@ describe('driver sheets and drivers per load', () => {
 
   it('a re-plan keeps each trip its own driver: the same trip in the previous version beats the carried trip 1', async () => {
     // One more driver, so each truck has its own and no guess is refused for a clash.
-    const r4 = await fetchWith(t.cookieJar, `${BASE}/api/drivers`, j({ code: 'D4', name: 'Khalid Al Amri', phone: '+968 9777 0104', active: true }));
+    const r4 = await fetchWith(t.cookieJar, `${BASE}/api/drivers`, j({ code: 'D4', name: 'Khalid Al Fulani', phone: '+968 9777 0104', active: true }));
     expect(r4.status).toBe(201);
     drivers.D4 = (await json(r4)).data.id;
 

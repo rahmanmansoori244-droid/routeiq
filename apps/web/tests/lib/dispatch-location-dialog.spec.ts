@@ -461,7 +461,7 @@ describe("LocationDialog: the owner's location rule (audit PR A5)", () => {
   it('a reading that could not be read also needs a hand pin', async () => {
     const t = setup();
     t.openFor(B_PINNED);
-    t.type('https://www.google.com/maps/place/Lulu+Hypermarket');
+    t.type('https://www.google.com/maps/place/Lumo+Hypermarket');
     t.read();
     calls[0].resolve(ok({ ok: false, needsPin: true, warnings: [], error: 'This Google Maps link does not contain coordinates (it only names a place). Drop a pin on the map instead.' }));
     await t.host.settle();

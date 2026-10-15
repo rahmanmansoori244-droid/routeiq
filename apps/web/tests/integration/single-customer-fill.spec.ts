@@ -1,7 +1,7 @@
 /**
  * ONE CUSTOMER ON A TRUCK may use every bay (owner rule 13 Oct 2026: "keep 90% for trucks with several
  * customers, but let a truck that carries only one customer be filled to 100%") - end-to-end against the
- * running web app + solver, with the production order that was split on 13 Oct:
+ * running web app + solver, with a large single-customer order of the size that was split on 13 Oct:
  *
  *  - Pallet fill 90%; the order is 300 cases of SS250ML (143 per pallet) + 500 of JA1.5L (56 per pallet) =
  *    11,027 units (11.03 pallets), more than 12 bays x 90% (10.8): the request sends ONE stop of 11,027
@@ -21,7 +21,7 @@ let t: TenantHandle;
 let depotId = '';
 let day = '';
 let runV1 = '';
-let tawoosId = '';
+let truckloadId = '';
 
 function isoPlus(n: number) {
   const d = new Date(Date.now() + 4 * 3600_000); // Muscat
@@ -70,16 +70,16 @@ beforeAll(async () => {
     data: { timezone: 'Asia/Muscat', planningCutoffMin: 18 * 60, shiftStartMin: 360, driverShiftMaxMinutes: 720, distanceProvider: 'HAVERSINE', osrmUrl: null, palletFillPct: 90 },
   });
   depotId = (await prisma.depot.create({ data: { tenantId: t.tenantId, code: 'MCT', name: 'Muscat depot', lat: 23.568, lng: 58.392, openMin: 300, closeMin: 1380 } })).id;
-  // NMWC's sizes: a 10-ton with 12 bays and 7713-RH with 11, no payload (weight is not a limit).
+  // NMWC's sizes: a 10-ton with 12 bays and an 11-bay truck, no payload (weight is not a limit).
   await prisma.truck.create({ data: { tenantId: t.tenantId, depotId, code: 'T12', capacityCases: 1140, capacityWeightKg: 0, fixedCostPerDay: 20, costPerKm: 0.1, bays: 12, maxTripsPerDay: 2 } });
   await prisma.truck.create({ data: { tenantId: t.tenantId, depotId, code: 'T11', capacityCases: 1045, capacityWeightKg: 0, fixedCostPerDay: 20, costPerKm: 0.1, bays: 11, maxTripsPerDay: 2 } });
   await prisma.product.create({ data: { tenantId: t.tenantId, code: 'SS250ML', name: 'Small 250ml', weightPerCaseKg: 6, casesPerPallet: 143 } });
   await prisma.product.create({ data: { tenantId: t.tenantId, code: 'JA1.5L', name: 'Water 1.5L', weightPerCaseKg: 9.4, casesPerPallet: 56 } });
-  for (const [code, lat, lng] of [['TAWOOS', 23.62, 58.47], ['SHOP', 23.588, 58.41], ['HYPER', 23.6, 58.372]] as const) {
+  for (const [code, lat, lng] of [['TRUCKLOAD', 23.62, 58.47], ['SHOP', 23.588, 58.41], ['HYPER', 23.6, 58.372]] as const) {
     const c = await prisma.customer.create({
       data: { tenantId: t.tenantId, code, name: code, branchKey: '__MAIN__', lat, lng, geocodeConfidence: 'HIGH', locationVerified: true, priority: 2, priorityConfirmed: true },
     });
-    if (code === 'TAWOOS') tawoosId = c.id;
+    if (code === 'TRUCKLOAD') truckloadId = c.id;
   }
 });
 
@@ -91,8 +91,8 @@ afterAll(async () => {
 describe('one customer on a truck may use every bay', () => {
   it('the 11.03-pallet order is one stop, planned alone on the 12-bay truck; the rule is sent and echoed; the check is VERIFIED', async () => {
     await addOrders(day, [
-      ['SO-T', 'TAWOOS', 'SS250ML', '300'],
-      ['SO-T', 'TAWOOS', 'JA1.5L', '500'],
+      ['SO-T', 'TRUCKLOAD', 'SS250ML', '300'],
+      ['SO-T', 'TRUCKLOAD', 'JA1.5L', '500'],
       ['SO-S', 'SHOP', 'SS250ML', '200'], // 1.4 pallets
       ['SO-H', 'HYPER', 'JA1.5L', '150'], // 2.7 pallets
     ]);
@@ -105,22 +105,22 @@ describe('one customer on a truck may use every bay', () => {
     const req = job.requestJson as any;
     expect(req.config.pallet_fill_pct).toBe(90);
     expect(req.config.single_customer_fill_pct).toBe(100);
-    const tawoosStops = (req.stops as any[]).filter((s) => s.customer_id === tawoosId);
-    expect(tawoosStops.map((s) => [s.demand_cases, s.demand_pallet_units])).toEqual([[800, 11_027]]);
+    const truckloadStops = (req.stops as any[]).filter((s) => s.customer_id === truckloadId);
+    expect(truckloadStops.map((s) => [s.demand_cases, s.demand_pallet_units])).toEqual([[800, 11_027]]);
 
     const run = await prisma.runPlan.findUniqueOrThrow({ where: { id: runV1 } });
     const sc = await prisma.scenarioResult.findUniqueOrThrow({ where: { id: run.chosenScenarioId! } });
     const d = sc.detailsJson as any;
     expect(d.single_customer_fill_pct).toBe(100);
     expect(d.feasibility.status).toBe('VERIFIED');
-    expect((d.response_warnings as string[]).join(' ')).toMatch(/One customer fills a truck: TAWOOS 11\.0 pallets, alone on a 12-bay truck \(every bay; trucks with several customers keep 90%\)/);
+    expect((d.response_warnings as string[]).join(' ')).toMatch(/One customer fills a truck: TRUCKLOAD 11\.0 pallets, alone on a 12-bay truck \(every bay; trucks with several customers keep 90%\)/);
     expect((d.response_warnings as string[]).join(' ')).not.toMatch(/did not apply the one-customer rule/);
 
     const p = await plan();
     expect(p.reconciliation.ok).toBe(true);
-    const load = p.loads.find((l: any) => l.stops.some((s: any) => s.customerCode === 'TAWOOS'));
+    const load = p.loads.find((l: any) => l.stops.some((s: any) => s.customerCode === 'TRUCKLOAD'));
     expect(load.truckCode).toBe('T12');
-    expect(load.stops.map((s: any) => s.customerCode)).toEqual(['TAWOOS']);
+    expect(load.stops.map((s: any) => s.customerCode)).toEqual(['TRUCKLOAD']);
     expect(load).toMatchObject({ palletUnits: 11_027, palletRoomUnits: 12_000, palletFillPct: 100, palletOneCustomer: true });
     for (const l of p.loads.filter((x: any) => x.id !== load.id)) {
       if (new Set(l.stops.map((s: any) => s.customerCode)).size > 1) expect(l.palletUnits).toBeLessThanOrEqual(l.bays * 900);
@@ -129,7 +129,7 @@ describe('one customer on a truck may use every bay', () => {
 
   it('LOCK of the full truck goes through: the web check measures a load of one customer by every bay', async () => {
     const p = await plan();
-    const load = p.loads.find((l: any) => l.stops.some((s: any) => s.customerCode === 'TAWOOS'));
+    const load = p.loads.find((l: any) => l.stops.some((s: any) => s.customerCode === 'TRUCKLOAD'));
     // Loads of a truck are locked in order (Load 1 first): lock the truck's earlier trips, then the full truck.
     const earlier = p.loads.filter((l: any) => l.truckCode === load.truckCode && l.loadNo < load.loadNo).sort((a: any, b: any) => a.loadNo - b.loadNo);
     for (const l of earlier) {

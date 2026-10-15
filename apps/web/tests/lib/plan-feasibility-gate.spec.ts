@@ -38,12 +38,12 @@ const truckSnap = (code: string) => ({
   v: 1, code, capacityCases: 100, capacityWeightKg: 1000, fixedCostPerDay: 20, tripCost: 0, costPerKm: 0.1, kmPerLitre: null,
   availableFromMin: null, availableToMin: null, maxTripsPerDay: null, rules: RULES, source: 'PLAN', capturedAt: '2026-09-26T12:00:00Z',
 });
-const stopSnap = { v: 1, customerId: 'c1', code: 'C1', branchCode: null, name: 'Lulu Bausher', customerType: null, lat: 23.6, lng: 58.4,
+const stopSnap = { v: 1, customerId: 'c1', code: 'C1', branchCode: null, name: 'Lumo Bausher', customerType: null, lat: 23.6, lng: 58.4,
   address: 'Old address', accessNotes: 'Back gate', hardStartMin: 360, hardEndMin: 840, prefStartMin: null, prefEndMin: null, serviceMin: 20, priority: 2,
   source: 'PLAN', capturedAt: '2026-09-26T12:00:00Z' };
 
 const customer = (over: Record<string, unknown> = {}) => ({
-  id: 'c1', tenantId: T, code: 'C1', branchCode: null, branchKey: '__MAIN__', name: 'Lulu Bausher', customerType: null, address: 'Old address',
+  id: 'c1', tenantId: T, code: 'C1', branchCode: null, branchKey: '__MAIN__', name: 'Lumo Bausher', customerType: null, address: 'Old address',
   accessNotes: 'Back gate', lat: 23.6, lng: 58.4, priority: 2, priorityConfirmed: true, avgServiceTimeMin: 20, serviceTimeConfirmed: true,
   hardWindowStartMin: 360, hardWindowEndMin: 840, prefWindowStartMin: null, prefWindowEndMin: null, active: true, locationVerified: true, createdFromUpload: false,
   ...over,
@@ -267,7 +267,7 @@ describe('snapshots (F08)', () => {
     };
     row('scenarioResult', 'sc1').detailsJson = details({ inputs, loads: [planned], scope: { orderIds: ['O1'], frozenOrderIds: [], orderPriority: {}, frozenLoadIds: [], frozenLoadOrderIds: [] } });
     // The customer and the truck changed after the optimizer was called.
-    tables.customer = [customer({ lat: 23.7, lng: 58.5, name: 'Lulu Bausher (renamed)' })];
+    tables.customer = [customer({ lat: 23.7, lng: 58.5, name: 'Lumo Bausher (renamed)' })];
     tables.truck[0].capacityCases = 80;
     await chooseScenario(T, 'P', 'sc1', 'u1');
     const l = tables.planLoad[0];
@@ -277,7 +277,7 @@ describe('snapshots (F08)', () => {
     expect(l.truckSnapshotJson.rules).toMatchObject({ reloadMin: 20, loadingMinPerCase: 0.1, maxTrips: 2, shiftMaxMin: 600 });
     const a = tables.routeAssignment[0];
     expect(a.stopSnapshotJson).toMatchObject({ lat: 23.61, lng: 58.41, hardStartMin: 420, hardEndMin: 720, serviceMin: 25, priority: 1, source: 'PLAN' });
-    expect(a.stopSnapshotJson.name).toBe('Lulu Bausher (renamed)'); // descriptive fields: from the customer when applied
+    expect(a.stopSnapshotJson.name).toBe('Lumo Bausher (renamed)'); // descriptive fields: from the customer when applied
     expect(readFeasibility(row('runPlan', 'P').feasibilityJson)?.ok).toBe(true);
   });
 
@@ -499,7 +499,7 @@ describe('an order left unserved for its customer data, fixed since (review of 9
   /** O4 of customer c2, left out by the option in use for `reasonCode`; c2 as it is now. */
   function seedLeftOut(reasonCode: string, now: Record<string, unknown>) {
     seed();
-    const c2 = customer({ id: 'c2', code: 'C2', name: 'Al Fair', ...now });
+    const c2 = customer({ id: 'c2', code: 'C2', name: 'Al Fawz', ...now });
     tables.customer.push(c2);
     tables.order.push({ ...tables.order[0], id: 'O4', customerId: 'c2', customer: c2, lines: lines('O4'), status: 'UNSERVED' });
     tables.unservedOrder = [{ id: 'U4', scenarioId: 'sc1', orderId: 'O4', reasonCode, reasonMessage: 'Location missing - add a Google Maps link, coordinates or a map pin.', portionCases: null, portionWeightKg: null, portionLinesJson: null }];
