@@ -41,9 +41,9 @@ def assert_allowed(r, sc) -> None:
 
 
 def day(limited_units: int = 1_500, **kw):
-    """Six stops for anyone and one limited stop (CARREFOUR: the 6-bay trucks only)."""
+    """Six stops for anyone and one limited stop (HYPER: the 6-bay trucks only)."""
     stops = [pstop(f"S{i}", 23.58 + 0.01 * i, 58.40 + 0.01 * i, cases=40, units=1_000) for i in range(6)]
-    stops.append(pstop("CARREFOUR", 23.62, 58.45, cases=60, units=limited_units, allowed_truck_ids=["SMALL"],
+    stops.append(pstop("HYPER", 23.62, 58.45, cases=60, units=limited_units, allowed_truck_ids=["SMALL"],
                        allowed_trucks_label=SMALL, **kw))
     return stops
 
@@ -54,13 +54,13 @@ def day(limited_units: int = 1_500, **kw):
 
 def test_a_limited_stop_is_on_an_allowed_truck_in_every_option():
     """The 12-bay truck is far cheaper and has room for the whole day: without the limit nothing stops it
-    from taking CARREFOUR; with it, every option puts CARREFOUR on the 6-bay truck, and says so (echo)."""
+    from taking HYPER; with it, every option puts HYPER on the 6-bay truck, and says so (echo)."""
     trucks = [btruck("BIG", bays=12, max_trips=2, fixed_cost=5), btruck("SMALL", bays=6, cap=570, max_trips=2, fixed_cost=40)]
     r = req(day(), trucks, scenarios=ALL, time_limit_sec=3)
     resp = optimize_dispatch(r)
     assert len(resp.scenarios) == 3
     for sc in resp.scenarios:
-        assert where(sc).get("CARREFOUR") == "SMALL", (sc.name, where(sc))
+        assert where(sc).get("HYPER") == "SMALL", (sc.name, where(sc))
         assert sc.allowed_trucks_rule is True
         assert_allowed(r, sc)
     # The same day without the limit: no echo (a request without the field is planned as before).
@@ -68,12 +68,12 @@ def test_a_limited_stop_is_on_an_allowed_truck_in_every_option():
     sc = rec(optimize_dispatch(free))
     assert sc.allowed_trucks_rule is None
     assert served_ids(sc) == {s.stop_id for s in free.stops}
-    assert where(sc)["CARREFOUR"] == "BIG"  # the cheap big truck carries the whole day
+    assert where(sc)["HYPER"] == "BIG"  # the cheap big truck carries the whole day
 
 
 def _raw_days():
     """Two days where, without the limit, a cheap big truck would take the limited stops: a bay day
-    (CARREFOUR on the 6-bay truck only) and a case-only day (every third stop on T2/T3 only)."""
+    (HYPER on the 6-bay truck only) and a case-only day (every third stop on T2/T3 only)."""
     bays = req(day(), [btruck("BIG", bays=12, max_trips=2, fixed_cost=5), btruck("SMALL", bays=6, cap=570, max_trips=2, fixed_cost=40)])
     cases = req([stop(f"C{i}", 23.56 + (i % 4) * 0.015, 58.36 + (i // 4) * 0.03, cases=30 + 5 * i,
                       **({"allowed_truck_ids": ["T2", "T3"], "allowed_trucks_label": SMALL} if i % 3 == 0 else {}))
@@ -164,7 +164,7 @@ def test_continuity_never_keeps_a_limited_stop_on_a_truck_it_may_not_use():
     stops = day(previous_truck_id="BIG")
     r = req(stops, [btruck("BIG", bays=12, max_trips=2), btruck("SMALL", bays=6, cap=570, max_trips=2)], change_penalty_per_stop=50)
     sc = rec(optimize_dispatch(r))
-    assert where(sc)["CARREFOUR"] == "SMALL"
+    assert where(sc)["HYPER"] == "SMALL"
     assert_allowed(r, sc)
 
 
@@ -176,9 +176,9 @@ def test_no_allowed_truck_today_leaves_it_out_with_the_reason():
     r = req(day(), [btruck("BIG", bays=12, max_trips=2)])
     sc = rec(optimize_dispatch(r))
     u = {x.stop_id: x for x in sc.unserved}
-    assert u["CARREFOUR"].reason_code == "NO_ALLOWED_TRUCK"
-    assert u["CARREFOUR"].reason_message.startswith(f"Needs {SMALL}: no such truck can take a new load today"), u["CARREFOUR"].reason_message
-    assert "CARREFOUR" not in where(sc)
+    assert u["HYPER"].reason_code == "NO_ALLOWED_TRUCK"
+    assert u["HYPER"].reason_message.startswith(f"Needs {SMALL}: no such truck can take a new load today"), u["HYPER"].reason_message
+    assert "HYPER" not in where(sc)
     assert served_ids(sc) == {f"S{i}" for i in range(6)}  # the others are planned
     assert_reconciled(r, sc)
     # An empty list: no truck may take it.
@@ -192,7 +192,7 @@ def test_an_allowed_truck_that_cannot_take_a_new_load_counts_as_none():
 
     small = btruck("SMALL", bays=6, cap=570, max_trips=1, frozen_trips=[FrozenTrip(load_no=1, depart_min=400, return_min=600, cases=50)])
     r = req(day(), [btruck("BIG", bays=12, max_trips=2), small])
-    assert unserved_map(rec(optimize_dispatch(r)))["CARREFOUR"] == "NO_ALLOWED_TRUCK"
+    assert unserved_map(rec(optimize_dispatch(r)))["HYPER"] == "NO_ALLOWED_TRUCK"
 
 
 def test_an_order_larger_than_every_allowed_truck_names_the_largest_one():
@@ -200,7 +200,7 @@ def test_an_order_larger_than_every_allowed_truck_names_the_largest_one():
     would carry it, so it is not "larger than any truck"."""
     r = req(day(limited_units=7_000), [btruck("BIG", bays=12, max_trips=2), btruck("SMALL", bays=6, cap=570, max_trips=2)])
     sc = rec(optimize_dispatch(r))
-    u = {x.stop_id: x for x in sc.unserved}["CARREFOUR"]
+    u = {x.stop_id: x for x in sc.unserved}["HYPER"]
     assert u.reason_code == "NO_ALLOWED_TRUCK"
     assert u.reason_message == (f"Needs {SMALL}: the order is larger than the largest such truck (7.0 pallets vs largest truck "
                                 "6.0 pallets: 6 bays at 100% fill); the other trucks may not deliver here. Turn on split "
