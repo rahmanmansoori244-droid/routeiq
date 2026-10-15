@@ -71,7 +71,7 @@ This mirrors `apps/web/lib/dispatch/plan-service.ts buildDispatchRequest` (and `
   windows, and no margin or revenue. `late=false`, and there is no `previous_truck_id` (this is version 1).
 * **Split deliveries.** Three customers are bigger than any truck (10 t payload). They go through a
   line-for-line port of `choosePartCapacity` + `splitIntoParts`, with JS rounding. Parts are sized for
-  R1-5187 (1140 cases / 10,000 kg). Stop ids are `<customer>#k`, order ids `ord-<customer>~k`, and part
+  a 10-ton truck (1140 cases / 10,000 kg). Stop ids are `<customer>#k`, order ids `ord-<customer>~k`, and part
   service = max(5, round(service × part cases / total cases)). The result:
   CUST-A → 935 + 165 cases, CUST-B → 703 + 317, CUST-C → 599 + 73.
 * **Trucks.** The 13 PRESELL trucks in `trucks.csv`, sorted by code (the local Postgres uses locale C). The costs follow run-test.mjs:

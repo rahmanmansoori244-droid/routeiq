@@ -17,13 +17,13 @@ The previous run (6 Oct, head `6b1e2ce`) is summarised at the end. Its evidence 
 - **Company:** "Ghala Water Co (hire demo)", slug `ghala-hire-demo`, made with the app's own sign-up (local only).
   - The admin came from sign-up; the dispatcher was a PLANNER added on the Users endpoint.
   - Sessions were minted locally (a copy of `.dev/mint-session.ts` with the `authTime` + `pwf` claims). The random passwords were never used or stored.
-- **Depot:** MCT-GHALA at 23.57623, 58.37174, open 06:00-20:00.
+- **Depot:** MCT-GHALA at 23.58, 58.37, open 06:00-20:00.
 - **Settings:**
   - First departure 07:00, latest return 18:00 (shift 11 h), driver break 60 min starting 12:00-14:00.
   - 3 loads per truck, turnaround 30 min, Pallet fill 100 %.
   - Driver 2.5 OMR/h, overtime 4 OMR/h after 9 h, fuel 0.26 OMR/l.
   - **Daily driver day rate 10 OMR** (the default; checked on Settings).
-- **Fleet (too small on purpose):** three 10-ton trucks R1-5187, R2-4954 and R3-9413.
+- **Fleet (too small on purpose):** three 10-ton trucks T-01, T-02 and T-03.
   - Each has 12 bays and payload 0 (no weight limit), 35 OMR/day, 0.10 OMR/km, 3.5 km/l and 3 OMR per load.
   - Their regular drivers are Ahmed Said, Rashid Ali and Yousuf Khalfan.
 - **Trucks to hire,** entered through the Trucks page form as the company admin:
@@ -83,10 +83,10 @@ Toast: "The hired trucks HIRE-10T-1110-1 were added for 11 Oct; re-planning the 
 | a | The suggestion is the cheapest set that delivers every P1-P3 order | **PASS** | The box says 1 x 10-ton (50 OMR). The stored what-if: 5 units offered; the search used 2 x 10-ton; the reduction (1 solve) kept 1, `complete: true`. The stored request was replayed on the same solver with fewer or cheaper rentals: see the table below. Cheaper sets are {} (0) and {1 x 3-ton} (30); both leave P1-P3 orders out. 2 x 3-ton costs 60, more than 50. |
 | b | The one-truck-fewer line is exact or absent | **PASS (absent)** | `hire_check.one_fewer = null`; the box has no such line. With a one-truck set, one fewer is the fleet alone, which the headline already describes. |
 | c | Use this plan: new version with the hired truck, every P1-P3 order, own trucks first | **PASS** | Plan v2 (REOPTIMIZE, Quick; the re-plan path, because the check's plan left out a 3-case P4 order that v1 delivers). 4 trucks, 12 loads, 70/80 orders, 11,436/12,482 cases, 132.6 pallets. **P1 6/6, P2 20/20, P3 38/38**, P4 6/10, P5 0/6. All three own trucks run 3 loads each (the maximum); only one truck is hired (HIRE-10T-1110-1, 3 loads, "hired · 1 day"). Every return is by 17:58, timing VERIFIED, no hard-window miss. The dropped P4 order (CUST-D, 3 cases) is delivered in v2. |
-| d | + Add daily driver on the hired truck fills all its loads | **PASS** | The dialog says "...the driver also goes on Loads 2 and 3 (its other loads still to plan) and becomes its default driver", button "Add and put on Loads 1, 2 and 3". Toast: "21458AR Loads 1, 2 and 3: daily driver Khalid Juma". All three loads show "Khalid Juma (daily)" (L1 "picked by hand", L2/L3 with Keep). The truck's default driver is Khalid Juma. Audit: LOAD_DRIVER_SET x 3 (2 with `via: whole rental day`) and HIRED_TRUCK_CHANGED (`via: daily driver quick add`). |
+| d | + Add daily driver on the hired truck fills all its loads | **PASS** | The dialog says "...the driver also goes on Loads 2 and 3 (its other loads still to plan) and becomes its default driver", button "Add and put on Loads 1, 2 and 3". Toast: "12345AB Loads 1, 2 and 3: daily driver Khalid Juma". All three loads show "Khalid Juma (daily)" (L1 "picked by hand", L2/L3 with Keep). The truck's default driver is Khalid Juma. Audit: LOAD_DRIVER_SET x 3 (2 with `via: whole rental day`) and HIRED_TRUCK_CHANGED (`via: daily driver quick add`). |
 | e | Fuel KPI: own trucks' fuel with a fuel-included note | **PASS** | v2 shows "FUEL (L · OMR) 168.5 · 43.8 - rented trucks: fuel included". 168.5 l is the sum of the 9 own-truck loads (23.2+12.3+25.1+15.9+9.4+21.1+20.4+19.3+21.8); x 0.26 = 43.8. The hired loads show fuel "incl.". |
-| f | Trucks page "by bays" and readable dates | **PASS** | 21458AR: "hired", "1 day: 11 Oct", "Hired 10-ton for 11 Oct (hire suggestion)", Capacity (cs) "by bays", 12 bays, OMR 50.00, OMR 0.00/km, default driver Khalid Juma. The confirm and toast say "11 Oct". |
-| g | Next date: the hired truck is not planned | **PASS** | 12 Oct: "3 trucks (36 bays per load round)"; plan v1 has only R1-5187, R2-4954 and R3-9413 (3 loads each). The box again suggests 1 x 10-ton (rentals do not carry over). |
+| f | Trucks page "by bays" and readable dates | **PASS** | 12345AB: "hired", "1 day: 11 Oct", "Hired 10-ton for 11 Oct (hire suggestion)", Capacity (cs) "by bays", 12 bays, OMR 50.00, OMR 0.00/km, default driver Khalid Juma. The confirm and toast say "11 Oct". |
+| g | Next date: the hired truck is not planned | **PASS** | 12 Oct: "3 trucks (36 bays per load round)"; plan v1 has only T-01, T-02 and T-03 (3 loads each). The box again suggests 1 x 10-ton (rentals do not carry over). |
 | h | A day with only P4/P5 left out: renting not suggested | **PASS** | 13 Oct: 31/35; P1 5/5, P2 14/14, P4 10/10, P5 2/6. The box only says "Left out: 4 orders, all P4/P5 - renting is not suggested for them." There is no button, and no HireSuggestion row was made. The 4 unserved orders are P5 (459 cases). |
 | i | A day the fleet can carry: no box | **PASS** | 14 Oct: 27/27 on 2 trucks and 5 loads, "Every order is planned". No box and no HireSuggestion row. |
 
@@ -127,13 +127,13 @@ A 3-ton can carry at most 6 bays x 3 loads = 18 pallets a day, against the 23.5 
 | 03c-settings-pallet-fill | Settings, timing: Pallet fill 100 %, max 3 loads per truck. |
 | 04a-plan-v2-hired-trucks-all-p1-p3-served | Plan v2 (REOPTIMIZE): 70/80, 4 trucks · 12 loads, **P1-P3 100 %**, Fuel "168.5 · 43.8 rented trucks: fuel included", 407.0 OMR. The box says only "Left out: 10 orders, all P4/P5 - renting is not suggested for them." |
 | 04b-plan-v2-loads-hire-trucks | Loads: HIRE-10T-1110-1 L1-L3 "hired · 1 day", Plate, No driver, fuel "incl.", cost 63.0 / 3.0 / 3.0. Below them, the own trucks' 9 loads. |
-| 05a-plate-set-on-hired-truck | Plate set to 21458AR. Toast "HIRE-10T-1110-1 is now 21458AR. Print the driver sheets again if they were printed." |
-| 05b-add-daily-driver-dialog | + Add daily driver on 21458AR L1: the dialog names Loads 2 and 3 and the default driver; button "Add and put on Loads 1, 2 and 3". |
-| 05c-plate-and-daily-driver-on-hired-truck | Toast "21458AR Loads 1, 2 and 3: daily driver Khalid Juma"; all three loads have Khalid Juma (daily). |
-| 06-driver-sheet-pdf-hired-truck | Driver sheet PDF: "Truck 21458AR — Trip 1 of 3", HIRED TRUCK, driver Khalid Juma +968 9000 0099, 4 stops, 816 cases, 11.8/12 pallets. |
+| 05a-plate-set-on-hired-truck | Plate set to 12345AB. Toast "HIRE-10T-1110-1 is now 12345AB. Print the driver sheets again if they were printed." |
+| 05b-add-daily-driver-dialog | + Add daily driver on 12345AB L1: the dialog names Loads 2 and 3 and the default driver; button "Add and put on Loads 1, 2 and 3". |
+| 05c-plate-and-daily-driver-on-hired-truck | Toast "12345AB Loads 1, 2 and 3: daily driver Khalid Juma"; all three loads have Khalid Juma (daily). |
+| 06-driver-sheet-pdf-hired-truck | Driver sheet PDF: "Truck 12345AB — Trip 1 of 3", HIRED TRUCK, driver Khalid Juma +968 9000 0099, 4 stops, 816 cases, 11.8/12 pallets. |
 | 07a-next-day-12-oct-fleet-3-trucks | 12 Oct: "3 trucks (36 bays per load round)". |
 | 07b-next-day-12-oct-only-own-trucks-planned | 12 Oct plan v1: only the own trucks are planned. |
-| 07c-trucks-page-hired-trucks-one-day-only | Trucks page: 21458AR "hired", "1 day: 11 Oct", "by bays", default driver Khalid Juma. |
+| 07c-trucks-page-hired-trucks-one-day-only | Trucks page: 12345AB "hired", "1 day: 11 Oct", "by bays", default driver Khalid Juma. |
 | 08a-2026-10-13-plan / 08b-...-unserved | 13 Oct: the P4/P5-only box; the 4 P5 orders left out. |
 | 09a-2026-10-14-plan / 09b-...-unserved | 14 Oct: 27/27, no box, "Every order is planned". |
 
@@ -148,7 +148,7 @@ A 3-ton can carry at most 6 bays x 3 loads = 18 pallets a day, against the 23.5 
    - Here the re-plan was better (P1-P3 64/64, P4 6/10, the 3-case order delivered). Nothing guarantees that, though: a fresh search could leave a P1-P3 order out that the checked plan delivered.
    - Under the owner's rule (P4/P5 never justify a truck; they ride along), a P4/P5-only difference could take the checked plan instead, or say so.
    - Also, the box's "this plan still delivers 2 of them" describes the check's plan, not the plan actually applied (v2 delivered 4 of the 14).
-3. **Observation, not a hire defect:** in v2, own truck R1-5187 L2 carries 3.0 of 12 pallets (250 cases, 1 stop, 11:20-12:24). Meanwhile 10 P4/P5 orders (1,046 cases) stay out with "could not be placed by the optimizer within its time limit". This is a Quick search; the timing is VERIFIED.
+3. **Observation, not a hire defect:** in v2, own truck T-01 L2 carries 3.0 of 12 pallets (250 cases, 1 stop, 11:20-12:24). Meanwhile 10 P4/P5 orders (1,046 cases) stay out with "could not be placed by the optimizer within its time limit". This is a Quick search; the timing is VERIFIED.
 
 The 6 Oct bugs, re-checked:
 - Bug 1 (2 x 10-ton where 1 suffices): **fixed**, 1 x 10-ton, proven cheapest.
@@ -162,7 +162,7 @@ Audit rows seen:
 - HIRE_CHECK_STARTED / HIRE_CHECK_FINISHED (PLANNER, AFTER_PLAN, `reduction: {used 1, first 2, solves 1, complete true}`), for 11 and 12 Oct.
 - HIRED_TRUCKS_ADDED (HIRE-10T-1110-1).
 - HIRE_SUGGESTION_USED (`how: REPLAN`, why "its plan leaves out orders your plan in use delivers", hireCost 50).
-- HIRED_TRUCK_CHANGED (plate 21458AR; then `via: daily driver quick add`, the default driver).
+- HIRED_TRUCK_CHANGED (plate 12345AB; then `via: daily driver quick add`, the default driver).
 - CASUAL_DRIVER_ADDED (phone "***099").
 - LOAD_DRIVER_SET x 3 (2 `via: whole rental day`).
 - DRIVER_LINK_ISSUED.
@@ -197,7 +197,7 @@ Branch `hire-suggestion`, worktree `C:/Users/abdulr/routeiq-wt-hire`, **head `7c
   - 11 Oct: 80 orders, 12,482 cases; 12 Oct: the same.
   - 13 Oct: 35 orders, 9,694 cases; 14 Oct: 27 orders, 4,868 cases.
 - Shots: headless Chrome over DevTools, 1366x900, in `shots-final/` (each looked at once). Evidence: `evidence-final/`.
-- One extra step this time, for check (c): two own loads were **locked** (R1-5187 L1, R3-9413 L1) on 11 Oct and on 12 Oct.
+- One extra step this time, for check (c): two own loads were **locked** (T-01 L1, T-03 L1) on 11 Oct and on 12 Oct.
 - Afterwards: web, solver and Chrome were stopped (ports 3020/8020 free), `routeiq_hs_demo2` was dropped, and the minted cookies and the Chrome profile were deleted.
 
 ## The exact box text
@@ -216,7 +216,7 @@ Branch `hire-suggestion`, worktree `C:/Users/abdulr/routeiq-wt-hire`, **head `7c
 
 On 7f46e3f the text said "1 order (3 cases, 0.0 pallets)". It now says "1 P4 order (3 cases)".
 
-**11 Oct, plan v1 after locking R1-5187 L1 and R3-9413 L1, then Check hire options.** It was run twice, with the same text both times (see bug 1):
+**11 Oct, plan v1 after locking T-01 L1 and T-03 L1, then Check hire options.** It was run twice, with the same text both times (see bug 1):
 
 > 25 orders (2,123 cases, 23.5 pallets) cannot be delivered with your fleet. To deliver them, hire 2 x 3-ton (6 bays): extra about 60 OMR. Still left out: none.
 >
@@ -244,11 +244,11 @@ The other days:
 
 | # | Check | Result | Evidence |
 |---|---|---|---|
-| a | The suggestion is the cheapest set that delivers every P1-P3 order | **PASS on the day as optimized; FAIL with two loads locked (bug 1)** | 11 Oct v1 (and 12 Oct v1): 1 x 10-ton, 50 OMR. Reduction: `first` 10T+10T (11 Oct) / 10T+3T (12 Oct), `used` 1 x 10T, 1 solve, `complete: true`. Replays below: own trucks only and 1 x 3-ton both leave P1-P3 orders out; 2 x 3-ton costs 60, more than 50. With R1-5187 L1 + R3-9413 L1 locked, the check suggested 2 x 3-ton (60 OMR; 80 with the day rates), `complete: true`. Yet 1 x 10-ton (50; 60) delivers every P1-P3 order in 4 of 4 replays. |
+| a | The suggestion is the cheapest set that delivers every P1-P3 order | **PASS on the day as optimized; FAIL with two loads locked (bug 1)** | 11 Oct v1 (and 12 Oct v1): 1 x 10-ton, 50 OMR. Reduction: `first` 10T+10T (11 Oct) / 10T+3T (12 Oct), `used` 1 x 10T, 1 solve, `complete: true`. Replays below: own trucks only and 1 x 3-ton both leave P1-P3 orders out; 2 x 3-ton costs 60, more than 50. With T-01 L1 + T-03 L1 locked, the check suggested 2 x 3-ton (60 OMR; 80 with the day rates), `complete: true`. Yet 1 x 10-ton (50; 60) delivers every P1-P3 order in 4 of 4 replays. |
 | b | Every number in the box matches; no "0.0 pallets"; a dropped order names its priority | **PASS** | Table below. "1 P4 order (3 cases)" is CUST-D: P4, 3 cases, 23 pallet units (under 50 units, so no pallets are given); `dropped.byPriority {"4":1}`. The confirm also says "1 P4 order". |
-| c | Use this plan: new version, every P1-P3 order, frozen loads unchanged | **PASS (both paths)** | **11 Oct v2** (`PLAN_APPLIED`, 2 x 3-ton, the check made with the locks): 79/80, **P1 6/6, P2 20/20, P3 38/38**, P4 10/10, P5 5/6; "2 locked/dispatched loads preserved". R1-5187 L1 and R3-9413 L1 are identical in v1 and v2: status, 07:00-10:38 / 07:00-11:03, 994 / 1,086 cases, 11.47 / 11.95 pallets, km, cost, and every stop, order and ETA (`v1-loads.txt` vs `v2-loads.txt`). **12 Oct v2** (`REPLAN`, why: the day changed + the dropped P4 order; 1 x 10-ton): 72/80, **P1-P3 64/64**, P4 6/10, P5 2/6; the two loads locked after the check are identical in v1 and v2. Both days the audit has `PLAN_VERSION_CREATED frozenLoadsCarried: 2`. |
-| d | Daily driver on all loads of the hired truck | **PASS** | HIRE-3T-1110-1 -> Plate 21458AR. + Add daily driver on L1: the dialog says "...the driver also goes on Loads 2 and 3 (its other loads still to plan) and becomes its default driver", button "Add and put on Loads 1, 2 and 3". Toast: "21458AR Loads 1, 2 and 3: daily driver Khalid Juma". DB: L1-L3 driver Khalid Juma (DAY-261011-1); the truck's default driver is Khalid Juma. Audit: CASUAL_DRIVER_ADDED, LOAD_DRIVER_SET x 3 (2 `via: whole rental day`), HIRED_TRUCK_CHANGED `via: daily driver quick add`. Driver sheet PDF: "Truck 21458AR - Trip 1 of 3", HIRED TRUCK, Khalid Juma +968 9000 0099, 5 stops, 528 cases, 6.0/6 pallets. |
-| e | Next date: the hired truck is not planned | **PASS** | 12 Oct: "3 trucks (36 bays per load round)". v1 has only R1-5187, R2-4954 and R3-9413; its what-if request has those 3 own trucks and all 5 rentable units. Trucks page: 21458AR and HIRE-3T-1110-2 "1 day: 11 Oct", "by bays". |
+| c | Use this plan: new version, every P1-P3 order, frozen loads unchanged | **PASS (both paths)** | **11 Oct v2** (`PLAN_APPLIED`, 2 x 3-ton, the check made with the locks): 79/80, **P1 6/6, P2 20/20, P3 38/38**, P4 10/10, P5 5/6; "2 locked/dispatched loads preserved". T-01 L1 and T-03 L1 are identical in v1 and v2: status, 07:00-10:38 / 07:00-11:03, 994 / 1,086 cases, 11.47 / 11.95 pallets, km, cost, and every stop, order and ETA (`v1-loads.txt` vs `v2-loads.txt`). **12 Oct v2** (`REPLAN`, why: the day changed + the dropped P4 order; 1 x 10-ton): 72/80, **P1-P3 64/64**, P4 6/10, P5 2/6; the two loads locked after the check are identical in v1 and v2. Both days the audit has `PLAN_VERSION_CREATED frozenLoadsCarried: 2`. |
+| d | Daily driver on all loads of the hired truck | **PASS** | HIRE-3T-1110-1 -> Plate 12345AB. + Add daily driver on L1: the dialog says "...the driver also goes on Loads 2 and 3 (its other loads still to plan) and becomes its default driver", button "Add and put on Loads 1, 2 and 3". Toast: "12345AB Loads 1, 2 and 3: daily driver Khalid Juma". DB: L1-L3 driver Khalid Juma (DAY-261011-1); the truck's default driver is Khalid Juma. Audit: CASUAL_DRIVER_ADDED, LOAD_DRIVER_SET x 3 (2 `via: whole rental day`), HIRED_TRUCK_CHANGED `via: daily driver quick add`. Driver sheet PDF: "Truck 12345AB - Trip 1 of 3", HIRED TRUCK, Khalid Juma +968 9000 0099, 5 stops, 528 cases, 6.0/6 pallets. |
+| e | Next date: the hired truck is not planned | **PASS** | 12 Oct: "3 trucks (36 bays per load round)". v1 has only T-01, T-02 and T-03; its what-if request has those 3 own trucks and all 5 rentable units. Trucks page: 12345AB and HIRE-3T-1110-2 "1 day: 11 Oct", "by bays". |
 | f | A P4/P5-only day: renting not suggested | **PASS** | 13 Oct: 31/35; P1 5/5, P2 14/14, P4 10/10, P5 2/6 (4 P5 out, 459 cases). Box: "Left out: 4 orders, all P4/P5 - renting is not suggested for them." No button, no HireSuggestion row. |
 | g | A day the fleet suffices: no box | **PASS** | 14 Oct: 27/27, 2 trucks · 5 loads, "Every order is planned"; no box, no HireSuggestion row. |
 
@@ -280,7 +280,7 @@ The stored what-if request was replayed on :8020 with only the listed rentals (`
 | 25 orders, 2,123 cases, 23.5 pallets | `summary.leftOut` 25 / 2,123 / 23,472 units; recomputed from the 25 stop ids (all P3); v1 P3 13/38 | OK |
 | 1 x 10-ton (12 bays), extra about 50 OMR | `hires` 1 x 10-ton at 50/day, `hireCost` 50; one rented truck, 3 loads | OK |
 | Still left out: none | `stillLeft` 0; replay 0 | OK |
-| 1 P4 order (3 cases) | `dropped`: CUST-D, P4, 3 cases, 23 units; on v1 R2-4954 L1 | OK |
+| 1 P4 order (3 cases) | `dropped`: CUST-D, P4, 3 cases, 23 units; on v1 T-02 L1 | OK |
 | about 19 OMR: 1 driver at 10 OMR, loading about 9 OMR | hired loads 63 + 3 + 3 = 50 hire + 10 + 3 x 3 | OK |
 | Fuel is included | hired loads: fuel 0, km cost 0 | OK |
 | 14 orders, all P4/P5; still delivers 2 | v1: P4 8 out + P5 6 out; `low.delivered` 2 | OK |
@@ -295,7 +295,7 @@ The locked-day box also matches its own data:
 ## Bugs and observations
 
 1. **The reduction can rule out the cheapest set on one unlucky solve and still say `complete` (medium).**
-   - **Day:** 11 Oct v1 with R1-5187 L1 and R3-9413 L1 locked.
+   - **Day:** 11 Oct v1 with T-01 L1 and T-03 L1 locked.
    - **What happened:** Check hire options, run twice, suggested **2 x 3-ton, 60 OMR (80 with 2 day rates)**, with `reduction {first 2, used 2, solves 3, complete true}` and the one-truck-fewer line. Use this plan then rented two 3-tons, so the day needs a second casual driver.
    - **The cheaper set works:** 1 x 10-ton (50 OMR, 60 with its driver) delivers every P1-P3 order with VERIFIED/EXACT timing in 4 of 4 replays with only that truck, all with identical results.
    - **Replaying the whole stored request:**
@@ -319,7 +319,7 @@ The locked-day box also matches its own data:
      - Or leave such a set "not proven" (`complete: false`).
      - The repack could also be held to never serve fewer higher-priority stops than its input plan.
 2. **Observation: Quick under-fills a truck while P4/P5 orders stay out** (as on 7f46e3f, issue 3).
-   - 12 Oct v2: R3-9413 L2 carries 3.0 of 12 pallets (250 cases, 1 stop).
+   - 12 Oct v2: T-03 L2 carries 3.0 of 12 pallets (250 cases, 1 stop).
    - Meanwhile 8 P4/P5 orders (990 cases, 10.4 pallets) stay out with "Fleet capacity shortage: 120.5 pallets requested vs 120.0".
    - The plan's own warning says "more than the shortage alone explains". This is not a hire defect.
 3. **Cosmetic:** the 12 Oct v2 dispatch page is 6 px wider than a 1366 px window (1357 vs 1351), so a horizontal scrollbar shows in `08ba` / `08bb`. The 11 Oct v2 page fits. The element causing it was not found.
@@ -338,10 +338,10 @@ There were no errors in the web or solver logs, no 500s, and no browser console 
 | 02 / 02b | The box (1 x 10-ton, "1 P4 order (3 cases)") in context and close up. |
 | 02c | The box after the re-check with two loads locked: 2 x 3-ton (bug 1). |
 | 03a / 03b / 03c | Trucks page with the Trucks to hire card (taken at the end, so it lists the hired trucks); Settings: day rate 10 OMR; Pallet fill 100 %, max 3 loads. |
-| 03d | 11 Oct v1 with R1-5187 L1 and R3-9413 L1 LOCKED. |
+| 03d | 11 Oct v1 with T-01 L1 and T-03 L1 LOCKED. |
 | 04a / 04b | 11 Oct v2 (PLAN_APPLIED): 79/80, P1-P3 100 %, "2 locked/dispatched loads preserved", Fuel "170 · 44.2 rented trucks: fuel included", 423.0 OMR; the hired loads (hired · 1 day, fuel incl., 43.0 / 3.0 / 3.0). |
-| 05a / 05b / 05c | Plate 21458AR; the daily-driver dialog; Khalid Juma (daily) on L1-L3. |
-| 06 | Driver sheet PDF, 21458AR trip 1 of 3, HIRED TRUCK. |
+| 05a / 05b / 05c | Plate 12345AB; the daily-driver dialog; Khalid Juma (daily) on L1-L3. |
+| 06 | Driver sheet PDF, 12345AB trip 1 of 3, HIRED TRUCK. |
 | 07a / 07b / 07c | 12 Oct: 3 trucks, only the own trucks planned; Trucks page "1 day: 11 Oct". |
 | 08a / 08ba / 08bb | 12 Oct v1 with two loads locked after the check; 12 Oct v2 (REPLAN, 1 x 10-ton, P1-P3 100 %); its 8 P4/P5 orders left out. |
 | 09a / 09b | 13 Oct: the P4/P5-only box; 4 P5 orders out. |
