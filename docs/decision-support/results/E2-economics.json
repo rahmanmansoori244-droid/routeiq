@@ -1,0 +1,6526 @@
+{
+ "experiment": "E2",
+ "title": "Small-stop economics",
+ "meta": {
+  "commit": "6b6de09d576c",
+  "generated_at": "2026-10-15T03:58:24+00:00",
+  "quick": false,
+  "budgets": {
+   "real_sec": 20,
+   "synthetic_sec": 40
+  },
+  "seeds": [
+   1,
+   2,
+   3
+  ],
+  "machine": {
+   "nproc": 4,
+   "cpu": "AMD EPYC 7763 64-Core Processor",
+   "python": "3.11.17",
+   "ortools": "9.15.675",
+   "platform": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.39"
+  },
+  "run_hosts": [
+   "codespaces-549a45",
+   "runnervm8k3b6"
+  ],
+  "lanes": [
+   "0/4",
+   "1/4",
+   "2/4",
+   "3/4"
+  ],
+  "env": {
+   "SOLVER_PARALLEL": "0",
+   "SOLVER_PYVRP": "off"
+  },
+  "equal_compute": "Every compared run has the same budget (search seconds, QUICK, RECOMMENDED only) and runs alone in its lane's process (SOLVER_PARALLEL=0). Production also runs the second route search (PyVRP); it is off here (SOLVER_PYVRP=off) so that every run gets the same single-core search.",
+  "honesty": "Distances are HAVERSINE estimates (estimated km). Plans are the best found in the time given, not proven optimal; only E5's oracle proves optimality, on the instances it enumerates completely. Cash is OMR (costing.truck_day_costs); solver penalties are ARTIFICIAL and never added to cash.",
+  "items": {
+   "total": 54,
+   "done": 54
+  },
+  "compute_sec": 2514.3,
+  "first_start": "2026-10-15T01:32:08+00:00",
+  "last_finish": "2026-10-15T03:37:49+00:00",
+  "ivms": {
+   "source": "decision_support/data/ivms_aggregates.json: aggregates of the IVMS report (Feb-Mar 2026) and the 13 Oct truck evidence",
+   "whatif": {
+    "source": "IVMS report 2026-01-31..2026-03-16, 45352 segments (aggregates only)",
+    "unloading_gap": {
+     "p25_below_p50": 0.39,
+     "chains": 8,
+     "visits": 422,
+     "basis": "13 Oct GPS evidence: time on site per chain, visit-weighted median of 1 - p25/p50"
+    },
+    "reload": "Reload between loads (trip 2+): 3T 30 min (p25 19, p50 28, p75 40, p90 60); 10T about 30 min (p50 28, p75 about 55, p90 about 80) before daytime trips (SUPPORTED (3T) / SUPPORTED, small n (10T))",
+    "latest_return": "Latest return to depot: 10T p50 17:00, p75 18:57, p90 20:07; 3T p50 17:36, p75 18:39, p90 19:22. 3T in October: p50 18:16, p75 19:02, p90 20:20 (58% of days after 18:00). (SUPPORTED)",
+    "ivms_last_stop_end": {
+     "p50": "20:10",
+     "p75": "21:34",
+     "p90": "24:00"
+    },
+    "speed": {
+     "evening": 0.839,
+     "night": 0.708,
+     "basis": "IVMS MOVING segments, Muscat (MOVING segments >= 1 km and >= 2 min, speed = km / hours <= 130): median km/h 06-18 30.7 (segment-weighted mean of the band medians, n=2978), 18-22 25.71 (n=398), 22-06 21.71 (n=147). Cross-check, 13 Oct truck evidence: Time-of-day factor, trucks, Muscat core: 1.00 except 12-15 about 1.06; 18+ 1.07-1.13 (low n) (INFERRED)"
+    }
+   },
+   "uncertainty_model": {
+    "travel_median": 1.0,
+    "travel_sigma": 0.373,
+    "unload_median": 1.0,
+    "unload_sigma": 0.501,
+    "assumed": [
+     "travel_median",
+     "unload_median"
+    ],
+    "basis": {
+     "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+     "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+    }
+   },
+   "band_factors": {
+    "06-09": 0.77,
+    "09-12": 1.017,
+    "12-15": 1.033,
+    "15-18": 0.892,
+    "18-22": 1.148,
+    "22-06": 1.359
+   },
+   "small_drop_on_site_min": {
+    "p25": 9.8,
+    "p50": 16.0,
+    "p75": 29.0,
+    "chains": 5,
+    "visits": 73
+   },
+   "visit_every_days": {
+    "p25": 3.75,
+    "p50": 5.0,
+    "p75": 7.5,
+    "customers": 118
+   },
+   "unloading_gap": {
+    "share": 0.39,
+    "visits": 422
+   },
+   "slow_day_factor": 1.286,
+   "muscat_speed_kmh": {
+    "06-09": 38.3,
+    "09-12": 29.01,
+    "12-15": 28.57
+   }
+  },
+  "labels": {
+   "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+   "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+   "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+   "time": "minutes, trips and trucks: time and capacity, not cash"
+  }
+ },
+ "days": {
+  "REAL-15OCT": {
+   "status": "COMPLETE",
+   "items_done": 27,
+   "items": 27,
+   "compute_sec": 1255.9,
+   "day": "REAL, anonymised; 86 stops, 12 trucks",
+   "budget": {
+    "time_limit_sec": 20,
+    "search_mode": "QUICK",
+    "seeds": [
+     1,
+     2,
+     3
+    ]
+   },
+   "report": {
+    "source": "REAL, anonymised (coordinates still in memory)",
+    "digest": "ad7706639ab2509b",
+    "budget": {
+     "time_limit_sec": 20,
+     "search_mode": "QUICK",
+     "seeds": [
+      1,
+      2,
+      3
+     ]
+    },
+    "baseline": {
+     "runs": 3,
+     "seeds": [
+      1,
+      2,
+      3
+     ],
+     "digest": "ad7706639ab2509b",
+     "metrics": {
+      "cases_served": {
+       "mean": 7218.333,
+       "min": 6885.0,
+       "max": 7885.0,
+       "values": [
+        7885.0,
+        6885.0,
+        6885.0
+       ]
+      },
+      "cases_total": {
+       "mean": 8485.0,
+       "min": 8485.0,
+       "max": 8485.0,
+       "values": [
+        8485.0,
+        8485.0,
+        8485.0
+       ]
+      },
+      "cash.distance": {
+       "mean": 89.448,
+       "min": 73.823,
+       "max": 97.631,
+       "values": [
+        73.823,
+        96.89,
+        97.631
+       ]
+      },
+      "cash.driver": {
+       "mean": 200.03,
+       "min": 192.533,
+       "max": 207.703,
+       "values": [
+        199.854,
+        192.533,
+        207.703
+       ]
+      },
+      "cash.fixed": {
+       "mean": 167.467,
+       "min": 150.8,
+       "max": 200.8,
+       "values": [
+        150.8,
+        150.8,
+        200.8
+       ]
+      },
+      "cash.fuel": {
+       "mean": 77.406,
+       "min": 76.003,
+       "max": 79.509,
+       "values": [
+        76.003,
+        76.706,
+        79.509
+       ]
+      },
+      "cash.overtime": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "cash.total": {
+       "mean": 534.351,
+       "min": 500.48,
+       "max": 585.643,
+       "values": [
+        500.48,
+        516.929,
+        585.643
+       ]
+      },
+      "cash.trip": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "km": {
+       "mean": 1083.85,
+       "min": 1031.02,
+       "max": 1179.98,
+       "values": [
+        1031.02,
+        1040.55,
+        1179.98
+       ]
+      },
+      "late_stops": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "minutes_outside_pref": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "paid_driver_min": {
+       "mean": 4800.667,
+       "min": 4621.0,
+       "max": 4986.0,
+       "values": [
+        4795.0,
+        4621.0,
+        4986.0
+       ]
+      },
+      "penalties.continuity": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "penalties.early": {
+       "mean": 29.867,
+       "min": 26.766,
+       "max": 32.63,
+       "values": [
+        26.766,
+        32.63,
+        30.205
+       ]
+      },
+      "penalties.unserved_penalty": {
+       "mean": 101000.0,
+       "min": 3000.0,
+       "max": 150000.0,
+       "values": [
+        3000.0,
+        150000.0,
+        150000.0
+       ]
+      },
+      "penalties.window": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "proven_impossible": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "served_by_priority.1": {
+       "mean": 14.0,
+       "min": 14.0,
+       "max": 14.0,
+       "values": [
+        14.0,
+        14.0,
+        14.0
+       ]
+      },
+      "served_by_priority.2": {
+       "mean": 21.333,
+       "min": 21.0,
+       "max": 22.0,
+       "values": [
+        22.0,
+        21.0,
+        21.0
+       ]
+      },
+      "served_by_priority.3": {
+       "mean": 47.0,
+       "min": 47.0,
+       "max": 47.0,
+       "values": [
+        47.0,
+        47.0,
+        47.0
+       ]
+      },
+      "served_by_priority.4": {
+       "mean": 2.0,
+       "min": 2.0,
+       "max": 2.0,
+       "values": [
+        2.0,
+        2.0,
+        2.0
+       ]
+      },
+      "served_by_priority.5": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "stops_served": {
+       "mean": 84.333,
+       "min": 84.0,
+       "max": 85.0,
+       "values": [
+        85.0,
+        84.0,
+        84.0
+       ]
+      },
+      "stops_total": {
+       "mean": 86.0,
+       "min": 86.0,
+       "max": 86.0,
+       "values": [
+        86.0,
+        86.0,
+        86.0
+       ]
+      },
+      "trips": {
+       "mean": 13.667,
+       "min": 13.0,
+       "max": 15.0,
+       "values": [
+        13.0,
+        13.0,
+        15.0
+       ]
+      },
+      "trucks_used": {
+       "mean": 9.333,
+       "min": 9.0,
+       "max": 10.0,
+       "values": [
+        9.0,
+        9.0,
+        10.0
+       ]
+      },
+      "unserved_by_priority.1": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "unserved_by_priority.2": {
+       "mean": 0.667,
+       "min": 0.0,
+       "max": 1.0,
+       "values": [
+        0.0,
+        1.0,
+        1.0
+       ]
+      },
+      "unserved_by_priority.3": {
+       "mean": 1.0,
+       "min": 1.0,
+       "max": 1.0,
+       "values": [
+        1.0,
+        1.0,
+        1.0
+       ]
+      },
+      "unserved_by_priority.4": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "unserved_by_priority.5": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "unserved_by_reason.LATE_ORDER_NO_CAPACITY": {
+       "mean": 1.667,
+       "min": 1.0,
+       "max": 2.0,
+       "values": [
+        1.0,
+        2.0,
+        2.0
+       ]
+      }
+     },
+     "status": {
+      "OPTIMIZED": 3
+     },
+     "solver_status": {
+      "ROUTING_SUCCESS": 3
+     },
+     "feasibility": {
+      "VERIFIED": 3
+     },
+     "wall_sec": {
+      "mean": 76.493,
+      "min": 73.68,
+      "max": 80.25,
+      "values": [
+       73.68,
+       75.55,
+       80.25
+      ]
+     },
+     "labels": {
+      "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+      "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+      "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+      "time": "minutes, trips and trucks: time and capacity, not cash"
+     }
+    },
+    "reference_seed": 1,
+    "baseline_retimed": true,
+    "max_cases": 3,
+    "combine_km": 2.0,
+    "stops": [
+     {
+      "stop": "stop-041",
+      "priority": 3,
+      "cases": 3,
+      "invoices": 1,
+      "late": true,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-12",
+        "load_no": 1,
+        "position": 10,
+        "load_stops": 11
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.064,
+        "fuel": 0.118,
+        "driver": 0.724,
+        "overtime": 0.0,
+        "total": 0.906
+       },
+       "freed": {
+        "paid_driver_min": 17,
+        "km": 1.6,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 3,
+        "pallets": 0.042,
+        "service_min": 15,
+        "detour_drive_min": 2.4
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 3000.0,
+        "window": 0.0
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-035",
+       "nearest_km": 0.92,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 45,
+       "timed_ok": 5,
+       "to": {
+        "truck": "truck-09",
+        "load_no": 1,
+        "position": 9,
+        "load_stops": 9
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-010",
+       "near_km": 11.58,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.079,
+        "fuel": 0.032,
+        "driver": 0.028,
+        "overtime": 0.0,
+        "total": 0.139
+       },
+       "km_delta": 0.44,
+       "paid_driver_min_delta": 1,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 0.0,
+        "window": 0.0
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": -109.483,
+        "min": -157.231,
+        "max": -29.251,
+        "values": [
+         -29.251,
+         -157.231,
+         -141.967
+        ]
+       },
+       "avoidable_cash_like_for_like": null,
+       "like_for_like_seeds": [],
+       "noise_omr": 197.879,
+       "used": false,
+       "note": "0 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": -29.251,
+         "paid_driver_min": 255,
+         "km": -17.11,
+         "trucks": -1,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 0,
+         "like_for_like": false
+        },
+        {
+         "seed": 2,
+         "cash_saved": -157.231,
+         "paid_driver_min": -668,
+         "km": -274.76,
+         "trucks": -3,
+         "trips": -4,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 1,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": -141.967,
+         "paid_driver_min": -168,
+         "km": -63.93,
+         "trucks": -2,
+         "trips": -2,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 2,
+         "like_for_like": false
+        }
+       ],
+       "cash_parts": {
+        "fixed": -100.0,
+        "trip": 0.0,
+        "distance": 0.651,
+        "fuel": -2.083,
+        "driver": -8.051,
+        "overtime": 0.0
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": -193.667,
+         "min": -668.0,
+         "max": 255.0,
+         "values": [
+          255.0,
+          -668.0,
+          -168.0
+         ]
+        },
+        "km": {
+         "mean": -118.6,
+         "min": -274.76,
+         "max": -17.11,
+         "values": [
+          -17.11,
+          -274.76,
+          -63.93
+         ]
+        },
+        "trucks_used": {
+         "mean": -2.0,
+         "min": -3.0,
+         "max": -1.0,
+         "values": [
+          -1.0,
+          -3.0,
+          -2.0
+         ]
+        },
+        "trips": {
+         "mean": -2.333,
+         "min": -4.0,
+         "max": -1.0,
+         "values": [
+          -1.0,
+          -4.0,
+          -2.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 1.0,
+         "min": 1.0,
+         "max": 1.0,
+         "values": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 1.0,
+         "min": 0.0,
+         "max": 2.0,
+         "values": [
+          0.0,
+          1.0,
+          2.0
+         ]
+        },
+        "stops": [
+         "stop-013",
+         "stop-044",
+         "stop-055",
+         "stop-083"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": -96000.0,
+         "min": -147000.0,
+         "max": 3000.0,
+         "values": [
+          3000.0,
+          -144000.0,
+          -147000.0
+         ]
+        },
+        "window": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "early": {
+         "mean": -0.878,
+         "min": -2.309,
+         "max": 0.13,
+         "values": [
+          0.13,
+          -2.309,
+          -0.454
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 277.16
+      },
+      "future": {
+       "omr": 0.906,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "all",
+       "visit_every_days": {
+        "p25": 3.75,
+        "p50": 5.0,
+        "p75": 7.5,
+        "customers": 118
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 1.8,
+        "fast_p75": 1.4,
+        "slow_p25": 2.3,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping unknown: all customers",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "late order: always served",
+       "serving it costs 0.91 OMR cash today (fixed plan)"
+      ]
+     },
+     {
+      "stop": "stop-035",
+      "priority": 3,
+      "cases": 3,
+      "invoices": 1,
+      "late": true,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-12",
+        "load_no": 1,
+        "position": 11,
+        "load_stops": 11
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.022,
+        "fuel": 0.042,
+        "driver": 0.66,
+        "overtime": 0.0,
+        "total": 0.724
+       },
+       "freed": {
+        "paid_driver_min": 16,
+        "km": 0.56,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 3,
+        "pallets": 0.042,
+        "service_min": 15,
+        "detour_drive_min": 0.8
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 3000.0,
+        "window": 0.0
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-041",
+       "nearest_km": 0.92,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 45,
+       "timed_ok": 10,
+       "to": {
+        "truck": "truck-09",
+        "load_no": 1,
+        "position": 9,
+        "load_stops": 9
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-010",
+       "near_km": 11.17,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.039,
+        "fuel": 0.021,
+        "driver": 0.018,
+        "overtime": 0.0,
+        "total": 0.078
+       },
+       "km_delta": 0.3,
+       "paid_driver_min_delta": 1,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 0.0,
+        "window": 0.0
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": -3.538,
+        "min": -57.283,
+        "max": 56.891,
+        "values": [
+         -57.283,
+         -10.223,
+         56.891
+        ]
+       },
+       "avoidable_cash_like_for_like": null,
+       "like_for_like_seeds": [],
+       "noise_omr": 85.163,
+       "used": false,
+       "note": "0 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": -57.283,
+         "paid_driver_min": -291,
+         "km": -35.77,
+         "trucks": -1,
+         "trips": -2,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 1,
+         "like_for_like": false
+        },
+        {
+         "seed": 2,
+         "cash_saved": -10.223,
+         "paid_driver_min": 64,
+         "km": 21.23,
+         "trucks": -1,
+         "trips": 0,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 1,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": 56.891,
+         "paid_driver_min": 387,
+         "km": 179.48,
+         "trucks": 0,
+         "trips": 1,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 2,
+         "like_for_like": false
+        }
+       ],
+       "cash_parts": {
+        "fixed": -33.333,
+        "trip": 0.0,
+        "distance": 23.243,
+        "fuel": 4.282,
+        "driver": 2.269,
+        "overtime": 0.0
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": 53.333,
+         "min": -291.0,
+         "max": 387.0,
+         "values": [
+          -291.0,
+          64.0,
+          387.0
+         ]
+        },
+        "km": {
+         "mean": 54.98,
+         "min": -35.77,
+         "max": 179.48,
+         "values": [
+          -35.77,
+          21.23,
+          179.48
+         ]
+        },
+        "trucks_used": {
+         "mean": -0.667,
+         "min": -1.0,
+         "max": 0.0,
+         "values": [
+          -1.0,
+          -1.0,
+          0.0
+         ]
+        },
+        "trips": {
+         "mean": -0.333,
+         "min": -2.0,
+         "max": 1.0,
+         "values": [
+          -2.0,
+          0.0,
+          1.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 0.667,
+         "min": 0.0,
+         "max": 1.0,
+         "values": [
+          0.0,
+          1.0,
+          1.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 1.333,
+         "min": 1.0,
+         "max": 2.0,
+         "values": [
+          1.0,
+          1.0,
+          2.0
+         ]
+        },
+        "stops": [
+         "stop-013",
+         "stop-044",
+         "stop-055"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": -98000.0,
+         "min": -147000.0,
+         "max": -3000.0,
+         "values": [
+          -3000.0,
+          -144000.0,
+          -147000.0
+         ]
+        },
+        "window": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "early": {
+         "mean": -0.859,
+         "min": -4.136,
+         "max": 3.922,
+         "values": [
+          3.922,
+          -4.136,
+          -2.362
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 200.05
+      },
+      "future": {
+       "omr": 0.724,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "all",
+       "visit_every_days": {
+        "p25": 3.75,
+        "p50": 5.0,
+        "p75": 7.5,
+        "customers": 118
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 0.6,
+        "fast_p75": 0.5,
+        "slow_p25": 0.8,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping unknown: all customers",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "late order: always served",
+       "serving it costs 0.72 OMR cash today (fixed plan)"
+      ]
+     },
+     {
+      "stop": "stop-069",
+      "priority": 3,
+      "cases": 3,
+      "invoices": 1,
+      "late": true,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-07",
+        "load_no": 2,
+        "position": 9,
+        "load_stops": 9
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.033,
+        "fuel": 0.06,
+        "driver": 0.552,
+        "overtime": 0.0,
+        "total": 0.645
+       },
+       "freed": {
+        "paid_driver_min": 13,
+        "km": 0.82,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 3,
+        "pallets": 0.042,
+        "service_min": 12,
+        "detour_drive_min": 1.2
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 3000.0,
+        "window": 0.0
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-063",
+       "nearest_km": 0.5,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 48,
+       "timed_ok": 12,
+       "to": {
+        "truck": "truck-08",
+        "load_no": 2,
+        "position": 5,
+        "load_stops": 5
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-009",
+       "near_km": 1.81,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.025,
+        "fuel": 0.045,
+        "driver": 0.037,
+        "overtime": 0.0,
+        "total": 0.107
+       },
+       "km_delta": 0.61,
+       "paid_driver_min_delta": 1,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 0.0,
+        "window": 0.0
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": -31.296,
+        "min": -103.629,
+        "max": 26.117,
+        "values": [
+         -103.629,
+         26.117,
+         -16.375
+        ]
+       },
+       "avoidable_cash_like_for_like": null,
+       "like_for_like_seeds": [],
+       "noise_omr": 113.297,
+       "used": false,
+       "note": "0 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": -103.629,
+         "paid_driver_min": -204,
+         "km": -129.94,
+         "trucks": -2,
+         "trips": -2,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 1,
+         "like_for_like": false
+        },
+        {
+         "seed": 2,
+         "cash_saved": 26.117,
+         "paid_driver_min": 52,
+         "km": 37.66,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 1,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": -16.375,
+         "paid_driver_min": -23,
+         "km": -24.26,
+         "trucks": -1,
+         "trips": 1,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 1,
+         "like_for_like": false
+        }
+       ],
+       "cash_parts": {
+        "fixed": -50.0,
+        "trip": 0.0,
+        "distance": 17.943,
+        "fuel": 3.16,
+        "driver": -2.399,
+        "overtime": 0.0
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": -58.333,
+         "min": -204.0,
+         "max": 52.0,
+         "values": [
+          -204.0,
+          52.0,
+          -23.0
+         ]
+        },
+        "km": {
+         "mean": -38.847,
+         "min": -129.94,
+         "max": 37.66,
+         "values": [
+          -129.94,
+          37.66,
+          -24.26
+         ]
+        },
+        "trucks_used": {
+         "mean": -1.0,
+         "min": -2.0,
+         "max": 0.0,
+         "values": [
+          -2.0,
+          0.0,
+          -1.0
+         ]
+        },
+        "trips": {
+         "mean": -0.667,
+         "min": -2.0,
+         "max": 1.0,
+         "values": [
+          -2.0,
+          -1.0,
+          1.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 0.667,
+         "min": 0.0,
+         "max": 1.0,
+         "values": [
+          1.0,
+          1.0,
+          0.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 1.0,
+         "min": 1.0,
+         "max": 1.0,
+         "values": [
+          1.0,
+          1.0,
+          1.0
+         ]
+        },
+        "stops": [
+         "stop-013",
+         "stop-044",
+         "stop-055"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": -97000.0,
+         "min": -147000.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          -144000.0,
+          -147000.0
+         ]
+        },
+        "window": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "early": {
+         "mean": -3.731,
+         "min": -6.714,
+         "max": -0.986,
+         "values": [
+          -0.986,
+          -6.714,
+          -3.492
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 261.8
+      },
+      "future": {
+       "omr": 0.645,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "all",
+       "visit_every_days": {
+        "p25": 3.75,
+        "p50": 5.0,
+        "p75": 7.5,
+        "customers": 118
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "15-18",
+        "at_p50": 0.9,
+        "fast_p75": 0.7,
+        "slow_p25": 1.1,
+        "speed_kmh_p50": 56.79,
+        "n": 721
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping unknown: all customers",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "late order: always served",
+       "serving it costs 0.65 OMR cash today (fixed plan)"
+      ]
+     },
+     {
+      "stop": "stop-027",
+      "priority": 3,
+      "cases": 1,
+      "invoices": 1,
+      "late": true,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-12",
+        "load_no": 1,
+        "position": 7,
+        "load_stops": 11
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.002,
+        "fuel": 0.003,
+        "driver": 0.627,
+        "overtime": 0.0,
+        "total": 0.632
+       },
+       "freed": {
+        "paid_driver_min": 15,
+        "km": 0.04,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 1,
+        "pallets": 0.034,
+        "service_min": 15,
+        "detour_drive_min": 0.1
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 3000.0,
+        "window": 0.0
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": false,
+       "nearest": "stop-022",
+       "nearest_km": 2.4,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 48,
+       "timed_ok": 12,
+       "to": {
+        "truck": "truck-09",
+        "load_no": 1,
+        "position": 3,
+        "load_stops": 9
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-042",
+       "near_km": 3.25,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.513,
+        "fuel": 0.539,
+        "driver": 0.458,
+        "overtime": 0.0,
+        "total": 1.51
+       },
+       "km_delta": 7.32,
+       "paid_driver_min_delta": 11,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 0.0,
+        "window": 0.0
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": -44.055,
+        "min": -171.446,
+        "max": 35.648,
+        "values": [
+         -171.446,
+         3.632,
+         35.648
+        ]
+       },
+       "avoidable_cash_like_for_like": {
+        "mean": 3.632,
+        "min": 3.632,
+        "max": 3.632,
+        "values": [
+         3.632
+        ]
+       },
+       "like_for_like_seeds": [
+        2
+       ],
+       "noise_omr": 158.629,
+       "used": false,
+       "note": "1 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": -171.446,
+         "paid_driver_min": 115,
+         "km": -145.05,
+         "trucks": -3,
+         "trips": -8,
+         "served_in_baseline": true,
+         "dropped": 2,
+         "gained": 0,
+         "like_for_like": false
+        },
+        {
+         "seed": 2,
+         "cash_saved": 3.632,
+         "paid_driver_min": 234,
+         "km": 66.59,
+         "trucks": -1,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 0,
+         "like_for_like": true
+        },
+        {
+         "seed": 3,
+         "cash_saved": 35.648,
+         "paid_driver_min": -48,
+         "km": 175.39,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 2,
+         "like_for_like": false
+        }
+       ],
+       "cash_parts": {
+        "fixed": -66.667,
+        "trip": 0.0,
+        "distance": 13.834,
+        "fuel": 4.595,
+        "driver": 4.182,
+        "overtime": 0.0
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": 100.333,
+         "min": -48.0,
+         "max": 234.0,
+         "values": [
+          115.0,
+          234.0,
+          -48.0
+         ]
+        },
+        "km": {
+         "mean": 32.31,
+         "min": -145.05,
+         "max": 175.39,
+         "values": [
+          -145.05,
+          66.59,
+          175.39
+         ]
+        },
+        "trucks_used": {
+         "mean": -1.333,
+         "min": -3.0,
+         "max": 0.0,
+         "values": [
+          -3.0,
+          -1.0,
+          0.0
+         ]
+        },
+        "trips": {
+         "mean": -3.333,
+         "min": -8.0,
+         "max": -1.0,
+         "values": [
+          -8.0,
+          -1.0,
+          -1.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 1.0,
+         "min": 0.0,
+         "max": 2.0,
+         "values": [
+          2.0,
+          0.0,
+          1.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 0.667,
+         "min": 0.0,
+         "max": 2.0,
+         "values": [
+          0.0,
+          0.0,
+          2.0
+         ]
+        },
+        "stops": [
+         "stop-002",
+         "stop-013",
+         "stop-044",
+         "stop-055",
+         "stop-083"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": -48000.0,
+         "min": -147000.0,
+         "max": 6000.0,
+         "values": [
+          6000.0,
+          -3000.0,
+          -147000.0
+         ]
+        },
+        "window": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "early": {
+         "mean": -3.276,
+         "min": -5.906,
+         "max": 0.369,
+         "values": [
+          0.369,
+          -5.906,
+          -4.29
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 271.86
+      },
+      "future": {
+       "omr": 0.632,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.01
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "all",
+       "visit_every_days": {
+        "p25": 3.75,
+        "p50": 5.0,
+        "p75": 7.5,
+        "customers": 118
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 0.0,
+        "fast_p75": 0.0,
+        "slow_p25": 0.1,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping unknown: all customers",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "late order: always served",
+       "serving it costs 0.63 OMR cash today (fixed plan)"
+      ]
+     }
+    ],
+    "invoices": null,
+    "assumptions": {
+     "clear_omr": "0.1 OMR: a cheaper option must save more than this (re-optimization: on every seed)",
+     "combine_km": "2.0 km straight line between stops of one load",
+     "segment_of_type": "{\"HYPERMARKET\": \"MT_HYPERMARKET\", \"SUPERMARKET\": \"MT_SUPERMARKET\", \"GROCERY\": \"GT_RETAIL\", \"HORECA\": \"HORECA_OTHER\", \"DARK_STORE\": \"DARK_STORE\"}",
+     "ride_along": "ASSUMPTION: OMR of the stop's extra unloading minutes if it waits for the customer's next regular delivery (0.25 min per case, the 14 Oct benchmark, x driver_cost_per_hour)",
+     "margin": "none given: break-even margins only (stops with DispatchStop.margin use it)",
+     "future": "PROXY (no next-day plan given)"
+    },
+    "labels": {
+     "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+     "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+     "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+     "time": "minutes, trips and trucks: time and capacity, not cash",
+     "cash_saved": "OMR cash the plan no longer spends without the stop (with - without); positive = saving",
+     "move": "OMR cash change if the stop rides on another load instead (moved - now); negative = cheaper",
+     "future": "OMR cash of delivering the stop later: NEXT_DAY_PLAN (exact insertion into the given plan) or PROXY (today's fixed-plan marginal cost of the same stop, reused)",
+     "ride_along": "ASSUMPTION: OMR of the stop's extra unloading minutes if it waits for the customer's next regular delivery (0.25 min per case, the 14 Oct benchmark, x driver_cost_per_hour)",
+     "margin": "contribution margin: DispatchStop.margin, or an explicit margin_per_case ASSUMPTION; never invented",
+     "break_even": "OMR per case: deferring pays only if the margin lost is below this, (least cash saved - future cost - 0.1) / cases, the figures the recommendation uses; only with a next-day plan (a PROXY future cost gives none)",
+     "evidence": "IVMS truck GPS (Feb-Mar 2026) and 13 Oct truck evidence aggregates: context, never cash"
+    }
+   }
+  },
+  "SYNTH-320": {
+   "status": "COMPLETE",
+   "items_done": 27,
+   "items": 27,
+   "compute_sec": 1258.4,
+   "day": "SYNTHETIC; 185 stops, 13 trucks",
+   "budget": {
+    "time_limit_sec": 40,
+    "search_mode": "QUICK",
+    "seeds": [
+     1,
+     2,
+     3
+    ]
+   },
+   "report": {
+    "source": "SYNTHETIC",
+    "digest": "fe04311e66d1749a",
+    "budget": {
+     "time_limit_sec": 40,
+     "search_mode": "QUICK",
+     "seeds": [
+      1,
+      2,
+      3
+     ]
+    },
+    "baseline": {
+     "runs": 3,
+     "seeds": [
+      1,
+      2,
+      3
+     ],
+     "digest": "fe04311e66d1749a",
+     "metrics": {
+      "cases_served": {
+       "mean": 9942.0,
+       "min": 9915.0,
+       "max": 9956.0,
+       "values": [
+        9955.0,
+        9915.0,
+        9956.0
+       ]
+      },
+      "cases_total": {
+       "mean": 9958.0,
+       "min": 9958.0,
+       "max": 9958.0,
+       "values": [
+        9958.0,
+        9958.0,
+        9958.0
+       ]
+      },
+      "cash.distance": {
+       "mean": 58.687,
+       "min": 53.038,
+       "max": 61.86,
+       "values": [
+        61.86,
+        53.038,
+        61.163
+       ]
+      },
+      "cash.driver": {
+       "mean": 314.103,
+       "min": 300.789,
+       "max": 320.875,
+       "values": [
+        320.875,
+        300.789,
+        320.646
+       ]
+      },
+      "cash.fixed": {
+       "mean": 206.0,
+       "min": 206.0,
+       "max": 206.0,
+       "values": [
+        206.0,
+        206.0,
+        206.0
+       ]
+      },
+      "cash.fuel": {
+       "mean": 80.463,
+       "min": 70.715,
+       "max": 86.192,
+       "values": [
+        86.192,
+        70.715,
+        84.482
+       ]
+      },
+      "cash.overtime": {
+       "mean": 8.246,
+       "min": 6.362,
+       "max": 10.081,
+       "values": [
+        10.081,
+        6.362,
+        8.294
+       ]
+      },
+      "cash.total": {
+       "mean": 667.499,
+       "min": 636.904,
+       "max": 685.008,
+       "values": [
+        685.008,
+        636.904,
+        680.585
+       ]
+      },
+      "cash.trip": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "km": {
+       "mean": 1176.13,
+       "min": 1027.94,
+       "max": 1258.78,
+       "values": [
+        1258.78,
+        1027.94,
+        1241.67
+       ]
+      },
+      "late_stops": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "minutes_outside_pref": {
+       "mean": 7830.333,
+       "min": 6463.0,
+       "max": 8547.0,
+       "values": [
+        8547.0,
+        6463.0,
+        8481.0
+       ]
+      },
+      "paid_driver_min": {
+       "mean": 7539.333,
+       "min": 7220.0,
+       "max": 7702.0,
+       "values": [
+        7702.0,
+        7220.0,
+        7696.0
+       ]
+      },
+      "penalties.continuity": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "penalties.early": {
+       "mean": 29.398,
+       "min": 28.498,
+       "max": 29.965,
+       "values": [
+        28.498,
+        29.731,
+        29.965
+       ]
+      },
+      "penalties.unserved_penalty": {
+       "mean": 1028333.333,
+       "min": 1000.0,
+       "max": 3082000.0,
+       "values": [
+        1000.0,
+        3082000.0,
+        2000.0
+       ]
+      },
+      "penalties.window": {
+       "mean": 391.517,
+       "min": 323.239,
+       "max": 427.158,
+       "values": [
+        427.158,
+        323.239,
+        424.154
+       ]
+      },
+      "proven_impossible": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "served_by_priority.1": {
+       "mean": 5.0,
+       "min": 5.0,
+       "max": 5.0,
+       "values": [
+        5.0,
+        5.0,
+        5.0
+       ]
+      },
+      "served_by_priority.2": {
+       "mean": 44.0,
+       "min": 44.0,
+       "max": 44.0,
+       "values": [
+        44.0,
+        44.0,
+        44.0
+       ]
+      },
+      "served_by_priority.3": {
+       "mean": 72.0,
+       "min": 70.0,
+       "max": 73.0,
+       "values": [
+        73.0,
+        70.0,
+        73.0
+       ]
+      },
+      "served_by_priority.4": {
+       "mean": 26.0,
+       "min": 26.0,
+       "max": 26.0,
+       "values": [
+        26.0,
+        26.0,
+        26.0
+       ]
+      },
+      "served_by_priority.5": {
+       "mean": 34.667,
+       "min": 33.0,
+       "max": 36.0,
+       "values": [
+        36.0,
+        33.0,
+        35.0
+       ]
+      },
+      "stops_served": {
+       "mean": 181.667,
+       "min": 178.0,
+       "max": 184.0,
+       "values": [
+        184.0,
+        178.0,
+        183.0
+       ]
+      },
+      "stops_total": {
+       "mean": 185.0,
+       "min": 185.0,
+       "max": 185.0,
+       "values": [
+        185.0,
+        185.0,
+        185.0
+       ]
+      },
+      "trips": {
+       "mean": 19.333,
+       "min": 19.0,
+       "max": 20.0,
+       "values": [
+        20.0,
+        19.0,
+        19.0
+       ]
+      },
+      "trucks_used": {
+       "mean": 13.0,
+       "min": 13.0,
+       "max": 13.0,
+       "values": [
+        13.0,
+        13.0,
+        13.0
+       ]
+      },
+      "unserved_by_priority.1": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "unserved_by_priority.2": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "unserved_by_priority.3": {
+       "mean": 1.0,
+       "min": 0.0,
+       "max": 3.0,
+       "values": [
+        0.0,
+        3.0,
+        0.0
+       ]
+      },
+      "unserved_by_priority.4": {
+       "mean": 0.0,
+       "min": 0.0,
+       "max": 0.0,
+       "values": [
+        0.0,
+        0.0,
+        0.0
+       ]
+      },
+      "unserved_by_priority.5": {
+       "mean": 2.333,
+       "min": 1.0,
+       "max": 4.0,
+       "values": [
+        1.0,
+        4.0,
+        2.0
+       ]
+      },
+      "unserved_by_reason.NO_ALLOWED_TRUCK": {
+       "mean": 0.333,
+       "min": 0.0,
+       "max": 1.0,
+       "values": [
+        0.0,
+        1.0,
+        0.0
+       ]
+      },
+      "unserved_by_reason.SOLVER_DROPPED_LOW_PRIORITY": {
+       "mean": 3.0,
+       "min": 1.0,
+       "max": 6.0,
+       "values": [
+        1.0,
+        6.0,
+        2.0
+       ]
+      }
+     },
+     "status": {
+      "OPTIMIZED": 3
+     },
+     "solver_status": {
+      "ROUTING_SUCCESS": 3
+     },
+     "feasibility": {
+      "VERIFIED": 3
+     },
+     "wall_sec": {
+      "mean": 42.82,
+      "min": 41.5,
+      "max": 45.26,
+      "values": [
+       45.26,
+       41.7,
+       41.5
+      ]
+     },
+     "labels": {
+      "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+      "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+      "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+      "time": "minutes, trips and trucks: time and capacity, not cash"
+     }
+    },
+    "reference_seed": 1,
+    "baseline_retimed": true,
+    "max_cases": 3,
+    "combine_km": 2.0,
+    "stops": [
+     {
+      "stop": "stop-001",
+      "priority": 5,
+      "cases": 1,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-07",
+        "load_no": 1,
+        "position": 12,
+        "load_stops": 15
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.0,
+        "fuel": 0.001,
+        "driver": 0.459,
+        "overtime": 0.0,
+        "total": 0.46
+       },
+       "freed": {
+        "paid_driver_min": 11,
+        "km": 0.02,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 1,
+        "pallets": 0.01,
+        "service_min": 11,
+        "detour_drive_min": 0.0
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 1000.0,
+        "window": -1.652
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-004",
+       "nearest_km": 0.5,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 76,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.46,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.01
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 0.0,
+        "fast_p75": 0.0,
+        "slow_p25": 0.0,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-004 (0.5 km) on its load",
+       "defer saves 0.46 OMR (fixed plan), not clearly more than future cost 0.46 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-002",
+      "priority": 3,
+      "cases": 3,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-04",
+        "load_no": 1,
+        "position": 9,
+        "load_stops": 13
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.003,
+        "fuel": 0.004,
+        "driver": 0.504,
+        "overtime": 0.807,
+        "total": 1.318
+       },
+       "freed": {
+        "paid_driver_min": 12,
+        "km": 0.07,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 3,
+        "pallets": 0.028,
+        "service_min": 12,
+        "detour_drive_min": 0.1
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 1026000.0,
+        "window": -5.42
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-005",
+       "nearest_km": 0.26,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 67,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": 1.201,
+        "min": -9.272,
+        "max": 12.874,
+        "values": [
+         12.874,
+         0.0,
+         -9.272
+        ]
+       },
+       "avoidable_cash_like_for_like": {
+        "mean": -9.272,
+        "min": -9.272,
+        "max": -9.272,
+        "values": [
+         -9.272
+        ]
+       },
+       "like_for_like_seeds": [
+        3
+       ],
+       "noise_omr": 52.953,
+       "used": false,
+       "note": "1 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": 12.874,
+         "paid_driver_min": 82,
+         "km": 34.06,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 0,
+         "like_for_like": false
+        },
+        {
+         "seed": 2,
+         "cash_saved": 0.0,
+         "paid_driver_min": 0,
+         "km": 0.0,
+         "trucks": 0,
+         "trips": 0,
+         "served_in_baseline": false,
+         "dropped": 0,
+         "gained": 0,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": -9.272,
+         "paid_driver_min": -86,
+         "km": -44.31,
+         "trucks": 0,
+         "trips": 0,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 0,
+         "like_for_like": true
+        }
+       ],
+       "cash_parts": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": -0.42,
+        "fuel": -0.135,
+        "driver": -0.036,
+        "overtime": 1.793
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": -1.333,
+         "min": -86.0,
+         "max": 82.0,
+         "values": [
+          82.0,
+          0.0,
+          -86.0
+         ]
+        },
+        "km": {
+         "mean": -3.417,
+         "min": -44.31,
+         "max": 34.06,
+         "values": [
+          34.06,
+          0.0,
+          -44.31
+         ]
+        },
+        "trucks_used": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "trips": {
+         "mean": -0.333,
+         "min": -1.0,
+         "max": 0.0,
+         "values": [
+          -1.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 0.333,
+         "min": 0.0,
+         "max": 1.0,
+         "values": [
+          1.0,
+          0.0,
+          0.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "stops": [
+         "stop-015"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": 0.0,
+         "min": -1026000.0,
+         "max": 1026000.0,
+         "values": [
+          1026000.0,
+          -1026000.0,
+          0.0
+         ]
+        },
+        "window": {
+         "mean": -2.344,
+         "min": -28.931,
+         "max": 21.898,
+         "values": [
+          -28.931,
+          0.0,
+          21.898
+         ]
+        },
+        "early": {
+         "mean": 0.467,
+         "min": -0.383,
+         "max": 1.785,
+         "values": [
+          -0.383,
+          0.0,
+          1.785
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 127.8
+      },
+      "future": {
+       "omr": 1.318,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 0.1,
+        "fast_p75": 0.1,
+        "slow_p25": 0.1,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "re-optimization not used: 1 like-for-like seed(s): too few to tell a saving from search noise",
+       "already rides with stop-005 (0.26 km) on its load",
+       "defer saves 1.32 OMR (fixed plan), not clearly more than future cost 1.32 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-003",
+      "priority": 3,
+      "cases": 3,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-06",
+        "load_no": 1,
+        "position": 7,
+        "load_stops": 7
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 3.155,
+        "fuel": 5.126,
+        "driver": 6.679,
+        "overtime": 0.0,
+        "total": 14.96
+       },
+       "freed": {
+        "paid_driver_min": 160,
+        "km": 78.86,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 3,
+        "pallets": 0.03,
+        "service_min": 12,
+        "detour_drive_min": 118.3
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.801,
+        "unserved_penalty": 1026000.0,
+        "window": -16.03
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": false,
+       "nearest": "stop-174",
+       "nearest_km": 39.47,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 67,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": 14.976,
+        "min": 0.0,
+        "max": 29.325,
+        "values": [
+         15.604,
+         0.0,
+         29.325
+        ]
+       },
+       "avoidable_cash_like_for_like": {
+        "mean": 15.604,
+        "min": 15.604,
+        "max": 15.604,
+        "values": [
+         15.604
+        ]
+       },
+       "like_for_like_seeds": [
+        1
+       ],
+       "noise_omr": 48.104,
+       "used": false,
+       "note": "1 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": 15.604,
+         "paid_driver_min": 110,
+         "km": 83.62,
+         "trucks": 0,
+         "trips": 0,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 0,
+         "like_for_like": true
+        },
+        {
+         "seed": 2,
+         "cash_saved": 0.0,
+         "paid_driver_min": 0,
+         "km": 0.0,
+         "trucks": 0,
+         "trips": 0,
+         "served_in_baseline": false,
+         "dropped": 0,
+         "gained": 0,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": 29.325,
+         "paid_driver_min": 229,
+         "km": 148.72,
+         "trucks": 0,
+         "trips": -2,
+         "served_in_baseline": true,
+         "dropped": 3,
+         "gained": 1,
+         "like_for_like": false
+        }
+       ],
+       "cash_parts": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 3.185,
+        "fuel": 5.238,
+        "driver": 4.684,
+        "overtime": 1.87
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": 113.0,
+         "min": 0.0,
+         "max": 229.0,
+         "values": [
+          110.0,
+          0.0,
+          229.0
+         ]
+        },
+        "km": {
+         "mean": 77.447,
+         "min": 0.0,
+         "max": 148.72,
+         "values": [
+          83.62,
+          0.0,
+          148.72
+         ]
+        },
+        "trucks_used": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "trips": {
+         "mean": -0.667,
+         "min": -2.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          -2.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 1.0,
+         "min": 0.0,
+         "max": 3.0,
+         "values": [
+          0.0,
+          0.0,
+          3.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 0.333,
+         "min": 0.0,
+         "max": 1.0,
+         "values": [
+          0.0,
+          0.0,
+          1.0
+         ]
+        },
+        "stops": [
+         "stop-001",
+         "stop-002",
+         "stop-006",
+         "stop-008"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": 342000.0,
+         "min": -1026000.0,
+         "max": 2052000.0,
+         "values": [
+          0.0,
+          -1026000.0,
+          2052000.0
+         ]
+        },
+        "window": {
+         "mean": -29.825,
+         "min": -70.954,
+         "max": 0.0,
+         "values": [
+          -18.521,
+          0.0,
+          -70.954
+         ]
+        },
+        "early": {
+         "mean": -0.449,
+         "min": -0.84,
+         "max": 0.0,
+         "values": [
+          -0.84,
+          0.0,
+          -0.506
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 132.09
+      },
+      "future": {
+       "omr": 14.96,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 89.2,
+        "fast_p75": 71.3,
+        "slow_p25": 114.9,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "re-optimization not used: 1 like-for-like seed(s): too few to tell a saving from search noise",
+       "defer saves 14.96 OMR (fixed plan), not clearly more than future cost 14.96 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-004",
+      "priority": 4,
+      "cases": 3,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-07",
+        "load_no": 1,
+        "position": 11,
+        "load_stops": 15
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.006,
+        "fuel": 0.011,
+        "driver": 0.509,
+        "overtime": 0.0,
+        "total": 0.526
+       },
+       "freed": {
+        "paid_driver_min": 12,
+        "km": 0.16,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 3,
+        "pallets": 0.038,
+        "service_min": 12,
+        "detour_drive_min": 0.2
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 38000.0,
+        "window": -1.835
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-007",
+       "nearest_km": 0.25,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 64,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.526,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 0.2,
+        "fast_p75": 0.1,
+        "slow_p25": 0.2,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-007 (0.25 km) on its load",
+       "defer saves 0.53 OMR (fixed plan), not clearly more than future cost 0.53 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-005",
+      "priority": 5,
+      "cases": 1,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-04",
+        "load_no": 1,
+        "position": 7,
+        "load_stops": 13
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.014,
+        "fuel": 0.021,
+        "driver": 0.479,
+        "overtime": 0.766,
+        "total": 1.28
+       },
+       "freed": {
+        "paid_driver_min": 11,
+        "km": 0.33,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 1,
+        "pallets": 0.021,
+        "service_min": 11,
+        "detour_drive_min": 0.5
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 1000.0,
+        "window": -5.3
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-002",
+       "nearest_km": 0.26,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 70,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": 1.28,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.01
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 0.4,
+        "fast_p75": 0.3,
+        "slow_p25": 0.5,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-002 (0.26 km) on its load",
+       "defer saves 1.28 OMR (fixed plan), not clearly more than future cost 1.28 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-006",
+      "priority": 5,
+      "cases": 3,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": false,
+      "fixed": null,
+      "combine": null,
+      "move": {
+       "found": false,
+       "tried": 70,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": null,
+       "basis": "NONE",
+       "note": "not served today: no marginal cost to reuse",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": null,
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "REVIEW",
+      "reasons": [
+       "the plan leaves it out: no exactly timed place found in the plan; never deleted, needs a dispatcher's decision"
+      ]
+     },
+     {
+      "stop": "stop-007",
+      "priority": 3,
+      "cases": 1,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-07",
+        "load_no": 1,
+        "position": 10,
+        "load_stops": 15
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.012,
+        "fuel": 0.019,
+        "driver": 0.476,
+        "overtime": 0.0,
+        "total": 0.507
+       },
+       "freed": {
+        "paid_driver_min": 12,
+        "km": 0.29,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 1,
+        "pallets": 0.021,
+        "service_min": 11,
+        "detour_drive_min": 0.4
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 1026000.0,
+        "window": -1.715
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-004",
+       "nearest_km": 0.25,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 70,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.507,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.01
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 0.3,
+        "fast_p75": 0.3,
+        "slow_p25": 0.4,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-004 (0.25 km) on its load",
+       "defer saves 0.51 OMR (fixed plan), not clearly more than future cost 0.51 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-008",
+      "priority": 3,
+      "cases": 3,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-04",
+        "load_no": 1,
+        "position": 8,
+        "load_stops": 13
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.015,
+        "fuel": 0.024,
+        "driver": 0.523,
+        "overtime": 0.836,
+        "total": 1.398
+       },
+       "freed": {
+        "paid_driver_min": 12,
+        "km": 0.36,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 3,
+        "pallets": 0.03,
+        "service_min": 12,
+        "detour_drive_min": 0.6
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 1026000.0,
+        "window": -5.51
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-002",
+       "nearest_km": 0.26,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 67,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": 0.905,
+        "min": -9.172,
+        "max": 11.887,
+        "values": [
+         11.887,
+         0.0,
+         -9.172
+        ]
+       },
+       "avoidable_cash_like_for_like": {
+        "mean": -9.172,
+        "min": -9.172,
+        "max": -9.172,
+        "values": [
+         -9.172
+        ]
+       },
+       "like_for_like_seeds": [
+        3
+       ],
+       "noise_omr": 52.853,
+       "used": false,
+       "note": "1 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": 11.887,
+         "paid_driver_min": 112,
+         "km": 53.9,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 0,
+         "like_for_like": false
+        },
+        {
+         "seed": 2,
+         "cash_saved": 0.0,
+         "paid_driver_min": 0,
+         "km": 0.0,
+         "trucks": 0,
+         "trips": 0,
+         "served_in_baseline": false,
+         "dropped": 0,
+         "gained": 0,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": -9.172,
+         "paid_driver_min": -85,
+         "km": -43.71,
+         "trucks": 0,
+         "trips": 0,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 0,
+         "like_for_like": true
+        }
+       ],
+       "cash_parts": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": -0.198,
+        "fuel": 0.106,
+        "driver": 0.389,
+        "overtime": 0.608
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": 9.0,
+         "min": -85.0,
+         "max": 112.0,
+         "values": [
+          112.0,
+          0.0,
+          -85.0
+         ]
+        },
+        "km": {
+         "mean": 3.397,
+         "min": -43.71,
+         "max": 53.9,
+         "values": [
+          53.9,
+          0.0,
+          -43.71
+         ]
+        },
+        "trucks_used": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "trips": {
+         "mean": -0.333,
+         "min": -1.0,
+         "max": 0.0,
+         "values": [
+          -1.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 0.333,
+         "min": 0.0,
+         "max": 1.0,
+         "values": [
+          1.0,
+          0.0,
+          0.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "stops": [
+         "stop-015"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": 0.0,
+         "min": -1026000.0,
+         "max": 1026000.0,
+         "values": [
+          1026000.0,
+          -1026000.0,
+          0.0
+         ]
+        },
+        "window": {
+         "mean": -2.788,
+         "min": -30.085,
+         "max": 21.721,
+         "values": [
+          -30.085,
+          0.0,
+          21.721
+         ]
+        },
+        "early": {
+         "mean": 0.546,
+         "min": -0.148,
+         "max": 1.785,
+         "values": [
+          -0.148,
+          0.0,
+          1.785
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 128.45
+      },
+      "future": {
+       "omr": 1.398,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 0.4,
+        "fast_p75": 0.3,
+        "slow_p25": 0.5,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "re-optimization not used: 1 like-for-like seed(s): too few to tell a saving from search noise",
+       "already rides with stop-002 (0.26 km) on its load",
+       "defer saves 1.40 OMR (fixed plan), not clearly more than future cost 1.40 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-020",
+      "priority": 3,
+      "cases": 2,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-02",
+        "load_no": 1,
+        "position": 1,
+        "load_stops": 9
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.002,
+        "fuel": 0.001,
+        "driver": 0.501,
+        "overtime": 0.802,
+        "total": 1.306
+       },
+       "freed": {
+        "paid_driver_min": 12,
+        "km": 0.03,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 2,
+        "pallets": 0.019,
+        "service_min": 12,
+        "detour_drive_min": 0.0
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.026,
+        "unserved_penalty": 1026000.0,
+        "window": -3.719
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-072",
+       "nearest_km": 0.14,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 73,
+       "timed_ok": 33,
+       "to": {
+        "truck": "truck-05",
+        "load_no": 1,
+        "position": 18,
+        "load_stops": 19
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-088",
+       "near_km": 0.26,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.006,
+        "fuel": 0.014,
+        "driver": 0.012,
+        "overtime": 0.019,
+        "total": 0.051
+       },
+       "km_delta": 0.18,
+       "paid_driver_min_delta": 0,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": -0.026,
+        "unserved_penalty": 0.0,
+        "window": 2.579
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": null,
+      "future": {
+       "omr": 1.306,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.021
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "06-09",
+        "at_p50": 0.0,
+        "fast_p75": 0.0,
+        "slow_p25": 0.0,
+        "speed_kmh_p50": 56.37,
+        "n": 334
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-072 (0.14 km) on its load",
+       "defer saves 1.31 OMR (fixed plan), not clearly more than future cost 1.31 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-051",
+      "priority": 2,
+      "cases": 1,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-11",
+        "load_no": 1,
+        "position": 2,
+        "load_stops": 16
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.012,
+        "fuel": 0.012,
+        "driver": 0.344,
+        "overtime": 0.55,
+        "total": 0.918
+       },
+       "freed": {
+        "paid_driver_min": 8,
+        "km": 0.17,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 1,
+        "pallets": 0.021,
+        "service_min": 8,
+        "detour_drive_min": 0.2
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.39,
+        "unserved_penalty": 75924000.0,
+        "window": -5.475
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-178",
+       "nearest_km": 0.25,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 70,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.918,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.01
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "HORECA_OTHER",
+       "visit_every_days": {
+        "p25": 2.86,
+        "p50": 3.75,
+        "p75": 4.64,
+        "customers": 7
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "06-09",
+        "at_p50": 0.2,
+        "fast_p75": 0.1,
+        "slow_p25": 0.3,
+        "speed_kmh_p50": 56.37,
+        "n": 334
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "P2: always served",
+       "serving it costs 0.92 OMR cash today (fixed plan)"
+      ]
+     },
+     {
+      "stop": "stop-055",
+      "priority": 5,
+      "cases": 2,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-09",
+        "load_no": 1,
+        "position": 6,
+        "load_stops": 11
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.027,
+        "fuel": 0.029,
+        "driver": 0.525,
+        "overtime": 0.0,
+        "total": 0.581
+       },
+       "freed": {
+        "paid_driver_min": 13,
+        "km": 0.39,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 2,
+        "pallets": 0.02,
+        "service_min": 12,
+        "detour_drive_min": 0.6
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.062,
+        "unserved_penalty": 1000.0,
+        "window": -5.112
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-048",
+       "nearest_km": 0.43,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 70,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.581,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.021
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.4,
+        "fast_p75": 0.3,
+        "slow_p25": 0.5,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-048 (0.43 km) on its load",
+       "defer saves 0.58 OMR (fixed plan), not clearly more than future cost 0.58 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-057",
+      "priority": 5,
+      "cases": 2,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-05",
+        "load_no": 1,
+        "position": 18,
+        "load_stops": 18
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.029,
+        "fuel": 0.046,
+        "driver": 0.545,
+        "overtime": 0.031,
+        "total": 0.651
+       },
+       "freed": {
+        "paid_driver_min": 14,
+        "km": 0.72,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 2,
+        "pallets": 0.02,
+        "service_min": 12,
+        "detour_drive_min": 1.1
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 1000.0,
+        "window": -6.715
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": false,
+       "nearest": "stop-088",
+       "nearest_km": 8.94,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 70,
+       "timed_ok": 34,
+       "to": {
+        "truck": "truck-06",
+        "load_no": 2,
+        "position": 3,
+        "load_stops": 3
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-116",
+       "near_km": 1.35,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": -0.027,
+        "fuel": -0.042,
+        "driver": -0.043,
+        "overtime": -0.031,
+        "total": -0.143
+       },
+       "km_delta": -0.67,
+       "paid_driver_min_delta": -2,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 0.0,
+        "window": 5.839
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.651,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.021
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "12-15",
+        "at_p50": 0.8,
+        "fast_p75": 0.7,
+        "slow_p25": 1.0,
+        "speed_kmh_p50": 53.07,
+        "n": 1086
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "COMBINE",
+      "reasons": [
+       "on truck-06 load 2 next to stop-116 (1.35 km) it costs -0.14 OMR cash against today's placement"
+      ]
+     },
+     {
+      "stop": "stop-063",
+      "priority": 3,
+      "cases": 2,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-12",
+        "load_no": 1,
+        "position": 7,
+        "load_stops": 13
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.005,
+        "fuel": 0.005,
+        "driver": 0.504,
+        "overtime": 0.0,
+        "total": 0.514
+       },
+       "freed": {
+        "paid_driver_min": 12,
+        "km": 0.07,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 2,
+        "pallets": 0.019,
+        "service_min": 12,
+        "detour_drive_min": 0.1
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.06,
+        "unserved_penalty": 1026000.0,
+        "window": -5.42
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-135",
+       "nearest_km": 0.05,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 76,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.514,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.021
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.1,
+        "fast_p75": 0.1,
+        "slow_p25": 0.1,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-135 (0.05 km) on its load",
+       "defer saves 0.51 OMR (fixed plan), not clearly more than future cost 0.51 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-067",
+      "priority": 3,
+      "cases": 2,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-13",
+        "load_no": 1,
+        "position": 4,
+        "load_stops": 12
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.031,
+        "fuel": 0.034,
+        "driver": 0.399,
+        "overtime": 0.639,
+        "total": 1.103
+       },
+       "freed": {
+        "paid_driver_min": 9,
+        "km": 0.4,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 2,
+        "pallets": 0.05,
+        "service_min": 9,
+        "detour_drive_min": 0.6
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.095,
+        "unserved_penalty": 1026000.0,
+        "window": -2.875
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-121",
+       "nearest_km": 0.49,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 64,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": 1.103,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.021
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "HORECA_OTHER",
+       "visit_every_days": {
+        "p25": 2.86,
+        "p50": 3.75,
+        "p75": 4.64,
+        "customers": 7
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.4,
+        "fast_p75": 0.4,
+        "slow_p25": 0.6,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-121 (0.49 km) on its load",
+       "defer saves 1.10 OMR (fixed plan), not clearly more than future cost 1.10 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-092",
+      "priority": 2,
+      "cases": 2,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-03",
+        "load_no": 2,
+        "position": 2,
+        "load_stops": 5
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.004,
+        "fuel": 0.007,
+        "driver": 0.383,
+        "overtime": 0.611,
+        "total": 1.005
+       },
+       "freed": {
+        "paid_driver_min": 9,
+        "km": 0.12,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 2,
+        "pallets": 0.02,
+        "service_min": 9,
+        "detour_drive_min": 0.2
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -1.136,
+        "unserved_penalty": 75924000.0,
+        "window": -0.916
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-145",
+       "nearest_km": 0.05,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 73,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": 1.005,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.021
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "HORECA_OTHER",
+       "visit_every_days": {
+        "p25": 2.86,
+        "p50": 3.75,
+        "p75": 4.64,
+        "customers": 7
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.1,
+        "fast_p75": 0.1,
+        "slow_p25": 0.2,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "P2: always served",
+       "serving it costs 1.00 OMR cash today (fixed plan)"
+      ]
+     },
+     {
+      "stop": "stop-099",
+      "priority": 2,
+      "cases": 1,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-03",
+        "load_no": 1,
+        "position": 5,
+        "load_stops": 6
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.004,
+        "fuel": 0.007,
+        "driver": 0.341,
+        "overtime": 0.544,
+        "total": 0.896
+       },
+       "freed": {
+        "paid_driver_min": 9,
+        "km": 0.12,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 1,
+        "pallets": 0.021,
+        "service_min": 8,
+        "detour_drive_min": 0.2
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.583,
+        "unserved_penalty": 75924000.0,
+        "window": -0.816
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-110",
+       "nearest_km": 1.15,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 70,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.896,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.01
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "HORECA_OTHER",
+       "visit_every_days": {
+        "p25": 2.86,
+        "p50": 3.75,
+        "p75": 4.64,
+        "customers": 7
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.1,
+        "fast_p75": 0.1,
+        "slow_p25": 0.2,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "P2: always served",
+       "serving it costs 0.90 OMR cash today (fixed plan)"
+      ]
+     },
+     {
+      "stop": "stop-101",
+      "priority": 3,
+      "cases": 3,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-04",
+        "load_no": 1,
+        "position": 6,
+        "load_stops": 13
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.003,
+        "fuel": 0.005,
+        "driver": 0.88,
+        "overtime": 1.003,
+        "total": 1.891
+       },
+       "freed": {
+        "paid_driver_min": 21,
+        "km": 0.08,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 3,
+        "pallets": 0.03,
+        "service_min": 21,
+        "detour_drive_min": 0.1
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 1026000.0,
+        "window": -10.223
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-180",
+       "nearest_km": 0.81,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 67,
+       "timed_ok": 4,
+       "to": {
+        "truck": "truck-05",
+        "load_no": 1,
+        "position": 14,
+        "load_stops": 19
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-108",
+       "near_km": 0.34,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.004,
+        "fuel": 0.007,
+        "driver": 0.006,
+        "overtime": 0.415,
+        "total": 0.432
+       },
+       "km_delta": 0.1,
+       "paid_driver_min_delta": 0,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 0.0,
+        "window": 3.234
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": -17.18,
+        "min": -45.922,
+        "max": 14.436,
+        "values": [
+         14.436,
+         -45.922,
+         -20.054
+        ]
+       },
+       "avoidable_cash_like_for_like": null,
+       "like_for_like_seeds": [],
+       "noise_omr": 48.104,
+       "used": false,
+       "note": "0 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": 14.436,
+         "paid_driver_min": 105,
+         "km": 103.41,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 1,
+         "like_for_like": false
+        },
+        {
+         "seed": 2,
+         "cash_saved": -45.922,
+         "paid_driver_min": -519,
+         "km": -217.53,
+         "trucks": 0,
+         "trips": -2,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 5,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": -20.054,
+         "paid_driver_min": -90,
+         "km": -58.22,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 2,
+         "like_for_like": false
+        }
+       ],
+       "cash_parts": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": -3.782,
+        "fuel": -4.593,
+        "driver": -7.01,
+        "overtime": -1.795
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": -168.0,
+         "min": -519.0,
+         "max": 105.0,
+         "values": [
+          105.0,
+          -519.0,
+          -90.0
+         ]
+        },
+        "km": {
+         "mean": -57.447,
+         "min": -217.53,
+         "max": 103.41,
+         "values": [
+          103.41,
+          -217.53,
+          -58.22
+         ]
+        },
+        "trucks_used": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "trips": {
+         "mean": -1.333,
+         "min": -2.0,
+         "max": -1.0,
+         "values": [
+          -1.0,
+          -2.0,
+          -1.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 2.667,
+         "min": 1.0,
+         "max": 5.0,
+         "values": [
+          1.0,
+          5.0,
+          2.0
+         ]
+        },
+        "stops": [
+         "stop-001",
+         "stop-002",
+         "stop-003",
+         "stop-005",
+         "stop-006",
+         "stop-008",
+         "stop-104"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": -1027666.667,
+         "min": -3080000.0,
+         "max": -1000.0,
+         "values": [
+          -1000.0,
+          -3080000.0,
+          -2000.0
+         ]
+        },
+        "window": {
+         "mean": 76.154,
+         "min": 18.071,
+         "max": 136.743,
+         "values": [
+          18.071,
+          136.743,
+          73.649
+         ]
+        },
+        "early": {
+         "mean": 2.004,
+         "min": 1.42,
+         "max": 2.852,
+         "values": [
+          1.74,
+          2.852,
+          1.42
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 128.43
+      },
+      "future": {
+       "omr": 1.891,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "MT_SUPERMARKET",
+       "visit_every_days": {
+        "p25": 5.0,
+        "p50": 6.0,
+        "p75": 7.5,
+        "customers": 15
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.1,
+        "fast_p75": 0.1,
+        "slow_p25": 0.1,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "re-optimization not used: 0 like-for-like seed(s): too few to tell a saving from search noise",
+       "already rides with stop-180 (0.81 km) on its load",
+       "defer saves 1.89 OMR (fixed plan), not clearly more than future cost 1.89 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-132",
+      "priority": 3,
+      "cases": 1,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-02",
+        "load_no": 1,
+        "position": 8,
+        "load_stops": 9
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.023,
+        "fuel": 0.037,
+        "driver": 0.493,
+        "overtime": 0.79,
+        "total": 1.343
+       },
+       "freed": {
+        "paid_driver_min": 12,
+        "km": 0.56,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 1,
+        "pallets": 0.013,
+        "service_min": 11,
+        "detour_drive_min": 0.8
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.177,
+        "unserved_penalty": 1026000.0,
+        "window": -1.777
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-161",
+       "nearest_km": 0.86,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 73,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": 0.778,
+        "min": -29.864,
+        "max": 24.274,
+        "values": [
+         7.925,
+         -29.864,
+         24.274
+        ]
+       },
+       "avoidable_cash_like_for_like": null,
+       "like_for_like_seeds": [],
+       "noise_omr": 48.104,
+       "used": false,
+       "note": "0 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": 7.925,
+         "paid_driver_min": 19,
+         "km": 57.99,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 0,
+         "like_for_like": false
+        },
+        {
+         "seed": 2,
+         "cash_saved": -29.864,
+         "paid_driver_min": -335,
+         "km": -136.43,
+         "trucks": 0,
+         "trips": 0,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 5,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": 24.274,
+         "paid_driver_min": 213,
+         "km": 123.8,
+         "trucks": 0,
+         "trips": -2,
+         "served_in_baseline": true,
+         "dropped": 3,
+         "gained": 2,
+         "like_for_like": false
+        }
+       ],
+       "cash_parts": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": -1.409,
+        "fuel": 0.165,
+        "driver": -1.392,
+        "overtime": 3.414
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": -34.333,
+         "min": -335.0,
+         "max": 213.0,
+         "values": [
+          19.0,
+          -335.0,
+          213.0
+         ]
+        },
+        "km": {
+         "mean": 15.12,
+         "min": -136.43,
+         "max": 123.8,
+         "values": [
+          57.99,
+          -136.43,
+          123.8
+         ]
+        },
+        "trucks_used": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "trips": {
+         "mean": -1.0,
+         "min": -2.0,
+         "max": 0.0,
+         "values": [
+          -1.0,
+          0.0,
+          -2.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 1.667,
+         "min": 1.0,
+         "max": 3.0,
+         "values": [
+          1.0,
+          1.0,
+          3.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 2.333,
+         "min": 0.0,
+         "max": 5.0,
+         "values": [
+          0.0,
+          5.0,
+          2.0
+         ]
+        },
+        "stops": [
+         "stop-001",
+         "stop-002",
+         "stop-003",
+         "stop-005",
+         "stop-006",
+         "stop-008",
+         "stop-055",
+         "stop-104",
+         "stop-162"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": -666.667,
+         "min": -2054000.0,
+         "max": 1026000.0,
+         "values": [
+          1026000.0,
+          -2054000.0,
+          1026000.0
+         ]
+        },
+        "window": {
+         "mean": -1.646,
+         "min": -50.078,
+         "max": 80.803,
+         "values": [
+          -35.664,
+          80.803,
+          -50.078
+         ]
+        },
+        "early": {
+         "mean": 3.465,
+         "min": 0.708,
+         "max": 5.887,
+         "values": [
+          5.887,
+          3.799,
+          0.708
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 129.57
+      },
+      "future": {
+       "omr": 1.343,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.01
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.6,
+        "fast_p75": 0.5,
+        "slow_p25": 0.8,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "re-optimization not used: 0 like-for-like seed(s): too few to tell a saving from search noise",
+       "already rides with stop-161 (0.86 km) on its load",
+       "defer saves 1.34 OMR (fixed plan), not clearly more than future cost 1.34 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-133",
+      "priority": 4,
+      "cases": 1,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-12",
+        "load_no": 1,
+        "position": 5,
+        "load_stops": 13
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.006,
+        "fuel": 0.006,
+        "driver": 0.464,
+        "overtime": 0.0,
+        "total": 0.476
+       },
+       "freed": {
+        "paid_driver_min": 11,
+        "km": 0.08,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 1,
+        "pallets": 0.01,
+        "service_min": 11,
+        "detour_drive_min": 0.1
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.055,
+        "unserved_penalty": 38000.0,
+        "window": -5.226
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-071",
+       "nearest_km": 0.81,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 79,
+       "timed_ok": 36,
+       "to": {
+        "truck": "truck-10",
+        "load_no": 1,
+        "position": 17,
+        "load_stops": 17
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-100",
+       "near_km": 0.74,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.015,
+        "fuel": 0.016,
+        "driver": 0.012,
+        "overtime": 0.0,
+        "total": 0.043
+       },
+       "km_delta": 0.21,
+       "paid_driver_min_delta": 0,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": -0.055,
+        "unserved_penalty": 0.0,
+        "window": 7.213
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.476,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.01
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.1,
+        "fast_p75": 0.1,
+        "slow_p25": 0.1,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-071 (0.81 km) on its load",
+       "defer saves 0.48 OMR (fixed plan), not clearly more than future cost 0.48 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-135",
+      "priority": 3,
+      "cases": 2,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-12",
+        "load_no": 1,
+        "position": 8,
+        "load_stops": 13
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.001,
+        "fuel": 0.001,
+        "driver": 0.5,
+        "overtime": 0.0,
+        "total": 0.502
+       },
+       "freed": {
+        "paid_driver_min": 12,
+        "km": 0.01,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 2,
+        "pallets": 0.02,
+        "service_min": 12,
+        "detour_drive_min": 0.0
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.06,
+        "unserved_penalty": 1026000.0,
+        "window": -5.4
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-063",
+       "nearest_km": 0.05,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 73,
+       "timed_ok": 35,
+       "to": {
+        "truck": "truck-07",
+        "load_no": 1,
+        "position": 16,
+        "load_stops": 16
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-147",
+       "near_km": 0.91,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.0,
+        "fuel": -0.001,
+        "driver": 0.001,
+        "overtime": 0.0,
+        "total": 0.0
+       },
+       "km_delta": 0.0,
+       "paid_driver_min_delta": 0,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": -0.06,
+        "unserved_penalty": 0.0,
+        "window": 6.03
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.502,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.021
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.0,
+        "fast_p75": 0.0,
+        "slow_p25": 0.0,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-063 (0.05 km) on its load",
+       "defer saves 0.50 OMR (fixed plan), not clearly more than future cost 0.50 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-143",
+      "priority": 2,
+      "cases": 2,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-03",
+        "load_no": 2,
+        "position": 1,
+        "load_stops": 5
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.098,
+        "fuel": 0.159,
+        "driver": 1.028,
+        "overtime": 1.281,
+        "total": 2.566
+       },
+       "freed": {
+        "paid_driver_min": 25,
+        "km": 2.45,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 2,
+        "pallets": 0.025,
+        "service_min": 21,
+        "detour_drive_min": 3.7
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.369,
+        "unserved_penalty": 75924000.0,
+        "window": -2.466
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": false,
+       "nearest": "stop-145",
+       "nearest_km": 2.89,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 70,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": 9.681,
+        "min": -34.912,
+        "max": 35.655,
+        "values": [
+         35.655,
+         -34.912,
+         28.3
+        ]
+       },
+       "avoidable_cash_like_for_like": {
+        "mean": 35.655,
+        "min": 35.655,
+        "max": 35.655,
+        "values": [
+         35.655
+        ]
+       },
+       "like_for_like_seeds": [
+        1
+       ],
+       "noise_omr": 48.104,
+       "used": false,
+       "note": "1 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": 35.655,
+         "paid_driver_min": 362,
+         "km": 167.35,
+         "trucks": 0,
+         "trips": 1,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 0,
+         "like_for_like": true
+        },
+        {
+         "seed": 2,
+         "cash_saved": -34.912,
+         "paid_driver_min": -376,
+         "km": -161.74,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 5,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": 28.3,
+         "paid_driver_min": 278,
+         "km": 143.08,
+         "trucks": 0,
+         "trips": 0,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 0,
+         "like_for_like": false
+        }
+       ],
+       "cash_parts": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.64,
+        "fuel": 2.528,
+        "driver": 3.636,
+        "overtime": 2.878
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": 88.0,
+         "min": -376.0,
+         "max": 362.0,
+         "values": [
+          362.0,
+          -376.0,
+          278.0
+         ]
+        },
+        "km": {
+         "mean": 49.563,
+         "min": -161.74,
+         "max": 167.35,
+         "values": [
+          167.35,
+          -161.74,
+          143.08
+         ]
+        },
+        "trucks_used": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "trips": {
+         "mean": 0.0,
+         "min": -1.0,
+         "max": 1.0,
+         "values": [
+          1.0,
+          -1.0,
+          0.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 0.333,
+         "min": 0.0,
+         "max": 1.0,
+         "values": [
+          0.0,
+          0.0,
+          1.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 1.667,
+         "min": 0.0,
+         "max": 5.0,
+         "values": [
+          0.0,
+          5.0,
+          0.0
+         ]
+        },
+        "stops": [
+         "stop-002",
+         "stop-003",
+         "stop-006",
+         "stop-008",
+         "stop-104"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": -1026333.333,
+         "min": -3080000.0,
+         "max": 1000.0,
+         "values": [
+          0.0,
+          -3080000.0,
+          1000.0
+         ]
+        },
+        "window": {
+         "mean": -9.113,
+         "min": -66.838,
+         "max": 94.071,
+         "values": [
+          -54.572,
+          94.071,
+          -66.838
+         ]
+        },
+        "early": {
+         "mean": 0.909,
+         "min": -0.131,
+         "max": 1.811,
+         "values": [
+          1.046,
+          1.811,
+          -0.131
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 137.23
+      },
+      "future": {
+       "omr": 2.566,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.021
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "MT_SUPERMARKET",
+       "visit_every_days": {
+        "p25": 5.0,
+        "p50": 6.0,
+        "p75": 7.5,
+        "customers": 15
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 2.6,
+        "fast_p75": 2.2,
+        "slow_p25": 3.4,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "P2: always served",
+       "serving it costs 2.57 OMR cash today (fixed plan)"
+      ]
+     },
+     {
+      "stop": "stop-165",
+      "priority": 3,
+      "cases": 3,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-03",
+        "load_no": 2,
+        "position": 4,
+        "load_stops": 5
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.078,
+        "fuel": 0.127,
+        "driver": 0.623,
+        "overtime": 0.995,
+        "total": 1.823
+       },
+       "freed": {
+        "paid_driver_min": 15,
+        "km": 1.96,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 3,
+        "pallets": 0.03,
+        "service_min": 12,
+        "detour_drive_min": 2.9
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.149,
+        "unserved_penalty": 1026000.0,
+        "window": -1.493
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-069",
+       "nearest_km": 0.79,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 70,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": 1.296,
+        "min": -21.589,
+        "max": 13.241,
+        "values": [
+         13.241,
+         -21.589,
+         12.236
+        ]
+       },
+       "avoidable_cash_like_for_like": null,
+       "like_for_like_seeds": [],
+       "noise_omr": 48.104,
+       "used": false,
+       "note": "0 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": 13.241,
+         "paid_driver_min": 63,
+         "km": 78.15,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 2,
+         "gained": 0,
+         "like_for_like": false
+        },
+        {
+         "seed": 2,
+         "cash_saved": -21.589,
+         "paid_driver_min": -269,
+         "km": -73.56,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 4,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": 12.236,
+         "paid_driver_min": 151,
+         "km": 79.72,
+         "trucks": 0,
+         "trips": 0,
+         "served_in_baseline": true,
+         "dropped": 0,
+         "gained": 1,
+         "like_for_like": false
+        }
+       ],
+       "cash_parts": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": -0.369,
+        "fuel": 0.973,
+        "driver": -0.814,
+        "overtime": 1.506
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": -18.333,
+         "min": -269.0,
+         "max": 151.0,
+         "values": [
+          63.0,
+          -269.0,
+          151.0
+         ]
+        },
+        "km": {
+         "mean": 28.103,
+         "min": -73.56,
+         "max": 79.72,
+         "values": [
+          78.15,
+          -73.56,
+          79.72
+         ]
+        },
+        "trucks_used": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "trips": {
+         "mean": -0.667,
+         "min": -1.0,
+         "max": 0.0,
+         "values": [
+          -1.0,
+          -1.0,
+          0.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 0.667,
+         "min": 0.0,
+         "max": 2.0,
+         "values": [
+          2.0,
+          0.0,
+          0.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 1.667,
+         "min": 0.0,
+         "max": 4.0,
+         "values": [
+          0.0,
+          4.0,
+          1.0
+         ]
+        },
+        "stops": [
+         "stop-001",
+         "stop-003",
+         "stop-006",
+         "stop-104"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": -1000.0,
+         "min": -1029000.0,
+         "max": 1027000.0,
+         "values": [
+          1027000.0,
+          -1029000.0,
+          -1000.0
+         ]
+        },
+        "window": {
+         "mean": 12.256,
+         "min": -24.704,
+         "max": 53.347,
+         "values": [
+          -24.704,
+          53.347,
+          8.124
+         ]
+        },
+        "early": {
+         "mean": 2.389,
+         "min": 0.673,
+         "max": 3.503,
+         "values": [
+          0.673,
+          2.992,
+          3.503
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 133.88
+      },
+      "future": {
+       "omr": 1.823,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 2.1,
+        "fast_p75": 1.7,
+        "slow_p25": 2.7,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "re-optimization not used: 0 like-for-like seed(s): too few to tell a saving from search noise",
+       "already rides with stop-069 (0.79 km) on its load",
+       "defer saves 1.82 OMR (fixed plan), not clearly more than future cost 1.82 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-171",
+      "priority": 4,
+      "cases": 1,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-05",
+        "load_no": 1,
+        "position": 12,
+        "load_stops": 18
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.011,
+        "fuel": 0.017,
+        "driver": 0.474,
+        "overtime": 0.031,
+        "total": 0.533
+       },
+       "freed": {
+        "paid_driver_min": 12,
+        "km": 0.26,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 1,
+        "pallets": 0.01,
+        "service_min": 11,
+        "detour_drive_min": 0.4
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 38000.0,
+        "window": -4.135
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-102",
+       "nearest_km": 0.18,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 76,
+       "timed_ok": 23,
+       "to": {
+        "truck": "truck-11",
+        "load_no": 1,
+        "position": 13,
+        "load_stops": 17
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-154",
+       "near_km": 0.3,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": -0.011,
+        "fuel": -0.017,
+        "driver": -0.015,
+        "overtime": 0.702,
+        "total": 0.659
+       },
+       "km_delta": -0.25,
+       "paid_driver_min_delta": -1,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": 0.0,
+        "unserved_penalty": 0.0,
+        "window": 2.929
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.533,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.01
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.3,
+        "fast_p75": 0.2,
+        "slow_p25": 0.4,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-102 (0.18 km) on its load",
+       "defer saves 0.53 OMR (fixed plan), not clearly more than future cost 0.53 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-174",
+      "priority": 3,
+      "cases": 1,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-06",
+        "load_no": 1,
+        "position": 6,
+        "load_stops": 7
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.002,
+        "fuel": 0.003,
+        "driver": 0.462,
+        "overtime": 0.0,
+        "total": 0.467
+       },
+       "freed": {
+        "paid_driver_min": 11,
+        "km": 0.05,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 1,
+        "pallets": 0.01,
+        "service_min": 11,
+        "detour_drive_min": 0.1
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.055,
+        "unserved_penalty": 1026000.0,
+        "window": -1.108
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-035",
+       "nearest_km": 0.53,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": true,
+       "tried": 76,
+       "timed_ok": 8,
+       "to": {
+        "truck": "truck-09",
+        "load_no": 1,
+        "position": 12,
+        "load_stops": 12
+       },
+       "kind": "EXISTING_LOAD",
+       "near": "stop-050",
+       "near_km": 0.84,
+       "cash_delta": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.058,
+        "fuel": 0.061,
+        "driver": 0.051,
+        "overtime": 0.0,
+        "total": 0.17
+       },
+       "km_delta": 0.81,
+       "paid_driver_min_delta": 1,
+       "penalty_delta": {
+        "continuity": 0.0,
+        "early": -0.055,
+        "unserved_penalty": 0.0,
+        "window": 8.279
+       },
+       "feasibility": "VERIFIED"
+      },
+      "defer": null,
+      "future": {
+       "omr": 0.467,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.01
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.1,
+        "fast_p75": 0.0,
+        "slow_p25": 0.1,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "already rides with stop-035 (0.53 km) on its load",
+       "defer saves 0.47 OMR (fixed plan), not clearly more than future cost 0.47 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     },
+     {
+      "stop": "stop-182",
+      "priority": 5,
+      "cases": 3,
+      "invoices": 1,
+      "late": false,
+      "committed": false,
+      "served": true,
+      "fixed": {
+       "at": {
+        "truck": "truck-11",
+        "load_no": 1,
+        "position": 8,
+        "load_stops": 16
+       },
+       "cash_saved": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 0.021,
+        "fuel": 0.021,
+        "driver": 0.518,
+        "overtime": 0.829,
+        "total": 1.389
+       },
+       "freed": {
+        "paid_driver_min": 12,
+        "km": 0.29,
+        "trucks": 0,
+        "trips": 0,
+        "cases": 3,
+        "pallets": 0.03,
+        "service_min": 12,
+        "detour_drive_min": 0.4
+       },
+       "penalty_change": {
+        "continuity": 0.0,
+        "early": -0.248,
+        "unserved_penalty": 1000.0,
+        "window": -6.73
+       },
+       "feasibility": "VERIFIED"
+      },
+      "combine": {
+       "combined": true,
+       "nearest": "stop-140",
+       "nearest_km": 0.7,
+       "combine_km": 2.0
+      },
+      "move": {
+       "found": false,
+       "tried": 67,
+       "timed_ok": 0,
+       "to": null,
+       "kind": null,
+       "near": null,
+       "near_km": null,
+       "cash_delta": null,
+       "km_delta": null,
+       "paid_driver_min_delta": null,
+       "penalty_delta": null,
+       "feasibility": null
+      },
+      "defer": {
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "paired": true,
+       "avoidable_cash": {
+        "mean": 15.88,
+        "min": -3.261,
+        "max": 26.994,
+        "values": [
+         26.994,
+         -3.261,
+         23.906
+        ]
+       },
+       "avoidable_cash_like_for_like": null,
+       "like_for_like_seeds": [],
+       "noise_omr": 48.104,
+       "used": false,
+       "note": "0 like-for-like seed(s): too few to tell a saving from search noise",
+       "per_seed": [
+        {
+         "seed": 1,
+         "cash_saved": 26.994,
+         "paid_driver_min": 185,
+         "km": 125.98,
+         "trucks": 0,
+         "trips": 0,
+         "served_in_baseline": true,
+         "dropped": 3,
+         "gained": 1,
+         "like_for_like": false
+        },
+        {
+         "seed": 2,
+         "cash_saved": -3.261,
+         "paid_driver_min": -31,
+         "km": -25.84,
+         "trucks": 0,
+         "trips": -1,
+         "served_in_baseline": true,
+         "dropped": 1,
+         "gained": 2,
+         "like_for_like": false
+        },
+        {
+         "seed": 3,
+         "cash_saved": 23.906,
+         "paid_driver_min": 180,
+         "km": 104.07,
+         "trucks": 0,
+         "trips": -2,
+         "served_in_baseline": true,
+         "dropped": 2,
+         "gained": 1,
+         "like_for_like": false
+        }
+       ],
+       "cash_parts": {
+        "fixed": 0.0,
+        "trip": 0.0,
+        "distance": 3.349,
+        "fuel": 4.681,
+        "driver": 4.645,
+        "overtime": 3.205
+       },
+       "freed": {
+        "paid_driver_min": {
+         "mean": 111.333,
+         "min": -31.0,
+         "max": 185.0,
+         "values": [
+          185.0,
+          -31.0,
+          180.0
+         ]
+        },
+        "km": {
+         "mean": 68.07,
+         "min": -25.84,
+         "max": 125.98,
+         "values": [
+          125.98,
+          -25.84,
+          104.07
+         ]
+        },
+        "trucks_used": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        },
+        "trips": {
+         "mean": -1.0,
+         "min": -2.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          -1.0,
+          -2.0
+         ]
+        }
+       },
+       "knock_on": {
+        "dropped_elsewhere": {
+         "mean": 2.0,
+         "min": 1.0,
+         "max": 3.0,
+         "values": [
+          3.0,
+          1.0,
+          2.0
+         ]
+        },
+        "gained_elsewhere": {
+         "mean": 1.333,
+         "min": 1.0,
+         "max": 2.0,
+         "values": [
+          1.0,
+          2.0,
+          1.0
+         ]
+        },
+        "stops": [
+         "stop-001",
+         "stop-002",
+         "stop-003",
+         "stop-005",
+         "stop-006",
+         "stop-008",
+         "stop-028"
+        ]
+       },
+       "penalty_change": {
+        "unserved_penalty": {
+         "mean": 1304333.333,
+         "min": -82000.0,
+         "max": 1998000.0,
+         "values": [
+          1998000.0,
+          -82000.0,
+          1997000.0
+         ]
+        },
+        "window": {
+         "mean": -42.28,
+         "min": -75.256,
+         "max": 11.486,
+         "values": [
+          -63.07,
+          11.486,
+          -75.256
+         ]
+        },
+        "early": {
+         "mean": 0.938,
+         "min": -1.325,
+         "max": 2.797,
+         "values": [
+          1.342,
+          -1.325,
+          2.797
+         ]
+        },
+        "continuity": {
+         "mean": 0.0,
+         "min": 0.0,
+         "max": 0.0,
+         "values": [
+          0.0,
+          0.0,
+          0.0
+         ]
+        }
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 132.04
+      },
+      "future": {
+       "omr": 1.389,
+       "basis": "PROXY",
+       "note": "PROXY: today's fixed-plan marginal cost of the same stop, reused",
+       "ride_along_omr": 0.031
+      },
+      "margin_omr": null,
+      "margin_basis": null,
+      "break_even_margin_per_case": null,
+      "evidence": {
+       "segment": "GT_RETAIL",
+       "visit_every_days": {
+        "p25": 6.75,
+        "p50": 10.0,
+        "p75": 10.0,
+        "customers": 23
+       },
+       "small_drop_on_site_min": {
+        "p25": 9.8,
+        "p50": 16.0,
+        "p75": 29.0,
+        "chains": 5,
+        "visits": 73
+       },
+       "detour_drive_min_at_ivms": {
+        "band": "09-12",
+        "at_p50": 0.3,
+        "fast_p75": 0.3,
+        "slow_p25": 0.4,
+        "speed_kmh_p50": 56.25,
+        "n": 1026
+       },
+       "basis": {
+        "visit_every_days": "13 Oct truck evidence 'Other delivery customers': delivery dates in September (30 / dates); segment mapping of the synthetic type",
+        "small_drop_on_site_min": "13 Oct evidence 'Claims check' (GPS visits), drops under 50 cases; a broader band than 1-3 cases",
+        "detour_drive_min_at_ivms": "IVMS raw report Feb-Mar 2026, MOVING segments of 5 km+, all regions; applied to the engine's estimated km"
+       }
+      },
+      "action": "SERVE",
+      "reasons": [
+       "re-optimization not used: 0 like-for-like seed(s): too few to tell a saving from search noise",
+       "already rides with stop-140 (0.7 km) on its load",
+       "defer saves 1.39 OMR (fixed plan), not clearly more than future cost 1.39 (PROXY)",
+       "no break-even margin: the future cost is a PROXY (today's cost reused), so whether a deferral pays cannot be judged without a next-day plan"
+      ]
+     }
+    ],
+    "invoices": {
+     "invoices": 320,
+     "small_invoices": 80,
+     "in_small_stops": 25,
+     "in_larger_stops": 55,
+     "note": "a small invoice inside a larger stop adds only its cases and unloading minutes to a visit made anyway; only small stops are evaluated here"
+    },
+    "assumptions": {
+     "clear_omr": "0.1 OMR: a cheaper option must save more than this (re-optimization: on every seed)",
+     "combine_km": "2.0 km straight line between stops of one load",
+     "segment_of_type": "{\"HYPERMARKET\": \"MT_HYPERMARKET\", \"SUPERMARKET\": \"MT_SUPERMARKET\", \"GROCERY\": \"GT_RETAIL\", \"HORECA\": \"HORECA_OTHER\", \"DARK_STORE\": \"DARK_STORE\"}",
+     "ride_along": "ASSUMPTION: OMR of the stop's extra unloading minutes if it waits for the customer's next regular delivery (0.25 min per case, the 14 Oct benchmark, x driver_cost_per_hour)",
+     "margin": "none given: break-even margins only (stops with DispatchStop.margin use it)",
+     "future": "PROXY (no next-day plan given)"
+    },
+    "labels": {
+     "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+     "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+     "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+     "time": "minutes, trips and trucks: time and capacity, not cash",
+     "cash_saved": "OMR cash the plan no longer spends without the stop (with - without); positive = saving",
+     "move": "OMR cash change if the stop rides on another load instead (moved - now); negative = cheaper",
+     "future": "OMR cash of delivering the stop later: NEXT_DAY_PLAN (exact insertion into the given plan) or PROXY (today's fixed-plan marginal cost of the same stop, reused)",
+     "ride_along": "ASSUMPTION: OMR of the stop's extra unloading minutes if it waits for the customer's next regular delivery (0.25 min per case, the 14 Oct benchmark, x driver_cost_per_hour)",
+     "margin": "contribution margin: DispatchStop.margin, or an explicit margin_per_case ASSUMPTION; never invented",
+     "break_even": "OMR per case: deferring pays only if the margin lost is below this, (least cash saved - future cost - 0.1) / cases, the figures the recommendation uses; only with a next-day plan (a PROXY future cost gives none)",
+     "evidence": "IVMS truck GPS (Feb-Mar 2026) and 13 Oct truck evidence aggregates: context, never cash"
+    }
+   }
+  }
+ }
+}

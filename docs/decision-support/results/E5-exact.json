@@ -1,0 +1,437 @@
+{
+ "experiment": "E5",
+ "title": "Exact oracle against the engine",
+ "meta": {
+  "commit": "6b6de09d576c",
+  "generated_at": "2026-10-15T03:58:30+00:00",
+  "quick": false,
+  "budgets": {
+   "engine_sec": 3
+  },
+  "seeds": [
+   1
+  ],
+  "machine": {
+   "nproc": 4,
+   "cpu": "AMD EPYC 7763 64-Core Processor",
+   "python": "3.11.17",
+   "ortools": "9.15.675",
+   "platform": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.39"
+  },
+  "run_hosts": [
+   "runnervm8k3b6"
+  ],
+  "lanes": [
+   "0/4",
+   "1/4",
+   "2/4",
+   "3/4"
+  ],
+  "env": {
+   "SOLVER_PARALLEL": "0",
+   "SOLVER_PYVRP": "off"
+  },
+  "equal_compute": "Every compared run has the same budget (search seconds, QUICK, RECOMMENDED only) and runs alone in its lane's process (SOLVER_PARALLEL=0). Production also runs the second route search (PyVRP); it is off here (SOLVER_PYVRP=off) so that every run gets the same single-core search.",
+  "honesty": "Distances are HAVERSINE estimates (estimated km). Plans are the best found in the time given, not proven optimal; only E5's oracle proves optimality, on the instances it enumerates completely. Cash is OMR (costing.truck_day_costs); solver penalties are ARTIFICIAL and never added to cash.",
+  "items": {
+   "total": 200,
+   "done": 200
+  },
+  "compute_sec": 584.4,
+  "first_start": "2026-10-15T03:03:15+00:00",
+  "last_finish": "2026-10-15T03:05:44+00:00",
+  "ivms": {
+   "source": "decision_support/data/ivms_aggregates.json: aggregates of the IVMS report (Feb-Mar 2026) and the 13 Oct truck evidence",
+   "whatif": {
+    "source": "IVMS report 2026-01-31..2026-03-16, 45352 segments (aggregates only)",
+    "unloading_gap": {
+     "p25_below_p50": 0.39,
+     "chains": 8,
+     "visits": 422,
+     "basis": "13 Oct GPS evidence: time on site per chain, visit-weighted median of 1 - p25/p50"
+    },
+    "reload": "Reload between loads (trip 2+): 3T 30 min (p25 19, p50 28, p75 40, p90 60); 10T about 30 min (p50 28, p75 about 55, p90 about 80) before daytime trips (SUPPORTED (3T) / SUPPORTED, small n (10T))",
+    "latest_return": "Latest return to depot: 10T p50 17:00, p75 18:57, p90 20:07; 3T p50 17:36, p75 18:39, p90 19:22. 3T in October: p50 18:16, p75 19:02, p90 20:20 (58% of days after 18:00). (SUPPORTED)",
+    "ivms_last_stop_end": {
+     "p50": "20:10",
+     "p75": "21:34",
+     "p90": "24:00"
+    },
+    "speed": {
+     "evening": 0.839,
+     "night": 0.708,
+     "basis": "IVMS MOVING segments, Muscat (MOVING segments >= 1 km and >= 2 min, speed = km / hours <= 130): median km/h 06-18 30.7 (segment-weighted mean of the band medians, n=2978), 18-22 25.71 (n=398), 22-06 21.71 (n=147). Cross-check, 13 Oct truck evidence: Time-of-day factor, trucks, Muscat core: 1.00 except 12-15 about 1.06; 18+ 1.07-1.13 (low n) (INFERRED)"
+    }
+   },
+   "uncertainty_model": {
+    "travel_median": 1.0,
+    "travel_sigma": 0.373,
+    "unload_median": 1.0,
+    "unload_sigma": 0.501,
+    "assumed": [
+     "travel_median",
+     "unload_median"
+    ],
+    "basis": {
+     "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+     "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+    }
+   },
+   "band_factors": {
+    "06-09": 0.77,
+    "09-12": 1.017,
+    "12-15": 1.033,
+    "15-18": 0.892,
+    "18-22": 1.148,
+    "22-06": 1.359
+   },
+   "small_drop_on_site_min": {
+    "p25": 9.8,
+    "p50": 16.0,
+    "p75": 29.0,
+    "chains": 5,
+    "visits": 73
+   },
+   "visit_every_days": {
+    "p25": 3.75,
+    "p50": 5.0,
+    "p75": 7.5,
+    "customers": 118
+   },
+   "unloading_gap": {
+    "share": 0.39,
+    "visits": 422
+   },
+   "slow_day_factor": 1.286,
+   "muscat_speed_kmh": {
+    "06-09": 38.3,
+    "09-12": 29.01,
+    "12-15": 28.57
+   }
+  },
+  "labels": {
+   "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+   "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+   "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+   "time": "minutes, trips and trucks: time and capacity, not cash"
+  }
+ },
+ "days": {
+  "DEFAULT": {
+   "status": "COMPLETE",
+   "items_done": 100,
+   "items": 100,
+   "compute_sec": 293.4,
+   "summary": {
+    "variant": "DEFAULT",
+    "instances": 100,
+    "engine_runs": 100,
+    "max_stops": 7,
+    "budget": {
+     "time_limit_sec": 3,
+     "search_mode": "QUICK",
+     "seeds": [
+      1
+     ]
+    },
+    "first_seed": 1,
+    "complete_enumerations": 100,
+    "oracle_verified": 100,
+    "oracle_seconds": {
+     "n": 100,
+     "median": 0.002,
+     "mean": 0.007,
+     "min": 0.0,
+     "max": 0.167
+    },
+    "engine_wall_sec": {
+     "n": 100,
+     "median": 3.01,
+     "mean": 2.946,
+     "min": 0.0,
+     "max": 3.64
+    },
+    "engine_plans_oracle_feasible": {
+     "n": 100,
+     "true": 100,
+     "share": 1.0
+    },
+    "served_equal": {
+     "n": 100,
+     "true": 100,
+     "share": 1.0
+    },
+    "service_equal": {
+     "n": 100,
+     "true": 100,
+     "share": 1.0
+    },
+    "engine_service_le_oracle": {
+     "n": 100,
+     "true": 100,
+     "share": 1.0
+    },
+    "engine_service_below_oracle": 0,
+    "stops_short_of_oracle": 0,
+    "proven_but_served": 0,
+    "engine_false_proofs": 0,
+    "engine_unproven_impossible": 0,
+    "oracle_never_servable": 68,
+    "cash_gap_omr": {
+     "n": 100,
+     "median": 0.0,
+     "mean": 0.469,
+     "min": 0.0,
+     "max": 8.474
+    },
+    "cash_gap_pct": {
+     "n": 97,
+     "median": 0.0,
+     "mean": 1.239,
+     "min": -0.002,
+     "max": 30.977
+    },
+    "cash_gap_zero_share": {
+     "n": 100,
+     "true": 70,
+     "share": 0.7
+    },
+    "cash_gap_same_stops_omr": {
+     "n": 100,
+     "median": 0.0,
+     "mean": 0.469,
+     "min": 0.0,
+     "max": 8.474
+    },
+    "routing_gap_omr": {
+     "n": 100,
+     "median": 0.0,
+     "mean": 0.369,
+     "min": 0.0,
+     "max": 8.121
+    },
+    "timing_gap_omr": {
+     "n": 100,
+     "median": 0.0,
+     "mean": 0.1,
+     "min": -0.001,
+     "max": 2.5
+    },
+    "ivms_slow_factor": 1.286,
+    "ivms_slow_basis": "p75 travel multiplier 1.286 = 1.0 x exp(0.674 x 0.373); median: DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows); sigma: IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+    "oracle_plans_survive_slow": {
+     "n": 100,
+     "true": 60,
+     "share": 0.6
+    },
+    "engine_plans_survive_slow": {
+     "n": 100,
+     "true": 65,
+     "share": 0.65
+    },
+    "ivms_speeds": {
+     "06-09": "IVMS 2026-01-31..2026-03-16: p50 speed of Muscat MOVING segments of 1 km or more, 06-09 band, n=305",
+     "09-12": "IVMS 2026-01-31..2026-03-16: p50 speed of Muscat MOVING segments of 1 km or more, 09-12 band, n=986",
+     "12-15": "IVMS 2026-01-31..2026-03-16: p50 speed of Muscat MOVING segments of 1 km or more, 12-15 band, n=1063"
+    },
+    "instance_assumptions": {
+     "label": "SYNTHETIC: customers of synth.make_day (public Muscat district centres and remote towns), cut down to a few stops; every number of synth.make_day's assumptions applies",
+     "stops": "3..max_stops stops drawn from synth.make_day(2 x stops + 2 invoices, seed)",
+     "trucks": "1 truck (25% of days) or 2, bays drawn from synth.FLEET_BAYS, synth's costs, one load each (max_trips 1); a small-truck-only customer may use the day's trucks of at most 6 bays",
+     "speed": "avg_speed_kmh = the IVMS median Muscat speed of a band drawn from 06-09, 09-12, 12-15",
+     "profiles": {
+      "MORNING": "synth's config (07:30 start, back by 19:00, 60-min break starting 14:00-15:00)",
+      "TIGHT_RETURN": "back by 12:00, 13:00 or 14:00 (latest_return_min)",
+      "LATE_START": "a plan made at 10:00, 11:00 or 12:00 (loading_from_min): the morning windows close, the break falls inside the day"
+     },
+     "profile_shares": {
+      "MORNING": 0.4,
+      "TIGHT_RETURN": 0.3,
+      "LATE_START": 0.3
+     }
+    },
+    "machine": {
+     "node": "codespaces-549a45",
+     "cpus": 4,
+     "python": "3.11.17"
+    },
+    "env": {
+     "SOLVER_PARALLEL": "0",
+     "SOLVER_PYVRP": "off"
+    },
+    "labels": {
+     "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+     "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+     "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+     "time": "minutes, trips and trucks: time and capacity, not cash",
+     "service_value": "ARTIFICIAL: the engine's service values of the served stops (strict priority weights); a rank, never money",
+     "claim": "OPTIMAL only when the enumeration is complete, for the oracle's rules and estimated km"
+    }
+   },
+   "profiles": {
+    "MORNING": 38,
+    "LATE_START": 38,
+    "TIGHT_RETURN": 24
+   }
+  },
+  "PREFERENCES_OFF": {
+   "status": "COMPLETE",
+   "items_done": 100,
+   "items": 100,
+   "compute_sec": 291.0,
+   "summary": {
+    "variant": "PREFERENCES_OFF (no preferred-window or early-arrival prices: the engine ranks by service and cash, like the oracle)",
+    "instances": 100,
+    "engine_runs": 100,
+    "max_stops": 7,
+    "budget": {
+     "time_limit_sec": 3,
+     "search_mode": "QUICK",
+     "seeds": [
+      1
+     ]
+    },
+    "first_seed": 1,
+    "complete_enumerations": 100,
+    "oracle_verified": 100,
+    "oracle_seconds": {
+     "n": 100,
+     "median": 0.002,
+     "mean": 0.007,
+     "min": 0.0,
+     "max": 0.171
+    },
+    "engine_wall_sec": {
+     "n": 100,
+     "median": 3.01,
+     "mean": 2.92,
+     "min": 0.0,
+     "max": 3.02
+    },
+    "engine_plans_oracle_feasible": {
+     "n": 100,
+     "true": 100,
+     "share": 1.0
+    },
+    "served_equal": {
+     "n": 100,
+     "true": 100,
+     "share": 1.0
+    },
+    "service_equal": {
+     "n": 100,
+     "true": 100,
+     "share": 1.0
+    },
+    "engine_service_le_oracle": {
+     "n": 100,
+     "true": 100,
+     "share": 1.0
+    },
+    "engine_service_below_oracle": 0,
+    "stops_short_of_oracle": 0,
+    "proven_but_served": 0,
+    "engine_false_proofs": 0,
+    "engine_unproven_impossible": 0,
+    "oracle_never_servable": 68,
+    "cash_gap_omr": {
+     "n": 100,
+     "median": 0.0,
+     "mean": 0.049,
+     "min": -0.001,
+     "max": 2.428
+    },
+    "cash_gap_pct": {
+     "n": 97,
+     "median": 0.0,
+     "mean": 0.088,
+     "min": -0.002,
+     "max": 4.459
+    },
+    "cash_gap_zero_share": {
+     "n": 100,
+     "true": 98,
+     "share": 0.98
+    },
+    "cash_gap_same_stops_omr": {
+     "n": 100,
+     "median": 0.0,
+     "mean": 0.049,
+     "min": -0.001,
+     "max": 2.428
+    },
+    "routing_gap_omr": {
+     "n": 100,
+     "median": 0.0,
+     "mean": 0.048,
+     "min": 0.0,
+     "max": 2.428
+    },
+    "timing_gap_omr": {
+     "n": 100,
+     "median": 0.0,
+     "mean": 0.0,
+     "min": -0.001,
+     "max": 0.001
+    },
+    "ivms_slow_factor": 1.286,
+    "ivms_slow_basis": "p75 travel multiplier 1.286 = 1.0 x exp(0.674 x 0.373); median: DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows); sigma: IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+    "oracle_plans_survive_slow": {
+     "n": 100,
+     "true": 60,
+     "share": 0.6
+    },
+    "engine_plans_survive_slow": {
+     "n": 100,
+     "true": 61,
+     "share": 0.61
+    },
+    "ivms_speeds": {
+     "06-09": "IVMS 2026-01-31..2026-03-16: p50 speed of Muscat MOVING segments of 1 km or more, 06-09 band, n=305",
+     "09-12": "IVMS 2026-01-31..2026-03-16: p50 speed of Muscat MOVING segments of 1 km or more, 09-12 band, n=986",
+     "12-15": "IVMS 2026-01-31..2026-03-16: p50 speed of Muscat MOVING segments of 1 km or more, 12-15 band, n=1063"
+    },
+    "instance_assumptions": {
+     "label": "SYNTHETIC: customers of synth.make_day (public Muscat district centres and remote towns), cut down to a few stops; every number of synth.make_day's assumptions applies",
+     "stops": "3..max_stops stops drawn from synth.make_day(2 x stops + 2 invoices, seed)",
+     "trucks": "1 truck (25% of days) or 2, bays drawn from synth.FLEET_BAYS, synth's costs, one load each (max_trips 1); a small-truck-only customer may use the day's trucks of at most 6 bays",
+     "speed": "avg_speed_kmh = the IVMS median Muscat speed of a band drawn from 06-09, 09-12, 12-15",
+     "profiles": {
+      "MORNING": "synth's config (07:30 start, back by 19:00, 60-min break starting 14:00-15:00)",
+      "TIGHT_RETURN": "back by 12:00, 13:00 or 14:00 (latest_return_min)",
+      "LATE_START": "a plan made at 10:00, 11:00 or 12:00 (loading_from_min): the morning windows close, the break falls inside the day"
+     },
+     "profile_shares": {
+      "MORNING": 0.4,
+      "TIGHT_RETURN": 0.3,
+      "LATE_START": 0.3
+     }
+    },
+    "machine": {
+     "node": "codespaces-549a45",
+     "cpus": 4,
+     "python": "3.11.17"
+    },
+    "env": {
+     "SOLVER_PARALLEL": "0",
+     "SOLVER_PYVRP": "off"
+    },
+    "labels": {
+     "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+     "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+     "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+     "time": "minutes, trips and trucks: time and capacity, not cash",
+     "service_value": "ARTIFICIAL: the engine's service values of the served stops (strict priority weights); a rank, never money",
+     "claim": "OPTIMAL only when the enumeration is complete, for the oracle's rules and estimated km"
+    }
+   },
+   "profiles": {
+    "MORNING": 38,
+    "LATE_START": 38,
+    "TIGHT_RETURN": 24
+   }
+  }
+ }
+}

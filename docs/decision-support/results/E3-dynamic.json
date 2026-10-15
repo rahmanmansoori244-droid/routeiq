@@ -1,0 +1,6136 @@
+{
+ "experiment": "E3",
+ "title": "Dynamic re-planning policies",
+ "meta": {
+  "commit": "6b6de09d576c",
+  "generated_at": "2026-10-15T03:58:28+00:00",
+  "quick": false,
+  "budgets": {
+   "real_sec": 20,
+   "synthetic_sec": 40,
+   "replan_sec": 10
+  },
+  "seeds": [
+   1
+  ],
+  "machine": {
+   "nproc": 4,
+   "cpu": "AMD EPYC 7763 64-Core Processor",
+   "python": "3.11.17",
+   "ortools": "9.15.675",
+   "platform": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.39"
+  },
+  "run_hosts": [
+   "codespaces-549a45",
+   "runnervmmprz5"
+  ],
+  "lanes": [
+   "0/4",
+   "1/4",
+   "2/4",
+   "3/4"
+  ],
+  "env": {
+   "SOLVER_PARALLEL": "0",
+   "SOLVER_PYVRP": "off"
+  },
+  "equal_compute": "Every compared run has the same budget (search seconds, QUICK, RECOMMENDED only) and runs alone in its lane's process (SOLVER_PARALLEL=0). Production also runs the second route search (PyVRP); it is off here (SOLVER_PYVRP=off) so that every run gets the same single-core search.",
+  "honesty": "Distances are HAVERSINE estimates (estimated km). Plans are the best found in the time given, not proven optimal; only E5's oracle proves optimality, on the instances it enumerates completely. Cash is OMR (costing.truck_day_costs); solver penalties are ARTIFICIAL and never added to cash.",
+  "items": {
+   "total": 26,
+   "done": 26
+  },
+  "compute_sec": 3416.0,
+  "first_start": "2026-10-15T00:59:57+00:00",
+  "last_finish": "2026-10-15T03:17:04+00:00",
+  "ivms": {
+   "source": "decision_support/data/ivms_aggregates.json: aggregates of the IVMS report (Feb-Mar 2026) and the 13 Oct truck evidence",
+   "whatif": {
+    "source": "IVMS report 2026-01-31..2026-03-16, 45352 segments (aggregates only)",
+    "unloading_gap": {
+     "p25_below_p50": 0.39,
+     "chains": 8,
+     "visits": 422,
+     "basis": "13 Oct GPS evidence: time on site per chain, visit-weighted median of 1 - p25/p50"
+    },
+    "reload": "Reload between loads (trip 2+): 3T 30 min (p25 19, p50 28, p75 40, p90 60); 10T about 30 min (p50 28, p75 about 55, p90 about 80) before daytime trips (SUPPORTED (3T) / SUPPORTED, small n (10T))",
+    "latest_return": "Latest return to depot: 10T p50 17:00, p75 18:57, p90 20:07; 3T p50 17:36, p75 18:39, p90 19:22. 3T in October: p50 18:16, p75 19:02, p90 20:20 (58% of days after 18:00). (SUPPORTED)",
+    "ivms_last_stop_end": {
+     "p50": "20:10",
+     "p75": "21:34",
+     "p90": "24:00"
+    },
+    "speed": {
+     "evening": 0.839,
+     "night": 0.708,
+     "basis": "IVMS MOVING segments, Muscat (MOVING segments >= 1 km and >= 2 min, speed = km / hours <= 130): median km/h 06-18 30.7 (segment-weighted mean of the band medians, n=2978), 18-22 25.71 (n=398), 22-06 21.71 (n=147). Cross-check, 13 Oct truck evidence: Time-of-day factor, trucks, Muscat core: 1.00 except 12-15 about 1.06; 18+ 1.07-1.13 (low n) (INFERRED)"
+    }
+   },
+   "uncertainty_model": {
+    "travel_median": 1.0,
+    "travel_sigma": 0.373,
+    "unload_median": 1.0,
+    "unload_sigma": 0.501,
+    "assumed": [
+     "travel_median",
+     "unload_median"
+    ],
+    "basis": {
+     "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+     "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+    }
+   },
+   "band_factors": {
+    "06-09": 0.77,
+    "09-12": 1.017,
+    "12-15": 1.033,
+    "15-18": 0.892,
+    "18-22": 1.148,
+    "22-06": 1.359
+   },
+   "small_drop_on_site_min": {
+    "p25": 9.8,
+    "p50": 16.0,
+    "p75": 29.0,
+    "chains": 5,
+    "visits": 73
+   },
+   "visit_every_days": {
+    "p25": 3.75,
+    "p50": 5.0,
+    "p75": 7.5,
+    "customers": 118
+   },
+   "unloading_gap": {
+    "share": 0.39,
+    "visits": 422
+   },
+   "slow_day_factor": 1.286,
+   "muscat_speed_kmh": {
+    "06-09": 38.3,
+    "09-12": 29.01,
+    "12-15": 28.57
+   }
+  },
+  "labels": {
+   "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+   "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+   "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+   "time": "minutes, trips and trucks: time and capacity, not cash"
+  }
+ },
+ "days": {
+  "SYNTH-280": {
+   "status": "COMPLETE",
+   "items_done": 16,
+   "items": 16,
+   "compute_sec": 2457.8,
+   "label": "SIMULATION (no future information; distances are estimated km)",
+   "budget": {
+    "replan": {
+     "time_limit_sec": 10,
+     "search_mode": "QUICK",
+     "seeds": [
+      1
+     ]
+    },
+    "morning": {
+     "time_limit_sec": 40,
+     "search_mode": "QUICK",
+     "seeds": [
+      1
+     ]
+    }
+   },
+   "settings": {
+    "delay_threshold_min": 20.0,
+    "preloaded_first_loads": true,
+    "change_penalty_per_stop": null,
+    "solver_seed": 1,
+    "morning_at_min": null
+   },
+   "policies": {
+    "A": {
+     "label": "static: the morning plan, executed as is (never serves an order revealed later, never retries a stop the morning plan left out)",
+     "triggers": []
+    },
+    "B": {
+     "label": "re-plan at each depot return",
+     "triggers": [
+      "DEPOT_RETURN"
+     ]
+    },
+    "C": {
+     "label": "event-triggered: depot return, delay over the threshold, new order",
+     "triggers": [
+      "DELAY",
+      "DEPOT_RETURN",
+      "NEW_ORDER"
+     ]
+    }
+   },
+   "worlds": [
+    {
+     "seed": 1,
+     "model": {
+      "travel_median": 1.0,
+      "travel_sigma": 0.373,
+      "unload_median": 1.0,
+      "unload_sigma": 0.501,
+      "assumed": [
+       "travel_median",
+       "unload_median"
+      ],
+      "basis": {
+       "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+       "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+      }
+     },
+     "band_factors": {
+      "06-09": 0.77,
+      "09-12": 1.017,
+      "12-15": 1.033,
+      "15-18": 0.892,
+      "18-22": 1.148,
+      "22-06": 1.359
+     },
+     "new_orders": 15,
+     "windows": "provenance labels given: SALES_PREFERENCE windows are measured against the genuine hours"
+    },
+    {
+     "seed": 2,
+     "model": {
+      "travel_median": 1.0,
+      "travel_sigma": 0.373,
+      "unload_median": 1.0,
+      "unload_sigma": 0.501,
+      "assumed": [
+       "travel_median",
+       "unload_median"
+      ],
+      "basis": {
+       "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+       "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+      }
+     },
+     "band_factors": {
+      "06-09": 0.77,
+      "09-12": 1.017,
+      "12-15": 1.033,
+      "15-18": 0.892,
+      "18-22": 1.148,
+      "22-06": 1.359
+     },
+     "new_orders": 15,
+     "windows": "provenance labels given: SALES_PREFERENCE windows are measured against the genuine hours"
+    },
+    {
+     "seed": 3,
+     "model": {
+      "travel_median": 1.0,
+      "travel_sigma": 0.373,
+      "unload_median": 1.0,
+      "unload_sigma": 0.501,
+      "assumed": [
+       "travel_median",
+       "unload_median"
+      ],
+      "basis": {
+       "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+       "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+      }
+     },
+     "band_factors": {
+      "06-09": 0.77,
+      "09-12": 1.017,
+      "12-15": 1.033,
+      "15-18": 0.892,
+      "18-22": 1.148,
+      "22-06": 1.359
+     },
+     "new_orders": 15,
+     "windows": "provenance labels given: SALES_PREFERENCE windows are measured against the genuine hours"
+    },
+    {
+     "seed": 4,
+     "model": {
+      "travel_median": 1.0,
+      "travel_sigma": 0.373,
+      "unload_median": 1.0,
+      "unload_sigma": 0.501,
+      "assumed": [
+       "travel_median",
+       "unload_median"
+      ],
+      "basis": {
+       "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+       "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+      }
+     },
+     "band_factors": {
+      "06-09": 0.77,
+      "09-12": 1.017,
+      "12-15": 1.033,
+      "15-18": 0.892,
+      "18-22": 1.148,
+      "22-06": 1.359
+     },
+     "new_orders": 15,
+     "windows": "provenance labels given: SALES_PREFERENCE windows are measured against the genuine hours"
+    },
+    {
+     "seed": 5,
+     "model": {
+      "travel_median": 1.0,
+      "travel_sigma": 0.373,
+      "unload_median": 1.0,
+      "unload_sigma": 0.501,
+      "assumed": [
+       "travel_median",
+       "unload_median"
+      ],
+      "basis": {
+       "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+       "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+      }
+     },
+     "band_factors": {
+      "06-09": 0.77,
+      "09-12": 1.017,
+      "12-15": 1.033,
+      "15-18": 0.892,
+      "18-22": 1.148,
+      "22-06": 1.359
+     },
+     "new_orders": 15,
+     "windows": "provenance labels given: SALES_PREFERENCE windows are measured against the genuine hours"
+    }
+   ],
+   "morning": {
+    "stops_known": 147,
+    "stops_planned": 133,
+    "loads": 19,
+    "trucks": 11,
+    "km": 1011.57,
+    "planned_cash": {
+     "fixed": 174.0,
+     "trip": 0.0,
+     "distance": 52.716,
+     "fuel": 70.261,
+     "driver": 263.101,
+     "overtime": 4.408,
+     "total": 564.486
+    },
+    "feasibility": "VERIFIED",
+    "wall_sec": 41.22
+   },
+   "runs": [
+    {
+     "policy": "A",
+     "world": 1,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 133,
+     "served_known": 133,
+     "served_new": 0,
+     "unserved": 29,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 1,
+      "3": 9,
+      "4": 10,
+      "5": 9
+     },
+     "cases_served": 8535,
+     "cash_per_case": 0.073,
+     "late_stops": 9,
+     "late_min": 373.3,
+     "pref_late_stops": 4,
+     "late_returns": 1,
+     "late_return_min": 124.5,
+     "late_breaks": 7,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 19,
+     "km": 1011.57,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 52.716,
+      "fuel": 70.261,
+      "driver": 291.667,
+      "overtime": 35.532,
+      "total": 624.176
+     },
+     "paid_driver_min": 7000,
+     "overtime_min": 533,
+     "replans": 0,
+     "replans_skipped": 0,
+     "replans_failed": 0,
+     "stops_moved": 0,
+     "stops_moved_distinct": 0,
+     "truck_changes": 0,
+     "dropped_from_plan": 0,
+     "solver_sec": 0,
+     "replans_logged": 0
+    },
+    {
+     "policy": "B",
+     "world": 1,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 145,
+     "served_known": 130,
+     "served_new": 15,
+     "unserved": 17,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 2,
+      "3": 2,
+      "4": 5,
+      "5": 8
+     },
+     "cases_served": 8423,
+     "cash_per_case": 0.08,
+     "late_stops": 5,
+     "late_min": 79.9,
+     "pref_late_stops": 4,
+     "late_returns": 2,
+     "late_return_min": 121.6,
+     "late_breaks": 6,
+     "missing_breaks": 1,
+     "trucks_used": 11,
+     "loads": 20,
+     "km": 1170.89,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 61.311,
+      "fuel": 81.305,
+      "driver": 305.508,
+      "overtime": 49.319,
+      "total": 671.443
+     },
+     "paid_driver_min": 7332,
+     "overtime_min": 740,
+     "replans": 10,
+     "replans_skipped": 10,
+     "replans_failed": 0,
+     "stops_moved": 32,
+     "stops_moved_distinct": 21,
+     "truck_changes": 31,
+     "dropped_from_plan": 5,
+     "solver_sec": 100.7,
+     "replans_logged": 20
+    },
+    {
+     "policy": "C",
+     "world": 1,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 147,
+     "served_known": 132,
+     "served_new": 15,
+     "unserved": 15,
+     "unserved_by_priority": {
+      "1": 1,
+      "2": 0,
+      "3": 2,
+      "4": 5,
+      "5": 7
+     },
+     "cases_served": 8554,
+     "cash_per_case": 0.076,
+     "late_stops": 7,
+     "late_min": 103.3,
+     "pref_late_stops": 4,
+     "late_returns": 3,
+     "late_return_min": 135.0,
+     "late_breaks": 7,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 20,
+     "km": 1075.99,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 57.619,
+      "fuel": 75.169,
+      "driver": 300.017,
+      "overtime": 40.534,
+      "total": 647.339
+     },
+     "paid_driver_min": 7200,
+     "overtime_min": 608,
+     "replans": 38,
+     "replans_skipped": 14,
+     "replans_failed": 0,
+     "stops_moved": 74,
+     "stops_moved_distinct": 32,
+     "truck_changes": 54,
+     "dropped_from_plan": 10,
+     "solver_sec": 383.99,
+     "replans_logged": 52
+    },
+    {
+     "policy": "A",
+     "world": 2,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 133,
+     "served_known": 133,
+     "served_new": 0,
+     "unserved": 29,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 1,
+      "3": 9,
+      "4": 10,
+      "5": 9
+     },
+     "cases_served": 8535,
+     "cash_per_case": 0.079,
+     "late_stops": 12,
+     "late_min": 767.8,
+     "pref_late_stops": 5,
+     "late_returns": 5,
+     "late_return_min": 408.8,
+     "late_breaks": 8,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 19,
+     "km": 1011.57,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 52.716,
+      "fuel": 70.261,
+      "driver": 309.958,
+      "overtime": 63.602,
+      "total": 670.536
+     },
+     "paid_driver_min": 7439,
+     "overtime_min": 954,
+     "replans": 0,
+     "replans_skipped": 0,
+     "replans_failed": 0,
+     "stops_moved": 0,
+     "stops_moved_distinct": 0,
+     "truck_changes": 0,
+     "dropped_from_plan": 0,
+     "solver_sec": 0,
+     "replans_logged": 0
+    },
+    {
+     "policy": "B",
+     "world": 2,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 144,
+     "served_known": 130,
+     "served_new": 14,
+     "unserved": 18,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 2,
+      "3": 2,
+      "4": 6,
+      "5": 8
+     },
+     "cases_served": 8223,
+     "cash_per_case": 0.082,
+     "late_stops": 9,
+     "late_min": 485.5,
+     "pref_late_stops": 3,
+     "late_returns": 5,
+     "late_return_min": 130.5,
+     "late_breaks": 8,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 18,
+     "km": 1107.7,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 57.287,
+      "fuel": 76.734,
+      "driver": 307.426,
+      "overtime": 54.438,
+      "total": 669.886
+     },
+     "paid_driver_min": 7378,
+     "overtime_min": 817,
+     "replans": 7,
+     "replans_skipped": 11,
+     "replans_failed": 0,
+     "stops_moved": 19,
+     "stops_moved_distinct": 16,
+     "truck_changes": 19,
+     "dropped_from_plan": 7,
+     "solver_sec": 70.51,
+     "replans_logged": 18
+    },
+    {
+     "policy": "C",
+     "world": 2,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 144,
+     "served_known": 130,
+     "served_new": 14,
+     "unserved": 18,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 2,
+      "3": 2,
+      "4": 6,
+      "5": 8
+     },
+     "cases_served": 8223,
+     "cash_per_case": 0.081,
+     "late_stops": 8,
+     "late_min": 459.4,
+     "pref_late_stops": 3,
+     "late_returns": 4,
+     "late_return_min": 175.0,
+     "late_breaks": 7,
+     "missing_breaks": 1,
+     "trucks_used": 11,
+     "loads": 18,
+     "km": 1083.18,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 56.546,
+      "fuel": 75.215,
+      "driver": 304.435,
+      "overtime": 51.741,
+      "total": 661.937
+     },
+     "paid_driver_min": 7306,
+     "overtime_min": 776,
+     "replans": 37,
+     "replans_skipped": 19,
+     "replans_failed": 0,
+     "stops_moved": 58,
+     "stops_moved_distinct": 31,
+     "truck_changes": 47,
+     "dropped_from_plan": 15,
+     "solver_sec": 373.12,
+     "replans_logged": 56
+    },
+    {
+     "policy": "A",
+     "world": 3,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 133,
+     "served_known": 133,
+     "served_new": 0,
+     "unserved": 29,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 1,
+      "3": 9,
+      "4": 10,
+      "5": 9
+     },
+     "cases_served": 8535,
+     "cash_per_case": 0.072,
+     "late_stops": 9,
+     "late_min": 442.7,
+     "pref_late_stops": 3,
+     "late_returns": 3,
+     "late_return_min": 103.7,
+     "late_breaks": 6,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 19,
+     "km": 1011.57,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 52.716,
+      "fuel": 70.261,
+      "driver": 286.799,
+      "overtime": 31.266,
+      "total": 615.041
+     },
+     "paid_driver_min": 6883,
+     "overtime_min": 469,
+     "replans": 0,
+     "replans_skipped": 0,
+     "replans_failed": 0,
+     "stops_moved": 0,
+     "stops_moved_distinct": 0,
+     "truck_changes": 0,
+     "dropped_from_plan": 0,
+     "solver_sec": 0,
+     "replans_logged": 0
+    },
+    {
+     "policy": "B",
+     "world": 3,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 149,
+     "served_known": 134,
+     "served_new": 15,
+     "unserved": 13,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "4": 4,
+      "5": 7
+     },
+     "cases_served": 8687,
+     "cash_per_case": 0.082,
+     "late_stops": 7,
+     "late_min": 427.4,
+     "pref_late_stops": 3,
+     "late_returns": 5,
+     "late_return_min": 200.4,
+     "late_breaks": 5,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 21,
+     "km": 1297.62,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 65.535,
+      "fuel": 89.281,
+      "driver": 316.232,
+      "overtime": 65.971,
+      "total": 711.018
+     },
+     "paid_driver_min": 7590,
+     "overtime_min": 990,
+     "replans": 10,
+     "replans_skipped": 11,
+     "replans_failed": 0,
+     "stops_moved": 45,
+     "stops_moved_distinct": 23,
+     "truck_changes": 39,
+     "dropped_from_plan": 7,
+     "solver_sec": 100.86,
+     "replans_logged": 21
+    },
+    {
+     "policy": "C",
+     "world": 3,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 148,
+     "served_known": 133,
+     "served_new": 15,
+     "unserved": 14,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "4": 4,
+      "5": 7
+     },
+     "cases_served": 8611,
+     "cash_per_case": 0.078,
+     "late_stops": 5,
+     "late_min": 347.3,
+     "pref_late_stops": 3,
+     "late_returns": 3,
+     "late_return_min": 103.6,
+     "late_breaks": 4,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 20,
+     "km": 1185.75,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 61.023,
+      "fuel": 81.998,
+      "driver": 305.554,
+      "overtime": 48.887,
+      "total": 671.461
+     },
+     "paid_driver_min": 7333,
+     "overtime_min": 733,
+     "replans": 31,
+     "replans_skipped": 17,
+     "replans_failed": 0,
+     "stops_moved": 30,
+     "stops_moved_distinct": 19,
+     "truck_changes": 25,
+     "dropped_from_plan": 10,
+     "solver_sec": 312.89,
+     "replans_logged": 48
+    },
+    {
+     "policy": "A",
+     "world": 4,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 133,
+     "served_known": 133,
+     "served_new": 0,
+     "unserved": 29,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 1,
+      "3": 9,
+      "4": 10,
+      "5": 9
+     },
+     "cases_served": 8535,
+     "cash_per_case": 0.077,
+     "late_stops": 13,
+     "late_min": 776.5,
+     "pref_late_stops": 3,
+     "late_returns": 3,
+     "late_return_min": 405.0,
+     "late_breaks": 7,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 19,
+     "km": 1011.57,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 52.716,
+      "fuel": 70.261,
+      "driver": 302.361,
+      "overtime": 55.884,
+      "total": 655.222
+     },
+     "paid_driver_min": 7257,
+     "overtime_min": 838,
+     "replans": 0,
+     "replans_skipped": 0,
+     "replans_failed": 0,
+     "stops_moved": 0,
+     "stops_moved_distinct": 0,
+     "truck_changes": 0,
+     "dropped_from_plan": 0,
+     "solver_sec": 0,
+     "replans_logged": 0
+    },
+    {
+     "policy": "B",
+     "world": 4,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 144,
+     "served_known": 129,
+     "served_new": 15,
+     "unserved": 18,
+     "unserved_by_priority": {
+      "1": 1,
+      "2": 2,
+      "3": 2,
+      "4": 5,
+      "5": 8
+     },
+     "cases_served": 7900,
+     "cash_per_case": 0.082,
+     "late_stops": 5,
+     "late_min": 153.4,
+     "pref_late_stops": 1,
+     "late_returns": 2,
+     "late_return_min": 109.3,
+     "late_breaks": 6,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 19,
+     "km": 1109.05,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 58.887,
+      "fuel": 77.301,
+      "driver": 297.228,
+      "overtime": 36.243,
+      "total": 643.658
+     },
+     "paid_driver_min": 7133,
+     "overtime_min": 544,
+     "replans": 8,
+     "replans_skipped": 11,
+     "replans_failed": 0,
+     "stops_moved": 32,
+     "stops_moved_distinct": 22,
+     "truck_changes": 22,
+     "dropped_from_plan": 6,
+     "solver_sec": 80.45,
+     "replans_logged": 19
+    },
+    {
+     "policy": "C",
+     "world": 4,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 145,
+     "served_known": 130,
+     "served_new": 15,
+     "unserved": 17,
+     "unserved_by_priority": {
+      "1": 1,
+      "2": 2,
+      "3": 1,
+      "4": 5,
+      "5": 8
+     },
+     "cases_served": 7920,
+     "cash_per_case": 0.085,
+     "late_stops": 4,
+     "late_min": 140.3,
+     "pref_late_stops": 1,
+     "late_returns": 4,
+     "late_return_min": 63.4,
+     "late_breaks": 4,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 21,
+     "km": 1233.41,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 61.894,
+      "fuel": 84.775,
+      "driver": 305.005,
+      "overtime": 48.687,
+      "total": 674.361
+     },
+     "paid_driver_min": 7320,
+     "overtime_min": 730,
+     "replans": 39,
+     "replans_skipped": 14,
+     "replans_failed": 0,
+     "stops_moved": 112,
+     "stops_moved_distinct": 41,
+     "truck_changes": 84,
+     "dropped_from_plan": 21,
+     "solver_sec": 393.7,
+     "replans_logged": 53
+    },
+    {
+     "policy": "A",
+     "world": 5,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 133,
+     "served_known": 133,
+     "served_new": 0,
+     "unserved": 29,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 1,
+      "3": 9,
+      "4": 10,
+      "5": 9
+     },
+     "cases_served": 8535,
+     "cash_per_case": 0.081,
+     "late_stops": 10,
+     "late_min": 843.4,
+     "pref_late_stops": 6,
+     "late_returns": 5,
+     "late_return_min": 535.5,
+     "late_breaks": 10,
+     "missing_breaks": 0,
+     "trucks_used": 11,
+     "loads": 19,
+     "km": 1011.57,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 52.716,
+      "fuel": 70.261,
+      "driver": 318.329,
+      "overtime": 74.693,
+      "total": 689.999
+     },
+     "paid_driver_min": 7640,
+     "overtime_min": 1120,
+     "replans": 0,
+     "replans_skipped": 0,
+     "replans_failed": 0,
+     "stops_moved": 0,
+     "stops_moved_distinct": 0,
+     "truck_changes": 0,
+     "dropped_from_plan": 0,
+     "solver_sec": 0,
+     "replans_logged": 0
+    },
+    {
+     "policy": "B",
+     "world": 5,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 141,
+     "served_known": 127,
+     "served_new": 14,
+     "unserved": 21,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 2,
+      "3": 4,
+      "4": 5,
+      "5": 10
+     },
+     "cases_served": 7987,
+     "cash_per_case": 0.087,
+     "late_stops": 5,
+     "late_min": 324.2,
+     "pref_late_stops": 5,
+     "late_returns": 6,
+     "late_return_min": 347.9,
+     "late_breaks": 6,
+     "missing_breaks": 1,
+     "trucks_used": 11,
+     "loads": 18,
+     "km": 1074.98,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 56.63,
+      "fuel": 74.809,
+      "driver": 318.665,
+      "overtime": 71.809,
+      "total": 695.914
+     },
+     "paid_driver_min": 7648,
+     "overtime_min": 1077,
+     "replans": 7,
+     "replans_skipped": 11,
+     "replans_failed": 0,
+     "stops_moved": 32,
+     "stops_moved_distinct": 21,
+     "truck_changes": 31,
+     "dropped_from_plan": 9,
+     "solver_sec": 70.33,
+     "replans_logged": 18
+    },
+    {
+     "policy": "C",
+     "world": 5,
+     "stops_total": 162,
+     "new_orders": 15,
+     "served": 139,
+     "served_known": 127,
+     "served_new": 12,
+     "unserved": 23,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 2,
+      "3": 5,
+      "4": 8,
+      "5": 8
+     },
+     "cases_served": 7824,
+     "cash_per_case": 0.087,
+     "late_stops": 4,
+     "late_min": 316.8,
+     "pref_late_stops": 5,
+     "late_returns": 5,
+     "late_return_min": 228.6,
+     "late_breaks": 6,
+     "missing_breaks": 1,
+     "trucks_used": 11,
+     "loads": 19,
+     "km": 1079.55,
+     "cash": {
+      "fixed": 174.0,
+      "trip": 0.0,
+      "distance": 56.794,
+      "fuel": 75.1,
+      "driver": 312.308,
+      "overtime": 59.982,
+      "total": 678.185
+     },
+     "paid_driver_min": 7495,
+     "overtime_min": 900,
+     "replans": 40,
+     "replans_skipped": 13,
+     "replans_failed": 0,
+     "stops_moved": 102,
+     "stops_moved_distinct": 41,
+     "truck_changes": 78,
+     "dropped_from_plan": 20,
+     "solver_sec": 402.01,
+     "replans_logged": 53
+    }
+   ],
+   "summary": {
+    "A": {
+     "cases_served": {
+      "mean": 8535.0,
+      "min": 8535.0,
+      "max": 8535.0,
+      "values": [
+       8535.0,
+       8535.0,
+       8535.0,
+       8535.0,
+       8535.0
+      ]
+     },
+     "cash.distance": {
+      "mean": 52.716,
+      "min": 52.716,
+      "max": 52.716,
+      "values": [
+       52.716,
+       52.716,
+       52.716,
+       52.716,
+       52.716
+      ]
+     },
+     "cash.driver": {
+      "mean": 301.823,
+      "min": 286.799,
+      "max": 318.329,
+      "values": [
+       291.667,
+       309.958,
+       286.799,
+       302.361,
+       318.329
+      ]
+     },
+     "cash.fixed": {
+      "mean": 174.0,
+      "min": 174.0,
+      "max": 174.0,
+      "values": [
+       174.0,
+       174.0,
+       174.0,
+       174.0,
+       174.0
+      ]
+     },
+     "cash.fuel": {
+      "mean": 70.261,
+      "min": 70.261,
+      "max": 70.261,
+      "values": [
+       70.261,
+       70.261,
+       70.261,
+       70.261,
+       70.261
+      ]
+     },
+     "cash.overtime": {
+      "mean": 52.195,
+      "min": 31.266,
+      "max": 74.693,
+      "values": [
+       35.532,
+       63.602,
+       31.266,
+       55.884,
+       74.693
+      ]
+     },
+     "cash.total": {
+      "mean": 650.995,
+      "min": 615.041,
+      "max": 689.999,
+      "values": [
+       624.176,
+       670.536,
+       615.041,
+       655.222,
+       689.999
+      ]
+     },
+     "cash.trip": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash_per_case": {
+      "mean": 0.076,
+      "min": 0.072,
+      "max": 0.081,
+      "values": [
+       0.073,
+       0.079,
+       0.072,
+       0.077,
+       0.081
+      ]
+     },
+     "dropped_from_plan": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "km": {
+      "mean": 1011.57,
+      "min": 1011.57,
+      "max": 1011.57,
+      "values": [
+       1011.57,
+       1011.57,
+       1011.57,
+       1011.57,
+       1011.57
+      ]
+     },
+     "late_breaks": {
+      "mean": 7.6,
+      "min": 6.0,
+      "max": 10.0,
+      "values": [
+       7.0,
+       8.0,
+       6.0,
+       7.0,
+       10.0
+      ]
+     },
+     "late_min": {
+      "mean": 640.74,
+      "min": 373.3,
+      "max": 843.4,
+      "values": [
+       373.3,
+       767.8,
+       442.7,
+       776.5,
+       843.4
+      ]
+     },
+     "late_return_min": {
+      "mean": 315.5,
+      "min": 103.7,
+      "max": 535.5,
+      "values": [
+       124.5,
+       408.8,
+       103.7,
+       405.0,
+       535.5
+      ]
+     },
+     "late_returns": {
+      "mean": 3.4,
+      "min": 1.0,
+      "max": 5.0,
+      "values": [
+       1.0,
+       5.0,
+       3.0,
+       3.0,
+       5.0
+      ]
+     },
+     "late_stops": {
+      "mean": 10.6,
+      "min": 9.0,
+      "max": 13.0,
+      "values": [
+       9.0,
+       12.0,
+       9.0,
+       13.0,
+       10.0
+      ]
+     },
+     "loads": {
+      "mean": 19.0,
+      "min": 19.0,
+      "max": 19.0,
+      "values": [
+       19.0,
+       19.0,
+       19.0,
+       19.0,
+       19.0
+      ]
+     },
+     "missing_breaks": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "new_orders": {
+      "mean": 15.0,
+      "min": 15.0,
+      "max": 15.0,
+      "values": [
+       15.0,
+       15.0,
+       15.0,
+       15.0,
+       15.0
+      ]
+     },
+     "overtime_min": {
+      "mean": 782.8,
+      "min": 469.0,
+      "max": 1120.0,
+      "values": [
+       533.0,
+       954.0,
+       469.0,
+       838.0,
+       1120.0
+      ]
+     },
+     "paid_driver_min": {
+      "mean": 7243.8,
+      "min": 6883.0,
+      "max": 7640.0,
+      "values": [
+       7000.0,
+       7439.0,
+       6883.0,
+       7257.0,
+       7640.0
+      ]
+     },
+     "pref_late_stops": {
+      "mean": 4.2,
+      "min": 3.0,
+      "max": 6.0,
+      "values": [
+       4.0,
+       5.0,
+       3.0,
+       3.0,
+       6.0
+      ]
+     },
+     "replans": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_failed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_skipped": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "served": {
+      "mean": 133.0,
+      "min": 133.0,
+      "max": 133.0,
+      "values": [
+       133.0,
+       133.0,
+       133.0,
+       133.0,
+       133.0
+      ]
+     },
+     "served_known": {
+      "mean": 133.0,
+      "min": 133.0,
+      "max": 133.0,
+      "values": [
+       133.0,
+       133.0,
+       133.0,
+       133.0,
+       133.0
+      ]
+     },
+     "served_new": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "solver_sec": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "stops_moved": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "stops_moved_distinct": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "stops_total": {
+      "mean": 162.0,
+      "min": 162.0,
+      "max": 162.0,
+      "values": [
+       162.0,
+       162.0,
+       162.0,
+       162.0,
+       162.0
+      ]
+     },
+     "truck_changes": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "trucks_used": {
+      "mean": 11.0,
+      "min": 11.0,
+      "max": 11.0,
+      "values": [
+       11.0,
+       11.0,
+       11.0,
+       11.0,
+       11.0
+      ]
+     },
+     "unserved": {
+      "mean": 29.0,
+      "min": 29.0,
+      "max": 29.0,
+      "values": [
+       29.0,
+       29.0,
+       29.0,
+       29.0,
+       29.0
+      ]
+     },
+     "unserved_by_priority.1": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.2": {
+      "mean": 1.0,
+      "min": 1.0,
+      "max": 1.0,
+      "values": [
+       1.0,
+       1.0,
+       1.0,
+       1.0,
+       1.0
+      ]
+     },
+     "unserved_by_priority.3": {
+      "mean": 9.0,
+      "min": 9.0,
+      "max": 9.0,
+      "values": [
+       9.0,
+       9.0,
+       9.0,
+       9.0,
+       9.0
+      ]
+     },
+     "unserved_by_priority.4": {
+      "mean": 10.0,
+      "min": 10.0,
+      "max": 10.0,
+      "values": [
+       10.0,
+       10.0,
+       10.0,
+       10.0,
+       10.0
+      ]
+     },
+     "unserved_by_priority.5": {
+      "mean": 9.0,
+      "min": 9.0,
+      "max": 9.0,
+      "values": [
+       9.0,
+       9.0,
+       9.0,
+       9.0,
+       9.0
+      ]
+     }
+    },
+    "B": {
+     "cases_served": {
+      "mean": 8244.0,
+      "min": 7900.0,
+      "max": 8687.0,
+      "values": [
+       8423.0,
+       8223.0,
+       8687.0,
+       7900.0,
+       7987.0
+      ]
+     },
+     "cash.distance": {
+      "mean": 59.93,
+      "min": 56.63,
+      "max": 65.535,
+      "values": [
+       61.311,
+       57.287,
+       65.535,
+       58.887,
+       56.63
+      ]
+     },
+     "cash.driver": {
+      "mean": 309.012,
+      "min": 297.228,
+      "max": 318.665,
+      "values": [
+       305.508,
+       307.426,
+       316.232,
+       297.228,
+       318.665
+      ]
+     },
+     "cash.fixed": {
+      "mean": 174.0,
+      "min": 174.0,
+      "max": 174.0,
+      "values": [
+       174.0,
+       174.0,
+       174.0,
+       174.0,
+       174.0
+      ]
+     },
+     "cash.fuel": {
+      "mean": 79.886,
+      "min": 74.809,
+      "max": 89.281,
+      "values": [
+       81.305,
+       76.734,
+       89.281,
+       77.301,
+       74.809
+      ]
+     },
+     "cash.overtime": {
+      "mean": 55.556,
+      "min": 36.243,
+      "max": 71.809,
+      "values": [
+       49.319,
+       54.438,
+       65.971,
+       36.243,
+       71.809
+      ]
+     },
+     "cash.total": {
+      "mean": 678.384,
+      "min": 643.658,
+      "max": 711.018,
+      "values": [
+       671.443,
+       669.886,
+       711.018,
+       643.658,
+       695.914
+      ]
+     },
+     "cash.trip": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash_per_case": {
+      "mean": 0.082,
+      "min": 0.08,
+      "max": 0.087,
+      "values": [
+       0.08,
+       0.082,
+       0.082,
+       0.082,
+       0.087
+      ]
+     },
+     "dropped_from_plan": {
+      "mean": 6.8,
+      "min": 5.0,
+      "max": 9.0,
+      "values": [
+       5.0,
+       7.0,
+       7.0,
+       6.0,
+       9.0
+      ]
+     },
+     "km": {
+      "mean": 1152.048,
+      "min": 1074.98,
+      "max": 1297.62,
+      "values": [
+       1170.89,
+       1107.7,
+       1297.62,
+       1109.05,
+       1074.98
+      ]
+     },
+     "late_breaks": {
+      "mean": 6.2,
+      "min": 5.0,
+      "max": 8.0,
+      "values": [
+       6.0,
+       8.0,
+       5.0,
+       6.0,
+       6.0
+      ]
+     },
+     "late_min": {
+      "mean": 294.08,
+      "min": 79.9,
+      "max": 485.5,
+      "values": [
+       79.9,
+       485.5,
+       427.4,
+       153.4,
+       324.2
+      ]
+     },
+     "late_return_min": {
+      "mean": 181.94,
+      "min": 109.3,
+      "max": 347.9,
+      "values": [
+       121.6,
+       130.5,
+       200.4,
+       109.3,
+       347.9
+      ]
+     },
+     "late_returns": {
+      "mean": 4.0,
+      "min": 2.0,
+      "max": 6.0,
+      "values": [
+       2.0,
+       5.0,
+       5.0,
+       2.0,
+       6.0
+      ]
+     },
+     "late_stops": {
+      "mean": 6.2,
+      "min": 5.0,
+      "max": 9.0,
+      "values": [
+       5.0,
+       9.0,
+       7.0,
+       5.0,
+       5.0
+      ]
+     },
+     "loads": {
+      "mean": 19.2,
+      "min": 18.0,
+      "max": 21.0,
+      "values": [
+       20.0,
+       18.0,
+       21.0,
+       19.0,
+       18.0
+      ]
+     },
+     "missing_breaks": {
+      "mean": 0.4,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     },
+     "new_orders": {
+      "mean": 15.0,
+      "min": 15.0,
+      "max": 15.0,
+      "values": [
+       15.0,
+       15.0,
+       15.0,
+       15.0,
+       15.0
+      ]
+     },
+     "overtime_min": {
+      "mean": 833.6,
+      "min": 544.0,
+      "max": 1077.0,
+      "values": [
+       740.0,
+       817.0,
+       990.0,
+       544.0,
+       1077.0
+      ]
+     },
+     "paid_driver_min": {
+      "mean": 7416.2,
+      "min": 7133.0,
+      "max": 7648.0,
+      "values": [
+       7332.0,
+       7378.0,
+       7590.0,
+       7133.0,
+       7648.0
+      ]
+     },
+     "pref_late_stops": {
+      "mean": 3.2,
+      "min": 1.0,
+      "max": 5.0,
+      "values": [
+       4.0,
+       3.0,
+       3.0,
+       1.0,
+       5.0
+      ]
+     },
+     "replans": {
+      "mean": 8.4,
+      "min": 7.0,
+      "max": 10.0,
+      "values": [
+       10.0,
+       7.0,
+       10.0,
+       8.0,
+       7.0
+      ]
+     },
+     "replans_failed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_skipped": {
+      "mean": 10.8,
+      "min": 10.0,
+      "max": 11.0,
+      "values": [
+       10.0,
+       11.0,
+       11.0,
+       11.0,
+       11.0
+      ]
+     },
+     "served": {
+      "mean": 144.6,
+      "min": 141.0,
+      "max": 149.0,
+      "values": [
+       145.0,
+       144.0,
+       149.0,
+       144.0,
+       141.0
+      ]
+     },
+     "served_known": {
+      "mean": 130.0,
+      "min": 127.0,
+      "max": 134.0,
+      "values": [
+       130.0,
+       130.0,
+       134.0,
+       129.0,
+       127.0
+      ]
+     },
+     "served_new": {
+      "mean": 14.6,
+      "min": 14.0,
+      "max": 15.0,
+      "values": [
+       15.0,
+       14.0,
+       15.0,
+       15.0,
+       14.0
+      ]
+     },
+     "solver_sec": {
+      "mean": 84.57,
+      "min": 70.33,
+      "max": 100.86,
+      "values": [
+       100.7,
+       70.51,
+       100.86,
+       80.45,
+       70.33
+      ]
+     },
+     "stops_moved": {
+      "mean": 32.0,
+      "min": 19.0,
+      "max": 45.0,
+      "values": [
+       32.0,
+       19.0,
+       45.0,
+       32.0,
+       32.0
+      ]
+     },
+     "stops_moved_distinct": {
+      "mean": 20.6,
+      "min": 16.0,
+      "max": 23.0,
+      "values": [
+       21.0,
+       16.0,
+       23.0,
+       22.0,
+       21.0
+      ]
+     },
+     "stops_total": {
+      "mean": 162.0,
+      "min": 162.0,
+      "max": 162.0,
+      "values": [
+       162.0,
+       162.0,
+       162.0,
+       162.0,
+       162.0
+      ]
+     },
+     "truck_changes": {
+      "mean": 28.4,
+      "min": 19.0,
+      "max": 39.0,
+      "values": [
+       31.0,
+       19.0,
+       39.0,
+       22.0,
+       31.0
+      ]
+     },
+     "trucks_used": {
+      "mean": 11.0,
+      "min": 11.0,
+      "max": 11.0,
+      "values": [
+       11.0,
+       11.0,
+       11.0,
+       11.0,
+       11.0
+      ]
+     },
+     "unserved": {
+      "mean": 17.4,
+      "min": 13.0,
+      "max": 21.0,
+      "values": [
+       17.0,
+       18.0,
+       13.0,
+       18.0,
+       21.0
+      ]
+     },
+     "unserved_by_priority.1": {
+      "mean": 0.2,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.2": {
+      "mean": 1.8,
+      "min": 1.0,
+      "max": 2.0,
+      "values": [
+       2.0,
+       2.0,
+       1.0,
+       2.0,
+       2.0
+      ]
+     },
+     "unserved_by_priority.3": {
+      "mean": 2.2,
+      "min": 1.0,
+      "max": 4.0,
+      "values": [
+       2.0,
+       2.0,
+       1.0,
+       2.0,
+       4.0
+      ]
+     },
+     "unserved_by_priority.4": {
+      "mean": 5.0,
+      "min": 4.0,
+      "max": 6.0,
+      "values": [
+       5.0,
+       6.0,
+       4.0,
+       5.0,
+       5.0
+      ]
+     },
+     "unserved_by_priority.5": {
+      "mean": 8.2,
+      "min": 7.0,
+      "max": 10.0,
+      "values": [
+       8.0,
+       8.0,
+       7.0,
+       8.0,
+       10.0
+      ]
+     }
+    },
+    "C": {
+     "cases_served": {
+      "mean": 8226.4,
+      "min": 7824.0,
+      "max": 8611.0,
+      "values": [
+       8554.0,
+       8223.0,
+       8611.0,
+       7920.0,
+       7824.0
+      ]
+     },
+     "cash.distance": {
+      "mean": 58.775,
+      "min": 56.546,
+      "max": 61.894,
+      "values": [
+       57.619,
+       56.546,
+       61.023,
+       61.894,
+       56.794
+      ]
+     },
+     "cash.driver": {
+      "mean": 305.464,
+      "min": 300.017,
+      "max": 312.308,
+      "values": [
+       300.017,
+       304.435,
+       305.554,
+       305.005,
+       312.308
+      ]
+     },
+     "cash.fixed": {
+      "mean": 174.0,
+      "min": 174.0,
+      "max": 174.0,
+      "values": [
+       174.0,
+       174.0,
+       174.0,
+       174.0,
+       174.0
+      ]
+     },
+     "cash.fuel": {
+      "mean": 78.451,
+      "min": 75.1,
+      "max": 84.775,
+      "values": [
+       75.169,
+       75.215,
+       81.998,
+       84.775,
+       75.1
+      ]
+     },
+     "cash.overtime": {
+      "mean": 49.966,
+      "min": 40.534,
+      "max": 59.982,
+      "values": [
+       40.534,
+       51.741,
+       48.887,
+       48.687,
+       59.982
+      ]
+     },
+     "cash.total": {
+      "mean": 666.657,
+      "min": 647.339,
+      "max": 678.185,
+      "values": [
+       647.339,
+       661.937,
+       671.461,
+       674.361,
+       678.185
+      ]
+     },
+     "cash.trip": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash_per_case": {
+      "mean": 0.081,
+      "min": 0.076,
+      "max": 0.087,
+      "values": [
+       0.076,
+       0.081,
+       0.078,
+       0.085,
+       0.087
+      ]
+     },
+     "dropped_from_plan": {
+      "mean": 15.2,
+      "min": 10.0,
+      "max": 21.0,
+      "values": [
+       10.0,
+       15.0,
+       10.0,
+       21.0,
+       20.0
+      ]
+     },
+     "km": {
+      "mean": 1131.576,
+      "min": 1075.99,
+      "max": 1233.41,
+      "values": [
+       1075.99,
+       1083.18,
+       1185.75,
+       1233.41,
+       1079.55
+      ]
+     },
+     "late_breaks": {
+      "mean": 5.6,
+      "min": 4.0,
+      "max": 7.0,
+      "values": [
+       7.0,
+       7.0,
+       4.0,
+       4.0,
+       6.0
+      ]
+     },
+     "late_min": {
+      "mean": 273.42,
+      "min": 103.3,
+      "max": 459.4,
+      "values": [
+       103.3,
+       459.4,
+       347.3,
+       140.3,
+       316.8
+      ]
+     },
+     "late_return_min": {
+      "mean": 141.12,
+      "min": 63.4,
+      "max": 228.6,
+      "values": [
+       135.0,
+       175.0,
+       103.6,
+       63.4,
+       228.6
+      ]
+     },
+     "late_returns": {
+      "mean": 3.8,
+      "min": 3.0,
+      "max": 5.0,
+      "values": [
+       3.0,
+       4.0,
+       3.0,
+       4.0,
+       5.0
+      ]
+     },
+     "late_stops": {
+      "mean": 5.6,
+      "min": 4.0,
+      "max": 8.0,
+      "values": [
+       7.0,
+       8.0,
+       5.0,
+       4.0,
+       4.0
+      ]
+     },
+     "loads": {
+      "mean": 19.6,
+      "min": 18.0,
+      "max": 21.0,
+      "values": [
+       20.0,
+       18.0,
+       20.0,
+       21.0,
+       19.0
+      ]
+     },
+     "missing_breaks": {
+      "mean": 0.4,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       0.0,
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     },
+     "new_orders": {
+      "mean": 15.0,
+      "min": 15.0,
+      "max": 15.0,
+      "values": [
+       15.0,
+       15.0,
+       15.0,
+       15.0,
+       15.0
+      ]
+     },
+     "overtime_min": {
+      "mean": 749.4,
+      "min": 608.0,
+      "max": 900.0,
+      "values": [
+       608.0,
+       776.0,
+       733.0,
+       730.0,
+       900.0
+      ]
+     },
+     "paid_driver_min": {
+      "mean": 7330.8,
+      "min": 7200.0,
+      "max": 7495.0,
+      "values": [
+       7200.0,
+       7306.0,
+       7333.0,
+       7320.0,
+       7495.0
+      ]
+     },
+     "pref_late_stops": {
+      "mean": 3.2,
+      "min": 1.0,
+      "max": 5.0,
+      "values": [
+       4.0,
+       3.0,
+       3.0,
+       1.0,
+       5.0
+      ]
+     },
+     "replans": {
+      "mean": 37.0,
+      "min": 31.0,
+      "max": 40.0,
+      "values": [
+       38.0,
+       37.0,
+       31.0,
+       39.0,
+       40.0
+      ]
+     },
+     "replans_failed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_skipped": {
+      "mean": 15.4,
+      "min": 13.0,
+      "max": 19.0,
+      "values": [
+       14.0,
+       19.0,
+       17.0,
+       14.0,
+       13.0
+      ]
+     },
+     "served": {
+      "mean": 144.6,
+      "min": 139.0,
+      "max": 148.0,
+      "values": [
+       147.0,
+       144.0,
+       148.0,
+       145.0,
+       139.0
+      ]
+     },
+     "served_known": {
+      "mean": 130.4,
+      "min": 127.0,
+      "max": 133.0,
+      "values": [
+       132.0,
+       130.0,
+       133.0,
+       130.0,
+       127.0
+      ]
+     },
+     "served_new": {
+      "mean": 14.2,
+      "min": 12.0,
+      "max": 15.0,
+      "values": [
+       15.0,
+       14.0,
+       15.0,
+       15.0,
+       12.0
+      ]
+     },
+     "solver_sec": {
+      "mean": 373.142,
+      "min": 312.89,
+      "max": 402.01,
+      "values": [
+       383.99,
+       373.12,
+       312.89,
+       393.7,
+       402.01
+      ]
+     },
+     "stops_moved": {
+      "mean": 75.2,
+      "min": 30.0,
+      "max": 112.0,
+      "values": [
+       74.0,
+       58.0,
+       30.0,
+       112.0,
+       102.0
+      ]
+     },
+     "stops_moved_distinct": {
+      "mean": 32.8,
+      "min": 19.0,
+      "max": 41.0,
+      "values": [
+       32.0,
+       31.0,
+       19.0,
+       41.0,
+       41.0
+      ]
+     },
+     "stops_total": {
+      "mean": 162.0,
+      "min": 162.0,
+      "max": 162.0,
+      "values": [
+       162.0,
+       162.0,
+       162.0,
+       162.0,
+       162.0
+      ]
+     },
+     "truck_changes": {
+      "mean": 57.6,
+      "min": 25.0,
+      "max": 84.0,
+      "values": [
+       54.0,
+       47.0,
+       25.0,
+       84.0,
+       78.0
+      ]
+     },
+     "trucks_used": {
+      "mean": 11.0,
+      "min": 11.0,
+      "max": 11.0,
+      "values": [
+       11.0,
+       11.0,
+       11.0,
+       11.0,
+       11.0
+      ]
+     },
+     "unserved": {
+      "mean": 17.4,
+      "min": 14.0,
+      "max": 23.0,
+      "values": [
+       15.0,
+       18.0,
+       14.0,
+       17.0,
+       23.0
+      ]
+     },
+     "unserved_by_priority.1": {
+      "mean": 0.4,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       1.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.2": {
+      "mean": 1.4,
+      "min": 0.0,
+      "max": 2.0,
+      "values": [
+       0.0,
+       2.0,
+       1.0,
+       2.0,
+       2.0
+      ]
+     },
+     "unserved_by_priority.3": {
+      "mean": 2.4,
+      "min": 1.0,
+      "max": 5.0,
+      "values": [
+       2.0,
+       2.0,
+       2.0,
+       1.0,
+       5.0
+      ]
+     },
+     "unserved_by_priority.4": {
+      "mean": 5.6,
+      "min": 4.0,
+      "max": 8.0,
+      "values": [
+       5.0,
+       6.0,
+       4.0,
+       5.0,
+       8.0
+      ]
+     },
+     "unserved_by_priority.5": {
+      "mean": 7.6,
+      "min": 7.0,
+      "max": 8.0,
+      "values": [
+       7.0,
+       8.0,
+       7.0,
+       8.0,
+       8.0
+      ]
+     }
+    }
+   },
+   "vs_A": {
+    "B": {
+     "cases_served": {
+      "mean": -291.0,
+      "min": -635.0,
+      "max": 152.0,
+      "values": [
+       -112.0,
+       -312.0,
+       152.0,
+       -635.0,
+       -548.0
+      ]
+     },
+     "cash.distance": {
+      "mean": 7.214,
+      "min": 3.914,
+      "max": 12.819,
+      "values": [
+       8.595,
+       4.571,
+       12.819,
+       6.171,
+       3.914
+      ]
+     },
+     "cash.driver": {
+      "mean": 7.189,
+      "min": -5.133,
+      "max": 29.433,
+      "values": [
+       13.841,
+       -2.532,
+       29.433,
+       -5.133,
+       0.336
+      ]
+     },
+     "cash.fixed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash.fuel": {
+      "mean": 9.625,
+      "min": 4.548,
+      "max": 19.02,
+      "values": [
+       11.044,
+       6.473,
+       19.02,
+       7.04,
+       4.548
+      ]
+     },
+     "cash.overtime": {
+      "mean": 3.361,
+      "min": -19.641,
+      "max": 34.705,
+      "values": [
+       13.787,
+       -9.164,
+       34.705,
+       -19.641,
+       -2.884
+      ]
+     },
+     "cash.total": {
+      "mean": 27.389,
+      "min": -11.564,
+      "max": 95.977,
+      "values": [
+       47.267,
+       -0.65,
+       95.977,
+       -11.564,
+       5.915
+      ]
+     },
+     "cash.trip": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash_per_case": {
+      "mean": 0.006,
+      "min": 0.003,
+      "max": 0.01,
+      "values": [
+       0.007,
+       0.003,
+       0.01,
+       0.005,
+       0.006
+      ]
+     },
+     "dropped_from_plan": {
+      "mean": 6.8,
+      "min": 5.0,
+      "max": 9.0,
+      "values": [
+       5.0,
+       7.0,
+       7.0,
+       6.0,
+       9.0
+      ]
+     },
+     "km": {
+      "mean": 140.478,
+      "min": 63.41,
+      "max": 286.05,
+      "values": [
+       159.32,
+       96.13,
+       286.05,
+       97.48,
+       63.41
+      ]
+     },
+     "late_breaks": {
+      "mean": -1.4,
+      "min": -4.0,
+      "max": 0.0,
+      "values": [
+       -1.0,
+       0.0,
+       -1.0,
+       -1.0,
+       -4.0
+      ]
+     },
+     "late_min": {
+      "mean": -346.66,
+      "min": -623.1,
+      "max": -15.3,
+      "values": [
+       -293.4,
+       -282.3,
+       -15.3,
+       -623.1,
+       -519.2
+      ]
+     },
+     "late_return_min": {
+      "mean": -133.56,
+      "min": -295.7,
+      "max": 96.7,
+      "values": [
+       -2.9,
+       -278.3,
+       96.7,
+       -295.7,
+       -187.6
+      ]
+     },
+     "late_returns": {
+      "mean": 0.6,
+      "min": -1.0,
+      "max": 2.0,
+      "values": [
+       1.0,
+       0.0,
+       2.0,
+       -1.0,
+       1.0
+      ]
+     },
+     "late_stops": {
+      "mean": -4.4,
+      "min": -8.0,
+      "max": -2.0,
+      "values": [
+       -4.0,
+       -3.0,
+       -2.0,
+       -8.0,
+       -5.0
+      ]
+     },
+     "loads": {
+      "mean": 0.2,
+      "min": -1.0,
+      "max": 2.0,
+      "values": [
+       1.0,
+       -1.0,
+       2.0,
+       0.0,
+       -1.0
+      ]
+     },
+     "missing_breaks": {
+      "mean": 0.4,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       1.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     },
+     "new_orders": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "overtime_min": {
+      "mean": 50.8,
+      "min": -294.0,
+      "max": 521.0,
+      "values": [
+       207.0,
+       -137.0,
+       521.0,
+       -294.0,
+       -43.0
+      ]
+     },
+     "paid_driver_min": {
+      "mean": 172.4,
+      "min": -124.0,
+      "max": 707.0,
+      "values": [
+       332.0,
+       -61.0,
+       707.0,
+       -124.0,
+       8.0
+      ]
+     },
+     "pref_late_stops": {
+      "mean": -1.0,
+      "min": -2.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       -2.0,
+       0.0,
+       -2.0,
+       -1.0
+      ]
+     },
+     "replans": {
+      "mean": 8.4,
+      "min": 7.0,
+      "max": 10.0,
+      "values": [
+       10.0,
+       7.0,
+       10.0,
+       8.0,
+       7.0
+      ]
+     },
+     "replans_failed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_skipped": {
+      "mean": 10.8,
+      "min": 10.0,
+      "max": 11.0,
+      "values": [
+       10.0,
+       11.0,
+       11.0,
+       11.0,
+       11.0
+      ]
+     },
+     "served": {
+      "mean": 11.6,
+      "min": 8.0,
+      "max": 16.0,
+      "values": [
+       12.0,
+       11.0,
+       16.0,
+       11.0,
+       8.0
+      ]
+     },
+     "served_known": {
+      "mean": -3.0,
+      "min": -6.0,
+      "max": 1.0,
+      "values": [
+       -3.0,
+       -3.0,
+       1.0,
+       -4.0,
+       -6.0
+      ]
+     },
+     "served_new": {
+      "mean": 14.6,
+      "min": 14.0,
+      "max": 15.0,
+      "values": [
+       15.0,
+       14.0,
+       15.0,
+       15.0,
+       14.0
+      ]
+     },
+     "solver_sec": {
+      "mean": 84.57,
+      "min": 70.33,
+      "max": 100.86,
+      "values": [
+       100.7,
+       70.51,
+       100.86,
+       80.45,
+       70.33
+      ]
+     },
+     "stops_moved": {
+      "mean": 32.0,
+      "min": 19.0,
+      "max": 45.0,
+      "values": [
+       32.0,
+       19.0,
+       45.0,
+       32.0,
+       32.0
+      ]
+     },
+     "stops_moved_distinct": {
+      "mean": 20.6,
+      "min": 16.0,
+      "max": 23.0,
+      "values": [
+       21.0,
+       16.0,
+       23.0,
+       22.0,
+       21.0
+      ]
+     },
+     "stops_total": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "truck_changes": {
+      "mean": 28.4,
+      "min": 19.0,
+      "max": 39.0,
+      "values": [
+       31.0,
+       19.0,
+       39.0,
+       22.0,
+       31.0
+      ]
+     },
+     "trucks_used": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved": {
+      "mean": -11.6,
+      "min": -16.0,
+      "max": -8.0,
+      "values": [
+       -12.0,
+       -11.0,
+       -16.0,
+       -11.0,
+       -8.0
+      ]
+     },
+     "unserved_by_priority.1": {
+      "mean": 0.2,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.2": {
+      "mean": 0.8,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       1.0,
+       1.0,
+       0.0,
+       1.0,
+       1.0
+      ]
+     },
+     "unserved_by_priority.3": {
+      "mean": -6.8,
+      "min": -8.0,
+      "max": -5.0,
+      "values": [
+       -7.0,
+       -7.0,
+       -8.0,
+       -7.0,
+       -5.0
+      ]
+     },
+     "unserved_by_priority.4": {
+      "mean": -5.0,
+      "min": -6.0,
+      "max": -4.0,
+      "values": [
+       -5.0,
+       -4.0,
+       -6.0,
+       -5.0,
+       -5.0
+      ]
+     },
+     "unserved_by_priority.5": {
+      "mean": -0.8,
+      "min": -2.0,
+      "max": 1.0,
+      "values": [
+       -1.0,
+       -1.0,
+       -2.0,
+       -1.0,
+       1.0
+      ]
+     }
+    },
+    "C": {
+     "cases_served": {
+      "mean": -308.6,
+      "min": -711.0,
+      "max": 76.0,
+      "values": [
+       19.0,
+       -312.0,
+       76.0,
+       -615.0,
+       -711.0
+      ]
+     },
+     "cash.distance": {
+      "mean": 6.059,
+      "min": 3.83,
+      "max": 9.178,
+      "values": [
+       4.903,
+       3.83,
+       8.307,
+       9.178,
+       4.078
+      ]
+     },
+     "cash.driver": {
+      "mean": 3.641,
+      "min": -6.021,
+      "max": 18.755,
+      "values": [
+       8.35,
+       -5.523,
+       18.755,
+       2.644,
+       -6.021
+      ]
+     },
+     "cash.fixed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash.fuel": {
+      "mean": 8.19,
+      "min": 4.839,
+      "max": 14.514,
+      "values": [
+       4.908,
+       4.954,
+       11.737,
+       14.514,
+       4.839
+      ]
+     },
+     "cash.overtime": {
+      "mean": -2.229,
+      "min": -14.711,
+      "max": 17.621,
+      "values": [
+       5.002,
+       -11.861,
+       17.621,
+       -7.197,
+       -14.711
+      ]
+     },
+     "cash.total": {
+      "mean": 15.662,
+      "min": -11.814,
+      "max": 56.42,
+      "values": [
+       23.163,
+       -8.599,
+       56.42,
+       19.139,
+       -11.814
+      ]
+     },
+     "cash.trip": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash_per_case": {
+      "mean": 0.005,
+      "min": 0.002,
+      "max": 0.008,
+      "values": [
+       0.003,
+       0.002,
+       0.006,
+       0.008,
+       0.006
+      ]
+     },
+     "dropped_from_plan": {
+      "mean": 15.2,
+      "min": 10.0,
+      "max": 21.0,
+      "values": [
+       10.0,
+       15.0,
+       10.0,
+       21.0,
+       20.0
+      ]
+     },
+     "km": {
+      "mean": 120.006,
+      "min": 64.42,
+      "max": 221.84,
+      "values": [
+       64.42,
+       71.61,
+       174.18,
+       221.84,
+       67.98
+      ]
+     },
+     "late_breaks": {
+      "mean": -2.0,
+      "min": -4.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       -1.0,
+       -2.0,
+       -3.0,
+       -4.0
+      ]
+     },
+     "late_min": {
+      "mean": -367.32,
+      "min": -636.2,
+      "max": -95.4,
+      "values": [
+       -270.0,
+       -308.4,
+       -95.4,
+       -636.2,
+       -526.6
+      ]
+     },
+     "late_return_min": {
+      "mean": -174.38,
+      "min": -341.6,
+      "max": 10.5,
+      "values": [
+       10.5,
+       -233.8,
+       -0.1,
+       -341.6,
+       -306.9
+      ]
+     },
+     "late_returns": {
+      "mean": 0.4,
+      "min": -1.0,
+      "max": 2.0,
+      "values": [
+       2.0,
+       -1.0,
+       0.0,
+       1.0,
+       0.0
+      ]
+     },
+     "late_stops": {
+      "mean": -5.0,
+      "min": -9.0,
+      "max": -2.0,
+      "values": [
+       -2.0,
+       -4.0,
+       -4.0,
+       -9.0,
+       -6.0
+      ]
+     },
+     "loads": {
+      "mean": 0.6,
+      "min": -1.0,
+      "max": 2.0,
+      "values": [
+       1.0,
+       -1.0,
+       1.0,
+       2.0,
+       0.0
+      ]
+     },
+     "missing_breaks": {
+      "mean": 0.4,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       0.0,
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     },
+     "new_orders": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "overtime_min": {
+      "mean": -33.4,
+      "min": -220.0,
+      "max": 264.0,
+      "values": [
+       75.0,
+       -178.0,
+       264.0,
+       -108.0,
+       -220.0
+      ]
+     },
+     "paid_driver_min": {
+      "mean": 87.0,
+      "min": -145.0,
+      "max": 450.0,
+      "values": [
+       200.0,
+       -133.0,
+       450.0,
+       63.0,
+       -145.0
+      ]
+     },
+     "pref_late_stops": {
+      "mean": -1.0,
+      "min": -2.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       -2.0,
+       0.0,
+       -2.0,
+       -1.0
+      ]
+     },
+     "replans": {
+      "mean": 37.0,
+      "min": 31.0,
+      "max": 40.0,
+      "values": [
+       38.0,
+       37.0,
+       31.0,
+       39.0,
+       40.0
+      ]
+     },
+     "replans_failed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_skipped": {
+      "mean": 15.4,
+      "min": 13.0,
+      "max": 19.0,
+      "values": [
+       14.0,
+       19.0,
+       17.0,
+       14.0,
+       13.0
+      ]
+     },
+     "served": {
+      "mean": 11.6,
+      "min": 6.0,
+      "max": 15.0,
+      "values": [
+       14.0,
+       11.0,
+       15.0,
+       12.0,
+       6.0
+      ]
+     },
+     "served_known": {
+      "mean": -2.6,
+      "min": -6.0,
+      "max": 0.0,
+      "values": [
+       -1.0,
+       -3.0,
+       0.0,
+       -3.0,
+       -6.0
+      ]
+     },
+     "served_new": {
+      "mean": 14.2,
+      "min": 12.0,
+      "max": 15.0,
+      "values": [
+       15.0,
+       14.0,
+       15.0,
+       15.0,
+       12.0
+      ]
+     },
+     "solver_sec": {
+      "mean": 373.142,
+      "min": 312.89,
+      "max": 402.01,
+      "values": [
+       383.99,
+       373.12,
+       312.89,
+       393.7,
+       402.01
+      ]
+     },
+     "stops_moved": {
+      "mean": 75.2,
+      "min": 30.0,
+      "max": 112.0,
+      "values": [
+       74.0,
+       58.0,
+       30.0,
+       112.0,
+       102.0
+      ]
+     },
+     "stops_moved_distinct": {
+      "mean": 32.8,
+      "min": 19.0,
+      "max": 41.0,
+      "values": [
+       32.0,
+       31.0,
+       19.0,
+       41.0,
+       41.0
+      ]
+     },
+     "stops_total": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "truck_changes": {
+      "mean": 57.6,
+      "min": 25.0,
+      "max": 84.0,
+      "values": [
+       54.0,
+       47.0,
+       25.0,
+       84.0,
+       78.0
+      ]
+     },
+     "trucks_used": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved": {
+      "mean": -11.6,
+      "min": -15.0,
+      "max": -6.0,
+      "values": [
+       -14.0,
+       -11.0,
+       -15.0,
+       -12.0,
+       -6.0
+      ]
+     },
+     "unserved_by_priority.1": {
+      "mean": 0.4,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       1.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.2": {
+      "mean": 0.4,
+      "min": -1.0,
+      "max": 1.0,
+      "values": [
+       -1.0,
+       1.0,
+       0.0,
+       1.0,
+       1.0
+      ]
+     },
+     "unserved_by_priority.3": {
+      "mean": -6.6,
+      "min": -8.0,
+      "max": -4.0,
+      "values": [
+       -7.0,
+       -7.0,
+       -7.0,
+       -8.0,
+       -4.0
+      ]
+     },
+     "unserved_by_priority.4": {
+      "mean": -4.4,
+      "min": -6.0,
+      "max": -2.0,
+      "values": [
+       -5.0,
+       -4.0,
+       -6.0,
+       -5.0,
+       -2.0
+      ]
+     },
+     "unserved_by_priority.5": {
+      "mean": -1.4,
+      "min": -2.0,
+      "max": -1.0,
+      "values": [
+       -2.0,
+       -1.0,
+       -2.0,
+       -1.0,
+       -1.0
+      ]
+     }
+    }
+   },
+   "labels": {
+    "cash": "OMR cash of the executed day (costing.truck_day_costs on actual times and estimated km), every load of the day",
+    "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+    "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+    "time": "minutes, trips and trucks: time and capacity, not cash",
+    "late": "minutes after the genuine closing time (window_rule), still delivered: the window as sent, except a SALES_PREFERENCE window, measured against the customer's genuine hours (a missed preference is counted apart); without window labels (a real day) every window counts as genuine. Only beyond 0.5 min, the plan's whole-minute resolution",
+    "replans": "re-plans that searched; those with nothing to plan (NOTHING_TO_PLAN) are counted as skipped. Stop moves counts every move, distinct stops moved each stop once"
+   },
+   "day": {
+    "name": "SYNTH-280",
+    "label": "SYNTHETIC",
+    "stops_known": 147,
+    "new_orders": 15,
+    "trucks": 11
+   }
+  },
+  "REAL-15OCT": {
+   "status": "COMPLETE",
+   "items_done": 10,
+   "items": 10,
+   "compute_sec": 958.2,
+   "label": "SIMULATION (no future information; distances are estimated km)",
+   "budget": {
+    "replan": {
+     "time_limit_sec": 10,
+     "search_mode": "QUICK",
+     "seeds": [
+      1
+     ]
+    },
+    "morning": {
+     "time_limit_sec": 20,
+     "search_mode": "QUICK",
+     "seeds": [
+      1
+     ]
+    }
+   },
+   "settings": {
+    "delay_threshold_min": 20.0,
+    "preloaded_first_loads": true,
+    "change_penalty_per_stop": null,
+    "solver_seed": 1,
+    "morning_at_min": null
+   },
+   "policies": {
+    "A": {
+     "label": "static: the morning plan, executed as is (never serves an order revealed later, never retries a stop the morning plan left out)",
+     "triggers": []
+    },
+    "B": {
+     "label": "re-plan at each depot return",
+     "triggers": [
+      "DEPOT_RETURN"
+     ]
+    },
+    "C": {
+     "label": "event-triggered: depot return, delay over the threshold, new order",
+     "triggers": [
+      "DELAY",
+      "DEPOT_RETURN",
+      "NEW_ORDER"
+     ]
+    }
+   },
+   "worlds": [
+    {
+     "seed": 1,
+     "model": {
+      "travel_median": 1.0,
+      "travel_sigma": 0.373,
+      "unload_median": 1.0,
+      "unload_sigma": 0.501,
+      "assumed": [
+       "travel_median",
+       "unload_median"
+      ],
+      "basis": {
+       "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+       "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+      }
+     },
+     "band_factors": {
+      "06-09": 0.77,
+      "09-12": 1.017,
+      "12-15": 1.033,
+      "15-18": 0.892,
+      "18-22": 1.148,
+      "22-06": 1.359
+     },
+     "new_orders": 0,
+     "windows": "no labels: every window as sent counts as genuine (UNKNOWN)"
+    },
+    {
+     "seed": 2,
+     "model": {
+      "travel_median": 1.0,
+      "travel_sigma": 0.373,
+      "unload_median": 1.0,
+      "unload_sigma": 0.501,
+      "assumed": [
+       "travel_median",
+       "unload_median"
+      ],
+      "basis": {
+       "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+       "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+      }
+     },
+     "band_factors": {
+      "06-09": 0.77,
+      "09-12": 1.017,
+      "12-15": 1.033,
+      "15-18": 0.892,
+      "18-22": 1.148,
+      "22-06": 1.359
+     },
+     "new_orders": 0,
+     "windows": "no labels: every window as sent counts as genuine (UNKNOWN)"
+    },
+    {
+     "seed": 3,
+     "model": {
+      "travel_median": 1.0,
+      "travel_sigma": 0.373,
+      "unload_median": 1.0,
+      "unload_sigma": 0.501,
+      "assumed": [
+       "travel_median",
+       "unload_median"
+      ],
+      "basis": {
+       "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+       "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+       "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+      }
+     },
+     "band_factors": {
+      "06-09": 0.77,
+      "09-12": 1.017,
+      "12-15": 1.033,
+      "15-18": 0.892,
+      "18-22": 1.148,
+      "22-06": 1.359
+     },
+     "new_orders": 0,
+     "windows": "no labels: every window as sent counts as genuine (UNKNOWN)"
+    }
+   ],
+   "morning": {
+    "stops_known": 86,
+    "stops_planned": 85,
+    "loads": 14,
+    "trucks": 10,
+    "km": 1066.84,
+    "planned_cash": {
+     "fixed": 200.8,
+     "trip": 0.0,
+     "distance": 67.116,
+     "fuel": 72.868,
+     "driver": 199.592,
+     "overtime": 0.0,
+     "total": 540.376
+    },
+    "feasibility": "VERIFIED",
+    "wall_sec": 92.56
+   },
+   "runs": [
+    {
+     "policy": "A",
+     "world": 1,
+     "stops_total": 86,
+     "new_orders": 0,
+     "served": 85,
+     "served_known": 85,
+     "served_new": 0,
+     "unserved": 1,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 0,
+      "3": 1,
+      "4": 0,
+      "5": 0
+     },
+     "cases_served": 7885,
+     "cash_per_case": 0.074,
+     "late_stops": 17,
+     "late_min": 964.8,
+     "pref_late_stops": 0,
+     "late_returns": 2,
+     "late_return_min": 315.8,
+     "late_breaks": 3,
+     "missing_breaks": 1,
+     "trucks_used": 10,
+     "loads": 14,
+     "km": 1066.84,
+     "cash": {
+      "fixed": 200.8,
+      "trip": 0.0,
+      "distance": 67.117,
+      "fuel": 72.868,
+      "driver": 225.427,
+      "overtime": 21.051,
+      "total": 587.263
+     },
+     "paid_driver_min": 5410,
+     "overtime_min": 316,
+     "replans": 0,
+     "replans_skipped": 0,
+     "replans_failed": 0,
+     "stops_moved": 0,
+     "stops_moved_distinct": 0,
+     "truck_changes": 0,
+     "dropped_from_plan": 0,
+     "solver_sec": 0,
+     "replans_logged": 0
+    },
+    {
+     "policy": "B",
+     "world": 1,
+     "stops_total": 86,
+     "new_orders": 0,
+     "served": 84,
+     "served_known": 84,
+     "served_new": 0,
+     "unserved": 2,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "4": 0,
+      "5": 0
+     },
+     "cases_served": 7879,
+     "cash_per_case": 0.074,
+     "late_stops": 12,
+     "late_min": 760.6,
+     "pref_late_stops": 0,
+     "late_returns": 2,
+     "late_return_min": 307.1,
+     "late_breaks": 2,
+     "missing_breaks": 0,
+     "trucks_used": 10,
+     "loads": 14,
+     "km": 1034.28,
+     "cash": {
+      "fixed": 200.8,
+      "trip": 0.0,
+      "distance": 66.877,
+      "fuel": 70.468,
+      "driver": 222.903,
+      "overtime": 20.472,
+      "total": 581.521
+     },
+     "paid_driver_min": 5350,
+     "overtime_min": 307,
+     "replans": 8,
+     "replans_skipped": 6,
+     "replans_failed": 0,
+     "stops_moved": 1,
+     "stops_moved_distinct": 1,
+     "truck_changes": 1,
+     "dropped_from_plan": 1,
+     "solver_sec": 99.6,
+     "replans_logged": 14
+    },
+    {
+     "policy": "C",
+     "world": 1,
+     "stops_total": 86,
+     "new_orders": 0,
+     "served": 84,
+     "served_known": 84,
+     "served_new": 0,
+     "unserved": 2,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "4": 0,
+      "5": 0
+     },
+     "cases_served": 7879,
+     "cash_per_case": 0.074,
+     "late_stops": 12,
+     "late_min": 760.6,
+     "pref_late_stops": 0,
+     "late_returns": 2,
+     "late_return_min": 307.1,
+     "late_breaks": 2,
+     "missing_breaks": 0,
+     "trucks_used": 10,
+     "loads": 14,
+     "km": 1034.28,
+     "cash": {
+      "fixed": 200.8,
+      "trip": 0.0,
+      "distance": 67.149,
+      "fuel": 70.468,
+      "driver": 222.915,
+      "overtime": 20.472,
+      "total": 581.804
+     },
+     "paid_driver_min": 5350,
+     "overtime_min": 307,
+     "replans": 18,
+     "replans_skipped": 9,
+     "replans_failed": 0,
+     "stops_moved": 8,
+     "stops_moved_distinct": 3,
+     "truck_changes": 8,
+     "dropped_from_plan": 2,
+     "solver_sec": 244.57,
+     "replans_logged": 27
+    },
+    {
+     "policy": "A",
+     "world": 2,
+     "stops_total": 86,
+     "new_orders": 0,
+     "served": 85,
+     "served_known": 85,
+     "served_new": 0,
+     "unserved": 1,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 0,
+      "3": 1,
+      "4": 0,
+      "5": 0
+     },
+     "cases_served": 7885,
+     "cash_per_case": 0.073,
+     "late_stops": 20,
+     "late_min": 1053.8,
+     "pref_late_stops": 0,
+     "late_returns": 1,
+     "late_return_min": 78.6,
+     "late_breaks": 3,
+     "missing_breaks": 4,
+     "trucks_used": 10,
+     "loads": 14,
+     "km": 1066.84,
+     "cash": {
+      "fixed": 200.8,
+      "trip": 0.0,
+      "distance": 67.117,
+      "fuel": 72.868,
+      "driver": 229.503,
+      "overtime": 5.24,
+      "total": 575.529
+     },
+     "paid_driver_min": 5508,
+     "overtime_min": 79,
+     "replans": 0,
+     "replans_skipped": 0,
+     "replans_failed": 0,
+     "stops_moved": 0,
+     "stops_moved_distinct": 0,
+     "truck_changes": 0,
+     "dropped_from_plan": 0,
+     "solver_sec": 0,
+     "replans_logged": 0
+    },
+    {
+     "policy": "B",
+     "world": 2,
+     "stops_total": 86,
+     "new_orders": 0,
+     "served": 82,
+     "served_known": 82,
+     "served_new": 0,
+     "unserved": 4,
+     "unserved_by_priority": {
+      "1": 1,
+      "2": 0,
+      "3": 3,
+      "4": 0,
+      "5": 0
+     },
+     "cases_served": 6895,
+     "cash_per_case": 0.081,
+     "late_stops": 11,
+     "late_min": 501.9,
+     "pref_late_stops": 0,
+     "late_returns": 1,
+     "late_return_min": 59.3,
+     "late_breaks": 3,
+     "missing_breaks": 3,
+     "trucks_used": 10,
+     "loads": 13,
+     "km": 1030.48,
+     "cash": {
+      "fixed": 200.8,
+      "trip": 0.0,
+      "distance": 70.111,
+      "fuel": 70.188,
+      "driver": 216.182,
+      "overtime": 3.956,
+      "total": 561.236
+     },
+     "paid_driver_min": 5188,
+     "overtime_min": 59,
+     "replans": 4,
+     "replans_skipped": 9,
+     "replans_failed": 0,
+     "stops_moved": 8,
+     "stops_moved_distinct": 5,
+     "truck_changes": 8,
+     "dropped_from_plan": 3,
+     "solver_sec": 54.28,
+     "replans_logged": 13
+    },
+    {
+     "policy": "C",
+     "world": 2,
+     "stops_total": 86,
+     "new_orders": 0,
+     "served": 83,
+     "served_known": 83,
+     "served_new": 0,
+     "unserved": 3,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 0,
+      "3": 3,
+      "4": 0,
+      "5": 0
+     },
+     "cases_served": 7755,
+     "cash_per_case": 0.087,
+     "late_stops": 11,
+     "late_min": 501.9,
+     "pref_late_stops": 0,
+     "late_returns": 2,
+     "late_return_min": 102.7,
+     "late_breaks": 3,
+     "missing_breaks": 3,
+     "trucks_used": 12,
+     "loads": 15,
+     "km": 1055.95,
+     "cash": {
+      "fixed": 300.8,
+      "trip": 0.0,
+      "distance": 69.857,
+      "fuel": 70.68,
+      "driver": 227.934,
+      "overtime": 3.956,
+      "total": 673.227
+     },
+     "paid_driver_min": 5470,
+     "overtime_min": 59,
+     "replans": 19,
+     "replans_skipped": 14,
+     "replans_failed": 0,
+     "stops_moved": 20,
+     "stops_moved_distinct": 9,
+     "truck_changes": 20,
+     "dropped_from_plan": 2,
+     "solver_sec": 269.43,
+     "replans_logged": 33
+    },
+    {
+     "policy": "A",
+     "world": 3,
+     "stops_total": 86,
+     "new_orders": 0,
+     "served": 85,
+     "served_known": 85,
+     "served_new": 0,
+     "unserved": 1,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 0,
+      "3": 1,
+      "4": 0,
+      "5": 0
+     },
+     "cases_served": 7885,
+     "cash_per_case": 0.072,
+     "late_stops": 10,
+     "late_min": 339.7,
+     "pref_late_stops": 0,
+     "late_returns": 3,
+     "late_return_min": 161.9,
+     "late_breaks": 4,
+     "missing_breaks": 2,
+     "trucks_used": 10,
+     "loads": 14,
+     "km": 1066.84,
+     "cash": {
+      "fixed": 200.8,
+      "trip": 0.0,
+      "distance": 67.117,
+      "fuel": 72.868,
+      "driver": 218.944,
+      "overtime": 10.793,
+      "total": 570.523
+     },
+     "paid_driver_min": 5255,
+     "overtime_min": 162,
+     "replans": 0,
+     "replans_skipped": 0,
+     "replans_failed": 0,
+     "stops_moved": 0,
+     "stops_moved_distinct": 0,
+     "truck_changes": 0,
+     "dropped_from_plan": 0,
+     "solver_sec": 0,
+     "replans_logged": 0
+    },
+    {
+     "policy": "B",
+     "world": 3,
+     "stops_total": 86,
+     "new_orders": 0,
+     "served": 82,
+     "served_known": 82,
+     "served_new": 0,
+     "unserved": 4,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 0,
+      "3": 4,
+      "4": 0,
+      "5": 0
+     },
+     "cases_served": 7702,
+     "cash_per_case": 0.079,
+     "late_stops": 8,
+     "late_min": 196.5,
+     "pref_late_stops": 0,
+     "late_returns": 3,
+     "late_return_min": 67.9,
+     "late_breaks": 3,
+     "missing_breaks": 1,
+     "trucks_used": 10,
+     "loads": 15,
+     "km": 1206.31,
+     "cash": {
+      "fixed": 200.8,
+      "trip": 0.0,
+      "distance": 95.629,
+      "fuel": 83.149,
+      "driver": 224.035,
+      "overtime": 4.524,
+      "total": 608.138
+     },
+     "paid_driver_min": 5377,
+     "overtime_min": 68,
+     "replans": 6,
+     "replans_skipped": 9,
+     "replans_failed": 0,
+     "stops_moved": 17,
+     "stops_moved_distinct": 7,
+     "truck_changes": 17,
+     "dropped_from_plan": 5,
+     "solver_sec": 75.86,
+     "replans_logged": 15
+    },
+    {
+     "policy": "C",
+     "world": 3,
+     "stops_total": 86,
+     "new_orders": 0,
+     "served": 82,
+     "served_known": 82,
+     "served_new": 0,
+     "unserved": 4,
+     "unserved_by_priority": {
+      "1": 0,
+      "2": 0,
+      "3": 4,
+      "4": 0,
+      "5": 0
+     },
+     "cases_served": 7702,
+     "cash_per_case": 0.079,
+     "late_stops": 8,
+     "late_min": 196.5,
+     "pref_late_stops": 0,
+     "late_returns": 3,
+     "late_return_min": 67.9,
+     "late_breaks": 3,
+     "missing_breaks": 1,
+     "trucks_used": 10,
+     "loads": 15,
+     "km": 1206.31,
+     "cash": {
+      "fixed": 200.8,
+      "trip": 0.0,
+      "distance": 95.629,
+      "fuel": 83.149,
+      "driver": 224.035,
+      "overtime": 4.524,
+      "total": 608.138
+     },
+     "paid_driver_min": 5377,
+     "overtime_min": 68,
+     "replans": 14,
+     "replans_skipped": 16,
+     "replans_failed": 0,
+     "stops_moved": 17,
+     "stops_moved_distinct": 7,
+     "truck_changes": 17,
+     "dropped_from_plan": 5,
+     "solver_sec": 173.52,
+     "replans_logged": 30
+    }
+   ],
+   "summary": {
+    "A": {
+     "cases_served": {
+      "mean": 7885.0,
+      "min": 7885.0,
+      "max": 7885.0,
+      "values": [
+       7885.0,
+       7885.0,
+       7885.0
+      ]
+     },
+     "cash.distance": {
+      "mean": 67.117,
+      "min": 67.117,
+      "max": 67.117,
+      "values": [
+       67.117,
+       67.117,
+       67.117
+      ]
+     },
+     "cash.driver": {
+      "mean": 224.625,
+      "min": 218.944,
+      "max": 229.503,
+      "values": [
+       225.427,
+       229.503,
+       218.944
+      ]
+     },
+     "cash.fixed": {
+      "mean": 200.8,
+      "min": 200.8,
+      "max": 200.8,
+      "values": [
+       200.8,
+       200.8,
+       200.8
+      ]
+     },
+     "cash.fuel": {
+      "mean": 72.868,
+      "min": 72.868,
+      "max": 72.868,
+      "values": [
+       72.868,
+       72.868,
+       72.868
+      ]
+     },
+     "cash.overtime": {
+      "mean": 12.361,
+      "min": 5.24,
+      "max": 21.051,
+      "values": [
+       21.051,
+       5.24,
+       10.793
+      ]
+     },
+     "cash.total": {
+      "mean": 577.772,
+      "min": 570.523,
+      "max": 587.263,
+      "values": [
+       587.263,
+       575.529,
+       570.523
+      ]
+     },
+     "cash.trip": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash_per_case": {
+      "mean": 0.073,
+      "min": 0.072,
+      "max": 0.074,
+      "values": [
+       0.074,
+       0.073,
+       0.072
+      ]
+     },
+     "dropped_from_plan": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "km": {
+      "mean": 1066.84,
+      "min": 1066.84,
+      "max": 1066.84,
+      "values": [
+       1066.84,
+       1066.84,
+       1066.84
+      ]
+     },
+     "late_breaks": {
+      "mean": 3.333,
+      "min": 3.0,
+      "max": 4.0,
+      "values": [
+       3.0,
+       3.0,
+       4.0
+      ]
+     },
+     "late_min": {
+      "mean": 786.1,
+      "min": 339.7,
+      "max": 1053.8,
+      "values": [
+       964.8,
+       1053.8,
+       339.7
+      ]
+     },
+     "late_return_min": {
+      "mean": 185.433,
+      "min": 78.6,
+      "max": 315.8,
+      "values": [
+       315.8,
+       78.6,
+       161.9
+      ]
+     },
+     "late_returns": {
+      "mean": 2.0,
+      "min": 1.0,
+      "max": 3.0,
+      "values": [
+       2.0,
+       1.0,
+       3.0
+      ]
+     },
+     "late_stops": {
+      "mean": 15.667,
+      "min": 10.0,
+      "max": 20.0,
+      "values": [
+       17.0,
+       20.0,
+       10.0
+      ]
+     },
+     "loads": {
+      "mean": 14.0,
+      "min": 14.0,
+      "max": 14.0,
+      "values": [
+       14.0,
+       14.0,
+       14.0
+      ]
+     },
+     "missing_breaks": {
+      "mean": 2.333,
+      "min": 1.0,
+      "max": 4.0,
+      "values": [
+       1.0,
+       4.0,
+       2.0
+      ]
+     },
+     "new_orders": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "overtime_min": {
+      "mean": 185.667,
+      "min": 79.0,
+      "max": 316.0,
+      "values": [
+       316.0,
+       79.0,
+       162.0
+      ]
+     },
+     "paid_driver_min": {
+      "mean": 5391.0,
+      "min": 5255.0,
+      "max": 5508.0,
+      "values": [
+       5410.0,
+       5508.0,
+       5255.0
+      ]
+     },
+     "pref_late_stops": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_failed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_skipped": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "served": {
+      "mean": 85.0,
+      "min": 85.0,
+      "max": 85.0,
+      "values": [
+       85.0,
+       85.0,
+       85.0
+      ]
+     },
+     "served_known": {
+      "mean": 85.0,
+      "min": 85.0,
+      "max": 85.0,
+      "values": [
+       85.0,
+       85.0,
+       85.0
+      ]
+     },
+     "served_new": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "solver_sec": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "stops_moved": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "stops_moved_distinct": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "stops_total": {
+      "mean": 86.0,
+      "min": 86.0,
+      "max": 86.0,
+      "values": [
+       86.0,
+       86.0,
+       86.0
+      ]
+     },
+     "truck_changes": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "trucks_used": {
+      "mean": 10.0,
+      "min": 10.0,
+      "max": 10.0,
+      "values": [
+       10.0,
+       10.0,
+       10.0
+      ]
+     },
+     "unserved": {
+      "mean": 1.0,
+      "min": 1.0,
+      "max": 1.0,
+      "values": [
+       1.0,
+       1.0,
+       1.0
+      ]
+     },
+     "unserved_by_priority.1": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.2": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.3": {
+      "mean": 1.0,
+      "min": 1.0,
+      "max": 1.0,
+      "values": [
+       1.0,
+       1.0,
+       1.0
+      ]
+     },
+     "unserved_by_priority.4": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.5": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "B": {
+     "cases_served": {
+      "mean": 7492.0,
+      "min": 6895.0,
+      "max": 7879.0,
+      "values": [
+       7879.0,
+       6895.0,
+       7702.0
+      ]
+     },
+     "cash.distance": {
+      "mean": 77.539,
+      "min": 66.877,
+      "max": 95.629,
+      "values": [
+       66.877,
+       70.111,
+       95.629
+      ]
+     },
+     "cash.driver": {
+      "mean": 221.04,
+      "min": 216.182,
+      "max": 224.035,
+      "values": [
+       222.903,
+       216.182,
+       224.035
+      ]
+     },
+     "cash.fixed": {
+      "mean": 200.8,
+      "min": 200.8,
+      "max": 200.8,
+      "values": [
+       200.8,
+       200.8,
+       200.8
+      ]
+     },
+     "cash.fuel": {
+      "mean": 74.602,
+      "min": 70.188,
+      "max": 83.149,
+      "values": [
+       70.468,
+       70.188,
+       83.149
+      ]
+     },
+     "cash.overtime": {
+      "mean": 9.651,
+      "min": 3.956,
+      "max": 20.472,
+      "values": [
+       20.472,
+       3.956,
+       4.524
+      ]
+     },
+     "cash.total": {
+      "mean": 583.632,
+      "min": 561.236,
+      "max": 608.138,
+      "values": [
+       581.521,
+       561.236,
+       608.138
+      ]
+     },
+     "cash.trip": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash_per_case": {
+      "mean": 0.078,
+      "min": 0.074,
+      "max": 0.081,
+      "values": [
+       0.074,
+       0.081,
+       0.079
+      ]
+     },
+     "dropped_from_plan": {
+      "mean": 3.0,
+      "min": 1.0,
+      "max": 5.0,
+      "values": [
+       1.0,
+       3.0,
+       5.0
+      ]
+     },
+     "km": {
+      "mean": 1090.357,
+      "min": 1030.48,
+      "max": 1206.31,
+      "values": [
+       1034.28,
+       1030.48,
+       1206.31
+      ]
+     },
+     "late_breaks": {
+      "mean": 2.667,
+      "min": 2.0,
+      "max": 3.0,
+      "values": [
+       2.0,
+       3.0,
+       3.0
+      ]
+     },
+     "late_min": {
+      "mean": 486.333,
+      "min": 196.5,
+      "max": 760.6,
+      "values": [
+       760.6,
+       501.9,
+       196.5
+      ]
+     },
+     "late_return_min": {
+      "mean": 144.767,
+      "min": 59.3,
+      "max": 307.1,
+      "values": [
+       307.1,
+       59.3,
+       67.9
+      ]
+     },
+     "late_returns": {
+      "mean": 2.0,
+      "min": 1.0,
+      "max": 3.0,
+      "values": [
+       2.0,
+       1.0,
+       3.0
+      ]
+     },
+     "late_stops": {
+      "mean": 10.333,
+      "min": 8.0,
+      "max": 12.0,
+      "values": [
+       12.0,
+       11.0,
+       8.0
+      ]
+     },
+     "loads": {
+      "mean": 14.0,
+      "min": 13.0,
+      "max": 15.0,
+      "values": [
+       14.0,
+       13.0,
+       15.0
+      ]
+     },
+     "missing_breaks": {
+      "mean": 1.333,
+      "min": 0.0,
+      "max": 3.0,
+      "values": [
+       0.0,
+       3.0,
+       1.0
+      ]
+     },
+     "new_orders": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "overtime_min": {
+      "mean": 144.667,
+      "min": 59.0,
+      "max": 307.0,
+      "values": [
+       307.0,
+       59.0,
+       68.0
+      ]
+     },
+     "paid_driver_min": {
+      "mean": 5305.0,
+      "min": 5188.0,
+      "max": 5377.0,
+      "values": [
+       5350.0,
+       5188.0,
+       5377.0
+      ]
+     },
+     "pref_late_stops": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans": {
+      "mean": 6.0,
+      "min": 4.0,
+      "max": 8.0,
+      "values": [
+       8.0,
+       4.0,
+       6.0
+      ]
+     },
+     "replans_failed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_skipped": {
+      "mean": 8.0,
+      "min": 6.0,
+      "max": 9.0,
+      "values": [
+       6.0,
+       9.0,
+       9.0
+      ]
+     },
+     "served": {
+      "mean": 82.667,
+      "min": 82.0,
+      "max": 84.0,
+      "values": [
+       84.0,
+       82.0,
+       82.0
+      ]
+     },
+     "served_known": {
+      "mean": 82.667,
+      "min": 82.0,
+      "max": 84.0,
+      "values": [
+       84.0,
+       82.0,
+       82.0
+      ]
+     },
+     "served_new": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "solver_sec": {
+      "mean": 76.58,
+      "min": 54.28,
+      "max": 99.6,
+      "values": [
+       99.6,
+       54.28,
+       75.86
+      ]
+     },
+     "stops_moved": {
+      "mean": 8.667,
+      "min": 1.0,
+      "max": 17.0,
+      "values": [
+       1.0,
+       8.0,
+       17.0
+      ]
+     },
+     "stops_moved_distinct": {
+      "mean": 4.333,
+      "min": 1.0,
+      "max": 7.0,
+      "values": [
+       1.0,
+       5.0,
+       7.0
+      ]
+     },
+     "stops_total": {
+      "mean": 86.0,
+      "min": 86.0,
+      "max": 86.0,
+      "values": [
+       86.0,
+       86.0,
+       86.0
+      ]
+     },
+     "truck_changes": {
+      "mean": 8.667,
+      "min": 1.0,
+      "max": 17.0,
+      "values": [
+       1.0,
+       8.0,
+       17.0
+      ]
+     },
+     "trucks_used": {
+      "mean": 10.0,
+      "min": 10.0,
+      "max": 10.0,
+      "values": [
+       10.0,
+       10.0,
+       10.0
+      ]
+     },
+     "unserved": {
+      "mean": 3.333,
+      "min": 2.0,
+      "max": 4.0,
+      "values": [
+       2.0,
+       4.0,
+       4.0
+      ]
+     },
+     "unserved_by_priority.1": {
+      "mean": 0.333,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       0.0,
+       1.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.2": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.3": {
+      "mean": 3.0,
+      "min": 2.0,
+      "max": 4.0,
+      "values": [
+       2.0,
+       3.0,
+       4.0
+      ]
+     },
+     "unserved_by_priority.4": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.5": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "C": {
+     "cases_served": {
+      "mean": 7778.667,
+      "min": 7702.0,
+      "max": 7879.0,
+      "values": [
+       7879.0,
+       7755.0,
+       7702.0
+      ]
+     },
+     "cash.distance": {
+      "mean": 77.545,
+      "min": 67.149,
+      "max": 95.629,
+      "values": [
+       67.149,
+       69.857,
+       95.629
+      ]
+     },
+     "cash.driver": {
+      "mean": 224.961,
+      "min": 222.915,
+      "max": 227.934,
+      "values": [
+       222.915,
+       227.934,
+       224.035
+      ]
+     },
+     "cash.fixed": {
+      "mean": 234.133,
+      "min": 200.8,
+      "max": 300.8,
+      "values": [
+       200.8,
+       300.8,
+       200.8
+      ]
+     },
+     "cash.fuel": {
+      "mean": 74.766,
+      "min": 70.468,
+      "max": 83.149,
+      "values": [
+       70.468,
+       70.68,
+       83.149
+      ]
+     },
+     "cash.overtime": {
+      "mean": 9.651,
+      "min": 3.956,
+      "max": 20.472,
+      "values": [
+       20.472,
+       3.956,
+       4.524
+      ]
+     },
+     "cash.total": {
+      "mean": 621.056,
+      "min": 581.804,
+      "max": 673.227,
+      "values": [
+       581.804,
+       673.227,
+       608.138
+      ]
+     },
+     "cash.trip": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash_per_case": {
+      "mean": 0.08,
+      "min": 0.074,
+      "max": 0.087,
+      "values": [
+       0.074,
+       0.087,
+       0.079
+      ]
+     },
+     "dropped_from_plan": {
+      "mean": 3.0,
+      "min": 2.0,
+      "max": 5.0,
+      "values": [
+       2.0,
+       2.0,
+       5.0
+      ]
+     },
+     "km": {
+      "mean": 1098.847,
+      "min": 1034.28,
+      "max": 1206.31,
+      "values": [
+       1034.28,
+       1055.95,
+       1206.31
+      ]
+     },
+     "late_breaks": {
+      "mean": 2.667,
+      "min": 2.0,
+      "max": 3.0,
+      "values": [
+       2.0,
+       3.0,
+       3.0
+      ]
+     },
+     "late_min": {
+      "mean": 486.333,
+      "min": 196.5,
+      "max": 760.6,
+      "values": [
+       760.6,
+       501.9,
+       196.5
+      ]
+     },
+     "late_return_min": {
+      "mean": 159.233,
+      "min": 67.9,
+      "max": 307.1,
+      "values": [
+       307.1,
+       102.7,
+       67.9
+      ]
+     },
+     "late_returns": {
+      "mean": 2.333,
+      "min": 2.0,
+      "max": 3.0,
+      "values": [
+       2.0,
+       2.0,
+       3.0
+      ]
+     },
+     "late_stops": {
+      "mean": 10.333,
+      "min": 8.0,
+      "max": 12.0,
+      "values": [
+       12.0,
+       11.0,
+       8.0
+      ]
+     },
+     "loads": {
+      "mean": 14.667,
+      "min": 14.0,
+      "max": 15.0,
+      "values": [
+       14.0,
+       15.0,
+       15.0
+      ]
+     },
+     "missing_breaks": {
+      "mean": 1.333,
+      "min": 0.0,
+      "max": 3.0,
+      "values": [
+       0.0,
+       3.0,
+       1.0
+      ]
+     },
+     "new_orders": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "overtime_min": {
+      "mean": 144.667,
+      "min": 59.0,
+      "max": 307.0,
+      "values": [
+       307.0,
+       59.0,
+       68.0
+      ]
+     },
+     "paid_driver_min": {
+      "mean": 5399.0,
+      "min": 5350.0,
+      "max": 5470.0,
+      "values": [
+       5350.0,
+       5470.0,
+       5377.0
+      ]
+     },
+     "pref_late_stops": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans": {
+      "mean": 17.0,
+      "min": 14.0,
+      "max": 19.0,
+      "values": [
+       18.0,
+       19.0,
+       14.0
+      ]
+     },
+     "replans_failed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_skipped": {
+      "mean": 13.0,
+      "min": 9.0,
+      "max": 16.0,
+      "values": [
+       9.0,
+       14.0,
+       16.0
+      ]
+     },
+     "served": {
+      "mean": 83.0,
+      "min": 82.0,
+      "max": 84.0,
+      "values": [
+       84.0,
+       83.0,
+       82.0
+      ]
+     },
+     "served_known": {
+      "mean": 83.0,
+      "min": 82.0,
+      "max": 84.0,
+      "values": [
+       84.0,
+       83.0,
+       82.0
+      ]
+     },
+     "served_new": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "solver_sec": {
+      "mean": 229.173,
+      "min": 173.52,
+      "max": 269.43,
+      "values": [
+       244.57,
+       269.43,
+       173.52
+      ]
+     },
+     "stops_moved": {
+      "mean": 15.0,
+      "min": 8.0,
+      "max": 20.0,
+      "values": [
+       8.0,
+       20.0,
+       17.0
+      ]
+     },
+     "stops_moved_distinct": {
+      "mean": 6.333,
+      "min": 3.0,
+      "max": 9.0,
+      "values": [
+       3.0,
+       9.0,
+       7.0
+      ]
+     },
+     "stops_total": {
+      "mean": 86.0,
+      "min": 86.0,
+      "max": 86.0,
+      "values": [
+       86.0,
+       86.0,
+       86.0
+      ]
+     },
+     "truck_changes": {
+      "mean": 15.0,
+      "min": 8.0,
+      "max": 20.0,
+      "values": [
+       8.0,
+       20.0,
+       17.0
+      ]
+     },
+     "trucks_used": {
+      "mean": 10.667,
+      "min": 10.0,
+      "max": 12.0,
+      "values": [
+       10.0,
+       12.0,
+       10.0
+      ]
+     },
+     "unserved": {
+      "mean": 3.0,
+      "min": 2.0,
+      "max": 4.0,
+      "values": [
+       2.0,
+       3.0,
+       4.0
+      ]
+     },
+     "unserved_by_priority.1": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.2": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.3": {
+      "mean": 3.0,
+      "min": 2.0,
+      "max": 4.0,
+      "values": [
+       2.0,
+       3.0,
+       4.0
+      ]
+     },
+     "unserved_by_priority.4": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.5": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     }
+    }
+   },
+   "vs_A": {
+    "B": {
+     "cases_served": {
+      "mean": -393.0,
+      "min": -990.0,
+      "max": -6.0,
+      "values": [
+       -6.0,
+       -990.0,
+       -183.0
+      ]
+     },
+     "cash.distance": {
+      "mean": 10.422,
+      "min": -0.24,
+      "max": 28.512,
+      "values": [
+       -0.24,
+       2.994,
+       28.512
+      ]
+     },
+     "cash.driver": {
+      "mean": -3.585,
+      "min": -13.321,
+      "max": 5.091,
+      "values": [
+       -2.524,
+       -13.321,
+       5.091
+      ]
+     },
+     "cash.fixed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash.fuel": {
+      "mean": 1.734,
+      "min": -2.68,
+      "max": 10.281,
+      "values": [
+       -2.4,
+       -2.68,
+       10.281
+      ]
+     },
+     "cash.overtime": {
+      "mean": -2.711,
+      "min": -6.269,
+      "max": -0.579,
+      "values": [
+       -0.579,
+       -1.284,
+       -6.269
+      ]
+     },
+     "cash.total": {
+      "mean": 5.86,
+      "min": -14.293,
+      "max": 37.615,
+      "values": [
+       -5.742,
+       -14.293,
+       37.615
+      ]
+     },
+     "cash.trip": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash_per_case": {
+      "mean": 0.005,
+      "min": 0.0,
+      "max": 0.008,
+      "values": [
+       0.0,
+       0.008,
+       0.007
+      ]
+     },
+     "dropped_from_plan": {
+      "mean": 3.0,
+      "min": 1.0,
+      "max": 5.0,
+      "values": [
+       1.0,
+       3.0,
+       5.0
+      ]
+     },
+     "km": {
+      "mean": 23.517,
+      "min": -36.36,
+      "max": 139.47,
+      "values": [
+       -32.56,
+       -36.36,
+       139.47
+      ]
+     },
+     "late_breaks": {
+      "mean": -0.667,
+      "min": -1.0,
+      "max": 0.0,
+      "values": [
+       -1.0,
+       0.0,
+       -1.0
+      ]
+     },
+     "late_min": {
+      "mean": -299.767,
+      "min": -551.9,
+      "max": -143.2,
+      "values": [
+       -204.2,
+       -551.9,
+       -143.2
+      ]
+     },
+     "late_return_min": {
+      "mean": -40.667,
+      "min": -94.0,
+      "max": -8.7,
+      "values": [
+       -8.7,
+       -19.3,
+       -94.0
+      ]
+     },
+     "late_returns": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "late_stops": {
+      "mean": -5.333,
+      "min": -9.0,
+      "max": -2.0,
+      "values": [
+       -5.0,
+       -9.0,
+       -2.0
+      ]
+     },
+     "loads": {
+      "mean": 0.0,
+      "min": -1.0,
+      "max": 1.0,
+      "values": [
+       0.0,
+       -1.0,
+       1.0
+      ]
+     },
+     "missing_breaks": {
+      "mean": -1.0,
+      "min": -1.0,
+      "max": -1.0,
+      "values": [
+       -1.0,
+       -1.0,
+       -1.0
+      ]
+     },
+     "new_orders": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "overtime_min": {
+      "mean": -41.0,
+      "min": -94.0,
+      "max": -9.0,
+      "values": [
+       -9.0,
+       -20.0,
+       -94.0
+      ]
+     },
+     "paid_driver_min": {
+      "mean": -86.0,
+      "min": -320.0,
+      "max": 122.0,
+      "values": [
+       -60.0,
+       -320.0,
+       122.0
+      ]
+     },
+     "pref_late_stops": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans": {
+      "mean": 6.0,
+      "min": 4.0,
+      "max": 8.0,
+      "values": [
+       8.0,
+       4.0,
+       6.0
+      ]
+     },
+     "replans_failed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_skipped": {
+      "mean": 8.0,
+      "min": 6.0,
+      "max": 9.0,
+      "values": [
+       6.0,
+       9.0,
+       9.0
+      ]
+     },
+     "served": {
+      "mean": -2.333,
+      "min": -3.0,
+      "max": -1.0,
+      "values": [
+       -1.0,
+       -3.0,
+       -3.0
+      ]
+     },
+     "served_known": {
+      "mean": -2.333,
+      "min": -3.0,
+      "max": -1.0,
+      "values": [
+       -1.0,
+       -3.0,
+       -3.0
+      ]
+     },
+     "served_new": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "solver_sec": {
+      "mean": 76.58,
+      "min": 54.28,
+      "max": 99.6,
+      "values": [
+       99.6,
+       54.28,
+       75.86
+      ]
+     },
+     "stops_moved": {
+      "mean": 8.667,
+      "min": 1.0,
+      "max": 17.0,
+      "values": [
+       1.0,
+       8.0,
+       17.0
+      ]
+     },
+     "stops_moved_distinct": {
+      "mean": 4.333,
+      "min": 1.0,
+      "max": 7.0,
+      "values": [
+       1.0,
+       5.0,
+       7.0
+      ]
+     },
+     "stops_total": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "truck_changes": {
+      "mean": 8.667,
+      "min": 1.0,
+      "max": 17.0,
+      "values": [
+       1.0,
+       8.0,
+       17.0
+      ]
+     },
+     "trucks_used": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved": {
+      "mean": 2.333,
+      "min": 1.0,
+      "max": 3.0,
+      "values": [
+       1.0,
+       3.0,
+       3.0
+      ]
+     },
+     "unserved_by_priority.1": {
+      "mean": 0.333,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       0.0,
+       1.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.2": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.3": {
+      "mean": 2.0,
+      "min": 1.0,
+      "max": 3.0,
+      "values": [
+       1.0,
+       2.0,
+       3.0
+      ]
+     },
+     "unserved_by_priority.4": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.5": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     }
+    },
+    "C": {
+     "cases_served": {
+      "mean": -106.333,
+      "min": -183.0,
+      "max": -6.0,
+      "values": [
+       -6.0,
+       -130.0,
+       -183.0
+      ]
+     },
+     "cash.distance": {
+      "mean": 10.428,
+      "min": 0.032,
+      "max": 28.512,
+      "values": [
+       0.032,
+       2.74,
+       28.512
+      ]
+     },
+     "cash.driver": {
+      "mean": 0.337,
+      "min": -2.512,
+      "max": 5.091,
+      "values": [
+       -2.512,
+       -1.569,
+       5.091
+      ]
+     },
+     "cash.fixed": {
+      "mean": 33.333,
+      "min": 0.0,
+      "max": 100.0,
+      "values": [
+       0.0,
+       100.0,
+       0.0
+      ]
+     },
+     "cash.fuel": {
+      "mean": 1.898,
+      "min": -2.4,
+      "max": 10.281,
+      "values": [
+       -2.4,
+       -2.188,
+       10.281
+      ]
+     },
+     "cash.overtime": {
+      "mean": -2.711,
+      "min": -6.269,
+      "max": -0.579,
+      "values": [
+       -0.579,
+       -1.284,
+       -6.269
+      ]
+     },
+     "cash.total": {
+      "mean": 43.285,
+      "min": -5.459,
+      "max": 97.698,
+      "values": [
+       -5.459,
+       97.698,
+       37.615
+      ]
+     },
+     "cash.trip": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "cash_per_case": {
+      "mean": 0.007,
+      "min": 0.0,
+      "max": 0.014,
+      "values": [
+       0.0,
+       0.014,
+       0.007
+      ]
+     },
+     "dropped_from_plan": {
+      "mean": 3.0,
+      "min": 2.0,
+      "max": 5.0,
+      "values": [
+       2.0,
+       2.0,
+       5.0
+      ]
+     },
+     "km": {
+      "mean": 32.007,
+      "min": -32.56,
+      "max": 139.47,
+      "values": [
+       -32.56,
+       -10.89,
+       139.47
+      ]
+     },
+     "late_breaks": {
+      "mean": -0.667,
+      "min": -1.0,
+      "max": 0.0,
+      "values": [
+       -1.0,
+       0.0,
+       -1.0
+      ]
+     },
+     "late_min": {
+      "mean": -299.767,
+      "min": -551.9,
+      "max": -143.2,
+      "values": [
+       -204.2,
+       -551.9,
+       -143.2
+      ]
+     },
+     "late_return_min": {
+      "mean": -26.2,
+      "min": -94.0,
+      "max": 24.1,
+      "values": [
+       -8.7,
+       24.1,
+       -94.0
+      ]
+     },
+     "late_returns": {
+      "mean": 0.333,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       0.0,
+       1.0,
+       0.0
+      ]
+     },
+     "late_stops": {
+      "mean": -5.333,
+      "min": -9.0,
+      "max": -2.0,
+      "values": [
+       -5.0,
+       -9.0,
+       -2.0
+      ]
+     },
+     "loads": {
+      "mean": 0.667,
+      "min": 0.0,
+      "max": 1.0,
+      "values": [
+       0.0,
+       1.0,
+       1.0
+      ]
+     },
+     "missing_breaks": {
+      "mean": -1.0,
+      "min": -1.0,
+      "max": -1.0,
+      "values": [
+       -1.0,
+       -1.0,
+       -1.0
+      ]
+     },
+     "new_orders": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "overtime_min": {
+      "mean": -41.0,
+      "min": -94.0,
+      "max": -9.0,
+      "values": [
+       -9.0,
+       -20.0,
+       -94.0
+      ]
+     },
+     "paid_driver_min": {
+      "mean": 8.0,
+      "min": -60.0,
+      "max": 122.0,
+      "values": [
+       -60.0,
+       -38.0,
+       122.0
+      ]
+     },
+     "pref_late_stops": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans": {
+      "mean": 17.0,
+      "min": 14.0,
+      "max": 19.0,
+      "values": [
+       18.0,
+       19.0,
+       14.0
+      ]
+     },
+     "replans_failed": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "replans_skipped": {
+      "mean": 13.0,
+      "min": 9.0,
+      "max": 16.0,
+      "values": [
+       9.0,
+       14.0,
+       16.0
+      ]
+     },
+     "served": {
+      "mean": -2.0,
+      "min": -3.0,
+      "max": -1.0,
+      "values": [
+       -1.0,
+       -2.0,
+       -3.0
+      ]
+     },
+     "served_known": {
+      "mean": -2.0,
+      "min": -3.0,
+      "max": -1.0,
+      "values": [
+       -1.0,
+       -2.0,
+       -3.0
+      ]
+     },
+     "served_new": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "solver_sec": {
+      "mean": 229.173,
+      "min": 173.52,
+      "max": 269.43,
+      "values": [
+       244.57,
+       269.43,
+       173.52
+      ]
+     },
+     "stops_moved": {
+      "mean": 15.0,
+      "min": 8.0,
+      "max": 20.0,
+      "values": [
+       8.0,
+       20.0,
+       17.0
+      ]
+     },
+     "stops_moved_distinct": {
+      "mean": 6.333,
+      "min": 3.0,
+      "max": 9.0,
+      "values": [
+       3.0,
+       9.0,
+       7.0
+      ]
+     },
+     "stops_total": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "truck_changes": {
+      "mean": 15.0,
+      "min": 8.0,
+      "max": 20.0,
+      "values": [
+       8.0,
+       20.0,
+       17.0
+      ]
+     },
+     "trucks_used": {
+      "mean": 0.667,
+      "min": 0.0,
+      "max": 2.0,
+      "values": [
+       0.0,
+       2.0,
+       0.0
+      ]
+     },
+     "unserved": {
+      "mean": 2.0,
+      "min": 1.0,
+      "max": 3.0,
+      "values": [
+       1.0,
+       2.0,
+       3.0
+      ]
+     },
+     "unserved_by_priority.1": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.2": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.3": {
+      "mean": 2.0,
+      "min": 1.0,
+      "max": 3.0,
+      "values": [
+       1.0,
+       2.0,
+       3.0
+      ]
+     },
+     "unserved_by_priority.4": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "unserved_by_priority.5": {
+      "mean": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     }
+    }
+   },
+   "labels": {
+    "cash": "OMR cash of the executed day (costing.truck_day_costs on actual times and estimated km), every load of the day",
+    "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+    "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+    "time": "minutes, trips and trucks: time and capacity, not cash",
+    "late": "minutes after the genuine closing time (window_rule), still delivered: the window as sent, except a SALES_PREFERENCE window, measured against the customer's genuine hours (a missed preference is counted apart); without window labels (a real day) every window counts as genuine. Only beyond 0.5 min, the plan's whole-minute resolution",
+    "replans": "re-plans that searched; those with nothing to plan (NOTHING_TO_PLAN) are counted as skipped. Stop moves counts every move, distinct stops moved each stop once"
+   },
+   "day": {
+    "name": "REAL-15OCT",
+    "label": "REAL, anonymised",
+    "stops_known": 86,
+    "new_orders": 0,
+    "trucks": 12
+   }
+  }
+ }
+}

@@ -1,0 +1,5360 @@
+{
+ "label": "SIMULATION (no future information; distances are estimated km)",
+ "budget": {
+  "replan": {
+   "time_limit_sec": 10,
+   "search_mode": "QUICK",
+   "seeds": [
+    1
+   ]
+  },
+  "morning": {
+   "time_limit_sec": 20,
+   "search_mode": "QUICK",
+   "seeds": [
+    1
+   ]
+  }
+ },
+ "settings": {
+  "delay_threshold_min": 20.0,
+  "preloaded_first_loads": true,
+  "change_penalty_per_stop": null,
+  "solver_seed": 1,
+  "morning_at_min": null
+ },
+ "policies": {
+  "A": {
+   "label": "static: the morning plan, executed as is",
+   "triggers": []
+  },
+  "B": {
+   "label": "re-plan at each depot return",
+   "triggers": [
+    "DEPOT_RETURN"
+   ]
+  },
+  "C": {
+   "label": "event-triggered: depot return, delay over the threshold, new order",
+   "triggers": [
+    "DELAY",
+    "DEPOT_RETURN",
+    "NEW_ORDER"
+   ]
+  }
+ },
+ "worlds": [
+  {
+   "seed": 1,
+   "model": {
+    "travel_median": 1.0,
+    "travel_sigma": 0.373,
+    "unload_median": 1.0,
+    "unload_sigma": 0.501,
+    "assumed": [
+     "travel_median",
+     "unload_median"
+    ],
+    "basis": {
+     "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+     "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+    }
+   },
+   "band_factors": {
+    "06-09": 0.77,
+    "09-12": 1.017,
+    "12-15": 1.033,
+    "15-18": 0.892,
+    "18-22": 1.148,
+    "22-06": 1.359
+   },
+   "new_orders": 15
+  },
+  {
+   "seed": 2,
+   "model": {
+    "travel_median": 1.0,
+    "travel_sigma": 0.373,
+    "unload_median": 1.0,
+    "unload_sigma": 0.501,
+    "assumed": [
+     "travel_median",
+     "unload_median"
+    ],
+    "basis": {
+     "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+     "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+    }
+   },
+   "band_factors": {
+    "06-09": 0.77,
+    "09-12": 1.017,
+    "12-15": 1.033,
+    "15-18": 0.892,
+    "18-22": 1.148,
+    "22-06": 1.359
+   },
+   "new_orders": 15
+  },
+  {
+   "seed": 3,
+   "model": {
+    "travel_median": 1.0,
+    "travel_sigma": 0.373,
+    "unload_median": 1.0,
+    "unload_sigma": 0.501,
+    "assumed": [
+     "travel_median",
+     "unload_median"
+    ],
+    "basis": {
+     "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+     "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+    }
+   },
+   "band_factors": {
+    "06-09": 0.77,
+    "09-12": 1.017,
+    "12-15": 1.033,
+    "15-18": 0.892,
+    "18-22": 1.148,
+    "22-06": 1.359
+   },
+   "new_orders": 15
+  }
+ ],
+ "morning": {
+  "stops_known": 147,
+  "stops_planned": 132,
+  "loads": 17,
+  "trucks": 11,
+  "km": 935.17,
+  "planned_cash": {
+   "fixed": 174.0,
+   "trip": 0.0,
+   "distance": 48.609,
+   "fuel": 64.969,
+   "driver": 255.661,
+   "overtime": 5.689,
+   "total": 548.928
+  },
+  "feasibility": "VERIFIED",
+  "wall_sec": 23.13
+ },
+ "runs": [
+  {
+   "policy": "A",
+   "world": 1,
+   "stops_total": 162,
+   "new_orders": 15,
+   "served": 132,
+   "served_new": 0,
+   "unserved": 30,
+   "unserved_by_priority": {
+    "1": 0,
+    "2": 1,
+    "3": 10,
+    "4": 10,
+    "5": 9
+   },
+   "cases_served": 8565,
+   "late_stops": 13,
+   "late_min": 503.1,
+   "late_returns": 1,
+   "late_return_min": 33.6,
+   "late_breaks": 6,
+   "missing_breaks": 0,
+   "trucks_used": 11,
+   "loads": 17,
+   "km": 935.17,
+   "cash": {
+    "fixed": 174.0,
+    "trip": 0.0,
+    "distance": 48.608,
+    "fuel": 64.968,
+    "driver": 281.241,
+    "overtime": 29.207,
+    "total": 598.023
+   },
+   "paid_driver_min": 6750,
+   "overtime_min": 438,
+   "replans": 0,
+   "replans_skipped": 0,
+   "replans_failed": 0,
+   "stops_moved": 0,
+   "truck_changes": 0,
+   "dropped_from_plan": 0,
+   "solver_sec": 0,
+   "replan_log": []
+  },
+  {
+   "policy": "B",
+   "world": 1,
+   "stops_total": 162,
+   "new_orders": 15,
+   "served": 144,
+   "served_new": 14,
+   "unserved": 18,
+   "unserved_by_priority": {
+    "1": 0,
+    "2": 0,
+    "3": 6,
+    "4": 5,
+    "5": 7
+   },
+   "cases_served": 8712,
+   "late_stops": 9,
+   "late_min": 201.6,
+   "late_returns": 2,
+   "late_return_min": 138.2,
+   "late_breaks": 6,
+   "missing_breaks": 0,
+   "trucks_used": 11,
+   "loads": 19,
+   "km": 1163.47,
+   "cash": {
+    "fixed": 174.0,
+    "trip": 0.0,
+    "distance": 59.714,
+    "fuel": 80.418,
+    "driver": 304.801,
+    "overtime": 47.681,
+    "total": 666.614
+   },
+   "paid_driver_min": 7315,
+   "overtime_min": 715,
+   "replans": 19,
+   "replans_skipped": 0,
+   "replans_failed": 0,
+   "stops_moved": 39,
+   "truck_changes": 37,
+   "dropped_from_plan": 7,
+   "solver_sec": 89.85,
+   "replan_log": [
+    {
+     "at": 606.759759715,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.22,
+     "stops_sent": 56,
+     "moved": 19,
+     "truck_changes": 17,
+     "dropped": 1,
+     "added": 9
+    },
+    {
+     "at": 613.7286000966666,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.11,
+     "stops_sent": 51,
+     "moved": 9,
+     "truck_changes": 9,
+     "dropped": 1,
+     "added": 0
+    },
+    {
+     "at": 629.925523385,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.13,
+     "stops_sent": 51,
+     "moved": 5,
+     "truck_changes": 5,
+     "dropped": 2,
+     "added": 3
+    },
+    {
+     "at": 632.941103015,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.12,
+     "stops_sent": 44,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 670.699625475,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.98,
+     "stops_sent": 38,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 1,
+     "added": 4
+    },
+    {
+     "at": 768.7575121999998,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.8,
+     "stops_sent": 32,
+     "moved": 2,
+     "truck_changes": 2,
+     "dropped": 1,
+     "added": 3
+    },
+    {
+     "at": 837.5040326433332,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.65,
+     "stops_sent": 24,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1030.7291114416666,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.69,
+     "stops_sent": 19,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 1,
+     "added": 0
+    },
+    {
+     "at": 1055.7066881800001,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.47,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1056.077409225,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.34,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1073.9626950466666,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.34,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1090.7123501716667,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.32,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1097.5159868116668,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.34,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1102.1976183333334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.34,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1109.9054963933334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1128.6850809999999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1133.26359932,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1170.60554174,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1247.5867848399998,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    }
+   ]
+  },
+  {
+   "policy": "C",
+   "world": 1,
+   "stops_total": 162,
+   "new_orders": 15,
+   "served": 143,
+   "served_new": 13,
+   "unserved": 19,
+   "unserved_by_priority": {
+    "1": 0,
+    "2": 2,
+    "3": 5,
+    "4": 3,
+    "5": 9
+   },
+   "cases_served": 8454,
+   "late_stops": 9,
+   "late_min": 295.0,
+   "late_returns": 1,
+   "late_return_min": 48.1,
+   "late_breaks": 6,
+   "missing_breaks": 0,
+   "trucks_used": 11,
+   "loads": 20,
+   "km": 1092.84,
+   "cash": {
+    "fixed": 174.0,
+    "trip": 0.0,
+    "distance": 57.23,
+    "fuel": 75.933,
+    "driver": 303.36,
+    "overtime": 45.377,
+    "total": 655.901
+   },
+   "paid_driver_min": 7281,
+   "overtime_min": 681,
+   "replans": 51,
+   "replans_skipped": 0,
+   "replans_failed": 0,
+   "stops_moved": 93,
+   "truck_changes": 87,
+   "dropped_from_plan": 18,
+   "solver_sec": 421.59,
+   "replan_log": [
+    {
+     "at": 511.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.93,
+     "stops_sent": 50,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 1,
+     "added": 2
+    },
+    {
+     "at": 551.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.87,
+     "stops_sent": 52,
+     "moved": 11,
+     "truck_changes": 9,
+     "dropped": 0,
+     "added": 2
+    },
+    {
+     "at": 552.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.32,
+     "stops_sent": 53,
+     "moved": 9,
+     "truck_changes": 9,
+     "dropped": 2,
+     "added": 2
+    },
+    {
+     "at": 553.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.86,
+     "stops_sent": 54,
+     "moved": 7,
+     "truck_changes": 7,
+     "dropped": 1,
+     "added": 3
+    },
+    {
+     "at": 555.5237344999999,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.73,
+     "stops_sent": 54,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 3,
+     "added": 2
+    },
+    {
+     "at": 563.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.74,
+     "stops_sent": 55,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 565.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.86,
+     "stops_sent": 56,
+     "moved": 6,
+     "truck_changes": 6,
+     "dropped": 1,
+     "added": 2
+    },
+    {
+     "at": 606.759759715,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.91,
+     "stops_sent": 56,
+     "moved": 19,
+     "truck_changes": 18,
+     "dropped": 1,
+     "added": 3
+    },
+    {
+     "at": 613.7286000966666,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.8,
+     "stops_sent": 51,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 618.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.93,
+     "stops_sent": 51,
+     "moved": 4,
+     "truck_changes": 4,
+     "dropped": 2,
+     "added": 2
+    },
+    {
+     "at": 629.925523385,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.83,
+     "stops_sent": 51,
+     "moved": 9,
+     "truck_changes": 6,
+     "dropped": 2,
+     "added": 2
+    },
+    {
+     "at": 632.941103015,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.69,
+     "stops_sent": 45,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 1,
+     "added": 1
+    },
+    {
+     "at": 643.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.62,
+     "stops_sent": 38,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 1,
+     "added": 1
+    },
+    {
+     "at": 643.97077335,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.77,
+     "stops_sent": 38,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 646.2090101166667,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.68,
+     "stops_sent": 38,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 653.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.77,
+     "stops_sent": 39,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 657.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.87,
+     "stops_sent": 40,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 668.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.93,
+     "stops_sent": 41,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 670.699625475,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.79,
+     "stops_sent": 41,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 683.2790013666666,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.6,
+     "stops_sent": 33,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 703.25120437,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.6,
+     "stops_sent": 33,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 719.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.59,
+     "stops_sent": 34,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 722.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.71,
+     "stops_sent": 35,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 746.21747064,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.81,
+     "stops_sent": 35,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 765.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.67,
+     "stops_sent": 36,
+     "moved": 4,
+     "truck_changes": 4,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 772.8397075899999,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.75,
+     "stops_sent": 36,
+     "moved": 2,
+     "truck_changes": 2,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 781.48759602,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.81,
+     "stops_sent": 36,
+     "moved": 2,
+     "truck_changes": 2,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 783.81496568,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.72,
+     "stops_sent": 36,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 812.0526130333332,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.62,
+     "stops_sent": 25,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 837.5040326433332,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.57,
+     "stops_sent": 25,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 858.83023768,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.72,
+     "stops_sent": 25,
+     "moved": 2,
+     "truck_changes": 2,
+     "dropped": 1,
+     "added": 0
+    },
+    {
+     "at": 894.0278012366667,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.75,
+     "stops_sent": 21,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 903.4367994649999,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.79,
+     "stops_sent": 21,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 904.3730005983333,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.88,
+     "stops_sent": 21,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 936.2316084449999,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.94,
+     "stops_sent": 21,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1002.3775704,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.75,
+     "stops_sent": 21,
+     "moved": 3,
+     "truck_changes": 3,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1030.7291114416666,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.58,
+     "stops_sent": 21,
+     "moved": 3,
+     "truck_changes": 3,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1056.077409225,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.59,
+     "stops_sent": 20,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 1,
+     "added": 0
+    },
+    {
+     "at": 1057.342347785,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.61,
+     "stops_sent": 20,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1073.9626950466666,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.33,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 1,
+     "added": 0
+    },
+    {
+     "at": 1081.0357776533333,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.33,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1088.5105682866667,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.32,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1090.7123501716667,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.32,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1102.1976183333334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.33,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1109.9054963933334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1114.37463072,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1133.26359932,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1136.6694219433332,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1137.9043155866666,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1160.322229265,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1188.066329845,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    }
+   ]
+  },
+  {
+   "policy": "A",
+   "world": 2,
+   "stops_total": 162,
+   "new_orders": 15,
+   "served": 132,
+   "served_new": 0,
+   "unserved": 30,
+   "unserved_by_priority": {
+    "1": 0,
+    "2": 1,
+    "3": 10,
+    "4": 10,
+    "5": 9
+   },
+   "cases_served": 8565,
+   "late_stops": 16,
+   "late_min": 991.6,
+   "late_returns": 5,
+   "late_return_min": 290.5,
+   "late_breaks": 7,
+   "missing_breaks": 1,
+   "trucks_used": 11,
+   "loads": 17,
+   "km": 935.17,
+   "cash": {
+    "fixed": 174.0,
+    "trip": 0.0,
+    "distance": 48.608,
+    "fuel": 64.968,
+    "driver": 302.872,
+    "overtime": 56.966,
+    "total": 647.413
+   },
+   "paid_driver_min": 7269,
+   "overtime_min": 854,
+   "replans": 0,
+   "replans_skipped": 0,
+   "replans_failed": 0,
+   "stops_moved": 0,
+   "truck_changes": 0,
+   "dropped_from_plan": 0,
+   "solver_sec": 0,
+   "replan_log": []
+  },
+  {
+   "policy": "B",
+   "world": 2,
+   "stops_total": 162,
+   "new_orders": 15,
+   "served": 146,
+   "served_new": 15,
+   "unserved": 16,
+   "unserved_by_priority": {
+    "1": 1,
+    "2": 1,
+    "3": 2,
+    "4": 4,
+    "5": 8
+   },
+   "cases_served": 8296,
+   "late_stops": 13,
+   "late_min": 708.9,
+   "late_returns": 6,
+   "late_return_min": 253.0,
+   "late_breaks": 8,
+   "missing_breaks": 1,
+   "trucks_used": 11,
+   "loads": 19,
+   "km": 1074.13,
+   "cash": {
+    "fixed": 174.0,
+    "trip": 0.0,
+    "distance": 54.215,
+    "fuel": 74.015,
+    "driver": 319.067,
+    "overtime": 70.508,
+    "total": 691.806
+   },
+   "paid_driver_min": 7658,
+   "overtime_min": 1058,
+   "replans": 19,
+   "replans_skipped": 0,
+   "replans_failed": 0,
+   "stops_moved": 13,
+   "truck_changes": 12,
+   "dropped_from_plan": 7,
+   "solver_sec": 86.94,
+   "replan_log": [
+    {
+     "at": 544.60690065,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.89,
+     "stops_sent": 50,
+     "moved": 4,
+     "truck_changes": 4,
+     "dropped": 1,
+     "added": 4
+    },
+    {
+     "at": 643.2813725999999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.83,
+     "stops_sent": 51,
+     "moved": 2,
+     "truck_changes": 1,
+     "dropped": 3,
+     "added": 10
+    },
+    {
+     "at": 650.7112043283335,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.79,
+     "stops_sent": 44,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 1,
+     "added": 0
+    },
+    {
+     "at": 696.0004267916664,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.83,
+     "stops_sent": 41,
+     "moved": 3,
+     "truck_changes": 3,
+     "dropped": 2,
+     "added": 4
+    },
+    {
+     "at": 705.4033196833334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.75,
+     "stops_sent": 34,
+     "moved": 4,
+     "truck_changes": 4,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 715.7712630899999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.58,
+     "stops_sent": 27,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 943.8780340699999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.61,
+     "stops_sent": 21,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 2
+    },
+    {
+     "at": 994.8724729800002,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.61,
+     "stops_sent": 17,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 1083.2308213933331,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.35,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1100.0275501066667,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.35,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1104.8562502233335,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.35,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1110.1208422716668,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1117.3806122733333,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1148.0169616883331,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1170.1453499400002,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1173.7377117566664,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1176.7795251549999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1206.4273019850002,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1217.8758965533332,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 16,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    }
+   ]
+  },
+  {
+   "policy": "C",
+   "world": 2,
+   "stops_total": 162,
+   "new_orders": 15,
+   "served": 144,
+   "served_new": 13,
+   "unserved": 18,
+   "unserved_by_priority": {
+    "1": 1,
+    "2": 1,
+    "3": 3,
+    "4": 6,
+    "5": 7
+   },
+   "cases_served": 8237,
+   "late_stops": 11,
+   "late_min": 657.7,
+   "late_returns": 6,
+   "late_return_min": 191.4,
+   "late_breaks": 6,
+   "missing_breaks": 0,
+   "trucks_used": 11,
+   "loads": 18,
+   "km": 1071.2,
+   "cash": {
+    "fixed": 174.0,
+    "trip": 0.0,
+    "distance": 55.754,
+    "fuel": 74.338,
+    "driver": 314.464,
+    "overtime": 64.706,
+    "total": 683.261
+   },
+   "paid_driver_min": 7547,
+   "overtime_min": 971,
+   "replans": 55,
+   "replans_skipped": 0,
+   "replans_failed": 0,
+   "stops_moved": 34,
+   "truck_changes": 34,
+   "dropped_from_plan": 18,
+   "solver_sec": 459.29,
+   "replan_log": [
+    {
+     "at": 511.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.75,
+     "stops_sent": 50,
+     "moved": 4,
+     "truck_changes": 4,
+     "dropped": 1,
+     "added": 4
+    },
+    {
+     "at": 517.8183410666667,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.9,
+     "stops_sent": 50,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 3,
+     "added": 2
+    },
+    {
+     "at": 531.8550421833332,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.2,
+     "stops_sent": 50,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 544.60690065,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.8,
+     "stops_sent": 50,
+     "moved": 4,
+     "truck_changes": 4,
+     "dropped": 1,
+     "added": 3
+    },
+    {
+     "at": 551.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.68,
+     "stops_sent": 44,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 2
+    },
+    {
+     "at": 552.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.73,
+     "stops_sent": 45,
+     "moved": 3,
+     "truck_changes": 3,
+     "dropped": 2,
+     "added": 3
+    },
+    {
+     "at": 553.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.81,
+     "stops_sent": 46,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 563.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.75,
+     "stops_sent": 47,
+     "moved": 2,
+     "truck_changes": 2,
+     "dropped": 4,
+     "added": 3
+    },
+    {
+     "at": 565.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.9,
+     "stops_sent": 48,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 600.0879772166666,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.01,
+     "stops_sent": 48,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 618.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.01,
+     "stops_sent": 49,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 643.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.87,
+     "stops_sent": 50,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 1,
+     "added": 1
+    },
+    {
+     "at": 643.2813725999999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.73,
+     "stops_sent": 50,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 650.7112043283335,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.69,
+     "stops_sent": 44,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 2,
+     "added": 2
+    },
+    {
+     "at": 651.5246818099998,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.82,
+     "stops_sent": 35,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 653.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.86,
+     "stops_sent": 36,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 653.846262535,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.9,
+     "stops_sent": 36,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 657.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.02,
+     "stops_sent": 37,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 668.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.96,
+     "stops_sent": 38,
+     "moved": 14,
+     "truck_changes": 14,
+     "dropped": 1,
+     "added": 2
+    },
+    {
+     "at": 678.7155603333333,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.77,
+     "stops_sent": 38,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 687.9626002983335,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.91,
+     "stops_sent": 38,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 696.0004267916664,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.82,
+     "stops_sent": 38,
+     "moved": 2,
+     "truck_changes": 2,
+     "dropped": 1,
+     "added": 0
+    },
+    {
+     "at": 701.2183622,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.76,
+     "stops_sent": 32,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 705.4033196833334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.16,
+     "stops_sent": 32,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 715.7712630899999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.1,
+     "stops_sent": 25,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 719.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.92,
+     "stops_sent": 17,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 722.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.04,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 751.0894443849999,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.21,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 765.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.87,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 785.5426442133332,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.78,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 789.8178937383335,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.88,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 822.6599439150001,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.15,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 837.9312759949999,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.98,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 853.7699747616667,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.8,
+     "stops_sent": 19,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 903.6304364283335,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.71,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 2,
+     "added": 0
+    },
+    {
+     "at": 920.3637768449998,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.73,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 985.2093906766665,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.58,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 992.9783648033335,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.6,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1001.9598748316666,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.62,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1018.7788913066667,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.84,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1026.1203860399999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.86,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1026.5434634683336,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.9,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1065.8269145200002,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.46,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1100.0275501066667,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.49,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1104.8562502233335,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.48,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1105.4418058883334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.48,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1121.9424803783334,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1129.8715995933333,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1143.2675371799999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1144.1439263466666,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1149.3808268266666,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1173.7377117566664,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1176.7795251549999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1181.7836209866666,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1206.4273019850002,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    }
+   ]
+  },
+  {
+   "policy": "A",
+   "world": 3,
+   "stops_total": 162,
+   "new_orders": 15,
+   "served": 132,
+   "served_new": 0,
+   "unserved": 30,
+   "unserved_by_priority": {
+    "1": 0,
+    "2": 1,
+    "3": 10,
+    "4": 10,
+    "5": 9
+   },
+   "cases_served": 8565,
+   "late_stops": 10,
+   "late_min": 463.8,
+   "late_returns": 1,
+   "late_return_min": 36.1,
+   "late_breaks": 5,
+   "missing_breaks": 0,
+   "trucks_used": 11,
+   "loads": 17,
+   "km": 935.17,
+   "cash": {
+    "fixed": 174.0,
+    "trip": 0.0,
+    "distance": 48.608,
+    "fuel": 64.968,
+    "driver": 274.062,
+    "overtime": 22.614,
+    "total": 584.253
+   },
+   "paid_driver_min": 6578,
+   "overtime_min": 339,
+   "replans": 0,
+   "replans_skipped": 0,
+   "replans_failed": 0,
+   "stops_moved": 0,
+   "truck_changes": 0,
+   "dropped_from_plan": 0,
+   "solver_sec": 0,
+   "replan_log": []
+  },
+  {
+   "policy": "B",
+   "world": 3,
+   "stops_total": 162,
+   "new_orders": 15,
+   "served": 148,
+   "served_new": 15,
+   "unserved": 14,
+   "unserved_by_priority": {
+    "1": 0,
+    "2": 2,
+    "3": 2,
+    "4": 3,
+    "5": 7
+   },
+   "cases_served": 8652,
+   "late_stops": 9,
+   "late_min": 511.3,
+   "late_returns": 2,
+   "late_return_min": 72.8,
+   "late_breaks": 5,
+   "missing_breaks": 1,
+   "trucks_used": 11,
+   "loads": 20,
+   "km": 1113.02,
+   "cash": {
+    "fixed": 174.0,
+    "trip": 0.0,
+    "distance": 57.044,
+    "fuel": 76.937,
+    "driver": 299.433,
+    "overtime": 39.093,
+    "total": 646.508
+   },
+   "paid_driver_min": 7186,
+   "overtime_min": 586,
+   "replans": 20,
+   "replans_skipped": 0,
+   "replans_failed": 0,
+   "stops_moved": 10,
+   "truck_changes": 8,
+   "dropped_from_plan": 4,
+   "solver_sec": 104.29,
+   "replan_log": [
+    {
+     "at": 574.8917166499999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.26,
+     "stops_sent": 56,
+     "moved": 5,
+     "truck_changes": 4,
+     "dropped": 1,
+     "added": 9
+    },
+    {
+     "at": 633.3069023349999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.33,
+     "stops_sent": 51,
+     "moved": 2,
+     "truck_changes": 1,
+     "dropped": 1,
+     "added": 2
+    },
+    {
+     "at": 634.6424372933333,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.22,
+     "stops_sent": 45,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 637.2832180833334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.34,
+     "stops_sent": 39,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 649.31804402,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.02,
+     "stops_sent": 30,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 713.5261450216667,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.88,
+     "stops_sent": 26,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 1,
+     "added": 4
+    },
+    {
+     "at": 913.7601331799998,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.87,
+     "stops_sent": 22,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 3
+    },
+    {
+     "at": 973.00584516,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.84,
+     "stops_sent": 17,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1007.3496336833334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.96,
+     "stops_sent": 15,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1060.1367354383335,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.51,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 1,
+     "added": 0
+    },
+    {
+     "at": 1069.069179953333,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.62,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1070.2765367149998,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.51,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1071.6227535133335,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.5,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1075.96105804,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.47,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1077.4472511466665,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.48,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1104.9160130933333,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 1.48,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1123.4885111066667,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1131.6724166933334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1176.1419668883334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1176.6690151266669,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    }
+   ]
+  },
+  {
+   "policy": "C",
+   "world": 3,
+   "stops_total": 162,
+   "new_orders": 15,
+   "served": 148,
+   "served_new": 14,
+   "unserved": 14,
+   "unserved_by_priority": {
+    "1": 0,
+    "2": 1,
+    "3": 2,
+    "4": 4,
+    "5": 7
+   },
+   "cases_served": 8716,
+   "late_stops": 10,
+   "late_min": 434.2,
+   "late_returns": 5,
+   "late_return_min": 138.0,
+   "late_breaks": 5,
+   "missing_breaks": 0,
+   "trucks_used": 11,
+   "loads": 20,
+   "km": 1107.05,
+   "cash": {
+    "fixed": 174.0,
+    "trip": 0.0,
+    "distance": 56.67,
+    "fuel": 76.507,
+    "driver": 302.54,
+    "overtime": 54.661,
+    "total": 664.379
+   },
+   "paid_driver_min": 7261,
+   "overtime_min": 820,
+   "replans": 48,
+   "replans_skipped": 0,
+   "replans_failed": 0,
+   "stops_moved": 46,
+   "truck_changes": 38,
+   "dropped_from_plan": 6,
+   "solver_sec": 386.49,
+   "replan_log": [
+    {
+     "at": 511.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.02,
+     "stops_sent": 50,
+     "moved": 11,
+     "truck_changes": 7,
+     "dropped": 2,
+     "added": 4
+    },
+    {
+     "at": 551.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.39,
+     "stops_sent": 52,
+     "moved": 3,
+     "truck_changes": 3,
+     "dropped": 0,
+     "added": 2
+    },
+    {
+     "at": 552.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.56,
+     "stops_sent": 53,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 1,
+     "added": 1
+    },
+    {
+     "at": 553.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.31,
+     "stops_sent": 54,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 561.8369525000002,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.22,
+     "stops_sent": 54,
+     "moved": 9,
+     "truck_changes": 6,
+     "dropped": 1,
+     "added": 2
+    },
+    {
+     "at": 563.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.95,
+     "stops_sent": 55,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 1,
+     "added": 1
+    },
+    {
+     "at": 565.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.09,
+     "stops_sent": 56,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 574.8917166499999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.23,
+     "stops_sent": 56,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 618.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.27,
+     "stops_sent": 52,
+     "moved": 4,
+     "truck_changes": 3,
+     "dropped": 0,
+     "added": 2
+    },
+    {
+     "at": 620.8588675700001,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.19,
+     "stops_sent": 52,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 633.3069023349999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.43,
+     "stops_sent": 52,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 634.6424372933333,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.01,
+     "stops_sent": 46,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 637.2832180833334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.03,
+     "stops_sent": 40,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 643.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.83,
+     "stops_sent": 31,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 649.31804402,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.94,
+     "stops_sent": 31,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 653.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.88,
+     "stops_sent": 24,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 657.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.87,
+     "stops_sent": 25,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 668.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.04,
+     "stops_sent": 26,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 707.8447710666667,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.16,
+     "stops_sent": 26,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 713.5261450216667,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.1,
+     "stops_sent": 26,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 719.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.88,
+     "stops_sent": 18,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 722.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.87,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 754.36785001,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.76,
+     "stops_sent": 19,
+     "moved": 3,
+     "truck_changes": 3,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 756.5444336383333,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.88,
+     "stops_sent": 19,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 765.0,
+     "triggers": [
+      "NEW_ORDER"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.92,
+     "stops_sent": 20,
+     "moved": 2,
+     "truck_changes": 2,
+     "dropped": 0,
+     "added": 1
+    },
+    {
+     "at": 798.5753452866667,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.09,
+     "stops_sent": 20,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 872.8978660900001,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 11.16,
+     "stops_sent": 20,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 891.0472529699999,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.81,
+     "stops_sent": 20,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 907.8614112383334,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.62,
+     "stops_sent": 20,
+     "moved": 5,
+     "truck_changes": 5,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 961.562202925,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.59,
+     "stops_sent": 20,
+     "moved": 4,
+     "truck_changes": 4,
+     "dropped": 1,
+     "added": 0
+    },
+    {
+     "at": 963.3160141416666,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.73,
+     "stops_sent": 20,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 973.00584516,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.75,
+     "stops_sent": 20,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1007.3496336833334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.76,
+     "stops_sent": 18,
+     "moved": 1,
+     "truck_changes": 1,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1030.5774002816665,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.75,
+     "stops_sent": 15,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1041.3219392666665,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "OPTIMIZED",
+     "feasibility": "VERIFIED",
+     "solver_sec": 10.71,
+     "stops_sent": 15,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1060.1367354383335,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.33,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1070.2765367149998,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.34,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1081.8922563200001,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.34,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1089.2251584933333,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.34,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1108.1573742933333,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.34,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1123.4885111066667,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1124.4738346249997,
+     "triggers": [
+      "DELAY"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1139.75025776,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1148.8959088933334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1156.36679398,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1173.0845257783335,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1176.1419668883334,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    },
+    {
+     "at": 1183.5364144916662,
+     "triggers": [
+      "DEPOT_RETURN"
+     ],
+     "status": "NOTHING_TO_PLAN",
+     "feasibility": "VERIFIED",
+     "solver_sec": 0.0,
+     "stops_sent": 14,
+     "moved": 0,
+     "truck_changes": 0,
+     "dropped": 0,
+     "added": 0
+    }
+   ]
+  }
+ ],
+ "summary": {
+  "A": {
+   "cases_served": {
+    "mean": 8565.0,
+    "min": 8565.0,
+    "max": 8565.0,
+    "values": [
+     8565.0,
+     8565.0,
+     8565.0
+    ]
+   },
+   "cash.distance": {
+    "mean": 48.608,
+    "min": 48.608,
+    "max": 48.608,
+    "values": [
+     48.608,
+     48.608,
+     48.608
+    ]
+   },
+   "cash.driver": {
+    "mean": 286.058,
+    "min": 274.062,
+    "max": 302.872,
+    "values": [
+     281.241,
+     302.872,
+     274.062
+    ]
+   },
+   "cash.fixed": {
+    "mean": 174.0,
+    "min": 174.0,
+    "max": 174.0,
+    "values": [
+     174.0,
+     174.0,
+     174.0
+    ]
+   },
+   "cash.fuel": {
+    "mean": 64.968,
+    "min": 64.968,
+    "max": 64.968,
+    "values": [
+     64.968,
+     64.968,
+     64.968
+    ]
+   },
+   "cash.overtime": {
+    "mean": 36.262,
+    "min": 22.614,
+    "max": 56.966,
+    "values": [
+     29.207,
+     56.966,
+     22.614
+    ]
+   },
+   "cash.total": {
+    "mean": 609.896,
+    "min": 584.253,
+    "max": 647.413,
+    "values": [
+     598.023,
+     647.413,
+     584.253
+    ]
+   },
+   "cash.trip": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "dropped_from_plan": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "km": {
+    "mean": 935.17,
+    "min": 935.17,
+    "max": 935.17,
+    "values": [
+     935.17,
+     935.17,
+     935.17
+    ]
+   },
+   "late_breaks": {
+    "mean": 6.0,
+    "min": 5.0,
+    "max": 7.0,
+    "values": [
+     6.0,
+     7.0,
+     5.0
+    ]
+   },
+   "late_min": {
+    "mean": 652.833,
+    "min": 463.8,
+    "max": 991.6,
+    "values": [
+     503.1,
+     991.6,
+     463.8
+    ]
+   },
+   "late_return_min": {
+    "mean": 120.067,
+    "min": 33.6,
+    "max": 290.5,
+    "values": [
+     33.6,
+     290.5,
+     36.1
+    ]
+   },
+   "late_returns": {
+    "mean": 2.333,
+    "min": 1.0,
+    "max": 5.0,
+    "values": [
+     1.0,
+     5.0,
+     1.0
+    ]
+   },
+   "late_stops": {
+    "mean": 13.0,
+    "min": 10.0,
+    "max": 16.0,
+    "values": [
+     13.0,
+     16.0,
+     10.0
+    ]
+   },
+   "loads": {
+    "mean": 17.0,
+    "min": 17.0,
+    "max": 17.0,
+    "values": [
+     17.0,
+     17.0,
+     17.0
+    ]
+   },
+   "missing_breaks": {
+    "mean": 0.333,
+    "min": 0.0,
+    "max": 1.0,
+    "values": [
+     0.0,
+     1.0,
+     0.0
+    ]
+   },
+   "new_orders": {
+    "mean": 15.0,
+    "min": 15.0,
+    "max": 15.0,
+    "values": [
+     15.0,
+     15.0,
+     15.0
+    ]
+   },
+   "overtime_min": {
+    "mean": 543.667,
+    "min": 339.0,
+    "max": 854.0,
+    "values": [
+     438.0,
+     854.0,
+     339.0
+    ]
+   },
+   "paid_driver_min": {
+    "mean": 6865.667,
+    "min": 6578.0,
+    "max": 7269.0,
+    "values": [
+     6750.0,
+     7269.0,
+     6578.0
+    ]
+   },
+   "replans": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "replans_failed": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "replans_skipped": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "served": {
+    "mean": 132.0,
+    "min": 132.0,
+    "max": 132.0,
+    "values": [
+     132.0,
+     132.0,
+     132.0
+    ]
+   },
+   "served_new": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "solver_sec": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "stops_moved": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "stops_total": {
+    "mean": 162.0,
+    "min": 162.0,
+    "max": 162.0,
+    "values": [
+     162.0,
+     162.0,
+     162.0
+    ]
+   },
+   "truck_changes": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "trucks_used": {
+    "mean": 11.0,
+    "min": 11.0,
+    "max": 11.0,
+    "values": [
+     11.0,
+     11.0,
+     11.0
+    ]
+   },
+   "unserved": {
+    "mean": 30.0,
+    "min": 30.0,
+    "max": 30.0,
+    "values": [
+     30.0,
+     30.0,
+     30.0
+    ]
+   },
+   "unserved_by_priority.1": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "unserved_by_priority.2": {
+    "mean": 1.0,
+    "min": 1.0,
+    "max": 1.0,
+    "values": [
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   "unserved_by_priority.3": {
+    "mean": 10.0,
+    "min": 10.0,
+    "max": 10.0,
+    "values": [
+     10.0,
+     10.0,
+     10.0
+    ]
+   },
+   "unserved_by_priority.4": {
+    "mean": 10.0,
+    "min": 10.0,
+    "max": 10.0,
+    "values": [
+     10.0,
+     10.0,
+     10.0
+    ]
+   },
+   "unserved_by_priority.5": {
+    "mean": 9.0,
+    "min": 9.0,
+    "max": 9.0,
+    "values": [
+     9.0,
+     9.0,
+     9.0
+    ]
+   }
+  },
+  "B": {
+   "cases_served": {
+    "mean": 8553.333,
+    "min": 8296.0,
+    "max": 8712.0,
+    "values": [
+     8712.0,
+     8296.0,
+     8652.0
+    ]
+   },
+   "cash.distance": {
+    "mean": 56.991,
+    "min": 54.215,
+    "max": 59.714,
+    "values": [
+     59.714,
+     54.215,
+     57.044
+    ]
+   },
+   "cash.driver": {
+    "mean": 307.767,
+    "min": 299.433,
+    "max": 319.067,
+    "values": [
+     304.801,
+     319.067,
+     299.433
+    ]
+   },
+   "cash.fixed": {
+    "mean": 174.0,
+    "min": 174.0,
+    "max": 174.0,
+    "values": [
+     174.0,
+     174.0,
+     174.0
+    ]
+   },
+   "cash.fuel": {
+    "mean": 77.123,
+    "min": 74.015,
+    "max": 80.418,
+    "values": [
+     80.418,
+     74.015,
+     76.937
+    ]
+   },
+   "cash.overtime": {
+    "mean": 52.427,
+    "min": 39.093,
+    "max": 70.508,
+    "values": [
+     47.681,
+     70.508,
+     39.093
+    ]
+   },
+   "cash.total": {
+    "mean": 668.309,
+    "min": 646.508,
+    "max": 691.806,
+    "values": [
+     666.614,
+     691.806,
+     646.508
+    ]
+   },
+   "cash.trip": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "dropped_from_plan": {
+    "mean": 6.0,
+    "min": 4.0,
+    "max": 7.0,
+    "values": [
+     7.0,
+     7.0,
+     4.0
+    ]
+   },
+   "km": {
+    "mean": 1116.873,
+    "min": 1074.13,
+    "max": 1163.47,
+    "values": [
+     1163.47,
+     1074.13,
+     1113.02
+    ]
+   },
+   "late_breaks": {
+    "mean": 6.333,
+    "min": 5.0,
+    "max": 8.0,
+    "values": [
+     6.0,
+     8.0,
+     5.0
+    ]
+   },
+   "late_min": {
+    "mean": 473.933,
+    "min": 201.6,
+    "max": 708.9,
+    "values": [
+     201.6,
+     708.9,
+     511.3
+    ]
+   },
+   "late_return_min": {
+    "mean": 154.667,
+    "min": 72.8,
+    "max": 253.0,
+    "values": [
+     138.2,
+     253.0,
+     72.8
+    ]
+   },
+   "late_returns": {
+    "mean": 3.333,
+    "min": 2.0,
+    "max": 6.0,
+    "values": [
+     2.0,
+     6.0,
+     2.0
+    ]
+   },
+   "late_stops": {
+    "mean": 10.333,
+    "min": 9.0,
+    "max": 13.0,
+    "values": [
+     9.0,
+     13.0,
+     9.0
+    ]
+   },
+   "loads": {
+    "mean": 19.333,
+    "min": 19.0,
+    "max": 20.0,
+    "values": [
+     19.0,
+     19.0,
+     20.0
+    ]
+   },
+   "missing_breaks": {
+    "mean": 0.667,
+    "min": 0.0,
+    "max": 1.0,
+    "values": [
+     0.0,
+     1.0,
+     1.0
+    ]
+   },
+   "new_orders": {
+    "mean": 15.0,
+    "min": 15.0,
+    "max": 15.0,
+    "values": [
+     15.0,
+     15.0,
+     15.0
+    ]
+   },
+   "overtime_min": {
+    "mean": 786.333,
+    "min": 586.0,
+    "max": 1058.0,
+    "values": [
+     715.0,
+     1058.0,
+     586.0
+    ]
+   },
+   "paid_driver_min": {
+    "mean": 7386.333,
+    "min": 7186.0,
+    "max": 7658.0,
+    "values": [
+     7315.0,
+     7658.0,
+     7186.0
+    ]
+   },
+   "replans": {
+    "mean": 19.333,
+    "min": 19.0,
+    "max": 20.0,
+    "values": [
+     19.0,
+     19.0,
+     20.0
+    ]
+   },
+   "replans_failed": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "replans_skipped": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "served": {
+    "mean": 146.0,
+    "min": 144.0,
+    "max": 148.0,
+    "values": [
+     144.0,
+     146.0,
+     148.0
+    ]
+   },
+   "served_new": {
+    "mean": 14.667,
+    "min": 14.0,
+    "max": 15.0,
+    "values": [
+     14.0,
+     15.0,
+     15.0
+    ]
+   },
+   "solver_sec": {
+    "mean": 93.693,
+    "min": 86.94,
+    "max": 104.29,
+    "values": [
+     89.85,
+     86.94,
+     104.29
+    ]
+   },
+   "stops_moved": {
+    "mean": 20.667,
+    "min": 10.0,
+    "max": 39.0,
+    "values": [
+     39.0,
+     13.0,
+     10.0
+    ]
+   },
+   "stops_total": {
+    "mean": 162.0,
+    "min": 162.0,
+    "max": 162.0,
+    "values": [
+     162.0,
+     162.0,
+     162.0
+    ]
+   },
+   "truck_changes": {
+    "mean": 19.0,
+    "min": 8.0,
+    "max": 37.0,
+    "values": [
+     37.0,
+     12.0,
+     8.0
+    ]
+   },
+   "trucks_used": {
+    "mean": 11.0,
+    "min": 11.0,
+    "max": 11.0,
+    "values": [
+     11.0,
+     11.0,
+     11.0
+    ]
+   },
+   "unserved": {
+    "mean": 16.0,
+    "min": 14.0,
+    "max": 18.0,
+    "values": [
+     18.0,
+     16.0,
+     14.0
+    ]
+   },
+   "unserved_by_priority.1": {
+    "mean": 0.333,
+    "min": 0.0,
+    "max": 1.0,
+    "values": [
+     0.0,
+     1.0,
+     0.0
+    ]
+   },
+   "unserved_by_priority.2": {
+    "mean": 1.0,
+    "min": 0.0,
+    "max": 2.0,
+    "values": [
+     0.0,
+     1.0,
+     2.0
+    ]
+   },
+   "unserved_by_priority.3": {
+    "mean": 3.333,
+    "min": 2.0,
+    "max": 6.0,
+    "values": [
+     6.0,
+     2.0,
+     2.0
+    ]
+   },
+   "unserved_by_priority.4": {
+    "mean": 4.0,
+    "min": 3.0,
+    "max": 5.0,
+    "values": [
+     5.0,
+     4.0,
+     3.0
+    ]
+   },
+   "unserved_by_priority.5": {
+    "mean": 7.333,
+    "min": 7.0,
+    "max": 8.0,
+    "values": [
+     7.0,
+     8.0,
+     7.0
+    ]
+   }
+  },
+  "C": {
+   "cases_served": {
+    "mean": 8469.0,
+    "min": 8237.0,
+    "max": 8716.0,
+    "values": [
+     8454.0,
+     8237.0,
+     8716.0
+    ]
+   },
+   "cash.distance": {
+    "mean": 56.551,
+    "min": 55.754,
+    "max": 57.23,
+    "values": [
+     57.23,
+     55.754,
+     56.67
+    ]
+   },
+   "cash.driver": {
+    "mean": 306.788,
+    "min": 302.54,
+    "max": 314.464,
+    "values": [
+     303.36,
+     314.464,
+     302.54
+    ]
+   },
+   "cash.fixed": {
+    "mean": 174.0,
+    "min": 174.0,
+    "max": 174.0,
+    "values": [
+     174.0,
+     174.0,
+     174.0
+    ]
+   },
+   "cash.fuel": {
+    "mean": 75.593,
+    "min": 74.338,
+    "max": 76.507,
+    "values": [
+     75.933,
+     74.338,
+     76.507
+    ]
+   },
+   "cash.overtime": {
+    "mean": 54.915,
+    "min": 45.377,
+    "max": 64.706,
+    "values": [
+     45.377,
+     64.706,
+     54.661
+    ]
+   },
+   "cash.total": {
+    "mean": 667.847,
+    "min": 655.901,
+    "max": 683.261,
+    "values": [
+     655.901,
+     683.261,
+     664.379
+    ]
+   },
+   "cash.trip": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "dropped_from_plan": {
+    "mean": 14.0,
+    "min": 6.0,
+    "max": 18.0,
+    "values": [
+     18.0,
+     18.0,
+     6.0
+    ]
+   },
+   "km": {
+    "mean": 1090.363,
+    "min": 1071.2,
+    "max": 1107.05,
+    "values": [
+     1092.84,
+     1071.2,
+     1107.05
+    ]
+   },
+   "late_breaks": {
+    "mean": 5.667,
+    "min": 5.0,
+    "max": 6.0,
+    "values": [
+     6.0,
+     6.0,
+     5.0
+    ]
+   },
+   "late_min": {
+    "mean": 462.3,
+    "min": 295.0,
+    "max": 657.7,
+    "values": [
+     295.0,
+     657.7,
+     434.2
+    ]
+   },
+   "late_return_min": {
+    "mean": 125.833,
+    "min": 48.1,
+    "max": 191.4,
+    "values": [
+     48.1,
+     191.4,
+     138.0
+    ]
+   },
+   "late_returns": {
+    "mean": 4.0,
+    "min": 1.0,
+    "max": 6.0,
+    "values": [
+     1.0,
+     6.0,
+     5.0
+    ]
+   },
+   "late_stops": {
+    "mean": 10.0,
+    "min": 9.0,
+    "max": 11.0,
+    "values": [
+     9.0,
+     11.0,
+     10.0
+    ]
+   },
+   "loads": {
+    "mean": 19.333,
+    "min": 18.0,
+    "max": 20.0,
+    "values": [
+     20.0,
+     18.0,
+     20.0
+    ]
+   },
+   "missing_breaks": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "new_orders": {
+    "mean": 15.0,
+    "min": 15.0,
+    "max": 15.0,
+    "values": [
+     15.0,
+     15.0,
+     15.0
+    ]
+   },
+   "overtime_min": {
+    "mean": 824.0,
+    "min": 681.0,
+    "max": 971.0,
+    "values": [
+     681.0,
+     971.0,
+     820.0
+    ]
+   },
+   "paid_driver_min": {
+    "mean": 7363.0,
+    "min": 7261.0,
+    "max": 7547.0,
+    "values": [
+     7281.0,
+     7547.0,
+     7261.0
+    ]
+   },
+   "replans": {
+    "mean": 51.333,
+    "min": 48.0,
+    "max": 55.0,
+    "values": [
+     51.0,
+     55.0,
+     48.0
+    ]
+   },
+   "replans_failed": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "replans_skipped": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "served": {
+    "mean": 145.0,
+    "min": 143.0,
+    "max": 148.0,
+    "values": [
+     143.0,
+     144.0,
+     148.0
+    ]
+   },
+   "served_new": {
+    "mean": 13.333,
+    "min": 13.0,
+    "max": 14.0,
+    "values": [
+     13.0,
+     13.0,
+     14.0
+    ]
+   },
+   "solver_sec": {
+    "mean": 422.457,
+    "min": 386.49,
+    "max": 459.29,
+    "values": [
+     421.59,
+     459.29,
+     386.49
+    ]
+   },
+   "stops_moved": {
+    "mean": 57.667,
+    "min": 34.0,
+    "max": 93.0,
+    "values": [
+     93.0,
+     34.0,
+     46.0
+    ]
+   },
+   "stops_total": {
+    "mean": 162.0,
+    "min": 162.0,
+    "max": 162.0,
+    "values": [
+     162.0,
+     162.0,
+     162.0
+    ]
+   },
+   "truck_changes": {
+    "mean": 53.0,
+    "min": 34.0,
+    "max": 87.0,
+    "values": [
+     87.0,
+     34.0,
+     38.0
+    ]
+   },
+   "trucks_used": {
+    "mean": 11.0,
+    "min": 11.0,
+    "max": 11.0,
+    "values": [
+     11.0,
+     11.0,
+     11.0
+    ]
+   },
+   "unserved": {
+    "mean": 17.0,
+    "min": 14.0,
+    "max": 19.0,
+    "values": [
+     19.0,
+     18.0,
+     14.0
+    ]
+   },
+   "unserved_by_priority.1": {
+    "mean": 0.333,
+    "min": 0.0,
+    "max": 1.0,
+    "values": [
+     0.0,
+     1.0,
+     0.0
+    ]
+   },
+   "unserved_by_priority.2": {
+    "mean": 1.333,
+    "min": 1.0,
+    "max": 2.0,
+    "values": [
+     2.0,
+     1.0,
+     1.0
+    ]
+   },
+   "unserved_by_priority.3": {
+    "mean": 3.333,
+    "min": 2.0,
+    "max": 5.0,
+    "values": [
+     5.0,
+     3.0,
+     2.0
+    ]
+   },
+   "unserved_by_priority.4": {
+    "mean": 4.333,
+    "min": 3.0,
+    "max": 6.0,
+    "values": [
+     3.0,
+     6.0,
+     4.0
+    ]
+   },
+   "unserved_by_priority.5": {
+    "mean": 7.667,
+    "min": 7.0,
+    "max": 9.0,
+    "values": [
+     9.0,
+     7.0,
+     7.0
+    ]
+   }
+  }
+ },
+ "vs_A": {
+  "B": {
+   "cases_served": {
+    "mean": -11.667,
+    "min": -269.0,
+    "max": 147.0,
+    "values": [
+     147.0,
+     -269.0,
+     87.0
+    ]
+   },
+   "cash.distance": {
+    "mean": 8.383,
+    "min": 5.607,
+    "max": 11.106,
+    "values": [
+     11.106,
+     5.607,
+     8.436
+    ]
+   },
+   "cash.driver": {
+    "mean": 21.709,
+    "min": 16.195,
+    "max": 25.371,
+    "values": [
+     23.56,
+     16.195,
+     25.371
+    ]
+   },
+   "cash.fixed": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "cash.fuel": {
+    "mean": 12.155,
+    "min": 9.047,
+    "max": 15.45,
+    "values": [
+     15.45,
+     9.047,
+     11.969
+    ]
+   },
+   "cash.overtime": {
+    "mean": 16.165,
+    "min": 13.542,
+    "max": 18.474,
+    "values": [
+     18.474,
+     13.542,
+     16.479
+    ]
+   },
+   "cash.total": {
+    "mean": 58.413,
+    "min": 44.393,
+    "max": 68.591,
+    "values": [
+     68.591,
+     44.393,
+     62.255
+    ]
+   },
+   "cash.trip": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "dropped_from_plan": {
+    "mean": 6.0,
+    "min": 4.0,
+    "max": 7.0,
+    "values": [
+     7.0,
+     7.0,
+     4.0
+    ]
+   },
+   "km": {
+    "mean": 181.703,
+    "min": 138.96,
+    "max": 228.3,
+    "values": [
+     228.3,
+     138.96,
+     177.85
+    ]
+   },
+   "late_breaks": {
+    "mean": 0.333,
+    "min": 0.0,
+    "max": 1.0,
+    "values": [
+     0.0,
+     1.0,
+     0.0
+    ]
+   },
+   "late_min": {
+    "mean": -178.9,
+    "min": -301.5,
+    "max": 47.5,
+    "values": [
+     -301.5,
+     -282.7,
+     47.5
+    ]
+   },
+   "late_return_min": {
+    "mean": 34.6,
+    "min": -37.5,
+    "max": 104.6,
+    "values": [
+     104.6,
+     -37.5,
+     36.7
+    ]
+   },
+   "late_returns": {
+    "mean": 1.0,
+    "min": 1.0,
+    "max": 1.0,
+    "values": [
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   "late_stops": {
+    "mean": -2.667,
+    "min": -4.0,
+    "max": -1.0,
+    "values": [
+     -4.0,
+     -3.0,
+     -1.0
+    ]
+   },
+   "loads": {
+    "mean": 2.333,
+    "min": 2.0,
+    "max": 3.0,
+    "values": [
+     2.0,
+     2.0,
+     3.0
+    ]
+   },
+   "missing_breaks": {
+    "mean": 0.333,
+    "min": 0.0,
+    "max": 1.0,
+    "values": [
+     0.0,
+     0.0,
+     1.0
+    ]
+   },
+   "new_orders": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "overtime_min": {
+    "mean": 242.667,
+    "min": 204.0,
+    "max": 277.0,
+    "values": [
+     277.0,
+     204.0,
+     247.0
+    ]
+   },
+   "paid_driver_min": {
+    "mean": 520.667,
+    "min": 389.0,
+    "max": 608.0,
+    "values": [
+     565.0,
+     389.0,
+     608.0
+    ]
+   },
+   "replans": {
+    "mean": 19.333,
+    "min": 19.0,
+    "max": 20.0,
+    "values": [
+     19.0,
+     19.0,
+     20.0
+    ]
+   },
+   "replans_failed": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "replans_skipped": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "served": {
+    "mean": 14.0,
+    "min": 12.0,
+    "max": 16.0,
+    "values": [
+     12.0,
+     14.0,
+     16.0
+    ]
+   },
+   "served_new": {
+    "mean": 14.667,
+    "min": 14.0,
+    "max": 15.0,
+    "values": [
+     14.0,
+     15.0,
+     15.0
+    ]
+   },
+   "solver_sec": {
+    "mean": 93.693,
+    "min": 86.94,
+    "max": 104.29,
+    "values": [
+     89.85,
+     86.94,
+     104.29
+    ]
+   },
+   "stops_moved": {
+    "mean": 20.667,
+    "min": 10.0,
+    "max": 39.0,
+    "values": [
+     39.0,
+     13.0,
+     10.0
+    ]
+   },
+   "stops_total": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "truck_changes": {
+    "mean": 19.0,
+    "min": 8.0,
+    "max": 37.0,
+    "values": [
+     37.0,
+     12.0,
+     8.0
+    ]
+   },
+   "trucks_used": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "unserved": {
+    "mean": -14.0,
+    "min": -16.0,
+    "max": -12.0,
+    "values": [
+     -12.0,
+     -14.0,
+     -16.0
+    ]
+   },
+   "unserved_by_priority.1": {
+    "mean": 0.333,
+    "min": 0.0,
+    "max": 1.0,
+    "values": [
+     0.0,
+     1.0,
+     0.0
+    ]
+   },
+   "unserved_by_priority.2": {
+    "mean": 0.0,
+    "min": -1.0,
+    "max": 1.0,
+    "values": [
+     -1.0,
+     0.0,
+     1.0
+    ]
+   },
+   "unserved_by_priority.3": {
+    "mean": -6.667,
+    "min": -8.0,
+    "max": -4.0,
+    "values": [
+     -4.0,
+     -8.0,
+     -8.0
+    ]
+   },
+   "unserved_by_priority.4": {
+    "mean": -6.0,
+    "min": -7.0,
+    "max": -5.0,
+    "values": [
+     -5.0,
+     -6.0,
+     -7.0
+    ]
+   },
+   "unserved_by_priority.5": {
+    "mean": -1.667,
+    "min": -2.0,
+    "max": -1.0,
+    "values": [
+     -2.0,
+     -1.0,
+     -2.0
+    ]
+   }
+  },
+  "C": {
+   "cases_served": {
+    "mean": -96.0,
+    "min": -328.0,
+    "max": 151.0,
+    "values": [
+     -111.0,
+     -328.0,
+     151.0
+    ]
+   },
+   "cash.distance": {
+    "mean": 7.943,
+    "min": 7.146,
+    "max": 8.622,
+    "values": [
+     8.622,
+     7.146,
+     8.062
+    ]
+   },
+   "cash.driver": {
+    "mean": 20.73,
+    "min": 11.592,
+    "max": 28.478,
+    "values": [
+     22.119,
+     11.592,
+     28.478
+    ]
+   },
+   "cash.fixed": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "cash.fuel": {
+    "mean": 10.625,
+    "min": 9.37,
+    "max": 11.539,
+    "values": [
+     10.965,
+     9.37,
+     11.539
+    ]
+   },
+   "cash.overtime": {
+    "mean": 18.652,
+    "min": 7.74,
+    "max": 32.047,
+    "values": [
+     16.17,
+     7.74,
+     32.047
+    ]
+   },
+   "cash.total": {
+    "mean": 57.951,
+    "min": 35.848,
+    "max": 80.126,
+    "values": [
+     57.878,
+     35.848,
+     80.126
+    ]
+   },
+   "cash.trip": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "dropped_from_plan": {
+    "mean": 14.0,
+    "min": 6.0,
+    "max": 18.0,
+    "values": [
+     18.0,
+     18.0,
+     6.0
+    ]
+   },
+   "km": {
+    "mean": 155.193,
+    "min": 136.03,
+    "max": 171.88,
+    "values": [
+     157.67,
+     136.03,
+     171.88
+    ]
+   },
+   "late_breaks": {
+    "mean": -0.333,
+    "min": -1.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     -1.0,
+     0.0
+    ]
+   },
+   "late_min": {
+    "mean": -190.533,
+    "min": -333.9,
+    "max": -29.6,
+    "values": [
+     -208.1,
+     -333.9,
+     -29.6
+    ]
+   },
+   "late_return_min": {
+    "mean": 5.767,
+    "min": -99.1,
+    "max": 101.9,
+    "values": [
+     14.5,
+     -99.1,
+     101.9
+    ]
+   },
+   "late_returns": {
+    "mean": 1.667,
+    "min": 0.0,
+    "max": 4.0,
+    "values": [
+     0.0,
+     1.0,
+     4.0
+    ]
+   },
+   "late_stops": {
+    "mean": -3.0,
+    "min": -5.0,
+    "max": 0.0,
+    "values": [
+     -4.0,
+     -5.0,
+     0.0
+    ]
+   },
+   "loads": {
+    "mean": 2.333,
+    "min": 1.0,
+    "max": 3.0,
+    "values": [
+     3.0,
+     1.0,
+     3.0
+    ]
+   },
+   "missing_breaks": {
+    "mean": -0.333,
+    "min": -1.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     -1.0,
+     0.0
+    ]
+   },
+   "new_orders": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "overtime_min": {
+    "mean": 280.333,
+    "min": 117.0,
+    "max": 481.0,
+    "values": [
+     243.0,
+     117.0,
+     481.0
+    ]
+   },
+   "paid_driver_min": {
+    "mean": 497.333,
+    "min": 278.0,
+    "max": 683.0,
+    "values": [
+     531.0,
+     278.0,
+     683.0
+    ]
+   },
+   "replans": {
+    "mean": 51.333,
+    "min": 48.0,
+    "max": 55.0,
+    "values": [
+     51.0,
+     55.0,
+     48.0
+    ]
+   },
+   "replans_failed": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "replans_skipped": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "served": {
+    "mean": 13.0,
+    "min": 11.0,
+    "max": 16.0,
+    "values": [
+     11.0,
+     12.0,
+     16.0
+    ]
+   },
+   "served_new": {
+    "mean": 13.333,
+    "min": 13.0,
+    "max": 14.0,
+    "values": [
+     13.0,
+     13.0,
+     14.0
+    ]
+   },
+   "solver_sec": {
+    "mean": 422.457,
+    "min": 386.49,
+    "max": 459.29,
+    "values": [
+     421.59,
+     459.29,
+     386.49
+    ]
+   },
+   "stops_moved": {
+    "mean": 57.667,
+    "min": 34.0,
+    "max": 93.0,
+    "values": [
+     93.0,
+     34.0,
+     46.0
+    ]
+   },
+   "stops_total": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "truck_changes": {
+    "mean": 53.0,
+    "min": 34.0,
+    "max": 87.0,
+    "values": [
+     87.0,
+     34.0,
+     38.0
+    ]
+   },
+   "trucks_used": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   "unserved": {
+    "mean": -13.0,
+    "min": -16.0,
+    "max": -11.0,
+    "values": [
+     -11.0,
+     -12.0,
+     -16.0
+    ]
+   },
+   "unserved_by_priority.1": {
+    "mean": 0.333,
+    "min": 0.0,
+    "max": 1.0,
+    "values": [
+     0.0,
+     1.0,
+     0.0
+    ]
+   },
+   "unserved_by_priority.2": {
+    "mean": 0.333,
+    "min": 0.0,
+    "max": 1.0,
+    "values": [
+     1.0,
+     0.0,
+     0.0
+    ]
+   },
+   "unserved_by_priority.3": {
+    "mean": -6.667,
+    "min": -8.0,
+    "max": -5.0,
+    "values": [
+     -5.0,
+     -7.0,
+     -8.0
+    ]
+   },
+   "unserved_by_priority.4": {
+    "mean": -5.667,
+    "min": -7.0,
+    "max": -4.0,
+    "values": [
+     -7.0,
+     -4.0,
+     -6.0
+    ]
+   },
+   "unserved_by_priority.5": {
+    "mean": -1.333,
+    "min": -2.0,
+    "max": 0.0,
+    "values": [
+     0.0,
+     -2.0,
+     -2.0
+    ]
+   }
+  }
+ },
+ "labels": {
+  "cash": "OMR cash of the executed day (costing.truck_day_costs on actual times and estimated km), every load of the day",
+  "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+  "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+  "time": "minutes, trips and trucks: time and capacity, not cash",
+  "late": "minutes after the genuine closing time (window_rule), still delivered"
+ },
+ "day": {
+  "label": "SYNTHETIC",
+  "invoices": 280,
+  "seed": 1,
+  "stops_known": 147,
+  "new_orders": 15,
+  "trucks": 11
+ }
+}

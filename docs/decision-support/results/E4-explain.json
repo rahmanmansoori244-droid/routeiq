@@ -1,0 +1,5582 @@
+{
+ "experiment": "E4",
+ "title": "Verdicts, ranked relaxations and the trade-off frontier",
+ "meta": {
+  "commit": "6b6de09d576c",
+  "generated_at": "2026-10-15T03:58:29+00:00",
+  "quick": false,
+  "budgets": {
+   "real_sec": 20,
+   "synthetic_sec": 40
+  },
+  "seeds": [
+   1,
+   2,
+   3
+  ],
+  "machine": {
+   "nproc": 4,
+   "cpu": "AMD EPYC 7763 64-Core Processor",
+   "python": "3.11.17",
+   "ortools": "9.15.675",
+   "platform": "Linux-6.8.0-1064-azure-x86_64-with-glibc2.39"
+  },
+  "run_hosts": [
+   "codespaces-549a45",
+   "runnervm8k3b6"
+  ],
+  "lanes": [
+   "0/4",
+   "1/4",
+   "2/4",
+   "3/4"
+  ],
+  "env": {
+   "SOLVER_PARALLEL": "0",
+   "SOLVER_PYVRP": "off"
+  },
+  "equal_compute": "Every compared run has the same budget (search seconds, QUICK, RECOMMENDED only) and runs alone in its lane's process (SOLVER_PARALLEL=0). Production also runs the second route search (PyVRP); it is off here (SOLVER_PYVRP=off) so that every run gets the same single-core search.",
+  "honesty": "Distances are HAVERSINE estimates (estimated km). Plans are the best found in the time given, not proven optimal; only E5's oracle proves optimality, on the instances it enumerates completely. Cash is OMR (costing.truck_day_costs); solver penalties are ARTIFICIAL and never added to cash.",
+  "items": {
+   "total": 84,
+   "done": 84
+  },
+  "compute_sec": 6239.0,
+  "first_start": "2026-10-15T03:03:17+00:00",
+  "last_finish": "2026-10-15T03:55:28+00:00",
+  "ivms": {
+   "source": "decision_support/data/ivms_aggregates.json: aggregates of the IVMS report (Feb-Mar 2026) and the 13 Oct truck evidence",
+   "whatif": {
+    "source": "IVMS report 2026-01-31..2026-03-16, 45352 segments (aggregates only)",
+    "unloading_gap": {
+     "p25_below_p50": 0.39,
+     "chains": 8,
+     "visits": 422,
+     "basis": "13 Oct GPS evidence: time on site per chain, visit-weighted median of 1 - p25/p50"
+    },
+    "reload": "Reload between loads (trip 2+): 3T 30 min (p25 19, p50 28, p75 40, p90 60); 10T about 30 min (p50 28, p75 about 55, p90 about 80) before daytime trips (SUPPORTED (3T) / SUPPORTED, small n (10T))",
+    "latest_return": "Latest return to depot: 10T p50 17:00, p75 18:57, p90 20:07; 3T p50 17:36, p75 18:39, p90 19:22. 3T in October: p50 18:16, p75 19:02, p90 20:20 (58% of days after 18:00). (SUPPORTED)",
+    "ivms_last_stop_end": {
+     "p50": "20:10",
+     "p75": "21:34",
+     "p90": "24:00"
+    },
+    "speed": {
+     "evening": 0.839,
+     "night": 0.708,
+     "basis": "IVMS MOVING segments, Muscat (MOVING segments >= 1 km and >= 2 min, speed = km / hours <= 130): median km/h 06-18 30.7 (segment-weighted mean of the band medians, n=2978), 18-22 25.71 (n=398), 22-06 21.71 (n=147). Cross-check, 13 Oct truck evidence: Time-of-day factor, trucks, Muscat core: 1.00 except 12-15 about 1.06; 18+ 1.07-1.13 (low n) (INFERRED)"
+    }
+   },
+   "uncertainty_model": {
+    "travel_median": 1.0,
+    "travel_sigma": 0.373,
+    "unload_median": 1.0,
+    "unload_sigma": 0.501,
+    "assumed": [
+     "travel_median",
+     "unload_median"
+    ],
+    "basis": {
+     "travel_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "travel_sigma": "IVMS speeds of 5 km+ segments, n=3719 (spread across visits: an upper bound)",
+     "unload_median": "DEFAULT ASSUMPTION (too few GPS-confirmed plan-vs-actual rows)",
+     "unload_sigma": "13 Oct evidence, chain x drop size, n=226 (spread across visits: an upper bound)"
+    }
+   },
+   "band_factors": {
+    "06-09": 0.77,
+    "09-12": 1.017,
+    "12-15": 1.033,
+    "15-18": 0.892,
+    "18-22": 1.148,
+    "22-06": 1.359
+   },
+   "small_drop_on_site_min": {
+    "p25": 9.8,
+    "p50": 16.0,
+    "p75": 29.0,
+    "chains": 5,
+    "visits": 73
+   },
+   "visit_every_days": {
+    "p25": 3.75,
+    "p50": 5.0,
+    "p75": 7.5,
+    "customers": 118
+   },
+   "unloading_gap": {
+    "share": 0.39,
+    "visits": 422
+   },
+   "slow_day_factor": 1.286,
+   "muscat_speed_kmh": {
+    "06-09": 38.3,
+    "09-12": 29.01,
+    "12-15": 28.57
+   }
+  },
+  "labels": {
+   "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+   "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+   "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+   "time": "minutes, trips and trucks: time and capacity, not cash"
+  }
+ },
+ "days": {
+  "REAL-15OCT-PREFIX": {
+   "status": "COMPLETE",
+   "items_done": 42,
+   "items": 42,
+   "compute_sec": 4412.8,
+   "day": "REAL, anonymised; 94 stops, 9 trucks",
+   "budget": {
+    "time_limit_sec": 20,
+    "search_mode": "QUICK",
+    "seeds": [
+     1,
+     2,
+     3
+    ]
+   },
+   "options": {
+    "minutes": [
+     10,
+     30
+    ],
+    "max_stops": 3,
+    "max_trucks": 2,
+    "max_hires": 1
+   },
+   "verdict_counts": [
+    {
+     "SEARCH_FAILURE": 10
+    },
+    {
+     "SEARCH_FAILURE": 10
+    },
+    {
+     "SEARCH_FAILURE": 16
+    }
+   ],
+   "explanation": {
+    "seeds": [
+     1,
+     2,
+     3
+    ],
+    "verdicts": [
+     {
+      "verdict": "SEARCH_FAILURE",
+      "scenario": "RECOMMENDED",
+      "status": "OPTIMIZED",
+      "solver_status": "ROUTING_SUCCESS",
+      "solver_time_sec": 96.45,
+      "time_limit_sec": 20,
+      "stops_total": 94,
+      "stops_served": 84,
+      "note": "10 stop(s) left out without a proof, not proven impossible: a longer search, a relaxation or a change could serve it.",
+      "stops": [
+       {
+        "stop_id": "stop-002",
+        "label": "stop-002",
+        "priority": 3,
+        "cases": 600,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 2,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 2 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-014",
+        "label": "stop-014",
+        "priority": 3,
+        "cases": 488,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 2,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 2 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-017",
+        "label": "stop-017",
+        "priority": 3,
+        "cases": 191,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 2,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 2 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-048",
+        "label": "stop-048",
+        "priority": 3,
+        "cases": 600,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "NO_ALLOWED_TRUCK",
+        "lower_served": 2,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 2 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-052",
+        "label": "stop-052",
+        "priority": 3,
+        "cases": 2,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 2,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly); 2 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-057",
+        "label": "stop-057",
+        "priority": 3,
+        "cases": 20,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 2,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly); 2 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-061",
+        "label": "stop-061",
+        "priority": 2,
+        "cases": 1000,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 48,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly); 48 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-077",
+        "label": "stop-077",
+        "priority": 3,
+        "cases": 60,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 2,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly); 2 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-091",
+        "label": "stop-091",
+        "priority": 3,
+        "cases": 6,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 2,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 2 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-093",
+        "label": "stop-093",
+        "priority": 3,
+        "cases": 100,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 2,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly); 2 lower-priority stop(s) are served"
+       }
+      ],
+      "counts": {
+       "SEARCH_FAILURE": 10
+      }
+     },
+     {
+      "verdict": "SEARCH_FAILURE",
+      "scenario": "RECOMMENDED",
+      "status": "OPTIMIZED",
+      "solver_status": "ROUTING_SUCCESS",
+      "solver_time_sec": 91.42,
+      "time_limit_sec": 20,
+      "stops_total": 94,
+      "stops_served": 84,
+      "note": "10 stop(s) left out without a proof, not proven impossible: a longer search, a relaxation or a change could serve it.",
+      "stops": [
+       {
+        "stop_id": "stop-002",
+        "label": "stop-002",
+        "priority": 3,
+        "cases": 600,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 1,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 1 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-014",
+        "label": "stop-014",
+        "priority": 3,
+        "cases": 488,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 1,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 1 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-017",
+        "label": "stop-017",
+        "priority": 3,
+        "cases": 191,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 1,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 1 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-040",
+        "label": "stop-040",
+        "priority": 3,
+        "cases": 30,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 1,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly); 1 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-048",
+        "label": "stop-048",
+        "priority": 3,
+        "cases": 600,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "NO_ALLOWED_TRUCK",
+        "lower_served": 1,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 1 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-075",
+        "label": "stop-075",
+        "priority": 3,
+        "cases": 80,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 1,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly); 1 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-077",
+        "label": "stop-077",
+        "priority": 3,
+        "cases": 60,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 1,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly); 1 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-091",
+        "label": "stop-091",
+        "priority": 3,
+        "cases": 6,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 1,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly); 1 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "stop-092",
+        "label": "stop-092",
+        "priority": 4,
+        "cases": 30,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-093",
+        "label": "stop-093",
+        "priority": 3,
+        "cases": 100,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 1,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly); 1 lower-priority stop(s) are served"
+       }
+      ],
+      "counts": {
+       "SEARCH_FAILURE": 10
+      }
+     },
+     {
+      "verdict": "SEARCH_FAILURE",
+      "scenario": "RECOMMENDED",
+      "status": "OPTIMIZED",
+      "solver_status": "ROUTING_SUCCESS",
+      "solver_time_sec": 96.55,
+      "time_limit_sec": 20,
+      "stops_total": 94,
+      "stops_served": 78,
+      "note": "16 stop(s) left out without a proof, not proven impossible: a longer search, a relaxation or a change could serve it.",
+      "stops": [
+       {
+        "stop_id": "stop-002",
+        "label": "stop-002",
+        "priority": 3,
+        "cases": 600,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "stop-010",
+        "label": "stop-010",
+        "priority": 3,
+        "cases": 30,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-014",
+        "label": "stop-014",
+        "priority": 3,
+        "cases": 488,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "stop-017",
+        "label": "stop-017",
+        "priority": 3,
+        "cases": 191,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "stop-019",
+        "label": "stop-019",
+        "priority": 3,
+        "cases": 290,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-026",
+        "label": "stop-026",
+        "priority": 3,
+        "cases": 59,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-042",
+        "label": "stop-042",
+        "priority": 3,
+        "cases": 6,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-048",
+        "label": "stop-048",
+        "priority": 3,
+        "cases": 600,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "NO_ALLOWED_TRUCK",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "stop-050",
+        "label": "stop-050",
+        "priority": 4,
+        "cases": 50,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-070",
+        "label": "stop-070",
+        "priority": 3,
+        "cases": 100,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-075",
+        "label": "stop-075",
+        "priority": 3,
+        "cases": 80,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-077",
+        "label": "stop-077",
+        "priority": 3,
+        "cases": 60,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-078",
+        "label": "stop-078",
+        "priority": 3,
+        "cases": 100,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-083",
+        "label": "stop-083",
+        "priority": 3,
+        "cases": 5,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       },
+       {
+        "stop_id": "stop-091",
+        "label": "stop-091",
+        "priority": 3,
+        "cases": 6,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "stop-092",
+        "label": "stop-092",
+        "priority": 4,
+        "cases": 30,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "TIMING",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it (cut when its truck's loads were timed exactly)"
+       }
+      ],
+      "counts": {
+       "SEARCH_FAILURE": 16
+      }
+     }
+    ],
+    "conflicts": {
+     "stop-002": {
+      "stop_id": "stop-002",
+      "label": "stop-002",
+      "priority": 3,
+      "cases": 600,
+      "pallets": 5.358,
+      "provenance": "UNKNOWN",
+      "window": "08:30-11:30",
+      "window_rule": "START",
+      "earliest_arrival": "08:19",
+      "latest_start": "11:30",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "08:05",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:54",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "5.4 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 289,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 6,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-09",
+        "load_no": 1,
+        "near_stop": "stop-008",
+        "km": 4.1,
+        "measure": "pallets",
+        "room_left": 0.42,
+        "fits": false,
+        "time_left_min": 55,
+        "detour_min": 191,
+        "window_ok": false
+       }
+      ],
+      "text": "stop-002 (P3, 600 cases, window 08:30-11:30 UNKNOWN): can be served on its own; earliest arrival 08:19; size 5.4 pallets vs largest 12.0; round trip 289 min, fits the shift; any truck. Nearby: truck-09 load 1 (stop-008, 4.1 km): 0.42 pallets left (too little), 55 min left, detour +191 min, misses its window."
+     },
+     "stop-010": {
+      "stop_id": "stop-010",
+      "label": "stop-010",
+      "priority": 3,
+      "cases": 30,
+      "pallets": 0.21,
+      "provenance": "UNKNOWN",
+      "window": "11:00-15:00",
+      "window_rule": "START",
+      "earliest_arrival": "07:38",
+      "latest_start": "15:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:35",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:34",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.21 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 39,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-02",
+        "load_no": 1,
+        "near_stop": "stop-059",
+        "km": 0.2,
+        "measure": "pallets",
+        "room_left": 0.03,
+        "fits": false,
+        "time_left_min": 174,
+        "detour_min": 164,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-07",
+        "load_no": 2,
+        "near_stop": "stop-087",
+        "km": 0.8,
+        "measure": "pallets",
+        "room_left": -0.49,
+        "fits": false,
+        "time_left_min": 246,
+        "detour_min": 26,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-06",
+        "load_no": 1,
+        "near_stop": "stop-032",
+        "km": 1.7,
+        "measure": "pallets",
+        "room_left": 1.56,
+        "fits": true,
+        "time_left_min": 180,
+        "detour_min": 28,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-09",
+        "load_no": 1,
+        "near_stop": "stop-076",
+        "km": 2.4,
+        "measure": "pallets",
+        "room_left": 1.43,
+        "fits": true,
+        "time_left_min": 126,
+        "detour_min": 27,
+        "window_ok": false
+       },
+       {
+        "truck_id": "truck-07",
+        "load_no": 1,
+        "near_stop": "stop-086",
+        "km": 2.8,
+        "measure": "pallets",
+        "room_left": 6.9,
+        "fits": true,
+        "time_left_min": 0,
+        "detour_min": 150,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-010 (P3, 30 cases, window 11:00-15:00 UNKNOWN): can be served on its own; earliest arrival 07:38; size 0.21 pallets vs largest 12.0; round trip 39 min, fits the shift; any truck. Nearby: truck-02 load 1 (stop-059, 0.2 km): 0.03 pallets left (too little), 174 min left, detour +164 min; truck-07 load 2 (stop-087, 0.8 km): -0.49 pallets left (too little), 246 min left, detour +26 min; truck-06 load 1 (stop-032, 1.7 km): 1.56 pallets left, 180 min left, detour +28 min; truck-09 load 1 (stop-076, 2.4 km): 1.43 pallets left, 126 min left, detour +27 min, misses its window; truck-07 load 1 (stop-086, 2.8 km): 6.9 pallets left, 0 min left, detour +150 min."
+     },
+     "stop-014": {
+      "stop_id": "stop-014",
+      "label": "stop-014",
+      "priority": 3,
+      "cases": 488,
+      "pallets": 4.358,
+      "provenance": "UNKNOWN",
+      "window": "08:00-17:00",
+      "window_rule": "START",
+      "earliest_arrival": "09:38",
+      "latest_start": "17:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "09:01",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:34",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "4.4 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 419,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 8,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-02",
+        "load_no": 1,
+        "near_stop": "stop-042",
+        "km": 2.4,
+        "measure": "pallets",
+        "room_left": 0.64,
+        "fits": false,
+        "time_left_min": 106,
+        "detour_min": 166,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-014 (P3, 488 cases, window 08:00-17:00 UNKNOWN): can be served on its own; earliest arrival 09:38; size 4.4 pallets vs largest 12.0; round trip 419 min, fits the shift; any truck. Nearby: truck-02 load 1 (stop-042, 2.4 km): 0.64 pallets left (too little), 106 min left, detour +166 min."
+     },
+     "stop-017": {
+      "stop_id": "stop-017",
+      "label": "stop-017",
+      "priority": 3,
+      "cases": 191,
+      "pallets": 2.013,
+      "provenance": "UNKNOWN",
+      "window": "06:00-18:00",
+      "window_rule": "START",
+      "earliest_arrival": "09:16",
+      "latest_start": "18:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "08:45",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:22",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "2.0 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 275,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-09",
+        "load_no": 1,
+        "near_stop": "stop-049",
+        "km": 0.1,
+        "measure": "pallets",
+        "room_left": 0.42,
+        "fits": false,
+        "time_left_min": 55,
+        "detour_min": 64,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-017 (P3, 191 cases, window 06:00-18:00 UNKNOWN): can be served on its own; earliest arrival 09:16; size 2.0 pallets vs largest 12.0; round trip 275 min, fits the shift; any truck. Nearby: truck-09 load 1 (stop-049, 0.1 km): 0.42 pallets left (too little), 55 min left, detour +64 min."
+     },
+     "stop-019": {
+      "stop_id": "stop-019",
+      "label": "stop-019",
+      "priority": 3,
+      "cases": 290,
+      "pallets": 2.776,
+      "provenance": "UNKNOWN",
+      "window": "08:00-16:00",
+      "window_rule": "START",
+      "earliest_arrival": "07:41",
+      "latest_start": "16:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:38",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:36",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "2.8 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 116,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-07",
+        "load_no": 1,
+        "near_stop": "stop-066",
+        "km": 0.4,
+        "measure": "pallets",
+        "room_left": 6.9,
+        "fits": true,
+        "time_left_min": 0,
+        "detour_min": 95,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-02",
+        "load_no": 1,
+        "near_stop": "stop-084",
+        "km": 0.8,
+        "measure": "pallets",
+        "room_left": 0.03,
+        "fits": false,
+        "time_left_min": 174,
+        "detour_min": 95,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-03",
+        "load_no": 1,
+        "near_stop": "stop-021",
+        "km": 0.9,
+        "measure": "pallets",
+        "room_left": 2.84,
+        "fits": true,
+        "time_left_min": 130,
+        "detour_min": 96,
+        "window_ok": false
+       },
+       {
+        "truck_id": "truck-06",
+        "load_no": 1,
+        "near_stop": "stop-065",
+        "km": 1.8,
+        "measure": "pallets",
+        "room_left": 1.56,
+        "fits": false,
+        "time_left_min": 180,
+        "detour_min": 97,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-09",
+        "load_no": 1,
+        "near_stop": "stop-022",
+        "km": 4.1,
+        "measure": "pallets",
+        "room_left": 1.43,
+        "fits": false,
+        "time_left_min": 126,
+        "detour_min": 106,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-019 (P3, 290 cases, window 08:00-16:00 UNKNOWN): can be served on its own; earliest arrival 07:41; size 2.8 pallets vs largest 12.0; round trip 116 min, fits the shift; any truck. Nearby: truck-07 load 1 (stop-066, 0.4 km): 6.9 pallets left, 0 min left, detour +95 min; truck-02 load 1 (stop-084, 0.8 km): 0.03 pallets left (too little), 174 min left, detour +95 min; truck-03 load 1 (stop-021, 0.9 km): 2.84 pallets left, 130 min left, detour +96 min, misses its window; truck-06 load 1 (stop-065, 1.8 km): 1.56 pallets left (too little), 180 min left, detour +97 min; truck-09 load 1 (stop-022, 4.1 km): 1.43 pallets left (too little), 126 min left, detour +106 min."
+     },
+     "stop-026": {
+      "stop_id": "stop-026",
+      "label": "stop-026",
+      "priority": 3,
+      "cases": 59,
+      "pallets": 0.686,
+      "provenance": "UNKNOWN",
+      "window": "09:00-16:00",
+      "window_rule": "START",
+      "earliest_arrival": "07:41",
+      "latest_start": "16:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:38",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:35",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.69 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 52,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-06",
+        "load_no": 1,
+        "near_stop": "stop-065",
+        "km": 0.6,
+        "measure": "pallets",
+        "room_left": 1.56,
+        "fits": true,
+        "time_left_min": 180,
+        "detour_min": 31,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-02",
+        "load_no": 1,
+        "near_stop": "stop-084",
+        "km": 0.7,
+        "measure": "pallets",
+        "room_left": 0.03,
+        "fits": false,
+        "time_left_min": 174,
+        "detour_min": 32,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-03",
+        "load_no": 1,
+        "near_stop": "stop-021",
+        "km": 0.7,
+        "measure": "pallets",
+        "room_left": 2.84,
+        "fits": true,
+        "time_left_min": 130,
+        "detour_min": 32,
+        "window_ok": false
+       },
+       {
+        "truck_id": "truck-07",
+        "load_no": 1,
+        "near_stop": "stop-066",
+        "km": 1.2,
+        "measure": "pallets",
+        "room_left": 6.9,
+        "fits": true,
+        "time_left_min": 0,
+        "detour_min": 32,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-07",
+        "load_no": 2,
+        "near_stop": "stop-087",
+        "km": 3.6,
+        "measure": "pallets",
+        "room_left": -0.49,
+        "fits": false,
+        "time_left_min": 246,
+        "detour_min": 40,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-026 (P3, 59 cases, window 09:00-16:00 UNKNOWN): can be served on its own; earliest arrival 07:41; size 0.69 pallets vs largest 12.0; round trip 52 min, fits the shift; any truck. Nearby: truck-06 load 1 (stop-065, 0.6 km): 1.56 pallets left, 180 min left, detour +31 min; truck-02 load 1 (stop-084, 0.7 km): 0.03 pallets left (too little), 174 min left, detour +32 min; truck-03 load 1 (stop-021, 0.7 km): 2.84 pallets left, 130 min left, detour +32 min, misses its window; truck-07 load 1 (stop-066, 1.2 km): 6.9 pallets left, 0 min left, detour +32 min; truck-07 load 2 (stop-087, 3.6 km): -0.49 pallets left (too little), 246 min left, detour +40 min."
+     },
+     "stop-040": {
+      "stop_id": "stop-040",
+      "label": "stop-040",
+      "priority": 3,
+      "cases": 30,
+      "pallets": 0.463,
+      "provenance": "UNKNOWN",
+      "window": "16:00-19:00",
+      "window_rule": "START",
+      "earliest_arrival": "09:12",
+      "latest_start": "19:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "08:42",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:21",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.46 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 228,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-04",
+        "load_no": 1,
+        "near_stop": "stop-049",
+        "km": 2.3,
+        "measure": "pallets",
+        "room_left": 0.39,
+        "fits": false,
+        "time_left_min": 98,
+        "detour_min": 141,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-040 (P3, 30 cases, window 16:00-19:00 UNKNOWN): can be served on its own; earliest arrival 09:12; size 0.46 pallets vs largest 12.0; round trip 228 min, fits the shift; any truck. Nearby: truck-04 load 1 (stop-049, 2.3 km): 0.39 pallets left (too little), 98 min left, detour +141 min."
+     },
+     "stop-042": {
+      "stop_id": "stop-042",
+      "label": "stop-042",
+      "priority": 3,
+      "cases": 6,
+      "pallets": 0.06,
+      "provenance": "UNKNOWN",
+      "window": "08:00-17:00",
+      "window_rule": "START",
+      "earliest_arrival": "09:39",
+      "latest_start": "17:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "09:01",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:34",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.06 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 275,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-09",
+        "load_no": 1,
+        "near_stop": "stop-015",
+        "km": 1.0,
+        "measure": "pallets",
+        "room_left": 1.43,
+        "fits": true,
+        "time_left_min": 126,
+        "detour_min": 18,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-042 (P3, 6 cases, window 08:00-17:00 UNKNOWN): can be served on its own; earliest arrival 09:39; size 0.06 pallets vs largest 12.0; round trip 275 min, fits the shift; any truck. Nearby: truck-09 load 1 (stop-015, 1.0 km): 1.43 pallets left, 126 min left, detour +18 min."
+     },
+     "stop-048": {
+      "stop_id": "stop-048",
+      "label": "stop-048",
+      "priority": 3,
+      "cases": 600,
+      "pallets": 5.358,
+      "provenance": "UNKNOWN",
+      "window": "08:00-14:00",
+      "window_rule": "START",
+      "earliest_arrival": "08:05",
+      "latest_start": "14:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:55",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:47",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "5.4 pallets vs largest 6.0",
+      "size_fits": true,
+      "round_trip_min": 260,
+      "shift_short_min": 0,
+      "allowed": [
+       "truck-02",
+       "truck-04",
+       "truck-05",
+       "truck-09"
+      ],
+      "usable_trucks": 9,
+      "fitting_trucks": 1,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-02",
+        "load_no": 1,
+        "near_stop": "stop-081",
+        "km": 0.8,
+        "measure": "pallets",
+        "room_left": 0.64,
+        "fits": false,
+        "time_left_min": 106,
+        "detour_min": 192,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-04",
+        "load_no": 1,
+        "near_stop": "stop-047",
+        "km": 1.4,
+        "measure": "pallets",
+        "room_left": 0.13,
+        "fits": false,
+        "time_left_min": 2,
+        "detour_min": 193,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-08",
+        "load_no": 1,
+        "near_stop": "stop-068",
+        "km": 1.6,
+        "measure": "pallets",
+        "room_left": 0.9,
+        "fits": false,
+        "time_left_min": 128,
+        "detour_min": 194,
+        "window_ok": false
+       }
+      ],
+      "text": "stop-048 (P3, 600 cases, window 08:00-14:00 UNKNOWN): can be served on its own; earliest arrival 08:05; size 5.4 pallets vs largest 6.0; round trip 260 min, fits the shift; only truck-02, truck-04, truck-05, truck-09. Nearby: truck-02 load 1 (stop-081, 0.8 km): 0.64 pallets left (too little), 106 min left, detour +192 min; truck-04 load 1 (stop-047, 1.4 km): 0.13 pallets left (too little), 2 min left, detour +193 min; truck-08 load 1 (stop-068, 1.6 km): 0.9 pallets left (too little), 128 min left, detour +194 min, misses its window."
+     },
+     "stop-050": {
+      "stop_id": "stop-050",
+      "label": "stop-050",
+      "priority": 4,
+      "cases": 50,
+      "pallets": 0.521,
+      "provenance": "UNKNOWN",
+      "window": "08:00-16:00",
+      "window_rule": "START",
+      "earliest_arrival": "07:58",
+      "latest_start": "16:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:50",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:44",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.52 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 85,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-01",
+        "load_no": 1,
+        "near_stop": "stop-007",
+        "km": 0.1,
+        "measure": "pallets",
+        "room_left": 1.87,
+        "fits": true,
+        "time_left_min": 122,
+        "detour_min": 29,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-04",
+        "load_no": 2,
+        "near_stop": "stop-012",
+        "km": 1.4,
+        "measure": "pallets",
+        "room_left": 0.48,
+        "fits": false,
+        "time_left_min": 59,
+        "detour_min": 31,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-05",
+        "load_no": 1,
+        "near_stop": "stop-051",
+        "km": 3.1,
+        "measure": "pallets",
+        "room_left": 0.06,
+        "fits": false,
+        "time_left_min": 159,
+        "detour_min": 32,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-050 (P4, 50 cases, window 08:00-16:00 UNKNOWN): can be served on its own; earliest arrival 07:58; size 0.52 pallets vs largest 12.0; round trip 85 min, fits the shift; any truck. Nearby: truck-01 load 1 (stop-007, 0.1 km): 1.87 pallets left, 122 min left, detour +29 min; truck-04 load 2 (stop-012, 1.4 km): 0.48 pallets left (too little), 59 min left, detour +31 min; truck-05 load 1 (stop-051, 3.1 km): 0.06 pallets left (too little), 159 min left, detour +32 min."
+     },
+     "stop-052": {
+      "stop_id": "stop-052",
+      "label": "stop-052",
+      "priority": 3,
+      "cases": 2,
+      "pallets": 0.013,
+      "provenance": "UNKNOWN",
+      "window": "09:00-15:00",
+      "window_rule": "START",
+      "earliest_arrival": "08:07",
+      "latest_start": "15:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:56",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:48",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.01 pallets vs largest 6.0",
+      "size_fits": true,
+      "round_trip_min": 90,
+      "shift_short_min": 0,
+      "allowed": [
+       "truck-02",
+       "truck-04",
+       "truck-05",
+       "truck-09"
+      ],
+      "usable_trucks": 9,
+      "fitting_trucks": 4,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-02",
+        "load_no": 1,
+        "near_stop": "stop-069",
+        "km": 1.9,
+        "measure": "pallets",
+        "room_left": 0.64,
+        "fits": true,
+        "time_left_min": 106,
+        "detour_min": 19,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-08",
+        "load_no": 1,
+        "near_stop": "stop-068",
+        "km": 2.2,
+        "measure": "pallets",
+        "room_left": 0.9,
+        "fits": false,
+        "time_left_min": 128,
+        "detour_min": 23,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-04",
+        "load_no": 1,
+        "near_stop": "stop-079",
+        "km": 3.8,
+        "measure": "pallets",
+        "room_left": 0.13,
+        "fits": true,
+        "time_left_min": 2,
+        "detour_min": 27,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-052 (P3, 2 cases, window 09:00-15:00 UNKNOWN): can be served on its own; earliest arrival 08:07; size 0.01 pallets vs largest 6.0; round trip 90 min, fits the shift; only truck-02, truck-04, truck-05, truck-09. Nearby: truck-02 load 1 (stop-069, 1.9 km): 0.64 pallets left, 106 min left, detour +19 min; truck-08 load 1 (stop-068, 2.2 km): 0.9 pallets left (too little), 128 min left, detour +23 min; truck-04 load 1 (stop-079, 3.8 km): 0.13 pallets left, 2 min left, detour +27 min."
+     },
+     "stop-057": {
+      "stop_id": "stop-057",
+      "label": "stop-057",
+      "priority": 3,
+      "cases": 20,
+      "pallets": 0.209,
+      "provenance": "UNKNOWN",
+      "window": "09:00-15:00",
+      "window_rule": "START",
+      "earliest_arrival": "08:04",
+      "latest_start": "15:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:54",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:47",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.21 pallets vs largest 6.0",
+      "size_fits": true,
+      "round_trip_min": 89,
+      "shift_short_min": 0,
+      "allowed": [
+       "truck-02",
+       "truck-04",
+       "truck-05",
+       "truck-09"
+      ],
+      "usable_trucks": 9,
+      "fitting_trucks": 4,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-02",
+        "load_no": 1,
+        "near_stop": "stop-069",
+        "km": 0.8,
+        "measure": "pallets",
+        "room_left": 0.64,
+        "fits": true,
+        "time_left_min": 106,
+        "detour_min": 22,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-08",
+        "load_no": 1,
+        "near_stop": "stop-068",
+        "km": 1.7,
+        "measure": "pallets",
+        "room_left": 0.9,
+        "fits": false,
+        "time_left_min": 128,
+        "detour_min": 24,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-04",
+        "load_no": 1,
+        "near_stop": "stop-080",
+        "km": 3.3,
+        "measure": "pallets",
+        "room_left": 0.13,
+        "fits": false,
+        "time_left_min": 2,
+        "detour_min": 28,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-057 (P3, 20 cases, window 09:00-15:00 UNKNOWN): can be served on its own; earliest arrival 08:04; size 0.21 pallets vs largest 6.0; round trip 89 min, fits the shift; only truck-02, truck-04, truck-05, truck-09. Nearby: truck-02 load 1 (stop-069, 0.8 km): 0.64 pallets left, 106 min left, detour +22 min; truck-08 load 1 (stop-068, 1.7 km): 0.9 pallets left (too little), 128 min left, detour +24 min; truck-04 load 1 (stop-080, 3.3 km): 0.13 pallets left (too little), 2 min left, detour +28 min."
+     },
+     "stop-061": {
+      "stop_id": "stop-061",
+      "label": "stop-061",
+      "priority": 2,
+      "cases": 1000,
+      "pallets": 8.929,
+      "provenance": "UNKNOWN",
+      "window": "08:00-13:00",
+      "window_rule": "START",
+      "earliest_arrival": "08:06",
+      "latest_start": "13:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:56",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:48",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "8.9 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 363,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 5,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-07",
+        "load_no": 1,
+        "near_stop": "stop-046",
+        "km": 0.3,
+        "measure": "pallets",
+        "room_left": 2.71,
+        "fits": false,
+        "time_left_min": 317,
+        "detour_min": 291,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-04",
+        "load_no": 1,
+        "near_stop": "stop-034",
+        "km": 0.6,
+        "measure": "pallets",
+        "room_left": 0.13,
+        "fits": false,
+        "time_left_min": 2,
+        "detour_min": 292,
+        "window_ok": false
+       },
+       {
+        "truck_id": "truck-06",
+        "load_no": 1,
+        "near_stop": "stop-067",
+        "km": 1.3,
+        "measure": "pallets",
+        "room_left": 0.55,
+        "fits": false,
+        "time_left_min": 134,
+        "detour_min": 292,
+        "window_ok": false
+       }
+      ],
+      "text": "stop-061 (P2, 1000 cases, window 08:00-13:00 UNKNOWN): can be served on its own; earliest arrival 08:06; size 8.9 pallets vs largest 12.0; round trip 363 min, fits the shift; any truck. Nearby: truck-07 load 1 (stop-046, 0.3 km): 2.71 pallets left (too little), 317 min left, detour +291 min; truck-04 load 1 (stop-034, 0.6 km): 0.13 pallets left (too little), 2 min left, detour +292 min, misses its window; truck-06 load 1 (stop-067, 1.3 km): 0.55 pallets left (too little), 134 min left, detour +292 min, misses its window."
+     },
+     "stop-070": {
+      "stop_id": "stop-070",
+      "label": "stop-070",
+      "priority": 3,
+      "cases": 100,
+      "pallets": 1.042,
+      "provenance": "UNKNOWN",
+      "window": "08:00-16:00",
+      "window_rule": "START",
+      "earliest_arrival": "07:37",
+      "latest_start": "16:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:35",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:34",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "1.0 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 52,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-09",
+        "load_no": 1,
+        "near_stop": "stop-076",
+        "km": 0.7,
+        "measure": "pallets",
+        "room_left": 1.43,
+        "fits": true,
+        "time_left_min": 126,
+        "detour_min": 38,
+        "window_ok": false
+       },
+       {
+        "truck_id": "truck-07",
+        "load_no": 2,
+        "near_stop": "stop-087",
+        "km": 1.5,
+        "measure": "pallets",
+        "room_left": -0.49,
+        "fits": false,
+        "time_left_min": 246,
+        "detour_min": 41,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-02",
+        "load_no": 1,
+        "near_stop": "stop-059",
+        "km": 1.6,
+        "measure": "pallets",
+        "room_left": 0.03,
+        "fits": false,
+        "time_left_min": 174,
+        "detour_min": 42,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-06",
+        "load_no": 1,
+        "near_stop": "stop-036",
+        "km": 2.5,
+        "measure": "pallets",
+        "room_left": 1.56,
+        "fits": true,
+        "time_left_min": 180,
+        "detour_min": 43,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-04",
+        "load_no": 1,
+        "near_stop": "stop-029",
+        "km": 3.6,
+        "measure": "pallets",
+        "room_left": 1.0,
+        "fits": false,
+        "time_left_min": 0,
+        "detour_min": 48,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-070 (P3, 100 cases, window 08:00-16:00 UNKNOWN): can be served on its own; earliest arrival 07:37; size 1.0 pallets vs largest 12.0; round trip 52 min, fits the shift; any truck. Nearby: truck-09 load 1 (stop-076, 0.7 km): 1.43 pallets left, 126 min left, detour +38 min, misses its window; truck-07 load 2 (stop-087, 1.5 km): -0.49 pallets left (too little), 246 min left, detour +41 min; truck-02 load 1 (stop-059, 1.6 km): 0.03 pallets left (too little), 174 min left, detour +42 min; truck-06 load 1 (stop-036, 2.5 km): 1.56 pallets left, 180 min left, detour +43 min; truck-04 load 1 (stop-029, 3.6 km): 1 pallets left (too little), 0 min left, detour +48 min."
+     },
+     "stop-075": {
+      "stop_id": "stop-075",
+      "label": "stop-075",
+      "priority": 3,
+      "cases": 80,
+      "pallets": 0.881,
+      "provenance": "UNKNOWN",
+      "window": "09:00-15:00",
+      "window_rule": "START",
+      "earliest_arrival": "08:29",
+      "latest_start": "15:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "08:12",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:59",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.88 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 150,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [],
+      "text": "stop-075 (P3, 80 cases, window 09:00-15:00 UNKNOWN): can be served on its own; earliest arrival 08:29; size 0.88 pallets vs largest 12.0; round trip 150 min, fits the shift; any truck."
+     },
+     "stop-077": {
+      "stop_id": "stop-077",
+      "label": "stop-077",
+      "priority": 3,
+      "cases": 60,
+      "pallets": 0.417,
+      "provenance": "UNKNOWN",
+      "window": "09:00-13:00",
+      "window_rule": "START",
+      "earliest_arrival": "08:52",
+      "latest_start": "13:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "08:28",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:11",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.42 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 191,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [],
+      "text": "stop-077 (P3, 60 cases, window 09:00-13:00 UNKNOWN): can be served on its own; earliest arrival 08:52; size 0.42 pallets vs largest 12.0; round trip 191 min, fits the shift; any truck."
+     },
+     "stop-078": {
+      "stop_id": "stop-078",
+      "label": "stop-078",
+      "priority": 3,
+      "cases": 100,
+      "pallets": 0.893,
+      "provenance": "UNKNOWN",
+      "window": "09:00-14:00",
+      "window_rule": "START",
+      "earliest_arrival": "07:41",
+      "latest_start": "14:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:38",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:35",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.89 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 64,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-07",
+        "load_no": 1,
+        "near_stop": "stop-066",
+        "km": 0.3,
+        "measure": "pallets",
+        "room_left": 6.9,
+        "fits": true,
+        "time_left_min": 0,
+        "detour_min": 43,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-03",
+        "load_no": 1,
+        "near_stop": "stop-021",
+        "km": 0.4,
+        "measure": "pallets",
+        "room_left": 2.84,
+        "fits": true,
+        "time_left_min": 130,
+        "detour_min": 44,
+        "window_ok": false
+       },
+       {
+        "truck_id": "truck-02",
+        "load_no": 1,
+        "near_stop": "stop-084",
+        "km": 1.0,
+        "measure": "pallets",
+        "room_left": 0.03,
+        "fits": false,
+        "time_left_min": 174,
+        "detour_min": 45,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-06",
+        "load_no": 1,
+        "near_stop": "stop-065",
+        "km": 1.6,
+        "measure": "pallets",
+        "room_left": 1.56,
+        "fits": true,
+        "time_left_min": 180,
+        "detour_min": 45,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-07",
+        "load_no": 2,
+        "near_stop": "stop-087",
+        "km": 4.0,
+        "measure": "pallets",
+        "room_left": -0.49,
+        "fits": false,
+        "time_left_min": 246,
+        "detour_min": 53,
+        "window_ok": false
+       }
+      ],
+      "text": "stop-078 (P3, 100 cases, window 09:00-14:00 UNKNOWN): can be served on its own; earliest arrival 07:41; size 0.89 pallets vs largest 12.0; round trip 64 min, fits the shift; any truck. Nearby: truck-07 load 1 (stop-066, 0.3 km): 6.9 pallets left, 0 min left, detour +43 min; truck-03 load 1 (stop-021, 0.4 km): 2.84 pallets left, 130 min left, detour +44 min, misses its window; truck-02 load 1 (stop-084, 1.0 km): 0.03 pallets left (too little), 174 min left, detour +45 min; truck-06 load 1 (stop-065, 1.6 km): 1.56 pallets left, 180 min left, detour +45 min; truck-07 load 2 (stop-087, 4.0 km): -0.49 pallets left (too little), 246 min left, detour +53 min, misses its window."
+     },
+     "stop-083": {
+      "stop_id": "stop-083",
+      "label": "stop-083",
+      "priority": 3,
+      "cases": 5,
+      "pallets": 0.07,
+      "provenance": "UNKNOWN",
+      "window": "09:00-12:00",
+      "window_rule": "START",
+      "earliest_arrival": "07:38",
+      "latest_start": "12:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:36",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:34",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.07 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 35,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-02",
+        "load_no": 1,
+        "near_stop": "stop-059",
+        "km": 0.9,
+        "measure": "pallets",
+        "room_left": 0.03,
+        "fits": false,
+        "time_left_min": 174,
+        "detour_min": 38,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-06",
+        "load_no": 1,
+        "near_stop": "stop-032",
+        "km": 1.1,
+        "measure": "pallets",
+        "room_left": 1.56,
+        "fits": true,
+        "time_left_min": 180,
+        "detour_min": 22,
+        "window_ok": false
+       },
+       {
+        "truck_id": "truck-07",
+        "load_no": 2,
+        "near_stop": "stop-087",
+        "km": 1.3,
+        "measure": "pallets",
+        "room_left": -0.49,
+        "fits": false,
+        "time_left_min": 246,
+        "detour_min": 22,
+        "window_ok": false
+       },
+       {
+        "truck_id": "truck-07",
+        "load_no": 1,
+        "near_stop": "stop-086",
+        "km": 2.1,
+        "measure": "pallets",
+        "room_left": 6.9,
+        "fits": true,
+        "time_left_min": 0,
+        "detour_min": 24,
+        "window_ok": true
+       },
+       {
+        "truck_id": "truck-03",
+        "load_no": 1,
+        "near_stop": "stop-021",
+        "km": 2.4,
+        "measure": "pallets",
+        "room_left": 2.84,
+        "fits": true,
+        "time_left_min": 130,
+        "detour_min": 20,
+        "window_ok": false
+       }
+      ],
+      "text": "stop-083 (P3, 5 cases, window 09:00-12:00 UNKNOWN): can be served on its own; earliest arrival 07:38; size 0.07 pallets vs largest 12.0; round trip 35 min, fits the shift; any truck. Nearby: truck-02 load 1 (stop-059, 0.9 km): 0.03 pallets left (too little), 174 min left, detour +38 min; truck-06 load 1 (stop-032, 1.1 km): 1.56 pallets left, 180 min left, detour +22 min, misses its window; truck-07 load 2 (stop-087, 1.3 km): -0.49 pallets left (too little), 246 min left, detour +22 min, misses its window; truck-07 load 1 (stop-086, 2.1 km): 6.9 pallets left, 0 min left, detour +24 min; truck-03 load 1 (stop-021, 2.4 km): 2.84 pallets left, 130 min left, detour +20 min, misses its window."
+     },
+     "stop-091": {
+      "stop_id": "stop-091",
+      "label": "stop-091",
+      "priority": 3,
+      "cases": 6,
+      "pallets": 0.134,
+      "provenance": "UNKNOWN",
+      "window": "08:00-14:00",
+      "window_rule": "START",
+      "earliest_arrival": "09:51",
+      "latest_start": "14:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "09:10",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:40",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.13 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 297,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [],
+      "text": "stop-091 (P3, 6 cases, window 08:00-14:00 UNKNOWN): can be served on its own; earliest arrival 09:51; size 0.13 pallets vs largest 12.0; round trip 297 min, fits the shift; any truck."
+     },
+     "stop-092": {
+      "stop_id": "stop-092",
+      "label": "stop-092",
+      "priority": 4,
+      "cases": 30,
+      "pallets": 0.377,
+      "provenance": "UNKNOWN",
+      "window": "08:00-12:00",
+      "window_rule": "START",
+      "earliest_arrival": "08:46",
+      "latest_start": "12:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "08:24",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:08",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.38 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 172,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-04",
+        "load_no": 1,
+        "near_stop": "stop-064",
+        "km": 0.7,
+        "measure": "pallets",
+        "room_left": 0.39,
+        "fits": true,
+        "time_left_min": 98,
+        "detour_min": 21,
+        "window_ok": false
+       }
+      ],
+      "text": "stop-092 (P4, 30 cases, window 08:00-12:00 UNKNOWN): can be served on its own; earliest arrival 08:46; size 0.38 pallets vs largest 12.0; round trip 172 min, fits the shift; any truck. Nearby: truck-04 load 1 (stop-064, 0.7 km): 0.39 pallets left, 98 min left, detour +21 min, misses its window."
+     },
+     "stop-093": {
+      "stop_id": "stop-093",
+      "label": "stop-093",
+      "priority": 3,
+      "cases": 100,
+      "pallets": 0.741,
+      "provenance": "UNKNOWN",
+      "window": "08:00-13:00",
+      "window_rule": "START",
+      "earliest_arrival": "09:12",
+      "latest_start": "13:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "08:43",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:21",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.74 pallets vs largest 12.0",
+      "size_fits": true,
+      "round_trip_min": 240,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 9,
+      "fitting_trucks": 9,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "truck-09",
+        "load_no": 1,
+        "near_stop": "stop-040",
+        "km": 1.2,
+        "measure": "pallets",
+        "room_left": 0.42,
+        "fits": false,
+        "time_left_min": 55,
+        "detour_min": 38,
+        "window_ok": false
+       }
+      ],
+      "text": "stop-093 (P3, 100 cases, window 08:00-13:00 UNKNOWN): can be served on its own; earliest arrival 09:12; size 0.74 pallets vs largest 12.0; round trip 240 min, fits the shift; any truck. Nearby: truck-09 load 1 (stop-040, 1.2 km): 0.42 pallets left (too little), 55 min left, detour +38 min, misses its window."
+     }
+    },
+    "ranking": {
+     "budget": {
+      "time_limit_sec": 20,
+      "search_mode": "QUICK",
+      "seeds": [
+       1,
+       2,
+       3
+      ]
+     },
+     "base": {
+      "runs": 3,
+      "seeds": [
+       1,
+       2,
+       3
+      ],
+      "digest": "65841a66ba367222",
+      "metrics": {
+       "cases_served": {
+        "mean": 5851.0,
+        "min": 5433.0,
+        "max": 6315.0,
+        "values": [
+         5433.0,
+         6315.0,
+         5805.0
+        ]
+       },
+       "cases_total": {
+        "mean": 8500.0,
+        "min": 8500.0,
+        "max": 8500.0,
+        "values": [
+         8500.0,
+         8500.0,
+         8500.0
+        ]
+       },
+       "cash.distance": {
+        "mean": 80.041,
+        "min": 69.736,
+        "max": 91.444,
+        "values": [
+         91.444,
+         78.942,
+         69.736
+        ]
+       },
+       "cash.driver": {
+        "mean": 209.472,
+        "min": 207.088,
+        "max": 213.555,
+        "values": [
+         207.088,
+         213.555,
+         207.774
+        ]
+       },
+       "cash.fixed": {
+        "mean": 150.8,
+        "min": 150.8,
+        "max": 150.8,
+        "values": [
+         150.8,
+         150.8,
+         150.8
+        ]
+       },
+       "cash.fuel": {
+        "mean": 74.289,
+        "min": 71.225,
+        "max": 75.936,
+        "values": [
+         75.936,
+         71.225,
+         75.706
+        ]
+       },
+       "cash.overtime": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "cash.total": {
+        "mean": 514.602,
+        "min": 504.016,
+        "max": 525.268,
+        "values": [
+         525.268,
+         514.522,
+         504.016
+        ]
+       },
+       "cash.trip": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "km": {
+        "mean": 1007.803,
+        "min": 966.23,
+        "max": 1030.15,
+        "values": [
+         1030.15,
+         966.23,
+         1027.03
+        ]
+       },
+       "late_stops": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "minutes_outside_pref": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "paid_driver_min": {
+        "mean": 5027.667,
+        "min": 4971.0,
+        "max": 5126.0,
+        "values": [
+         4971.0,
+         5126.0,
+         4986.0
+        ]
+       },
+       "penalties.continuity": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "penalties.early": {
+        "mean": 36.135,
+        "min": 34.097,
+        "max": 39.636,
+        "values": [
+         34.673,
+         39.636,
+         34.097
+        ]
+       },
+       "penalties.unserved_penalty": {
+        "mean": 89000.0,
+        "min": 28000.0,
+        "max": 195000.0,
+        "values": [
+         195000.0,
+         28000.0,
+         44000.0
+        ]
+       },
+       "penalties.window": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "proven_impossible": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "served_by_priority.1": {
+        "mean": 14.0,
+        "min": 14.0,
+        "max": 14.0,
+        "values": [
+         14.0,
+         14.0,
+         14.0
+        ]
+       },
+       "served_by_priority.2": {
+        "mean": 22.667,
+        "min": 22.0,
+        "max": 23.0,
+        "values": [
+         22.0,
+         23.0,
+         23.0
+        ]
+       },
+       "served_by_priority.3": {
+        "mean": 44.333,
+        "min": 41.0,
+        "max": 46.0,
+        "values": [
+         46.0,
+         46.0,
+         41.0
+        ]
+       },
+       "served_by_priority.4": {
+        "mean": 1.0,
+        "min": 0.0,
+        "max": 2.0,
+        "values": [
+         2.0,
+         1.0,
+         0.0
+        ]
+       },
+       "served_by_priority.5": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "stops_served": {
+        "mean": 82.0,
+        "min": 78.0,
+        "max": 84.0,
+        "values": [
+         84.0,
+         84.0,
+         78.0
+        ]
+       },
+       "stops_total": {
+        "mean": 94.0,
+        "min": 94.0,
+        "max": 94.0,
+        "values": [
+         94.0,
+         94.0,
+         94.0
+        ]
+       },
+       "trips": {
+        "mean": 11.667,
+        "min": 11.0,
+        "max": 13.0,
+        "values": [
+         11.0,
+         13.0,
+         11.0
+        ]
+       },
+       "trucks_used": {
+        "mean": 9.0,
+        "min": 9.0,
+        "max": 9.0,
+        "values": [
+         9.0,
+         9.0,
+         9.0
+        ]
+       },
+       "unserved_by_priority.1": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "unserved_by_priority.2": {
+        "mean": 0.333,
+        "min": 0.0,
+        "max": 1.0,
+        "values": [
+         1.0,
+         0.0,
+         0.0
+        ]
+       },
+       "unserved_by_priority.3": {
+        "mean": 10.667,
+        "min": 9.0,
+        "max": 14.0,
+        "values": [
+         9.0,
+         9.0,
+         14.0
+        ]
+       },
+       "unserved_by_priority.4": {
+        "mean": 1.0,
+        "min": 0.0,
+        "max": 2.0,
+        "values": [
+         0.0,
+         1.0,
+         2.0
+        ]
+       },
+       "unserved_by_priority.5": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "unserved_by_reason.NO_ALLOWED_TRUCK": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "values": [
+         1.0,
+         1.0,
+         1.0
+        ]
+       },
+       "unserved_by_reason.SOLVER_DROPPED_LOW_PRIORITY": {
+        "mean": 11.0,
+        "min": 9.0,
+        "max": 15.0,
+        "values": [
+         9.0,
+         9.0,
+         15.0
+        ]
+       }
+      },
+      "status": {
+       "OPTIMIZED": 3
+      },
+      "solver_status": {
+       "ROUTING_SUCCESS": 3
+      },
+      "feasibility": {
+       "VERIFIED": 3
+      },
+      "wall_sec": {
+       "mean": 94.863,
+       "min": 91.48,
+       "max": 96.63,
+       "values": [
+        96.48,
+        91.48,
+        96.63
+       ]
+      },
+      "labels": {
+       "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+       "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+       "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+       "time": "minutes, trips and trucks: time and capacity, not cash"
+      }
+     },
+     "rows": [
+      {
+       "label": "hire 1 truck (14 bays, hire 50.00 OMR/day)",
+       "phrase": "Hiring one more truck (14 bays, hire 50.00 OMR/day)",
+       "kind": "HIRE",
+       "tier": "ACTIONABLE",
+       "basis": "an existing hire option at its own hire price; the engine's hire rules and hire check apply",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 5.667,
+        "min": 4.0,
+        "max": 9.0
+       },
+       "cases_gained": {
+        "mean": 782.333,
+        "min": 317.0,
+        "max": 1209.0
+       },
+       "cash_delta": {
+        "mean": 70.634,
+        "min": 56.061,
+        "max": 92.669
+       },
+       "late_min_delta": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0
+       },
+       "gained": [
+        "stop-010",
+        "stop-017",
+        "stop-019",
+        "stop-026",
+        "stop-040",
+        "stop-042",
+        "stop-052",
+        "stop-057",
+        "stop-061",
+        "stop-070",
+        "stop-075",
+        "stop-077",
+        "stop-078",
+        "stop-083",
+        "stop-091",
+        "stop-093"
+       ],
+       "lost": [
+        "stop-005",
+        "stop-050",
+        "stop-092"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 718.22,
+       "sentence": "Hiring one more truck (14 bays, hire 50.00 OMR/day) changes cash cost by +70.63 OMR (range +56.06..+92.67 over 3 seeds) and changes deliveries by +5.667 on average (range +4..+9) (newly served: stop-010, stop-017, stop-019, stop-026, stop-040, stop-042, stop-052, stop-057, stop-061, stop-070, stop-075, stop-077, stop-078, stop-083, stop-091, stop-093; no longer served: stop-005, stop-050, stop-092).",
+       "gains_every_seed": true
+      },
+      {
+       "label": "truck-03 +1 load",
+       "phrase": "Allowing truck-03 one more load",
+       "kind": "TRIP",
+       "tier": "ACTIONABLE",
+       "basis": "a company setting (loads per truck per day); shift, return and break limits unchanged",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 4.0,
+        "min": 1.0,
+        "max": 9.0
+       },
+       "cases_gained": {
+        "mean": -4.333,
+        "min": -883.0,
+        "max": 999.0
+       },
+       "cash_delta": {
+        "mean": 0.294,
+        "min": -11.257,
+        "max": 8.279
+       },
+       "late_min_delta": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0
+       },
+       "gained": [
+        "stop-010",
+        "stop-017",
+        "stop-019",
+        "stop-026",
+        "stop-040",
+        "stop-042",
+        "stop-050",
+        "stop-052",
+        "stop-057",
+        "stop-070",
+        "stop-075",
+        "stop-077",
+        "stop-078",
+        "stop-083"
+       ],
+       "lost": [
+        "stop-049",
+        "stop-061",
+        "stop-092",
+        "stop-093"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 245.49,
+       "sentence": "Allowing truck-03 one more load changes cash cost by +0.29 OMR (range -11.26..+8.28 over 3 seeds) and changes deliveries by +4 on average (range +1..+9) (newly served: stop-010, stop-017, stop-019, stop-026, stop-040, stop-042, stop-050, stop-052, stop-057, stop-070, stop-075, stop-077, stop-078, stop-083; no longer served: stop-049, stop-061, stop-092, stop-093).",
+       "gains_every_seed": true
+      },
+      {
+       "label": "truck-01 +1 load",
+       "phrase": "Allowing truck-01 one more load",
+       "kind": "TRIP",
+       "tier": "ACTIONABLE",
+       "basis": "a company setting (loads per truck per day); shift, return and break limits unchanged",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 2.0,
+        "min": -2.0,
+        "max": 9.0
+       },
+       "cases_gained": {
+        "mean": 134.333,
+        "min": -190.0,
+        "max": 769.0
+       },
+       "cash_delta": {
+        "mean": -10.745,
+        "min": -29.216,
+        "max": 11.647
+       },
+       "late_min_delta": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0
+       },
+       "gained": [
+        "stop-010",
+        "stop-019",
+        "stop-026",
+        "stop-040",
+        "stop-042",
+        "stop-050",
+        "stop-057",
+        "stop-070",
+        "stop-075",
+        "stop-077",
+        "stop-078",
+        "stop-083",
+        "stop-091"
+       ],
+       "lost": [
+        "stop-018",
+        "stop-032",
+        "stop-036",
+        "stop-049",
+        "stop-054",
+        "stop-068"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 271.23,
+       "sentence": "Allowing truck-01 one more load changes cash cost by -10.74 OMR (range -29.22..+11.65 over 3 seeds) and changes deliveries by +2 on average (range -2..+9) (newly served: stop-010, stop-019, stop-026, stop-040, stop-042, stop-050, stop-057, stop-070, stop-075, stop-077, stop-078, stop-083, stop-091; no longer served: stop-018, stop-032, stop-036, stop-049, stop-054, stop-068).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "shift and latest return +30 min (HYPOTHETICAL)",
+       "phrase": "Extending the shift and the latest return by 30 minutes",
+       "kind": "SHIFT",
+       "tier": "HYPOTHETICAL",
+       "basis": "HYPOTHETICAL - needs driver agreement; truck evidence, latest return to depot: 10T p50 17:00, p75 18:57, p90 20:07; 3T p50 17:36, p75 18:39, p90 19:22. 3T in October: p50 18:16, p75 19:02, p90 20:20 (58% of days after 18:00).",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 2.333,
+        "min": -1.0,
+        "max": 5.0
+       },
+       "cases_gained": {
+        "mean": 59.667,
+        "min": -814.0,
+        "max": 631.0
+       },
+       "cash_delta": {
+        "mean": 6.109,
+        "min": -14.774,
+        "max": 27.321
+       },
+       "late_min_delta": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0
+       },
+       "gained": [
+        "stop-010",
+        "stop-017",
+        "stop-026",
+        "stop-042",
+        "stop-052",
+        "stop-057",
+        "stop-070",
+        "stop-077",
+        "stop-078",
+        "stop-083",
+        "stop-091"
+       ],
+       "lost": [
+        "stop-019",
+        "stop-024",
+        "stop-043",
+        "stop-045",
+        "stop-067",
+        "stop-081",
+        "stop-090"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 275.41,
+       "sentence": "[HYPOTHETICAL] Extending the shift and the latest return by 30 minutes changes cash cost by +6.11 OMR (range -14.77..+27.32 over 3 seeds) and changes deliveries by +2.333 on average (range -1..+5) (newly served: stop-010, stop-017, stop-026, stop-042, stop-052, stop-057, stop-070, stop-077, stop-078, stop-083, stop-091; no longer served: stop-019, stop-024, stop-043, stop-045, stop-067, stop-081, stop-090).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-010 window +30 min (UNKNOWN, HYPOTHETICAL)",
+       "phrase": "Extending stop-010's window by 30 minutes",
+       "kind": "WINDOW",
+       "tier": "HYPOTHETICAL",
+       "basis": "HYPOTHETICAL - needs confirmation that this window is a preference; 13 Oct truck evidence: 12 of 27 RouteIQ hard windows with corroborated visits close earlier than practice",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 2.333,
+        "min": 0.0,
+        "max": 5.0
+       },
+       "cases_gained": {
+        "mean": 26.667,
+        "min": -258.0,
+        "max": 290.0
+       },
+       "cash_delta": {
+        "mean": -5.941,
+        "min": -42.562,
+        "max": 27.505
+       },
+       "late_min_delta": {
+        "mean": 10.0,
+        "min": 0,
+        "max": 30
+       },
+       "gained": [
+        "stop-010",
+        "stop-026",
+        "stop-040",
+        "stop-042",
+        "stop-052",
+        "stop-057",
+        "stop-070",
+        "stop-078",
+        "stop-083",
+        "stop-091"
+       ],
+       "lost": [
+        "stop-021",
+        "stop-024",
+        "stop-065",
+        "stop-092"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 271.5,
+       "sentence": "[HYPOTHETICAL] Extending stop-010's window by 30 minutes changes cash cost by -5.94 OMR (range -42.56..+27.50 over 3 seeds) and changes deliveries by +2.333 on average (range +0..+5) (newly served: stop-010, stop-026, stop-040, stop-042, stop-052, stop-057, stop-070, stop-078, stop-083, stop-091; no longer served: stop-021, stop-024, stop-065, stop-092).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-002 window +10 min (UNKNOWN, HYPOTHETICAL)",
+       "phrase": "Extending stop-002's window by 10 minutes",
+       "kind": "WINDOW",
+       "tier": "HYPOTHETICAL",
+       "basis": "HYPOTHETICAL - needs confirmation that this window is a preference; 13 Oct truck evidence: 12 of 27 RouteIQ hard windows with corroborated visits close earlier than practice",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 0.667,
+        "min": 0.0,
+        "max": 1.0
+       },
+       "cases_gained": {
+        "mean": 27.0,
+        "min": -64.0,
+        "max": 145.0
+       },
+       "cash_delta": {
+        "mean": 3.666,
+        "min": 0.0,
+        "max": 8.922
+       },
+       "late_min_delta": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0
+       },
+       "gained": [
+        "stop-010",
+        "stop-026",
+        "stop-042",
+        "stop-050",
+        "stop-070",
+        "stop-091"
+       ],
+       "lost": [
+        "stop-005",
+        "stop-049",
+        "stop-080",
+        "stop-084"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 270.0,
+       "sentence": "[HYPOTHETICAL] Extending stop-002's window by 10 minutes changes cash cost by +3.67 OMR (range +0.00..+8.92 over 3 seeds) and changes deliveries by +0.667 on average (range +0..+1) (newly served: stop-010, stop-026, stop-042, stop-050, stop-070, stop-091; no longer served: stop-005, stop-049, stop-080, stop-084).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-010 window +10 min (UNKNOWN, HYPOTHETICAL)",
+       "phrase": "Extending stop-010's window by 10 minutes",
+       "kind": "WINDOW",
+       "tier": "HYPOTHETICAL",
+       "basis": "HYPOTHETICAL - needs confirmation that this window is a preference; 13 Oct truck evidence: 12 of 27 RouteIQ hard windows with corroborated visits close earlier than practice",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 0.667,
+        "min": -3.0,
+        "max": 5.0
+       },
+       "cases_gained": {
+        "mean": -28.0,
+        "min": -380.0,
+        "max": 296.0
+       },
+       "cash_delta": {
+        "mean": 1.492,
+        "min": -1.199,
+        "max": 5.676
+       },
+       "late_min_delta": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0
+       },
+       "gained": [
+        "stop-026",
+        "stop-040",
+        "stop-042",
+        "stop-070",
+        "stop-075",
+        "stop-078",
+        "stop-083"
+       ],
+       "lost": [
+        "stop-018",
+        "stop-019",
+        "stop-043",
+        "stop-068",
+        "stop-093"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 271.05,
+       "sentence": "[HYPOTHETICAL] Extending stop-010's window by 10 minutes changes cash cost by +1.49 OMR (range -1.20..+5.68 over 3 seeds) and changes deliveries by +0.667 on average (range -3..+5) (newly served: stop-026, stop-040, stop-042, stop-070, stop-075, stop-078, stop-083; no longer served: stop-018, stop-019, stop-043, stop-068, stop-093).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-061 window +10 min (UNKNOWN, HYPOTHETICAL)",
+       "phrase": "Extending stop-061's window by 10 minutes",
+       "kind": "WINDOW",
+       "tier": "HYPOTHETICAL",
+       "basis": "HYPOTHETICAL - needs confirmation that this window is a preference; 13 Oct truck evidence: 12 of 27 RouteIQ hard windows with corroborated visits close earlier than practice",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 0.333,
+        "min": 0.0,
+        "max": 1.0
+       },
+       "cases_gained": {
+        "mean": 10.333,
+        "min": -64.0,
+        "max": 95.0
+       },
+       "cash_delta": {
+        "mean": 0.099,
+        "min": -8.626,
+        "max": 8.922
+       },
+       "late_min_delta": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0
+       },
+       "gained": [
+        "stop-010",
+        "stop-026",
+        "stop-042",
+        "stop-070",
+        "stop-091"
+       ],
+       "lost": [
+        "stop-005",
+        "stop-049",
+        "stop-080",
+        "stop-084"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 274.03,
+       "sentence": "[HYPOTHETICAL] Extending stop-061's window by 10 minutes changes cash cost by +0.10 OMR (range -8.63..+8.92 over 3 seeds) and changes deliveries by +0.333 on average (range +0..+1) (newly served: stop-010, stop-026, stop-042, stop-070, stop-091; no longer served: stop-005, stop-049, stop-080, stop-084).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-061 window +30 min (UNKNOWN, HYPOTHETICAL)",
+       "phrase": "Extending stop-061's window by 30 minutes",
+       "kind": "WINDOW",
+       "tier": "HYPOTHETICAL",
+       "basis": "HYPOTHETICAL - needs confirmation that this window is a preference; 13 Oct truck evidence: 12 of 27 RouteIQ hard windows with corroborated visits close earlier than practice",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 0.333,
+        "min": 0.0,
+        "max": 1.0
+       },
+       "cases_gained": {
+        "mean": 10.333,
+        "min": -64.0,
+        "max": 95.0
+       },
+       "cash_delta": {
+        "mean": 0.099,
+        "min": -8.626,
+        "max": 8.922
+       },
+       "late_min_delta": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0
+       },
+       "gained": [
+        "stop-010",
+        "stop-026",
+        "stop-042",
+        "stop-070",
+        "stop-091"
+       ],
+       "lost": [
+        "stop-005",
+        "stop-049",
+        "stop-080",
+        "stop-084"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 273.51,
+       "sentence": "[HYPOTHETICAL] Extending stop-061's window by 30 minutes changes cash cost by +0.10 OMR (range -8.63..+8.92 over 3 seeds) and changes deliveries by +0.333 on average (range +0..+1) (newly served: stop-010, stop-026, stop-042, stop-070, stop-091; no longer served: stop-005, stop-049, stop-080, stop-084).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-002 window +30 min (UNKNOWN, HYPOTHETICAL)",
+       "phrase": "Extending stop-002's window by 30 minutes",
+       "kind": "WINDOW",
+       "tier": "HYPOTHETICAL",
+       "basis": "HYPOTHETICAL - needs confirmation that this window is a preference; 13 Oct truck evidence: 12 of 27 RouteIQ hard windows with corroborated visits close earlier than practice",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": -0.333,
+        "min": -2.0,
+        "max": 1.0
+       },
+       "cases_gained": {
+        "mean": 25.0,
+        "min": -70.0,
+        "max": 145.0
+       },
+       "cash_delta": {
+        "mean": -4.295,
+        "min": -14.962,
+        "max": 2.076
+       },
+       "late_min_delta": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0
+       },
+       "gained": [
+        "stop-010",
+        "stop-026",
+        "stop-042",
+        "stop-050",
+        "stop-070"
+       ],
+       "lost": [
+        "stop-040",
+        "stop-043",
+        "stop-049",
+        "stop-068",
+        "stop-080",
+        "stop-084"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 268.74,
+       "sentence": "[HYPOTHETICAL] Extending stop-002's window by 30 minutes changes cash cost by -4.30 OMR (range -14.96..+2.08 over 3 seeds) and changes deliveries by -0.333 on average (range -2..+1) (newly served: stop-010, stop-026, stop-042, stop-050, stop-070; no longer served: stop-040, stop-043, stop-049, stop-068, stop-080, stop-084).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "unloading 39% faster per case (REQUIRES EVIDENCE)",
+       "phrase": "Unloading 39% faster per case",
+       "kind": "UNLOADING",
+       "tier": "REQUIRES_EVIDENCE",
+       "basis": "REQUIRES EVIDENCE - the best-quartile visits are 39% shorter than the median (13 Oct truck evidence, time on site per chain, visit-weighted median of 1 - p25/p50 over 422 visits); applied to the per-case part only (0.25 min per case)",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 7.667,
+        "min": 4.0,
+        "max": 13.0
+       },
+       "cases_gained": {
+        "mean": 913.667,
+        "min": 491.0,
+        "max": 1243.0
+       },
+       "cash_delta": {
+        "mean": -16.566,
+        "min": -42.046,
+        "max": 27.681
+       },
+       "late_min_delta": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0
+       },
+       "gained": [
+        "stop-010",
+        "stop-017",
+        "stop-019",
+        "stop-026",
+        "stop-040",
+        "stop-042",
+        "stop-050",
+        "stop-052",
+        "stop-057",
+        "stop-061",
+        "stop-070",
+        "stop-075",
+        "stop-077",
+        "stop-078",
+        "stop-083",
+        "stop-091",
+        "stop-092",
+        "stop-093"
+       ],
+       "lost": [],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 246.64,
+       "sentence": "[REQUIRES EVIDENCE] Unloading 39% faster per case changes cash cost by -16.57 OMR (range -42.05..+27.68 over 3 seeds) and changes deliveries by +7.667 on average (range +4..+13) (newly served: stop-010, stop-017, stop-019, stop-026, stop-040, stop-042, stop-050, stop-052, stop-057, stop-061, stop-070, stop-075, stop-077, stop-078, stop-083, stop-091, stop-092, stop-093).",
+       "gains_every_seed": true
+      }
+     ],
+     "labels": {
+      "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+      "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+      "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+      "time": "minutes, trips and trucks: time and capacity, not cash"
+     }
+    },
+    "frontier": {
+     "budget": {
+      "time_limit_sec": 20,
+      "search_mode": "QUICK",
+      "seeds": [
+       1,
+       2,
+       3
+      ]
+     },
+     "points": [
+      {
+       "label": "RECOMMENDED",
+       "scenario": "RECOMMENDED",
+       "flags": [],
+       "cash": {
+        "mean": 514.602,
+        "min": 504.016,
+        "max": 525.268,
+        "values": [
+         525.268,
+         514.522,
+         504.016
+        ]
+       },
+       "served": {
+        "mean": 82.0,
+        "min": 78,
+        "max": 84,
+        "values": [
+         84,
+         84,
+         78
+        ]
+       },
+       "late_min": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0,
+        "values": [
+         0,
+         0,
+         0
+        ]
+       },
+       "trucks": {
+        "mean": 9.0,
+        "min": 9,
+        "max": 9,
+        "values": [
+         9,
+         9,
+         9
+        ]
+       },
+       "km": {
+        "mean": 1007.803,
+        "min": 966.23,
+        "max": 1030.15,
+        "values": [
+         1030.15,
+         966.23,
+         1027.03
+        ]
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "dominated_by": "MIN_TRUCKS"
+      },
+      {
+       "label": "MIN_TRUCKS",
+       "scenario": "MIN_TRUCKS",
+       "flags": [],
+       "cash": {
+        "mean": 496.848,
+        "min": 480.509,
+        "max": 511.286,
+        "values": [
+         511.286,
+         480.509,
+         498.749
+        ]
+       },
+       "served": {
+        "mean": 85.667,
+        "min": 85,
+        "max": 86,
+        "values": [
+         85,
+         86,
+         86
+        ]
+       },
+       "late_min": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0,
+        "values": [
+         0,
+         0,
+         0
+        ]
+       },
+       "trucks": {
+        "mean": 9.0,
+        "min": 9,
+        "max": 9,
+        "values": [
+         9,
+         9,
+         9
+        ]
+       },
+       "km": {
+        "mean": 945.903,
+        "min": 901.01,
+        "max": 987.52,
+        "values": [
+         987.52,
+         901.01,
+         949.18
+        ]
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "dominated_by": null
+      },
+      {
+       "label": "MIN_DISTANCE",
+       "scenario": "MIN_DISTANCE",
+       "flags": [],
+       "cash": {
+        "mean": 505.413,
+        "min": 499.663,
+        "max": 508.973,
+        "values": [
+         507.603,
+         499.663,
+         508.973
+        ]
+       },
+       "served": {
+        "mean": 87.0,
+        "min": 86,
+        "max": 88,
+        "values": [
+         88,
+         86,
+         87
+        ]
+       },
+       "late_min": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0,
+        "values": [
+         0,
+         0,
+         0
+        ]
+       },
+       "trucks": {
+        "mean": 9.0,
+        "min": 9,
+        "max": 9,
+        "values": [
+         9,
+         9,
+         9
+        ]
+       },
+       "km": {
+        "mean": 931.887,
+        "min": 852.16,
+        "max": 1018.91,
+        "values": [
+         1018.91,
+         852.16,
+         924.59
+        ]
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "dominated_by": null
+      },
+      {
+       "label": "hire 1 truck (14 bays, hire 50.00 OMR/day)",
+       "scenario": "RECOMMENDED",
+       "flags": [],
+       "cash": {
+        "mean": 585.236,
+        "min": 567.189,
+        "max": 607.191,
+        "values": [
+         581.329,
+         607.191,
+         567.189
+        ]
+       },
+       "served": {
+        "mean": 87.667,
+        "min": 87,
+        "max": 88,
+        "values": [
+         88,
+         88,
+         87
+        ]
+       },
+       "late_min": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0,
+        "values": [
+         0,
+         0,
+         0
+        ]
+       },
+       "trucks": {
+        "mean": 10.0,
+        "min": 10,
+        "max": 10,
+        "values": [
+         10,
+         10,
+         10
+        ]
+       },
+       "km": {
+        "mean": 1043.84,
+        "min": 1004.49,
+        "max": 1080.52,
+        "values": [
+         1046.51,
+         1080.52,
+         1004.49
+        ]
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "dominated_by": null
+      },
+      {
+       "label": "truck-03 +1 load",
+       "scenario": "RECOMMENDED",
+       "flags": [],
+       "cash": {
+        "mean": 514.896,
+        "min": 503.265,
+        "max": 529.128,
+        "values": [
+         529.128,
+         503.265,
+         512.295
+        ]
+       },
+       "served": {
+        "mean": 86.0,
+        "min": 85,
+        "max": 87,
+        "values": [
+         86,
+         85,
+         87
+        ]
+       },
+       "late_min": {
+        "mean": 0.0,
+        "min": 0,
+        "max": 0,
+        "values": [
+         0,
+         0,
+         0
+        ]
+       },
+       "trucks": {
+        "mean": 9.0,
+        "min": 9,
+        "max": 9,
+        "values": [
+         9,
+         9,
+         9
+        ]
+       },
+       "km": {
+        "mean": 1027.207,
+        "min": 997.24,
+        "max": 1060.64,
+        "values": [
+         1060.64,
+         997.24,
+         1023.74
+        ]
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "dominated_by": "MIN_DISTANCE"
+      }
+     ],
+     "non_dominated": [
+      "MIN_TRUCKS",
+      "MIN_DISTANCE",
+      "hire 1 truck (14 bays, hire 50.00 OMR/day)"
+     ],
+     "labels": {
+      "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+      "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+      "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+      "time": "minutes, trips and trucks: time and capacity, not cash"
+     }
+    }
+   }
+  },
+  "SYNTH-320-TIGHT": {
+   "status": "COMPLETE",
+   "items_done": 42,
+   "items": 42,
+   "compute_sec": 1826.2,
+   "day": "SYNTHETIC tight (hypermarket windows close 60 min earlier); 185 stops, 13 trucks",
+   "budget": {
+    "time_limit_sec": 40,
+    "search_mode": "QUICK",
+    "seeds": [
+     1,
+     2,
+     3
+    ]
+   },
+   "options": {
+    "minutes": [
+     10,
+     30
+    ],
+    "max_stops": 3,
+    "max_trucks": 2,
+    "max_hires": 1
+   },
+   "verdict_counts": [
+    {
+     "SEARCH_FAILURE": 3
+    },
+    {
+     "SEARCH_FAILURE": 5
+    },
+    {
+     "SEARCH_FAILURE": 3
+    }
+   ],
+   "explanation": {
+    "seeds": [
+     1,
+     2,
+     3
+    ],
+    "verdicts": [
+     {
+      "verdict": "SEARCH_FAILURE",
+      "scenario": "RECOMMENDED",
+      "status": "OPTIMIZED",
+      "solver_status": "ROUTING_SUCCESS",
+      "solver_time_sec": 45.39,
+      "time_limit_sec": 40,
+      "stops_total": 185,
+      "stops_served": 182,
+      "note": "3 stop(s) left out without a proof, not proven impossible: a longer search, a relaxation or a change could serve it.",
+      "stops": [
+       {
+        "stop_id": "syn-006",
+        "label": "stop-006",
+        "priority": 5,
+        "cases": 3,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "syn-104",
+        "label": "stop-104",
+        "priority": 5,
+        "cases": 29,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "NO_ALLOWED_TRUCK",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "syn-180",
+        "label": "stop-180",
+        "priority": 3,
+        "cases": 118,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 61,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 61 lower-priority stop(s) are served"
+       }
+      ],
+      "counts": {
+       "SEARCH_FAILURE": 3
+      }
+     },
+     {
+      "verdict": "SEARCH_FAILURE",
+      "scenario": "RECOMMENDED",
+      "status": "OPTIMIZED",
+      "solver_status": "ROUTING_SUCCESS",
+      "solver_time_sec": 46.52,
+      "time_limit_sec": 40,
+      "stops_total": 185,
+      "stops_served": 180,
+      "note": "5 stop(s) left out without a proof, not proven impossible: a longer search, a relaxation or a change could serve it.",
+      "stops": [
+       {
+        "stop_id": "syn-005",
+        "label": "stop-005",
+        "priority": 5,
+        "cases": 1,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "syn-023",
+        "label": "stop-023",
+        "priority": 3,
+        "cases": 192,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 59,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 59 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "syn-037",
+        "label": "stop-037",
+        "priority": 5,
+        "cases": 15,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "syn-104",
+        "label": "stop-104",
+        "priority": 5,
+        "cases": 29,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "NO_ALLOWED_TRUCK",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "syn-162",
+        "label": "stop-162",
+        "priority": 5,
+        "cases": 24,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       }
+      ],
+      "counts": {
+       "SEARCH_FAILURE": 5
+      }
+     },
+     {
+      "verdict": "SEARCH_FAILURE",
+      "scenario": "RECOMMENDED",
+      "status": "OPTIMIZED",
+      "solver_status": "ROUTING_SUCCESS",
+      "solver_time_sec": 44.04,
+      "time_limit_sec": 40,
+      "stops_total": 185,
+      "stops_served": 182,
+      "note": "3 stop(s) left out without a proof, not proven impossible: a longer search, a relaxation or a change could serve it.",
+      "stops": [
+       {
+        "stop_id": "syn-003",
+        "label": "stop-003",
+        "priority": 3,
+        "cases": 3,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 61,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it; 61 lower-priority stop(s) are served"
+       },
+       {
+        "stop_id": "syn-005",
+        "label": "stop-005",
+        "priority": 5,
+        "cases": 1,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       },
+       {
+        "stop_id": "syn-006",
+        "label": "stop-006",
+        "priority": 5,
+        "cases": 3,
+        "verdict": "SEARCH_FAILURE",
+        "kind": "SEARCH",
+        "proof": null,
+        "scope": null,
+        "confirmed": null,
+        "reason_code": "SOLVER_DROPPED_LOW_PRIORITY",
+        "lower_served": 0,
+        "note": "not proven impossible: a longer search, a relaxation or a change could serve it"
+       }
+      ],
+      "counts": {
+       "SEARCH_FAILURE": 3
+      }
+     }
+    ],
+    "conflicts": {
+     "stop-003": {
+      "stop_id": "syn-003",
+      "label": "stop-003",
+      "priority": 3,
+      "cases": 3,
+      "pallets": 0.03,
+      "provenance": "SALES_PREFERENCE",
+      "window": "07:00-13:00",
+      "window_rule": "START",
+      "earliest_arrival": "09:11",
+      "latest_start": "13:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "08:41",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:20",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.03 pallets vs largest 14.0",
+      "size_fits": true,
+      "round_trip_min": 214,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 13,
+      "fitting_trucks": 13,
+      "blocking": [],
+      "nearby": [],
+      "text": "stop-003 (P3, 3 cases, window 07:00-13:00 SALES_PREFERENCE): can be served on its own; earliest arrival 09:11; size 0.03 pallets vs largest 14.0; round trip 214 min, fits the shift; any truck."
+     },
+     "stop-005": {
+      "stop_id": "syn-005",
+      "label": "stop-005",
+      "priority": 5,
+      "cases": 1,
+      "pallets": 0.021,
+      "provenance": "UNKNOWN",
+      "window": "07:00-13:00",
+      "window_rule": "START",
+      "earliest_arrival": "09:33",
+      "latest_start": "13:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "08:58",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:31",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.02 pallets vs largest 14.0",
+      "size_fits": true,
+      "round_trip_min": 258,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 13,
+      "fitting_trucks": 13,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "T06",
+        "load_no": 1,
+        "near_stop": "stop-002",
+        "km": 0.3,
+        "measure": "pallets",
+        "room_left": 0.08,
+        "fits": true,
+        "time_left_min": 47,
+        "detour_min": 12,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-005 (P5, 1 cases, window 07:00-13:00 UNKNOWN): can be served on its own; earliest arrival 09:33; size 0.02 pallets vs largest 14.0; round trip 258 min, fits the shift; any truck. Nearby: T06 load 1 (stop-002, 0.3 km): 0.08 pallets left, 47 min left, detour +12 min."
+     },
+     "stop-006": {
+      "stop_id": "syn-006",
+      "label": "stop-006",
+      "priority": 5,
+      "cases": 3,
+      "pallets": 0.028,
+      "provenance": "UNKNOWN",
+      "window": "07:00-13:00",
+      "window_rule": "START",
+      "earliest_arrival": "09:11",
+      "latest_start": "13:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "08:42",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "08:20",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.03 pallets vs largest 14.0",
+      "size_fits": true,
+      "round_trip_min": 215,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 13,
+      "fitting_trucks": 13,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "T06",
+        "load_no": 1,
+        "near_stop": "stop-003",
+        "km": 0.4,
+        "measure": "pallets",
+        "room_left": 0.07,
+        "fits": true,
+        "time_left_min": 171,
+        "detour_min": 14,
+        "window_ok": false
+       }
+      ],
+      "text": "stop-006 (P5, 3 cases, window 07:00-13:00 UNKNOWN): can be served on its own; earliest arrival 09:11; size 0.03 pallets vs largest 14.0; round trip 215 min, fits the shift; any truck. Nearby: T06 load 1 (stop-003, 0.4 km): 0.07 pallets left, 171 min left, detour +14 min, misses its window."
+     },
+     "stop-023": {
+      "stop_id": "syn-023",
+      "label": "stop-023",
+      "priority": 3,
+      "cases": 192,
+      "pallets": 1.871,
+      "provenance": "SALES_PREFERENCE",
+      "window": "07:00-13:00",
+      "window_rule": "START",
+      "earliest_arrival": "07:42",
+      "latest_start": "13:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:38",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:36",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "1.9 pallets vs largest 14.0",
+      "size_fits": true,
+      "round_trip_min": 92,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 13,
+      "fitting_trucks": 13,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "T07",
+        "load_no": 1,
+        "near_stop": "stop-127",
+        "km": 0.5,
+        "measure": "pallets",
+        "room_left": 0.43,
+        "fits": false,
+        "time_left_min": 0,
+        "detour_min": 70,
+        "window_ok": true
+       },
+       {
+        "truck_id": "T01",
+        "load_no": 2,
+        "near_stop": "stop-109",
+        "km": 0.8,
+        "measure": "pallets",
+        "room_left": 0.89,
+        "fits": false,
+        "time_left_min": 142,
+        "detour_min": 70,
+        "window_ok": false
+       },
+       {
+        "truck_id": "T03",
+        "load_no": 1,
+        "near_stop": "stop-103",
+        "km": 1.4,
+        "measure": "pallets",
+        "room_left": 0.0,
+        "fits": false,
+        "time_left_min": 30,
+        "detour_min": 72,
+        "window_ok": true
+       },
+       {
+        "truck_id": "T11",
+        "load_no": 1,
+        "near_stop": "stop-141",
+        "km": 1.4,
+        "measure": "pallets",
+        "room_left": 0.28,
+        "fits": false,
+        "time_left_min": 80,
+        "detour_min": 72,
+        "window_ok": true
+       },
+       {
+        "truck_id": "T05",
+        "load_no": 1,
+        "near_stop": "stop-120",
+        "km": 1.7,
+        "measure": "pallets",
+        "room_left": 0.0,
+        "fits": false,
+        "time_left_min": 159,
+        "detour_min": 70,
+        "window_ok": false
+       }
+      ],
+      "text": "stop-023 (P3, 192 cases, window 07:00-13:00 SALES_PREFERENCE): can be served on its own; earliest arrival 07:42; size 1.9 pallets vs largest 14.0; round trip 92 min, fits the shift; any truck. Nearby: T07 load 1 (stop-127, 0.5 km): 0.43 pallets left (too little), 0 min left, detour +70 min; T01 load 2 (stop-109, 0.8 km): 0.89 pallets left (too little), 142 min left, detour +70 min, misses its window; T03 load 1 (stop-103, 1.4 km): 0 pallets left (too little), 30 min left, detour +72 min; T11 load 1 (stop-141, 1.4 km): 0.28 pallets left (too little), 80 min left, detour +72 min; T05 load 1 (stop-120, 1.7 km): 0 pallets left (too little), 159 min left, detour +70 min, misses its window."
+     },
+     "stop-037": {
+      "stop_id": "syn-037",
+      "label": "stop-037",
+      "priority": 5,
+      "cases": 15,
+      "pallets": 0.138,
+      "provenance": "UNKNOWN",
+      "window": "08:00-12:00",
+      "window_rule": "START",
+      "earliest_arrival": "07:49",
+      "latest_start": "12:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:44",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:40",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.14 pallets vs largest 14.0",
+      "size_fits": true,
+      "round_trip_min": 54,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 13,
+      "fitting_trucks": 13,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "T06",
+        "load_no": 1,
+        "near_stop": "stop-164",
+        "km": 0.2,
+        "measure": "pallets",
+        "room_left": 0.08,
+        "fits": false,
+        "time_left_min": 47,
+        "detour_min": 16,
+        "window_ok": true
+       },
+       {
+        "truck_id": "T07",
+        "load_no": 2,
+        "near_stop": "stop-088",
+        "km": 0.2,
+        "measure": "pallets",
+        "room_left": 2.35,
+        "fits": true,
+        "time_left_min": 40,
+        "detour_min": 16,
+        "window_ok": false
+       },
+       {
+        "truck_id": "T01",
+        "load_no": 1,
+        "near_stop": "stop-059",
+        "km": 0.3,
+        "measure": "pallets",
+        "room_left": 0.01,
+        "fits": false,
+        "time_left_min": 35,
+        "detour_min": 15,
+        "window_ok": false
+       },
+       {
+        "truck_id": "T07",
+        "load_no": 1,
+        "near_stop": "stop-033",
+        "km": 0.3,
+        "measure": "pallets",
+        "room_left": 0.43,
+        "fits": true,
+        "time_left_min": 0,
+        "detour_min": 16,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-037 (P5, 15 cases, window 08:00-12:00 UNKNOWN): can be served on its own; earliest arrival 07:49; size 0.14 pallets vs largest 14.0; round trip 54 min, fits the shift; any truck. Nearby: T06 load 1 (stop-164, 0.2 km): 0.08 pallets left (too little), 47 min left, detour +16 min; T07 load 2 (stop-088, 0.2 km): 2.35 pallets left, 40 min left, detour +16 min, misses its window; T01 load 1 (stop-059, 0.3 km): 0.01 pallets left (too little), 35 min left, detour +15 min, misses its window; T07 load 1 (stop-033, 0.3 km): 0.43 pallets left, 0 min left, detour +16 min."
+     },
+     "stop-104": {
+      "stop_id": "syn-104",
+      "label": "stop-104",
+      "priority": 5,
+      "cases": 29,
+      "pallets": 0.605,
+      "provenance": "UNKNOWN",
+      "window": "08:00-12:00",
+      "window_rule": "START",
+      "earliest_arrival": "08:06",
+      "latest_start": "12:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:55",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:48",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.60 pallets vs largest 6.0",
+      "size_fits": true,
+      "round_trip_min": 90,
+      "shift_short_min": 0,
+      "allowed": [
+       "T01",
+       "T02",
+       "T03",
+       "T04",
+       "T05",
+       "T06",
+       "T07"
+      ],
+      "usable_trucks": 13,
+      "fitting_trucks": 7,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "T07",
+        "load_no": 2,
+        "near_stop": "stop-154",
+        "km": 0.0,
+        "measure": "pallets",
+        "room_left": 0.21,
+        "fits": false,
+        "time_left_min": 35,
+        "detour_min": 19,
+        "window_ok": false
+       },
+       {
+        "truck_id": "T04",
+        "load_no": 1,
+        "near_stop": "stop-102",
+        "km": 0.3,
+        "measure": "pallets",
+        "room_left": 0.13,
+        "fits": false,
+        "time_left_min": 30,
+        "detour_min": 19,
+        "window_ok": false
+       },
+       {
+        "truck_id": "T01",
+        "load_no": 1,
+        "near_stop": "stop-064",
+        "km": 0.4,
+        "measure": "pallets",
+        "room_left": 0.12,
+        "fits": false,
+        "time_left_min": 104,
+        "detour_min": 19,
+        "window_ok": true
+       },
+       {
+        "truck_id": "T02",
+        "load_no": 2,
+        "near_stop": "stop-171",
+        "km": 0.4,
+        "measure": "pallets",
+        "room_left": 0.04,
+        "fits": false,
+        "time_left_min": 30,
+        "detour_min": 19,
+        "window_ok": false
+       },
+       {
+        "truck_id": "T09",
+        "load_no": 1,
+        "near_stop": "stop-013",
+        "km": 3.5,
+        "measure": "pallets",
+        "room_left": 1.49,
+        "fits": false,
+        "time_left_min": 139,
+        "detour_min": 28,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-104 (P5, 29 cases, window 08:00-12:00 UNKNOWN): can be served on its own; earliest arrival 08:06; size 0.60 pallets vs largest 6.0; round trip 90 min, fits the shift; only T01, T02, T03, T04, T05, T06, T07. Nearby: T07 load 2 (stop-154, 0.0 km): 0.21 pallets left (too little), 35 min left, detour +19 min, misses its window; T04 load 1 (stop-102, 0.3 km): 0.13 pallets left (too little), 30 min left, detour +19 min, misses its window; T01 load 1 (stop-064, 0.4 km): 0.12 pallets left (too little), 104 min left, detour +19 min; T02 load 2 (stop-171, 0.4 km): 0.04 pallets left (too little), 30 min left, detour +19 min, misses its window; T09 load 1 (stop-013, 3.5 km): 1.49 pallets left (too little), 139 min left, detour +28 min."
+     },
+     "stop-162": {
+      "stop_id": "syn-162",
+      "label": "stop-162",
+      "priority": 5,
+      "cases": 24,
+      "pallets": 0.24,
+      "provenance": "UNKNOWN",
+      "window": "08:00-12:00",
+      "window_rule": "START",
+      "earliest_arrival": "07:36",
+      "latest_start": "12:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:34",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:33",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "0.24 pallets vs largest 14.0",
+      "size_fits": true,
+      "round_trip_min": 30,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 13,
+      "fitting_trucks": 13,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "T06",
+        "load_no": 1,
+        "near_stop": "stop-128",
+        "km": 0.4,
+        "measure": "pallets",
+        "room_left": 0.08,
+        "fits": false,
+        "time_left_min": 47,
+        "detour_min": 18,
+        "window_ok": true
+       },
+       {
+        "truck_id": "T03",
+        "load_no": 2,
+        "near_stop": "stop-056",
+        "km": 0.8,
+        "measure": "pallets",
+        "room_left": 2.88,
+        "fits": true,
+        "time_left_min": 148,
+        "detour_min": 19,
+        "window_ok": false
+       },
+       {
+        "truck_id": "T04",
+        "load_no": 1,
+        "near_stop": "stop-125",
+        "km": 1.1,
+        "measure": "pallets",
+        "room_left": 0.09,
+        "fits": false,
+        "time_left_min": 0,
+        "detour_min": 18,
+        "window_ok": true
+       },
+       {
+        "truck_id": "T12",
+        "load_no": 1,
+        "near_stop": "stop-096",
+        "km": 1.2,
+        "measure": "pallets",
+        "room_left": 1.06,
+        "fits": true,
+        "time_left_min": 115,
+        "detour_min": 20,
+        "window_ok": true
+       },
+       {
+        "truck_id": "T02",
+        "load_no": 2,
+        "near_stop": "stop-185",
+        "km": 1.5,
+        "measure": "pallets",
+        "room_left": 0.01,
+        "fits": false,
+        "time_left_min": 250,
+        "detour_min": 18,
+        "window_ok": false
+       }
+      ],
+      "text": "stop-162 (P5, 24 cases, window 08:00-12:00 UNKNOWN): can be served on its own; earliest arrival 07:36; size 0.24 pallets vs largest 14.0; round trip 30 min, fits the shift; any truck. Nearby: T06 load 1 (stop-128, 0.4 km): 0.08 pallets left (too little), 47 min left, detour +18 min; T03 load 2 (stop-056, 0.8 km): 2.88 pallets left, 148 min left, detour +19 min, misses its window; T04 load 1 (stop-125, 1.1 km): 0.09 pallets left (too little), 0 min left, detour +18 min; T12 load 1 (stop-096, 1.2 km): 1.06 pallets left, 115 min left, detour +20 min; T02 load 2 (stop-185, 1.5 km): 0.01 pallets left (too little), 250 min left, detour +18 min, misses its window."
+     },
+     "stop-180": {
+      "stop_id": "syn-180",
+      "label": "stop-180",
+      "priority": 3,
+      "cases": 118,
+      "pallets": 1.296,
+      "provenance": "SALES_PREFERENCE",
+      "window": "07:00-13:00",
+      "window_rule": "START",
+      "earliest_arrival": "08:03",
+      "latest_start": "13:00",
+      "window_short_min": 0,
+      "ivms": {
+       "band": "06-09",
+       "n": 334,
+       "basis": "IVMS Feb-Mar 2026, MOVING segments of 5 km+, over the engine's estimated km",
+       "p50": {
+        "kmh": 56.37,
+        "arrival": "07:54",
+        "short_min": 0
+       },
+       "p90": {
+        "kmh": 80.74,
+        "arrival": "07:46",
+        "short_min": 0
+       },
+       "robust": null
+      },
+      "size": "1.3 pallets vs largest 14.0",
+      "size_fits": true,
+      "round_trip_min": 117,
+      "shift_short_min": 0,
+      "allowed": null,
+      "usable_trucks": 13,
+      "fitting_trucks": 13,
+      "blocking": [],
+      "nearby": [
+       {
+        "truck_id": "T02",
+        "load_no": 2,
+        "near_stop": "stop-168",
+        "km": 0.1,
+        "measure": "pallets",
+        "room_left": 0.04,
+        "fits": false,
+        "time_left_min": 30,
+        "detour_min": 51,
+        "window_ok": true
+       },
+       {
+        "truck_id": "T07",
+        "load_no": 2,
+        "near_stop": "stop-027",
+        "km": 0.5,
+        "measure": "pallets",
+        "room_left": 0.21,
+        "fits": false,
+        "time_left_min": 35,
+        "detour_min": 51,
+        "window_ok": false
+       },
+       {
+        "truck_id": "T01",
+        "load_no": 1,
+        "near_stop": "stop-086",
+        "km": 0.8,
+        "measure": "pallets",
+        "room_left": 0.12,
+        "fits": false,
+        "time_left_min": 104,
+        "detour_min": 51,
+        "window_ok": false
+       },
+       {
+        "truck_id": "T04",
+        "load_no": 1,
+        "near_stop": "stop-182",
+        "km": 0.9,
+        "measure": "pallets",
+        "room_left": 0.13,
+        "fits": false,
+        "time_left_min": 30,
+        "detour_min": 53,
+        "window_ok": true
+       },
+       {
+        "truck_id": "T09",
+        "load_no": 1,
+        "near_stop": "stop-022",
+        "km": 1.0,
+        "measure": "pallets",
+        "room_left": 1.49,
+        "fits": true,
+        "time_left_min": 139,
+        "detour_min": 50,
+        "window_ok": true
+       }
+      ],
+      "text": "stop-180 (P3, 118 cases, window 07:00-13:00 SALES_PREFERENCE): can be served on its own; earliest arrival 08:03; size 1.3 pallets vs largest 14.0; round trip 117 min, fits the shift; any truck. Nearby: T02 load 2 (stop-168, 0.1 km): 0.04 pallets left (too little), 30 min left, detour +51 min; T07 load 2 (stop-027, 0.5 km): 0.21 pallets left (too little), 35 min left, detour +51 min, misses its window; T01 load 1 (stop-086, 0.8 km): 0.12 pallets left (too little), 104 min left, detour +51 min, misses its window; T04 load 1 (stop-182, 0.9 km): 0.13 pallets left (too little), 30 min left, detour +53 min; T09 load 1 (stop-022, 1.0 km): 1.49 pallets left, 139 min left, detour +50 min."
+     }
+    },
+    "ranking": {
+     "budget": {
+      "time_limit_sec": 40,
+      "search_mode": "QUICK",
+      "seeds": [
+       1,
+       2,
+       3
+      ]
+     },
+     "base": {
+      "runs": 3,
+      "seeds": [
+       1,
+       2,
+       3
+      ],
+      "digest": "e20ced2bd3868942",
+      "metrics": {
+       "cases_served": {
+        "mean": 9818.667,
+        "min": 9697.0,
+        "max": 9951.0,
+        "values": [
+         9808.0,
+         9697.0,
+         9951.0
+        ]
+       },
+       "cases_total": {
+        "mean": 9958.0,
+        "min": 9958.0,
+        "max": 9958.0,
+        "values": [
+         9958.0,
+         9958.0,
+         9958.0
+        ]
+       },
+       "cash.distance": {
+        "mean": 59.914,
+        "min": 58.473,
+        "max": 62.014,
+        "values": [
+         59.255,
+         62.014,
+         58.473
+        ]
+       },
+       "cash.driver": {
+        "mean": 313.167,
+        "min": 312.167,
+        "max": 313.728,
+        "values": [
+         313.728,
+         312.167,
+         313.606
+        ]
+       },
+       "cash.fixed": {
+        "mean": 206.0,
+        "min": 206.0,
+        "max": 206.0,
+        "values": [
+         206.0,
+         206.0,
+         206.0
+        ]
+       },
+       "cash.fuel": {
+        "mean": 81.434,
+        "min": 79.475,
+        "max": 83.703,
+        "values": [
+         81.125,
+         83.703,
+         79.475
+        ]
+       },
+       "cash.overtime": {
+        "mean": 8.885,
+        "min": 5.993,
+        "max": 10.588,
+        "values": [
+         10.075,
+         10.588,
+         5.993
+        ]
+       },
+       "cash.total": {
+        "mean": 669.401,
+        "min": 663.547,
+        "max": 674.472,
+        "values": [
+         670.183,
+         674.472,
+         663.547
+        ]
+       },
+       "cash.trip": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "km": {
+        "mean": 1187.203,
+        "min": 1157.74,
+        "max": 1214.23,
+        "values": [
+         1189.64,
+         1214.23,
+         1157.74
+        ]
+       },
+       "late_stops": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "minutes_outside_pref": {
+        "mean": 8491.667,
+        "min": 8033.0,
+        "max": 8820.0,
+        "values": [
+         8033.0,
+         8820.0,
+         8622.0
+        ]
+       },
+       "paid_driver_min": {
+        "mean": 7516.333,
+        "min": 7493.0,
+        "max": 7530.0,
+        "values": [
+         7530.0,
+         7493.0,
+         7526.0
+        ]
+       },
+       "penalties.continuity": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "penalties.early": {
+        "mean": 27.449,
+        "min": 26.601,
+        "max": 28.807,
+        "values": [
+         26.938,
+         26.601,
+         28.807
+        ]
+       },
+       "penalties.unserved_penalty": {
+        "mean": 1028666.667,
+        "min": 1028000.0,
+        "max": 1030000.0,
+        "values": [
+         1028000.0,
+         1030000.0,
+         1028000.0
+        ]
+       },
+       "penalties.window": {
+        "mean": 424.582,
+        "min": 401.613,
+        "max": 440.999,
+        "values": [
+         401.613,
+         440.999,
+         431.134
+        ]
+       },
+       "proven_impossible": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "served_by_priority.1": {
+        "mean": 5.0,
+        "min": 5.0,
+        "max": 5.0,
+        "values": [
+         5.0,
+         5.0,
+         5.0
+        ]
+       },
+       "served_by_priority.2": {
+        "mean": 44.0,
+        "min": 44.0,
+        "max": 44.0,
+        "values": [
+         44.0,
+         44.0,
+         44.0
+        ]
+       },
+       "served_by_priority.3": {
+        "mean": 72.0,
+        "min": 72.0,
+        "max": 72.0,
+        "values": [
+         72.0,
+         72.0,
+         72.0
+        ]
+       },
+       "served_by_priority.4": {
+        "mean": 26.0,
+        "min": 26.0,
+        "max": 26.0,
+        "values": [
+         26.0,
+         26.0,
+         26.0
+        ]
+       },
+       "served_by_priority.5": {
+        "mean": 34.333,
+        "min": 33.0,
+        "max": 35.0,
+        "values": [
+         35.0,
+         33.0,
+         35.0
+        ]
+       },
+       "stops_served": {
+        "mean": 181.333,
+        "min": 180.0,
+        "max": 182.0,
+        "values": [
+         182.0,
+         180.0,
+         182.0
+        ]
+       },
+       "stops_total": {
+        "mean": 185.0,
+        "min": 185.0,
+        "max": 185.0,
+        "values": [
+         185.0,
+         185.0,
+         185.0
+        ]
+       },
+       "trips": {
+        "mean": 19.0,
+        "min": 19.0,
+        "max": 19.0,
+        "values": [
+         19.0,
+         19.0,
+         19.0
+        ]
+       },
+       "trucks_used": {
+        "mean": 13.0,
+        "min": 13.0,
+        "max": 13.0,
+        "values": [
+         13.0,
+         13.0,
+         13.0
+        ]
+       },
+       "unserved_by_priority.1": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "unserved_by_priority.2": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "unserved_by_priority.3": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "values": [
+         1.0,
+         1.0,
+         1.0
+        ]
+       },
+       "unserved_by_priority.4": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+         0.0,
+         0.0,
+         0.0
+        ]
+       },
+       "unserved_by_priority.5": {
+        "mean": 2.667,
+        "min": 2.0,
+        "max": 4.0,
+        "values": [
+         2.0,
+         4.0,
+         2.0
+        ]
+       },
+       "unserved_by_reason.NO_ALLOWED_TRUCK": {
+        "mean": 0.667,
+        "min": 0.0,
+        "max": 1.0,
+        "values": [
+         1.0,
+         1.0,
+         0.0
+        ]
+       },
+       "unserved_by_reason.SOLVER_DROPPED_LOW_PRIORITY": {
+        "mean": 3.0,
+        "min": 2.0,
+        "max": 4.0,
+        "values": [
+         2.0,
+         4.0,
+         3.0
+        ]
+       }
+      },
+      "status": {
+       "OPTIMIZED": 3
+      },
+      "solver_status": {
+       "ROUTING_SUCCESS": 3
+      },
+      "feasibility": {
+       "VERIFIED": 3
+      },
+      "wall_sec": {
+       "mean": 45.423,
+       "min": 44.15,
+       "max": 46.61,
+       "values": [
+        45.51,
+        46.61,
+        44.15
+       ]
+      },
+      "labels": {
+       "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+       "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+       "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+       "time": "minutes, trips and trucks: time and capacity, not cash"
+      }
+     },
+     "rows": [
+      {
+       "label": "stop-003 window +10 min (SALES_PREFERENCE)",
+       "phrase": "Extending stop-003's window by 10 minutes",
+       "kind": "WINDOW",
+       "tier": "ACTIONABLE",
+       "basis": "the window is labelled SALES_PREFERENCE (a salesman's request, not the customer's closing time)",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": -0.667,
+        "min": -1.0,
+        "max": 0.0
+       },
+       "cases_gained": {
+        "mean": 2.667,
+        "min": -44.0,
+        "max": 53.0
+       },
+       "cash_delta": {
+        "mean": -1.663,
+        "min": -14.721,
+        "max": 16.569
+       },
+       "late_min_delta": {
+        "mean": -39.0,
+        "min": -829,
+        "max": 435
+       },
+       "gained": [
+        "stop-003",
+        "stop-023"
+       ],
+       "lost": [
+        "stop-110",
+        "stop-162",
+        "stop-181"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 135.24,
+       "sentence": "Extending stop-003's window by 10 minutes changes cash cost by -1.66 OMR (range -14.72..+16.57 over 3 seeds) and changes deliveries by -0.667 on average (range -1..+0) (newly served: stop-003, stop-023; no longer served: stop-110, stop-162, stop-181).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "T08 +1 load",
+       "phrase": "Allowing T08 one more load",
+       "kind": "TRIP",
+       "tier": "ACTIONABLE",
+       "basis": "a company setting (loads per truck per day); shift, return and break limits unchanged",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": -0.667,
+        "min": -2.0,
+        "max": 0.0
+       },
+       "cases_gained": {
+        "mean": -1.333,
+        "min": -4.0,
+        "max": 0.0
+       },
+       "cash_delta": {
+        "mean": -9.498,
+        "min": -28.495,
+        "max": 0.0
+       },
+       "late_min_delta": {
+        "mean": -301.333,
+        "min": -904,
+        "max": 0
+       },
+       "gained": [
+        "stop-006"
+       ],
+       "lost": [
+        "stop-002",
+        "stop-005",
+        "stop-008"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 132.56,
+       "sentence": "Allowing T08 one more load changes cash cost by -9.50 OMR (range -28.50..+0.00 over 3 seeds) and changes deliveries by -0.667 on average (range -2..+0) (newly served: stop-006; no longer served: stop-002, stop-005, stop-008).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-023 window +30 min (SALES_PREFERENCE)",
+       "phrase": "Extending stop-023's window by 30 minutes",
+       "kind": "WINDOW",
+       "tier": "ACTIONABLE",
+       "basis": "the window is labelled SALES_PREFERENCE (a salesman's request, not the customer's closing time)",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": -1.0,
+        "min": -3.0,
+        "max": 0.0
+       },
+       "cases_gained": {
+        "mean": 86.333,
+        "min": 0.0,
+        "max": 199.0
+       },
+       "cash_delta": {
+        "mean": 8.612,
+        "min": 1.116,
+        "max": 13.484
+       },
+       "late_min_delta": {
+        "mean": 671.0,
+        "min": 32,
+        "max": 1002
+       },
+       "gained": [
+        "stop-023",
+        "stop-037",
+        "stop-104",
+        "stop-180"
+       ],
+       "lost": [
+        "stop-005",
+        "stop-006",
+        "stop-055",
+        "stop-110",
+        "stop-137"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 134.35,
+       "sentence": "Extending stop-023's window by 30 minutes changes cash cost by +8.61 OMR (range +1.12..+13.48 over 3 seeds) and changes deliveries by -1 on average (range -3..+0) (newly served: stop-023, stop-037, stop-104, stop-180; no longer served: stop-005, stop-006, stop-055, stop-110, stop-137).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-023 window +10 min (SALES_PREFERENCE)",
+       "phrase": "Extending stop-023's window by 10 minutes",
+       "kind": "WINDOW",
+       "tier": "ACTIONABLE",
+       "basis": "the window is labelled SALES_PREFERENCE (a salesman's request, not the customer's closing time)",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": -1.0,
+        "min": -3.0,
+        "max": 0.0
+       },
+       "cases_gained": {
+        "mean": 66.333,
+        "min": 0.0,
+        "max": 178.0
+       },
+       "cash_delta": {
+        "mean": 2.426,
+        "min": -19.562,
+        "max": 26.84
+       },
+       "late_min_delta": {
+        "mean": 138.333,
+        "min": -725,
+        "max": 1140
+       },
+       "gained": [
+        "stop-023",
+        "stop-037",
+        "stop-104",
+        "stop-180"
+       ],
+       "lost": [
+        "stop-002",
+        "stop-005",
+        "stop-006",
+        "stop-008",
+        "stop-055",
+        "stop-110",
+        "stop-137",
+        "stop-181"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 133.92,
+       "sentence": "Extending stop-023's window by 10 minutes changes cash cost by +2.43 OMR (range -19.56..+26.84 over 3 seeds) and changes deliveries by -1 on average (range -3..+0) (newly served: stop-023, stop-037, stop-104, stop-180; no longer served: stop-002, stop-005, stop-006, stop-008, stop-055, stop-110, stop-137, stop-181).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-180 window +10 min (SALES_PREFERENCE)",
+       "phrase": "Extending stop-180's window by 10 minutes",
+       "kind": "WINDOW",
+       "tier": "ACTIONABLE",
+       "basis": "the window is labelled SALES_PREFERENCE (a salesman's request, not the customer's closing time)",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": -1.667,
+        "min": -3.0,
+        "max": 0.0
+       },
+       "cases_gained": {
+        "mean": -32.667,
+        "min": -64.0,
+        "max": 0.0
+       },
+       "cash_delta": {
+        "mean": -6.099,
+        "min": -11.962,
+        "max": 0.0
+       },
+       "late_min_delta": {
+        "mean": -244.667,
+        "min": -416,
+        "max": 0
+       },
+       "gained": [],
+       "lost": [
+        "stop-055",
+        "stop-104",
+        "stop-137",
+        "stop-182"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 139.29,
+       "sentence": "Extending stop-180's window by 10 minutes changes cash cost by -6.10 OMR (range -11.96..+0.00 over 3 seeds) and changes deliveries by -1.667 on average (range -3..+0) (no longer served: stop-055, stop-104, stop-137, stop-182).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-180 window +30 min (SALES_PREFERENCE)",
+       "phrase": "Extending stop-180's window by 30 minutes",
+       "kind": "WINDOW",
+       "tier": "ACTIONABLE",
+       "basis": "the window is labelled SALES_PREFERENCE (a salesman's request, not the customer's closing time)",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": -2.0,
+        "min": -4.0,
+        "max": 0.0
+       },
+       "cases_gained": {
+        "mean": 57.0,
+        "min": -147.0,
+        "max": 250.0
+       },
+       "cash_delta": {
+        "mean": -17.502,
+        "min": -25.101,
+        "max": -9.826
+       },
+       "late_min_delta": {
+        "mean": -821.667,
+        "min": -1619,
+        "max": -409
+       },
+       "gained": [
+        "stop-023",
+        "stop-037",
+        "stop-180"
+       ],
+       "lost": [
+        "stop-001",
+        "stop-002",
+        "stop-003",
+        "stop-006",
+        "stop-008",
+        "stop-028",
+        "stop-110"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 138.01,
+       "sentence": "Extending stop-180's window by 30 minutes changes cash cost by -17.50 OMR (range -25.10..-9.83 over 3 seeds) and changes deliveries by -2 on average (range -4..+0) (newly served: stop-023, stop-037, stop-180; no longer served: stop-001, stop-002, stop-003, stop-006, stop-008, stop-028, stop-110).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "stop-003 window +30 min (SALES_PREFERENCE)",
+       "phrase": "Extending stop-003's window by 30 minutes",
+       "kind": "WINDOW",
+       "tier": "ACTIONABLE",
+       "basis": "the window is labelled SALES_PREFERENCE (a salesman's request, not the customer's closing time)",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": -2.0,
+        "min": -3.0,
+        "max": -1.0
+       },
+       "cases_gained": {
+        "mean": -55.333,
+        "min": -118.0,
+        "max": -3.0
+       },
+       "cash_delta": {
+        "mean": -13.547,
+        "min": -22.636,
+        "max": -8.44
+       },
+       "late_min_delta": {
+        "mean": -749.333,
+        "min": -1229,
+        "max": -368
+       },
+       "gained": [
+        "stop-003",
+        "stop-023",
+        "stop-037",
+        "stop-162"
+       ],
+       "lost": [
+        "stop-002",
+        "stop-005",
+        "stop-006",
+        "stop-008",
+        "stop-137",
+        "stop-180",
+        "stop-181"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 134.84,
+       "sentence": "Extending stop-003's window by 30 minutes changes cash cost by -13.55 OMR (range -22.64..-8.44 over 3 seeds) and changes deliveries by -2 on average (range -3..-1) (newly served: stop-003, stop-023, stop-037, stop-162; no longer served: stop-002, stop-005, stop-006, stop-008, stop-137, stop-180, stop-181).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "T02 +1 load",
+       "phrase": "Allowing T02 one more load",
+       "kind": "TRIP",
+       "tier": "ACTIONABLE",
+       "basis": "a company setting (loads per truck per day); shift, return and break limits unchanged",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": -3.667,
+        "min": -6.0,
+        "max": -2.0
+       },
+       "cases_gained": {
+        "mean": -145.667,
+        "min": -382.0,
+        "max": -7.0
+       },
+       "cash_delta": {
+        "mean": -18.732,
+        "min": -39.585,
+        "max": -2.171
+       },
+       "late_min_delta": {
+        "mean": -1306.333,
+        "min": -3040,
+        "max": -428
+       },
+       "gained": [
+        "stop-023",
+        "stop-104",
+        "stop-162"
+       ],
+       "lost": [
+        "stop-001",
+        "stop-002",
+        "stop-005",
+        "stop-008",
+        "stop-028",
+        "stop-110",
+        "stop-137",
+        "stop-180",
+        "stop-181"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 130.15,
+       "sentence": "Allowing T02 one more load changes cash cost by -18.73 OMR (range -39.59..-2.17 over 3 seeds) and changes deliveries by -3.667 on average (range -6..-2) (newly served: stop-023, stop-104, stop-162; no longer served: stop-001, stop-002, stop-005, stop-008, stop-028, stop-110, stop-137, stop-180, stop-181).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "shift and latest return +30 min (HYPOTHETICAL)",
+       "phrase": "Extending the shift and the latest return by 30 minutes",
+       "kind": "SHIFT",
+       "tier": "HYPOTHETICAL",
+       "basis": "HYPOTHETICAL - needs driver agreement; truck evidence, latest return to depot: 10T p50 17:00, p75 18:57, p90 20:07; 3T p50 17:36, p75 18:39, p90 19:22. 3T in October: p50 18:16, p75 19:02, p90 20:20 (58% of days after 18:00).",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": -1.667,
+        "min": -2.0,
+        "max": -1.0
+       },
+       "cases_gained": {
+        "mean": -46.0,
+        "min": -81.0,
+        "max": 4.0
+       },
+       "cash_delta": {
+        "mean": -4.196,
+        "min": -8.72,
+        "max": -1.422
+       },
+       "late_min_delta": {
+        "mean": -183.667,
+        "min": -835,
+        "max": 548
+       },
+       "gained": [
+        "stop-005",
+        "stop-023",
+        "stop-104"
+       ],
+       "lost": [
+        "stop-001",
+        "stop-015",
+        "stop-110",
+        "stop-137",
+        "stop-162",
+        "stop-180"
+       ],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 128.12,
+       "sentence": "[HYPOTHETICAL] Extending the shift and the latest return by 30 minutes changes cash cost by -4.20 OMR (range -8.72..-1.42 over 3 seeds) and changes deliveries by -1.667 on average (range -2..-1) (newly served: stop-005, stop-023, stop-104; no longer served: stop-001, stop-015, stop-110, stop-137, stop-162, stop-180).",
+       "gains_every_seed": false
+      },
+      {
+       "label": "unloading 39% faster per case (REQUIRES EVIDENCE)",
+       "phrase": "Unloading 39% faster per case",
+       "kind": "UNLOADING",
+       "tier": "REQUIRES_EVIDENCE",
+       "basis": "REQUIRES EVIDENCE - the best-quartile visits are 39% shorter than the median (13 Oct truck evidence, time on site per chain, visit-weighted median of 1 - p25/p50 over 422 visits); applied to the per-case part only (0.25 min per case)",
+       "seeds": [
+        1,
+        2,
+        3
+       ],
+       "stops_gained": {
+        "mean": 3.667,
+        "min": 3.0,
+        "max": 5.0
+       },
+       "cases_gained": {
+        "mean": 139.333,
+        "min": 7.0,
+        "max": 261.0
+       },
+       "cash_delta": {
+        "mean": -39.24,
+        "min": -47.041,
+        "max": -25.756
+       },
+       "late_min_delta": {
+        "mean": -4882.0,
+        "min": -5111,
+        "max": -4547
+       },
+       "gained": [
+        "stop-003",
+        "stop-005",
+        "stop-006",
+        "stop-023",
+        "stop-037",
+        "stop-104",
+        "stop-162",
+        "stop-180"
+       ],
+       "lost": [],
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "wall_sec": 125.07,
+       "sentence": "[REQUIRES EVIDENCE] Unloading 39% faster per case changes cash cost by -39.24 OMR (range -47.04..-25.76 over 3 seeds) and changes deliveries by +3.667 on average (range +3..+5) (newly served: stop-003, stop-005, stop-006, stop-023, stop-037, stop-104, stop-162, stop-180).",
+       "gains_every_seed": true
+      }
+     ],
+     "labels": {
+      "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+      "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+      "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+      "time": "minutes, trips and trucks: time and capacity, not cash"
+     }
+    },
+    "frontier": {
+     "budget": {
+      "time_limit_sec": 40,
+      "search_mode": "QUICK",
+      "seeds": [
+       1,
+       2,
+       3
+      ]
+     },
+     "points": [
+      {
+       "label": "RECOMMENDED",
+       "scenario": "RECOMMENDED",
+       "flags": [],
+       "cash": {
+        "mean": 669.401,
+        "min": 663.547,
+        "max": 674.472,
+        "values": [
+         670.183,
+         674.472,
+         663.547
+        ]
+       },
+       "served": {
+        "mean": 181.333,
+        "min": 180,
+        "max": 182,
+        "values": [
+         182,
+         180,
+         182
+        ]
+       },
+       "late_min": {
+        "mean": 8242.667,
+        "min": 7829,
+        "max": 8507,
+        "values": [
+         7829,
+         8507,
+         8392
+        ]
+       },
+       "trucks": {
+        "mean": 13.0,
+        "min": 13,
+        "max": 13,
+        "values": [
+         13,
+         13,
+         13
+        ]
+       },
+       "km": {
+        "mean": 1187.203,
+        "min": 1157.74,
+        "max": 1214.23,
+        "values": [
+         1189.64,
+         1214.23,
+         1157.74
+        ]
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "dominated_by": null
+      },
+      {
+       "label": "MIN_TRUCKS",
+       "scenario": "MIN_TRUCKS",
+       "flags": [],
+       "cash": {
+        "mean": 649.047,
+        "min": 621.954,
+        "max": 688.302,
+        "values": [
+         688.302,
+         636.884,
+         621.954
+        ]
+       },
+       "served": {
+        "mean": 182.667,
+        "min": 182,
+        "max": 184,
+        "values": [
+         184,
+         182,
+         182
+        ]
+       },
+       "late_min": {
+        "mean": 12208.333,
+        "min": 10211,
+        "max": 14695,
+        "values": [
+         14695,
+         11719,
+         10211
+        ]
+       },
+       "trucks": {
+        "mean": 13.0,
+        "min": 13,
+        "max": 13,
+        "values": [
+         13,
+         13,
+         13
+        ]
+       },
+       "km": {
+        "mean": 1035.5,
+        "min": 914.03,
+        "max": 1217.75,
+        "values": [
+         1217.75,
+         974.72,
+         914.03
+        ]
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "dominated_by": null
+      },
+      {
+       "label": "MIN_DISTANCE",
+       "scenario": "MIN_DISTANCE",
+       "flags": [],
+       "cash": {
+        "mean": 645.303,
+        "min": 638.193,
+        "max": 659.271,
+        "values": [
+         638.193,
+         638.446,
+         659.271
+        ]
+       },
+       "served": {
+        "mean": 181.333,
+        "min": 180,
+        "max": 183,
+        "values": [
+         180,
+         181,
+         183
+        ]
+       },
+       "late_min": {
+        "mean": 11827.333,
+        "min": 11015,
+        "max": 13103,
+        "values": [
+         11364,
+         11015,
+         13103
+        ]
+       },
+       "trucks": {
+        "mean": 13.0,
+        "min": 13,
+        "max": 13,
+        "values": [
+         13,
+         13,
+         13
+        ]
+       },
+       "km": {
+        "mean": 1021.393,
+        "min": 983.06,
+        "max": 1081.4,
+        "values": [
+         983.06,
+         999.72,
+         1081.4
+        ]
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "dominated_by": null
+      },
+      {
+       "label": "unloading 39% faster per case (REQUIRES EVIDENCE)",
+       "scenario": "RECOMMENDED",
+       "flags": [
+        "REQUIRES_EVIDENCE"
+       ],
+       "cash": {
+        "mean": 630.161,
+        "min": 618.625,
+        "max": 648.716,
+        "values": [
+         623.142,
+         648.716,
+         618.625
+        ]
+       },
+       "served": {
+        "mean": 185.0,
+        "min": 185,
+        "max": 185,
+        "values": [
+         185,
+         185,
+         185
+        ]
+       },
+       "late_min": {
+        "mean": 3360.667,
+        "min": 2841,
+        "max": 3960,
+        "values": [
+         2841,
+         3960,
+         3281
+        ]
+       },
+       "trucks": {
+        "mean": 13.0,
+        "min": 13,
+        "max": 13,
+        "values": [
+         13,
+         13,
+         13
+        ]
+       },
+       "km": {
+        "mean": 1262.76,
+        "min": 1215.25,
+        "max": 1339.81,
+        "values": [
+         1233.22,
+         1339.81,
+         1215.25
+        ]
+       },
+       "feasibility": {
+        "VERIFIED": 3
+       },
+       "dominated_by": null
+      }
+     ],
+     "non_dominated": [
+      "RECOMMENDED",
+      "MIN_TRUCKS",
+      "MIN_DISTANCE",
+      "unloading 39% faster per case (REQUIRES EVIDENCE)"
+     ],
+     "labels": {
+      "cash": "OMR cash cost of the new loads (costing.truck_day_costs via DispatchScenario.truck_days)",
+      "penalties": "ARTIFICIAL: solver penalties in OMR-equivalent (leaving stops out, preferred windows, early arrival, plan continuity). Not cash; never add them to cash",
+      "km": "estimated km (HAVERSINE: straight line x haversine_multiplier), not road km",
+      "time": "minutes, trips and trucks: time and capacity, not cash"
+     }
+    }
+   }
+  }
+ }
+}
