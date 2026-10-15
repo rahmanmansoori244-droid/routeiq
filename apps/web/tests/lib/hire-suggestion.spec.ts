@@ -637,7 +637,7 @@ describe('a one-day truck', () => {
     // Its plate taken over by a later day's hired truck ("12345AB.261007"): its own plans still say the plate.
     expect(shownTruckCode('HIRE-10T-0710-1', { code: '12345AB.261007', onlyOnDate: new Date('2026-10-07T00:00:00Z') })).toBe('12345AB');
     expect(shownTruckCode('HIRE-10T-0710-1', { code: '12345AB.261008', onlyOnDate: new Date('2026-10-07T00:00:00Z') })).toBe('12345AB.261008');
-    expect(shownTruckCode('R1-5187', { code: 'R1-5187-NEW', onlyOnDate: null })).toBe('R1-5187');
+    expect(shownTruckCode('T-01', { code: 'T-01-NEW', onlyOnDate: null })).toBe('T-01');
     expect(shownTruckCode(null, { code: 'R2' })).toBe('R2');
   });
 });

@@ -4,7 +4,7 @@
  * goes whole on one truck. When a split truly can't be avoided, the planner should keep the leftover as
  * small as possible and avoid adding an extra truck just for it.") Weight is not a limit (NMWC: no payload).
  *
- * The production order behind it: 300 cases of SS250ML (143 per pallet) + 500 of JA1.5L (56 per pallet) =
+ * The large single-customer order behind it: 300 cases of SS250ML (143 per pallet) + 500 of JA1.5L (56 per pallet) =
  * 2,098 + 8,929 = 11,027 units (11.03 pallets). At Pallet fill 90% a 12-bay truck holds 10,800, so it was
  * split 9.89 + 1.13 pallets (sized for the 11-bay truck, "more trips" first).
  * - pallets.ts: the room of a load by its customers (loadRoomUnits, plannedLoadRoom), the limit text, the
@@ -46,12 +46,12 @@ import { dispatchConfigFromTenant, effectivePlannerValues } from '@/lib/dispatch
 import { tenantAssumptions } from '@/lib/dispatch/workbook';
 
 // ------------------------------------------------------------------------------------------------
-// Tawoos, with the numbers
+// The truckload order, with the numbers
 // ------------------------------------------------------------------------------------------------
 
 const SS = 143; // SS250ML cases per pallet
 const JA = 56; // JA1.5L cases per pallet
-const tawoosLines = (k = 1): OpenLine[] => [
+const truckloadLines = (k = 1): OpenLine[] => [
   { lineId: 'ss', orderId: 'o1', cases: 300 * k, kgPerCase: 6, casesPerPallet: SS },
   { lineId: 'ja', orderId: 'o1', cases: 500 * k, kgPerCase: 9.4, casesPerPallet: JA },
 ];
@@ -70,9 +70,9 @@ const nmwcFleet = (fill = 90, rule = true): FleetTruck[] =>
   }));
 
 describe('the room of a load by its customers (pallets.ts)', () => {
-  it('Tawoos is 11,027 units; one customer on 12 bays at 90% may use 12,000, several 10,800; the 11-bay truck holds 11,000', () => {
+  it('the truckload order is 11,027 units; one customer on 12 bays at 90% may use 12,000, several 10,800; the 11-bay truck holds 11,000', () => {
     expect(palletUnits(300, SS) + palletUnits(500, JA)).toBe(11_027);
-    expect(unitsOf(tawoosLines())).toBe(11_027);
+    expect(unitsOf(truckloadLines())).toBe(11_027);
     expect(SINGLE_CUSTOMER_FILL_PCT).toBe(100);
     expect(loadRoomUnits(12, 90, 100, 1)).toBe(12_000);
     expect(loadRoomUnits(12, 90, 100, 2)).toBe(10_800);
@@ -131,7 +131,7 @@ describe('the room of a load by its customers (pallets.ts)', () => {
 // ------------------------------------------------------------------------------------------------
 
 describe('classifyCustomer and the part sizes (split.ts)', () => {
-  it('Tawoos at 90%: FULL_TRUCK, alone on a 12-bay truck (never the 11-bay, 11,000 < 11,027)', () => {
+  it('the truckload order at 90%: FULL_TRUCK, alone on a 12-bay truck (never the 11-bay, 11,000 < 11,027)', () => {
     expect(classifyCustomer(800, 0, 11_027, nmwcFleet())).toEqual({ kind: 'FULL_TRUCK', bays: [12] });
     // At 95% it fits a 12-bay truck shared (11,400): an ordinary stop.
     expect(classifyCustomer(800, 0, 11_027, nmwcFleet(95))).toEqual({ kind: 'STOP' });
@@ -155,18 +155,18 @@ describe('classifyCustomer and the part sizes (split.ts)', () => {
     const split = choosePartCapacity(800, 0, nmwcFleet(90, false), 0, 11_027)!;
     expect(split.cap.palletUnits).toBe(10_800);
     expect(split.truckCode).toMatch(/-12$/);
-    const parts = splitIntoParts(tawoosLines(), split.cap);
+    const parts = splitIntoParts(truckloadLines(), split.cap);
     expect(parts.map((p) => unitsOf(p))).toEqual([10_797, 231]);
     expect(parts[1].reduce((a, x) => a + x.cases, 0)).toBe(33);
   });
 
-  it('Tawoos x1.2 (13.2 pallets): 11,995 alone + a 1,238 leftover; x2 (22.1 pallets): 2 parts, 12,000 + 10,054 (3 before)', () => {
-    const x12 = tawoosLines(1.2);
+  it('the truckload order x1.2 (13.2 pallets): 11,995 alone + a 1,238 leftover; x2 (22.1 pallets): 2 parts, 12,000 + 10,054 (3 before)', () => {
+    const x12 = truckloadLines(1.2);
     expect(unitsOf(x12)).toBe(13_233);
     const s12 = choosePartCapacity(960, 0, nmwcFleet(), 0, 13_233)!;
     expect(s12.cap.palletUnits).toBe(12_000); // every bay: each full part rides alone
     expect(splitIntoParts(x12, s12.cap).map((p) => unitsOf(p))).toEqual([11_995, 1_238]);
-    const x2 = tawoosLines(2);
+    const x2 = truckloadLines(2);
     expect(unitsOf(x2)).toBe(22_054);
     const s2 = choosePartCapacity(1600, 0, nmwcFleet(), 0, 22_054)!;
     expect(splitIntoParts(x2, s2.cap).map((p) => unitsOf(p))).toEqual([12_000, 10_054]);
@@ -243,13 +243,13 @@ const truckRow = (id: string, bays: number) => ({
 const FLEET = () => [4, 5, 5, 6, 11, 12, 12, 12, 12].map((b, i) => truckRow(`T${i + 1}`, b));
 function customer(id: string, code: string, over: Record<string, unknown> = {}) {
   return {
-    id, code, branchCode: 'SUWIQ', name: `Shop ${code}`, lat: 23.6, lng: 58.4, priority: 3, priorityConfirmed: false, avgServiceTimeMin: 10, serviceTimeConfirmed: false,
+    id, code, branchCode: 'BR01', name: `Shop ${code}`, lat: 23.6, lng: 58.4, priority: 3, priorityConfirmed: false, avgServiceTimeMin: 10, serviceTimeConfirmed: false,
     customerType: null, hardWindowStartMin: null, hardWindowEndMin: null, prefWindowStartMin: null, prefWindowEndMin: null, locationVerified: true,
     createdFromUpload: false, active: true, smallTruckOnly: false, ...over,
   };
 }
-/** The production order: SS250ML x ss + JA1.5L x ja cases (no case weight entered: weight is not a limit). */
-function tawoosOrder(cust: ReturnType<typeof customer>, k = 1) {
+/** The truckload order: SS250ML x ss + JA1.5L x ja cases (no case weight entered: weight is not a limit). */
+function truckloadOrder(cust: ReturnType<typeof customer>, k = 1) {
   const ss = Math.round(300 * k);
   const ja = Math.round(500 * k);
   const line = (id: string, cases: number, code: string, casesPerPallet: number) => ({
@@ -280,43 +280,43 @@ beforeEach(() => {
 });
 
 describe('buildDispatchRequest: one customer that fills a truck', () => {
-  const TAWOOS = customer('cust-tawoos', 'CCT0005');
+  const TRUCKLOAD = customer('cust-truckload', 'XAA0001');
 
-  it('Tawoos at 90%: ONE stop of 11,027 units, the rule sent, and the warning names it', async () => {
-    wire([tawoosOrder(TAWOOS)]);
+  it('the truckload order at 90%: ONE stop of 11,027 units, the rule sent, and the warning names it', async () => {
+    wire([truckloadOrder(TRUCKLOAD)]);
     const b = await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW });
-    expect(b.request.stops.map((s) => [s.stop_id, s.demand_cases, s.demand_pallet_units])).toEqual([['cust-tawoos', 800, 11_027]]);
+    expect(b.request.stops.map((s) => [s.stop_id, s.demand_cases, s.demand_pallet_units])).toEqual([['cust-truckload', 800, 11_027]]);
     expect(b.request.config.pallet_fill_pct).toBe(90);
     expect(b.request.config.single_customer_fill_pct).toBe(100);
     expect(b.warnings).toContain(
-      'One customer fills a truck: CCT0005/SUWIQ 11.0 pallets, alone on a 12-bay truck (every bay; trucks with several customers keep 90%).',
+      'One customer fills a truck: XAA0001/BR01 11.0 pallets, alone on a 12-bay truck (every bay; trucks with several customers keep 90%).',
     );
     expect(b.warnings.join(' ')).not.toMatch(/Split delivery/);
   });
 
   it('with split deliveries off it is still one stop (classified before the switch), never "larger than any truck"', async () => {
-    wire([tawoosOrder(TAWOOS)], { splitDeliveries: false });
+    wire([truckloadOrder(TRUCKLOAD)], { splitDeliveries: false });
     const b = await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW });
-    expect(b.request.stops.map((s) => s.stop_id)).toEqual(['cust-tawoos']);
-    expect(b.warnings.join(' ')).toMatch(/One customer fills a truck: CCT0005\/SUWIQ 11\.0 pallets/);
+    expect(b.request.stops.map((s) => s.stop_id)).toEqual(['cust-truckload']);
+    expect(b.warnings.join(' ')).toMatch(/One customer fills a truck: XAA0001\/BR01 11\.0 pallets/);
   });
 
   it('at 95% it fits a 12-bay truck shared: an ordinary stop, no warning', async () => {
-    wire([tawoosOrder(TAWOOS)], { palletFillPct: 95 });
+    wire([truckloadOrder(TRUCKLOAD)], { palletFillPct: 95 });
     const b = await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW });
-    expect(b.request.stops.map((s) => s.stop_id)).toEqual(['cust-tawoos']);
+    expect(b.request.stops.map((s) => s.stop_id)).toEqual(['cust-truckload']);
     expect(b.warnings.join(' ')).not.toMatch(/One customer fills a truck/);
   });
 
   it('x1.2 (13.2 pallets) is split: a full part of 11,995 that rides alone and a leftover of 1,238 the warning names', async () => {
-    wire([tawoosOrder(TAWOOS, 1.2)]);
+    wire([truckloadOrder(TRUCKLOAD, 1.2)]);
     const b = await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW });
     expect(b.request.stops.map((s) => [s.stop_id, s.demand_pallet_units])).toEqual([
-      ['cust-tawoos#1', 11_995],
-      ['cust-tawoos#2', 1_238],
+      ['cust-truckload#1', 11_995],
+      ['cust-truckload#2', 1_238],
     ]);
     expect(b.request.stops.reduce((a, s) => a + s.demand_cases, 0)).toBe(960);
-    expect(b.warnings.join(' ')).toMatch(/Split delivery \(bigger than any truck\): CCT0005\/SUWIQ \(960 cases, 13\.2 pallets, 0 kg\) in 2 parts sized for T6, leftover 1\.2 pallets \(177 cases\)\./);
+    expect(b.warnings.join(' ')).toMatch(/Split delivery \(bigger than any truck\): XAA0001\/BR01 \(960 cases, 13\.2 pallets, 0 kg\) in 2 parts sized for T6, leftover 1\.2 pallets \(177 cases\)\./);
   });
 
   it('a small-truck-only customer of 5.6 pallets fills its 6-bay truck alone (one stop, small trucks only)', async () => {
@@ -331,7 +331,7 @@ describe('buildDispatchRequest: one customer that fills a truck', () => {
     const b = await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW });
     expect(b.request.stops).toHaveLength(1);
     expect(b.request.stops[0]).toMatchObject({ stop_id: 'cust-mt', demand_pallet_units: 5_600, allowed_truck_ids: ['T1', 'T2', 'T3', 'T4'] });
-    expect(b.warnings).toContain('One customer fills a truck: MT1/SUWIQ 5.6 pallets, alone on a 6-bay truck (every bay; trucks with several customers keep 90%).');
+    expect(b.warnings).toContain('One customer fills a truck: MT1/BR01 5.6 pallets, alone on a 6-bay truck (every bay; trucks with several customers keep 90%).');
   });
 });
 
@@ -371,7 +371,7 @@ const RULES: PlanRules = {
 };
 const VERIFIED: FeasibilityReport = { status: 'VERIFIED', timing: 'EXACT', violations: [] };
 const snap = (single: number | null) => ({
-  v: 1, code: 'R1-5187', capacityCases: 1140, capacityWeightKg: 0, fixedCostPerDay: 0, tripCost: 0, costPerKm: 0, kmPerLitre: null,
+  v: 1, code: 'T-01', capacityCases: 1140, capacityWeightKg: 0, fixedCostPerDay: 0, tripCost: 0, costPerKm: 0, kmPerLitre: null,
   availableFromMin: null, availableToMin: null, maxTripsPerDay: null, bays: 12, palletFillPct: 90, palletRoomUnits: 10_800,
   ...(single !== null ? { singleCustomerFillPct: single } : {}),
   rules: RULES, source: 'PLAN', capturedAt: '2026-10-14T03:00:00Z',
@@ -386,42 +386,42 @@ function assignment(orderId: string, customerId: string, units: number, seq = 1)
 function loadRow(assignments: FeasibilityRow['assignments'], single: number | null = 100, bays = 12): FeasibilityRow {
   return {
     id: 'L1', truckId: 't1', loadNo: 1, status: 'PLANNED', departMin: 400, returnMin: 560, cases: 800, weightKg: 0, carriedFromLoadId: null,
-    truckSnapshotJson: snap(single), truck: { code: 'R1-5187', capacityCases: 1140, capacityWeightKg: 0, bays },
+    truckSnapshotJson: snap(single), truck: { code: 'T-01', capacityCases: 1140, capacityWeightKg: 0, bays },
     assignments,
   };
 }
 const codes = (f: ReturnType<typeof checkPlanFeasibility>) => f.violations.map((v) => v.code);
 
 describe('the dispatch check measures each load by its customers', () => {
-  it('Tawoos alone at 11.03 on 12 bays passes (room 12.0, one customer); no false CAPACITY_CHANGED', () => {
-    const inp = feasibilityInputFromRows([loadRow([assignment('o1', 'tawoos', 11_027)])], 'sc1', undefined, null, { palletFillPctNow: 90 });
+  it('the truckload customer alone at 11.03 on 12 bays passes (room 12.0, one customer); no false CAPACITY_CHANGED', () => {
+    const inp = feasibilityInputFromRows([loadRow([assignment('o1', 'truckload', 11_027)])], 'sc1', undefined, null, { palletFillPctNow: 90 });
     expect(inp.loads[0].capacity).toEqual({ cases: 1140, kg: 0, palletRoomUnits: 12_000, bays: 12, fillPct: 100, oneCustomer: true });
     expect(inp.loads[0].capacityNow).toMatchObject({ bays: 12, fillPct: 100, palletRoomUnits: 12_000, oneCustomer: true });
     expect(codes(checkPlanFeasibility(inp))).toEqual([]);
     // Two rows (two orders) of the same customer are one customer too.
-    const two = feasibilityInputFromRows([loadRow([assignment('o1', 'tawoos', 9_000), assignment('o2', 'tawoos', 2_027, 1)])], 'sc1', undefined, null, { palletFillPctNow: 90 });
+    const two = feasibilityInputFromRows([loadRow([assignment('o1', 'truckload', 9_000), assignment('o2', 'truckload', 2_027, 1)])], 'sc1', undefined, null, { palletFillPctNow: 90 });
     expect(codes(checkPlanFeasibility(two))).toEqual([]);
     // The Pallet fill changed since (90 -> 95): a one-customer load still has every bay: no warning.
-    const later = feasibilityInputFromRows([loadRow([assignment('o1', 'tawoos', 11_027)])], 'sc1', undefined, null, { palletFillPctNow: 95 });
+    const later = feasibilityInputFromRows([loadRow([assignment('o1', 'truckload', 11_027)])], 'sc1', undefined, null, { palletFillPctNow: 95 });
     expect(codes(checkPlanFeasibility(later))).toEqual([]);
   });
 
   it('a load of two customers at 11.03 is over its room (10.8 at 90%): CAPACITY_PALLETS', () => {
-    const inp = feasibilityInputFromRows([loadRow([assignment('o1', 'tawoos', 9_000), assignment('o2', 'other', 2_027, 2)])], 'sc1', undefined, null, { palletFillPctNow: 90 });
+    const inp = feasibilityInputFromRows([loadRow([assignment('o1', 'truckload', 9_000), assignment('o2', 'other', 2_027, 2)])], 'sc1', undefined, null, { palletFillPctNow: 90 });
     expect(inp.loads[0].capacity).toEqual({ cases: 1140, kg: 0, palletRoomUnits: 10_800, bays: 12, fillPct: 90 });
     const f = checkPlanFeasibility(inp);
     expect(codes(f)).toEqual(['CAPACITY_PALLETS']);
-    expect(f.violations[0].message).toBe('R1-5187 load 1 needs 11.0 pallets; the truck takes 10.8 (12 bays at 90% fill).');
+    expect(f.violations[0].message).toBe('T-01 load 1 needs 11.0 pallets; the truck takes 10.8 (12 bays at 90% fill).');
   });
 
   it('one customer over every bay names the one-customer room', () => {
-    const f = checkPlanFeasibility(feasibilityInputFromRows([loadRow([assignment('o1', 'tawoos', 12_100)])], 'sc1', undefined, null));
+    const f = checkPlanFeasibility(feasibilityInputFromRows([loadRow([assignment('o1', 'truckload', 12_100)])], 'sc1', undefined, null));
     expect(codes(f)).toEqual(['CAPACITY_PALLETS']);
-    expect(f.violations[0].message).toBe('R1-5187 load 1 needs 12.1 pallets; the truck takes 12.0 (12 bays at 100% fill, one customer).');
+    expect(f.violations[0].message).toBe('T-01 load 1 needs 12.1 pallets; the truck takes 12.0 (12 bays at 100% fill, one customer).');
   });
 
   it('a load planned before the rule (no echo in its snapshot) keeps the room it was planned with, and its check hash', () => {
-    const rows = [loadRow([assignment('o1', 'tawoos', 11_027)], null)];
+    const rows = [loadRow([assignment('o1', 'truckload', 11_027)], null)];
     const inp = feasibilityInputFromRows(rows, 'sc1', undefined, null, { palletFillPctNow: 90 });
     // Exactly the fields an older web gave (no oneCustomer key anywhere): the hash reads only these.
     expect(inp.loads[0].capacity).toEqual({ cases: 1140, kg: 0, palletRoomUnits: 10_800, bays: 12, fillPct: 90 });
@@ -431,7 +431,7 @@ describe('the dispatch check measures each load by its customers', () => {
     const noIds = rows.map((r) => ({ ...r, assignments: r.assignments.map((a) => ({ ...a, order: { ...a.order, customerId: undefined } })) }));
     expect(inputHash(feasibilityInputFromRows(noIds, 'sc1', undefined, null, { palletFillPctNow: 90 }))).toBe(inputHash(inp));
     // A one-customer load under the rule hashes differently from the same load before it (its room differs).
-    expect(inputHash(feasibilityInputFromRows([loadRow([assignment('o1', 'tawoos', 11_027)])], 'sc1', undefined, null, { palletFillPctNow: 90 }))).not.toBe(inputHash(inp));
+    expect(inputHash(feasibilityInputFromRows([loadRow([assignment('o1', 'truckload', 11_027)])], 'sc1', undefined, null, { palletFillPctNow: 90 }))).not.toBe(inputHash(inp));
     expect(VERIFIED.status).toBe('VERIFIED');
   });
 });
