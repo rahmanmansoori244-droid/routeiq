@@ -81,7 +81,7 @@ describe('checkManualLocation: a save that is not a hand pin is read again (L2)'
   });
 
   it('text that cannot be read, or no text at all, is refused with what to do', () => {
-    const place = check('https://www.google.com/maps/place/Lulu+Hypermarket', 23.5859, 58.4059);
+    const place = check('https://www.google.com/maps/place/Lumo+Hypermarket', 23.5859, 58.4059);
     expect(place).toMatchObject({ ok: false, code: 'PIN_REQUIRED', message: expect.stringMatching(/only names a place/) });
     expect(check(`23°99'00"N 58°24'00"E`, 23.5859, 58.4059)).toMatchObject({
       ok: false,

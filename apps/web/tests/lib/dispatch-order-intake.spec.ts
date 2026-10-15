@@ -558,10 +558,10 @@ describe('resolveOrderLines', () => {
         row({ so: 'S1', date: D, cust: 'C001', branch: 'B01', item: 'W500', qty: '5' }),
         row({ so: 'S2', date: D, cust: 'C001', branch: 'B01', item: 'NOWT', qty: '5' }),
       ],
-      [cust('C001', 'B01', { lat: null, lng: null, name: 'Lulu Bawshar' })],
+      [cust('C001', 'B01', { lat: null, lng: null, name: 'Lumo Bawshar' })],
       [prod('W500'), prod('NOWT', { weightPerCaseKg: 0 })],
     );
-    expect(res.issues.customersWithoutLocation).toEqual(['C001 / B01 Lulu Bawshar']);
+    expect(res.issues.customersWithoutLocation).toEqual(['C001 / B01 Lumo Bawshar']);
     expect(res.issues.productsWithoutWeight).toEqual(['NOWT']);
   });
 

@@ -25,7 +25,7 @@ const VERIFIED: FeasibilityReport = { status: 'VERIFIED', timing: 'EXACT', viola
 /** A stop open 06:00-11:00, served 10:40, unloading 35 min: finished 11:15. */
 function lateFinish(rules: PlanRules, over: Partial<FeasLoad> = {}): FeasLoad {
   const s: FeasStop = {
-    orderId: 'o1', sequence: 1, label: 'Lulu Bausher', cases: 40, kg: 400, kgUnknown: false,
+    orderId: 'o1', sequence: 1, label: 'Lumo Bausher', cases: 40, kg: 400, kgUnknown: false,
     etaMin: 640, serviceStartMin: 640, departureMin: 675, hardWindowOk: true, hardStartMin: 360, hardEndMin: 660,
   };
   return {
@@ -41,7 +41,7 @@ describe('finish by closing: the web gate checks each load under the rule it was
     const f = run(lateFinish({ ...RULES, windowRule: 'FINISH' }));
     expect(f.violations.map((v) => v.code)).toEqual(['HARD_WINDOW']);
     expect(f.violations[0]).toMatchObject({ severity: 'BLOCK', loadNo: 1 });
-    expect(f.violations[0].message).toBe('T01 load 1: Lulu Bausher finishes unloading at 11:15, after its receiving hours end (11:00).');
+    expect(f.violations[0].message).toBe('T01 load 1: Lumo Bausher finishes unloading at 11:15, after its receiving hours end (11:00).');
     expect(f.ok).toBe(false);
   });
 

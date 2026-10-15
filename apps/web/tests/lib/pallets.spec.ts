@@ -173,7 +173,7 @@ const VERIFIED: FeasibilityReport = { status: 'VERIFIED', timing: 'EXACT', viola
 
 function pstop(orderId: string, cases: number, palletUnits?: number | null): FeasStop {
   return {
-    orderId, sequence: 1, label: 'Lulu', cases, kg: cases * 5, kgUnknown: false,
+    orderId, sequence: 1, label: 'Lumo', cases, kg: cases * 5, kgUnknown: false,
     etaMin: 420, serviceStartMin: 420, departureMin: 440, hardWindowOk: true, hardStartMin: 360, hardEndMin: 840,
     ...(palletUnits === undefined ? {} : { palletUnits }),
   };

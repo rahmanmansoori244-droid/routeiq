@@ -31,7 +31,7 @@ const RULES: PlanRules = {
 
 function stop(over: Partial<FeasStop> = {}): FeasStop {
   return {
-    orderId: 'o1', sequence: 1, label: 'Lulu Bausher', cases: 40, kg: 400, kgUnknown: false,
+    orderId: 'o1', sequence: 1, label: 'Lumo Bausher', cases: 40, kg: 400, kgUnknown: false,
     etaMin: 420, serviceStartMin: 420, departureMin: 440, hardWindowOk: true, hardStartMin: 360, hardEndMin: 840, ...over,
   };
 }

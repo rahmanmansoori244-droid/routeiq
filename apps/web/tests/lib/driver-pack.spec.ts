@@ -35,9 +35,9 @@ const OPTS = { tenantName: 'NMWC Test' };
 /** Fixture + a customer split over two loads + a stop without a location. */
 function withSplitAndNoLocation(): PlanDetail {
   const d = fixture();
-  const nesto = d.loads[2].stops[0]; // C004 on the long truck, trip 1
-  d.loads[2].stops[0] = { ...nesto, split: { part: 1, parts: 2, restUnserved: false } };
-  d.loads[1].stops.push({ ...nesto, sequence: 3, cases: 30, split: { part: 2, parts: 2, restUnserved: true } });
+  const nexus = d.loads[2].stops[0]; // C004 on the long truck, trip 1
+  d.loads[2].stops[0] = { ...nexus, split: { part: 1, parts: 2, restUnserved: false } };
+  d.loads[1].stops.push({ ...nexus, sequence: 3, cases: 30, split: { part: 2, parts: 2, restUnserved: true } });
   d.loads[0].stops[1] = { ...d.loads[0].stops[1], lat: null, lng: null, mapsUrl: null };
   return d;
 }
@@ -156,7 +156,7 @@ describe('driverPackModel', () => {
     const st = driverPackModel(d, OPTS).sheets[0].stops;
     expect(st.map((s) => s.sequence)).toEqual([1, 2]);
     expect(st[0]).toMatchObject({
-      customerName: 'Lulu Hypermarket Bausher',
+      customerName: 'Lumo Hypermarket Bausher',
       customerCode: 'C001',
       branchCode: 'B1',
       customerType: 'HYPERMARKET',
@@ -294,8 +294,8 @@ describe('driver links', () => {
     expect(lines[1]).toBe('NMWC · Delivery 2026-09-25 · Plan v2');
     expect(lines[2]).toBe('Depart 06:00 · 2 stops · 110 cases');
     // Phase B: each stop says when unloading must be finished.
-    const s1 = lines.findIndex((x) => /^1\. 06:40 \(unload until \d\d:\d\d\) Lulu Hypermarket Bausher \(C001\/B1\) · 70 cs$/.test(x));
-    const s2 = lines.findIndex((x) => /^2\. 07:30 \(unload until \d\d:\d\d\) Al Fair Qurum \(C002\) · 40 cs$/.test(x));
+    const s1 = lines.findIndex((x) => /^1\. 06:40 \(unload until \d\d:\d\d\) Lumo Hypermarket Bausher \(C001\/B1\) · 70 cs$/.test(x));
+    const s2 = lines.findIndex((x) => /^2\. 07:30 \(unload until \d\d:\d\d\) Al Fawz Qurum \(C002\) · 40 cs$/.test(x));
     expect(s1).toBeGreaterThan(2);
     expect(s2).toBeGreaterThan(s1);
     expect(lines[s1 + 1]).toBe('https://www.google.com/maps/search/?api=1&query=23.5859,58.3829');
@@ -349,7 +349,7 @@ describe('renderDriverPackPdf', () => {
     expect(tel(first)).toHaveLength(1); // stop 2 prints none
     // Next to the name and address line, before the access notes.
     const at = first.indexOf(sq('Tel 9123 4567'));
-    expect(first.indexOf(sq('Lulu Hypermarket Bausher'))).toBeLessThan(at);
+    expect(first.indexOf(sq('Lumo Hypermarket Bausher'))).toBeLessThan(at);
     expect(first.indexOf(sq('Bausher, Sultan Qaboos St, near Muscat Grand Mall'))).toBeLessThan(at);
     expect(at).toBeLessThan(first.indexOf(sq('Access: Receiving at the back gate')));
     // A stop without an address: the Tel line follows the name.
@@ -399,7 +399,7 @@ describe('text the built-in font cannot print', () => {
   it('keeps Latin text, swaps look-alikes and marks each unprintable run once', () => {
     expect(pdfSafe('Café Mañana – 2×')).toEqual({ text: 'Café Mañana – 2×', lost: false });
     expect(pdfSafe('Zeta هايبر Market')).toEqual({ text: `Zeta ${UNPRINTABLE} Market`, lost: true });
-    expect(pdfSafe('لولو هايبر ماركت Lulu')).toEqual({ text: '[?] Lulu', lost: true });
+    expect(pdfSafe('لومو هايبر ماركت Lumo')).toEqual({ text: '[?] Lumo', lost: true });
     expect(pdfSafe('السيب، شارع 18')).toEqual({ text: '[?] 18', lost: true });
     expect(pdfSafe('Gate 🚚 3')).toEqual({ text: 'Gate [?] 3', lost: true });
     expect(pdfSafe('Łódź Store')).toEqual({ text: 'Lódz Store', lost: false });
@@ -567,7 +567,7 @@ describe('frozen plan facts and unverified times on the sheet (review F08 / F04)
     const d = changedAndUnverified();
     const trips = tripsByTruck(d.loads);
     const l1 = whatsappText(d.run, d.loads[0], trips.get('t1')!).split('\n');
-    const at = l1.findIndex((x) => /^1\. 06:40 \(unload until \d\d:\d\d\) Lulu Hypermarket Bausher \(C001\/B1\) · 70 cs$/.test(x));
+    const at = l1.findIndex((x) => /^1\. 06:40 \(unload until \d\d:\d\d\) Lumo Hypermarket Bausher \(C001\/B1\) · 70 cs$/.test(x));
     expect(at).toBeGreaterThan(0);
     // The planned pin stays the stop's pin (and the route's); the change and the new pin follow it.
     expect(l1[at + 1]).toBe(pinUrl({ lat: ORDERS[0].lat, lng: ORDERS[0].lng }));

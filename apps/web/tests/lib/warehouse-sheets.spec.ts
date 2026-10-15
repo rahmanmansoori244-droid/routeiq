@@ -85,8 +85,8 @@ describe('loadSheetModel', () => {
     expect(s1.products.map((p) => `${p.productCode}x${p.cases}`)).toEqual(['JAB-1500-6x20', 'TAN-500-24x80', 'TAN-5Gx10']);
     expect(s1.totalCases).toBe(110);
     expect(s1.invoices.map((i) => [i.stop, i.invoiceNo, i.customerName, i.cases])).toEqual([
-      [1, 'SO-1001', 'Lulu Hypermarket Bausher', 70],
-      [2, 'SO-1002', 'Al Fair Qurum', 40],
+      [1, 'SO-1001', 'Lumo Hypermarket Bausher', 70],
+      [2, 'SO-1002', 'Al Fawz Qurum', 40],
     ]);
     expect(s1.invoices[0].lines.map((l) => `${l.productCode}x${l.cases}`)).toEqual(['JAB-1500-6x20', 'TAN-500-24x50']);
     expect(s1.invoices[0].branchCode).toBe('B1');
@@ -213,8 +213,8 @@ describe('returnNoteModel', () => {
     expect(n1.backAt).toBe('15:58');
     expect(n1.notBack).toBe(false);
     expect(n1.stops.map((s) => [s.customerName, s.result, s.delivered, s.returned])).toEqual([
-      ['Lulu Hypermarket Bausher', 'Delivered', 70, 0],
-      ['Al Fair Qurum', 'Partly delivered', 20, 20],
+      ['Lumo Hypermarket Bausher', 'Delivered', 70, 0],
+      ['Al Fawz Qurum', 'Partly delivered', 20, 20],
     ]);
     expect(n1.returnStops.map((s) => s.stop)).toEqual([2]);
     expect(n1.returnStops[0].reason).toBe('Damaged goods');

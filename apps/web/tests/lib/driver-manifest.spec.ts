@@ -53,7 +53,7 @@ describe('projectManifest', () => {
     expect(m.depot).toMatchObject({ code: 'MCT', name: 'Muscat Depot' });
     expect(m.drivers).toEqual([{ name: 'Salim Al Harthy', casual: false }]);
     // Another truck's customers never appear.
-    expect(JSON.stringify(m)).not.toContain('Nesto Barka');
+    expect(JSON.stringify(m)).not.toContain('Nexus Barka');
   });
 
   it('only a DISPATCHED load is actionable', () => {

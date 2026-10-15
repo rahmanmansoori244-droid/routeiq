@@ -25,7 +25,7 @@ const C = (over: Partial<CustomerForPlanning> = {}): CustomerForPlanning => ({
   id: 'c1',
   code: 'C001',
   branchCode: null,
-  name: 'Lulu Bawshar',
+  name: 'Lumo Bawshar',
   lat: 23.5859,
   lng: 58.4059,
   priority: 3,

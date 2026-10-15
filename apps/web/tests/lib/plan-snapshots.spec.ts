@@ -27,11 +27,11 @@ import { configProblems } from '@/lib/startup-checks';
 import { fixture } from './plan-detail-fixture';
 
 const snap: StopSnapshot = {
-  v: 1, customerId: 'c1', code: 'C1', branchCode: null, name: 'Lulu Bausher', customerType: null, lat: 23.6, lng: 58.4,
+  v: 1, customerId: 'c1', code: 'C1', branchCode: null, name: 'Lumo Bausher', customerType: null, lat: 23.6, lng: 58.4,
   address: 'Sultan Qaboos St', accessNotes: null, hardStartMin: 360, hardEndMin: 840, prefStartMin: 420, prefEndMin: 600,
   serviceMin: 20, priority: 1, source: 'PLAN', capturedAt: '2026-09-26T12:00:00Z',
 };
-const live = { name: 'Lulu Bausher', address: 'Sultan Qaboos St', lat: 23.6, lng: 58.4, hardStartMin: 360, hardEndMin: 840, prefStartMin: 420, prefEndMin: 600 };
+const live = { name: 'Lumo Bausher', address: 'Sultan Qaboos St', lat: 23.6, lng: 58.4, hardStartMin: 360, hardEndMin: 840, prefStartMin: 420, prefEndMin: 600 };
 
 describe('stopMasterChanges', () => {
   it('nothing changed, or a pin moved less than 50 m (a re-pasted link): nothing to report', () => {
@@ -42,7 +42,7 @@ describe('stopMasterChanges', () => {
   });
 
   it('a moved pin, new hours, a new name or address are each reported once, with the new values', () => {
-    const c = stopMasterChanges(snap, { ...live, lat: 23.6006, hardEndMin: 720, name: 'Lulu Hypermarket Bausher', address: null });
+    const c = stopMasterChanges(snap, { ...live, lat: 23.6006, hardEndMin: 720, name: 'Lumo Hypermarket Bausher', address: null });
     expect(c.map((x) => x.kind)).toEqual(['LOCATION', 'HOURS', 'NAME', 'ADDRESS']);
     expect(c[0]).toMatchObject({ newLat: 23.6006, newLng: 58.4 });
     expect(c[0].movedM).toBeGreaterThan(60);

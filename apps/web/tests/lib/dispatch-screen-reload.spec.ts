@@ -51,7 +51,7 @@ beforeEach(() => {
 const DEPOT = { id: 'd1', code: 'MCT', name: 'Muscat', lat: 23.58, lng: 58.4 };
 const AREA = { minLat: 20, maxLat: 26, minLng: 55, maxLng: 60 };
 const customer = {
-  customerId: 'c1', code: 'C001', branchCode: 'B1', name: 'Lulu Hypermarket Bausher', customerType: 'HYPERMARKET', priority: 1, prioritySource: 'CUSTOMER',
+  customerId: 'c1', code: 'C001', branchCode: 'B1', name: 'Lumo Hypermarket Bausher', customerType: 'HYPERMARKET', priority: 1, prioritySource: 'CUSTOMER',
   serviceMin: 20, serviceSource: 'CUSTOMER', hardWindowStartMin: null, hardWindowEndMin: null, prefWindowStartMin: null, prefWindowEndMin: null, window: 'Any time',
   lat: 23.5859, lng: 58.3829, locationVerified: true, orders: 1, cases: 70, issues: [{ code: 'TYPE_MISSING', blocking: false, message: 'x' }], blocking: false,
 };
