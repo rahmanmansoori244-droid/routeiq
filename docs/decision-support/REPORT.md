@@ -3,7 +3,8 @@
 For the NMWC operations owner. Branch `feat/decision-support`. All the evidence (E1-E5, on SYNTHETIC days and on the
 REAL 15 Oct 2026 requests) measures the code recorded as `6b6de09d576c` in the result files: this branch's code with
 all 19 review fixes, before the privacy rule on the IVMS aggregates (section 7.4). That rule changed no figure the
-experiments use, so the results stand.
+experiments use, so the results stand. Experiment E6 (the engine at production settings, section 3.8) measures the
+code recorded as `bdf62d077468`: the same engine files, with E6 added to the evidence suite.
 
 This is a **prototype**. It is not deployed, and the live planner does not use it. The design is in
 [DESIGN.md](DESIGN.md); the raw evidence is in [results/](results/INDEX.md).
@@ -25,7 +26,9 @@ They do not replace it and never change a plan in use. They answer five question
 There are 120 automatic tests (5 of them added on 15 Oct for experiment E6, the engine at production settings, section 7.1). The evidence suite (experiments E1-E5) ran in full: on invented, NMWC-like days
 (SYNTHETIC) on GitHub's servers, and on two real RouteIQ requests of 15 Oct 2026 (REAL, anonymised when read) on the
 project's codespace, where the private data stays (section 3.0). One real day is one sample: the REAL results show
-what the tools say about that day, not a pattern across days.
+what the tools say about that day, not a pattern across days. Experiment E6, the engine run as production runs it
+(THOROUGH and QUICK, all three plan options, worker processes), also ran in full on 15 Oct: 58 runs on the same two
+real requests and three synthetic days (section 3.8).
 
 **Most important findings**
 
@@ -50,7 +53,8 @@ what the tools say about that day, not a pattern across days.
    applies by default (RECOMMENDED) was beaten by the MIN_TRUCKS option in every seed (5.27-34.01 OMR cheaper and 1, 2
    and 8 more stops; but the mean gaps of 17.75 OMR and 3.7 stops are within this request's seed spread of 21.25 OMR
    and 6 stops, and seed 3's 78-stop RECOMMENDED run gives 8 of the 11 extra stops: suggestive, not established).
-   Production settings may differ (E4, REAL).
+   Production settings may differ (E4, REAL). At production settings this did not happen: there RECOMMENDED served as
+   many stops as the other options in all 8 runs on this request and was the cheapest in 6 (E6, REAL, section 3.8).
 3. **On small days the engine serves as many stops as the proven best plan.** On 100 small SYNTHETIC days with a
    proven best plan, each run with and without the preferred-window prices (200 engine runs), the engine served as
    many stops as the proven best, with the same priority value, every time, and never broke one of the oracle's
@@ -87,12 +91,21 @@ what the tools say about that day, not a pattern across days.
    arriving during the day, both re-planning policies served 1-3 fewer stops than the morning plan in every world and
    had 5.3 fewer late stops; B left a P1 stop out in 1 of 3 worlds (REAL request, SIMULATED day: E3, 3 worlds). In
    some synthetic worlds too, B and C left out a P1 or P2 stop the morning plan delivered (possibly late).
+8. **At production settings, the 20-minute search did not beat the 2-minute one on the real day, and plans still
+   vary from run to run.** On the two 15 Oct requests, THOROUGH's RECOMMENDED plan cost 30.76 and 57.40 OMR more
+   than QUICK's on average (paired by seed), without serving more stops on average; its search had mostly settled by
+   5 minutes. Three THOROUGH runs of the 86-stop request cost 599.09 to 668.75 OMR with 11 or 12 trucks; five QUICK
+   runs 540.22 to 652.90 OMR with 10 to 12. THOROUGH served more only on the bigger synthetic days that leave stops
+   out (+3.2 stops). Over 46 runs, RECOMMENDED never served fewer stops than another option. A small change of the
+   day (one stop, one window, one truck) re-shuffled 65 to 83 of 86 stops in a fresh optimization, as much as
+   another seed does (E6, REAL and SYNTHETIC, section 3.8).
 
 **What to do next**
 
-- Measure the search noise with THOROUGH searches and the second route search (production settings) on 2-3 real days;
-  this run used 20 s and 40 s QUICK without the second search.
-- Check, at production settings, whether RECOMMENDED leaves out stops that MIN_TRUCKS or MIN_DISTANCE serve (E4, REAL).
+- Done on 15 Oct (E6, section 3.8): the search noise at production settings on the two 15 Oct requests and three
+  synthetic days, and whether RECOMMENDED leaves out stops that MIN_TRUCKS or MIN_DISTANCE serve (it did not serve
+  fewer in any of 46 runs). Still to do: the same on 2-3 more real days (one day is one sample); the second route
+  search, which the engine skipped on every E6 day; and a re-plan with plan continuity after a small change.
 - Start recording, per customer: whether a window is a genuine receiving time or a salesman's preference, and whether
   afternoon delivery is accepted. Record margins per case if available.
 - Plan a measured unloading trial before counting on faster unloading.
@@ -105,6 +118,7 @@ what the tools say about that day, not a pattern across days.
 | Search, seed | The engine searches for a good plan for a fixed time. A seed is a different starting order of the stops; different seeds make the search end at different plans for the same day. |
 | Search noise | How much the result changes between seeds, or between runs, of the same day with the same search time. |
 | QUICK, THOROUGH | The engine's two search modes. QUICK: a fixed time by day size (5 s up to 25 stops, 20 s up to 120 stops, more for larger days). THOROUGH: up to 20 minutes, stopping once it stops improving; the default for tomorrow's plan. |
+| PROD, QUICKP | E6's two settings, both run as production runs the engine (all three plan options in one request, worker processes, the second route search on): PROD = THOROUGH, at most 1,200 s for the whole request; QUICKP = QUICK, the automatic time by day size. |
 | Cash (OMR) | What a plan costs in money: truck fixed cost, trip cost, distance, fuel, driver pay and overtime (the engine's own cost model). |
 | ARTIFICIAL penalty | A price the engine uses only to steer its search (for leaving a stop out, missing a preferred window, arriving early). Written in OMR-equivalent but **not money**; never added to cash. |
 | Time and capacity | Minutes, trips, trucks and pallets: a third kind of number, kept apart from cash and from penalties. |
@@ -281,7 +295,7 @@ the depot. Three policies are compared on the same worlds:
 | `synth.py` | Builds SYNTHETIC NMWC-like days of 280-400 invoices: customers around public Muscat district centres, remote small orders in Quriyat, Samail and Bidbid, a mixed fleet of 4-14 bay trucks, tight morning windows for hypermarkets, about 25% of invoices of 1-3 cases. Every invented number is listed. |
 | `history.py` | Reads a real day from outside the repository, replaces every id with a label, and models uncertain travel and unloading times. |
 | `ivms.py` | Turns the owner's IVMS truck GPS report and the 13 Oct truck evidence into aggregates only (`data/ivms_aggregates.json`): speeds by hour, stop times, unloading per chain, visit frequency. It refuses to write a file that contains a name, plate, address or customer id it read, and it publishes figures for a region only when at least 3 vehicles drive there (section 7.4). |
-| `experiments.py` | The evidence suite E1-E5. Caches every solve, splits the work into lanes, and writes the result files. Checks every output against the real days' ids and coordinates before writing it. |
+| `experiments.py` | The evidence suite E1-E6. Caches every solve, splits the work into lanes, and writes the result files. Checks every output against the real days' ids and coordinates before writing it. |
 
 **How to run the whole evidence suite** (on the codespace, 4 lanes, then the report):
 
@@ -296,6 +310,12 @@ The lanes write only to the run cache (`~/ds-runs`, outside the repository); onl
 Without `--out-dir` the results go to `docs/decision-support/results/` in the checkout. With the real days present,
 always pass `--out-dir` outside the repository, and copy files into `results/` only after the leak check and the
 owner's OK, because the repository is public.
+
+Experiment E6 is not part of `all`. Run it one engine run at a time per machine, without lanes (each run uses the
+machine's CPUs through worker processes, as production does), for example one item with
+`python -m decision_support.experiments e6 --only 'E6/REAL-15OCT/PROD/s1/'`, then the report with
+`python -m decision_support.experiments e6 --report --out-dir ~/ds-out/results`. A THOROUGH run takes up to 20
+minutes.
 
 **How to run the tests** (on the codespace):
 
@@ -339,6 +359,10 @@ python -m pytest tests/test_ds_*.py tests/test_api_process_no_pyvrp.py -q
   and the machine its result file names. The engine runs are the cached Actions runs.
 - **Code:** the code recorded as `6b6de09d576c` for every run. The Actions run used a temporary branch with one extra
   workflow file; that branch has been deleted (section 7.4).
+- **E6** (section 3.8) is not equal compute: it runs the engine as production does. Real days on the codespace, one
+  run at a time (15 Oct, 11:13-13:24 UTC); synthetic days on GitHub Actions run 38726106132, one engine run per 4-CPU
+  machine, with the codespace's OR-Tools build. Code `bdf62d077468`. That Actions run, too, used a temporary branch
+  with one extra workflow file, since deleted.
 - **Equal compute:** every compared run had the same search time, QUICK mode, the RECOMMENDED plan only (E4's
   frontier: each plan option alone, with the same time), one search at a time (`SOLVER_PARALLEL=0`) and no second
   route search (`SOLVER_PYVRP=off`). Production runs the second search; it was off here so every run got the same
@@ -354,7 +378,7 @@ python -m pytest tests/test_ds_*.py tests/test_api_process_no_pyvrp.py -q
   day with 3 worlds instead of 5, and E5 on 100 instances per variant.
 - Distances are estimated km. Plans are the best found in the time given, not proven best (except E5's oracle).
 - **Sections 3.1-3.6 are SYNTHETIC unless a number is marked REAL; section 3.7 is REAL (section 3.7.3 simulates the
-  real request's execution).** Synthetic days use invented
+  real request's execution); section 3.8 (E6) names each day REAL or SYNTHETIC.** Synthetic days use invented
   truck costs, so their OMR figures show direction and size, not NMWC's actual money. The real days use the truck
   costs in the requests.
 
@@ -369,6 +393,8 @@ python -m pytest tests/test_ds_*.py tests/test_api_process_no_pyvrp.py -q
 | E4 Verdicts, relaxations, frontier | SYNTH-320-TIGHT | GitHub Actions | COMPLETE (42 runs) | 30.4 |
 | E4 Verdicts, relaxations, frontier | REAL-15OCT-PREFIX: the pre-fix 15 Oct request, 94 stops, 9 own trucks | codespace | COMPLETE (42 runs) | 73.5 |
 | E5 Exact oracle | 100 small days x 2 engine variants | GitHub Actions | COMPLETE (200 runs) | 9.7 |
+| E6 Production settings | REAL-15OCT, REAL-15OCT-PREFIX | codespace | COMPLETE (28 items) | 130.6 |
+| E6 Production settings | SYNTH-320, SYNTH-320-S2, SYNTH-400-S3 | GitHub Actions | COMPLETE (30 items) | 325.4 |
 
 ### 3.1 Read this first: search noise
 
@@ -420,12 +446,15 @@ runs varied (section 3.0).
   cheaper or dearer than the plan in use may be search luck, not a better or worse day; on a real day, so may a
   difference of a truck.
 - Tomorrow's plan is made with THOROUGH by default (up to 20 minutes, stopping when it stops improving), with the
-  second route search on. **This run did not measure THOROUGH or the second search**, so we do not yet know how much
-  smaller the noise is in production. For scale only: an earlier benchmark in this repository
+  second route search on. E1-E5 did not measure THOROUGH; **E6 did (section 3.8), and the noise stays**: three
+  THOROUGH runs of the real 15 Oct day cost 599.09 to 668.75 OMR with 11 or 12 trucks (five QUICK runs at the same
+  production settings: 540.22 to 652.90 OMR, 10 to 12 trucks). The second route search did not run on any E6 day:
+  the engine skips it when some stops may use only some trucks. An earlier benchmark in this repository
   ([OPTIMIZER_BENCHMARK.md](../OPTIMIZER_BENCHMARK.md) section 11.3, 29 Sep 2026) found THOROUGH about 41 OMR a day
-  cheaper than QUICK on one real 83-stop day.
-- Before acting on any rule change worth a few tens of OMR a day, measure it with several seeds, on real days, with
-  THOROUGH searches.
+  cheaper than QUICK on one real 83-stop day; E6 found it dearer on average on both 15 Oct requests. One real day
+  each cannot settle it.
+- Before acting on any rule change worth a few tens of OMR a day, measure it with several seeds, on several real
+  days.
 
 ### 3.2 E1: What-if levers
 
@@ -918,6 +947,181 @@ allowed)). The three groups are kept apart.
 **Limits.** One real request; 20 s QUICK without the second route search; relaxations tried one at a time; hires
 limited to the 3 trucks hired that day.
 
+### 3.8 E6: model behaviour at production settings
+
+E1-E5 gave every run the same short, single-core search of one plan option, so that comparisons were fair. E6 runs
+the engine the way RouteIQ runs it for a real plan, to see how it behaves: how much its plans vary from run to run,
+whether the long search pays, which plan option wins, whether RECOMMENDED leaves out stops that another option
+serves, and how far a plan moves after a small change of the day. Every number below is from
+[results/E6-production.md](results/E6-production.md) and its JSON.
+
+**Setup.**
+- **Two settings, both as in production:** all three plan options in one request, worker processes
+  (`SOLVER_PARALLEL=1`), the second route search switched on (`SOLVER_PYVRP=on`), every tuning switch cleared.
+  - **PROD** = THOROUGH, as the requests ask: at most 1,200 s for the whole request; the engine's stall rule stops
+    the search once the best plan has not improved for max(300 s, half the time searched).
+  - **QUICKP** = QUICK, the automatic time by day size: 20 s of search on the real days (60-123 s for the whole
+    request) and 120-150 s on the synthetic days (184-344 s for the whole request).
+- **Days.** REAL-15OCT: the 15 Oct request, 86 stops, 12 trucks. REAL-15OCT-PREFIX: the pre-fix request, 94 stops on
+  the 9 own trucks, more than they can carry (every run left out 5 to 21 stops). Three SYNTHETIC days (invented
+  truck costs): SYNTH-320 (185 stops, 13 trucks), SYNTH-320-S2 (186 stops, 13 trucks, another generator seed) and
+  SYNTH-400-S3 (229 stops, 16 trucks).
+- **Seeds.** PROD: seeds 1-3 on each real day, 1-5 on each synthetic day. QUICKP: seeds 1-5 everywhere. On each real
+  day also six changes of the day (P0-P5, part 4), solved with QUICKP seed 1.
+- **Where.** Real days on the codespace, one run at a time, 15 Oct 11:13-13:24 UTC (28 items, 130.6 compute
+  minutes). Synthetic days on GitHub Actions run 38726106132, one engine run per 4-CPU machine (30 items, 325.4
+  compute minutes). 58 of 58 items complete, 455.9 compute minutes in all. Code `bdf62d077468`. Every plan of every
+  option was VERIFIED by the independent timetable check.
+- **The second route search never ran.** In all 58 runs the engine skipped it (SKIPPED, ALLOWED_TRUCKS): on these
+  days some stops may use only some trucks, which the second search cannot model, so the engine plans such a day
+  with its own search alone (its rule since 13 Oct). E6 therefore measures the engine's own (OR-Tools) search.
+- Unlike production, the runs are offline: estimated km, not road distances. Plans are the best found in the time
+  given, not proven best.
+
+**1. How much plans vary between runs** (RECOMMENDED; mean [lowest..highest] over the seeds)
+
+| Day | Setting | Runs | Cash OMR | Trucks | Stops served | Cases served |
+|---|---|---|---|---|---|---|
+| REAL-15OCT, 86 stops | PROD | 3 | 633.70 [599.09..668.75] | 11.7 [11..12] | 85.7 [85..86] | 8322 [7997..8485] of 8485 |
+| | QUICKP | 5 | 593.57 [540.22..652.90] | 10.8 [10..12] | 85.6 [85..86] | 8245 [7885..8485] |
+| REAL-15OCT-PREFIX, 94 stops | PROD | 3 | 551.88 [510.02..607.70] | 9 | 83.0 [73..89] | 5937 [5632..6418] of 8500 |
+| | QUICKP | 5 | 492.54 [478.75..505.92] | 9 | 83.8 [80..89] | 5965 [5345..6379] |
+| SYNTH-320, 185 stops | PROD | 5 | 663.24 [652.32..673.91] | 13 | 185 (all) | 9958 (all) |
+| | QUICKP | 5 | 659.96 [648.89..674.89] | 13 | 185 (all) | 9958 (all) |
+| SYNTH-320-S2, 186 stops | PROD | 5 | 664.52 [645.59..694.73] | 13 | 183.0 [181..184] | 11214 [11114..11241] of 11244 |
+| | QUICKP | 5 | 639.14 [626.60..658.89] | 13 | 179.8 [178..181] | 11180 [11114..11237] |
+| SYNTH-400-S3, 229 stops | PROD | 5 | 810.88 [773.63..833.18] | 16 | 224.6 [222..227] | 13310 [13241..13399] of 13406 |
+| | QUICKP | 5 | 786.22 [773.54..801.81] | 16 | 221.4 [219..224] | 13312 [13236..13362] |
+
+- **The long search does not make the plan repeatable.** Three THOROUGH runs of the real 15 Oct day cost 599.09 to
+  668.75 OMR and used 11 or 12 trucks; five QUICK runs cost 540.22 to 652.90 OMR with 10 to 12 trucks. On the pre-fix
+  request the THOROUGH runs served 73 to 89 of 94 stops (QUICK: 80 to 89). Over the five days THOROUGH's cash spread
+  (standard deviation) was smaller than QUICK's on two days and larger on three.
+- **On the real day, trucks make most of the difference.** Two of the three THOROUGH runs used 12 trucks (633.27 and
+  668.75 OMR); the two cheapest QUICK runs used 10 (540.22 and 554.66 OMR). Truck fixed cost was 200.80, 250.80 or
+  300.80 OMR for 10, 11 or 12 trucks: 100 of the 128.53 OMR between the cheapest and the dearest run of the day. On
+  average THOROUGH's RECOMMENDED paid 284.13 OMR of truck fixed cost, QUICK's 240.80. On the pre-fix request every
+  run used the 9 own trucks, and the differences were distance, fuel and driver pay.
+- **The same request, run again, can end at another plan.** The control P0 solved each real day again with the same
+  seed and nothing changed. On REAL-15OCT the second plan moved 4 stops and cost 29.12 OMR more, on the same 10
+  trucks; on the pre-fix request it was the same plan. With worker processes a run is not fully repeatable.
+
+**2. Does the long search pay?** (PROD minus QUICKP, RECOMMENDED, paired by seed; mean [lowest..highest])
+
+| Day | Pairs | Δ cash OMR | Δ stops served | Δ trucks | Δ estimated km | Whole request, PROD / QUICKP |
+|---|---|---|---|---|---|---|
+| REAL-15OCT | 3 | +30.76 [-53.82..+78.61] | -0.3 [-1..0] | +0.7 [-1..+2] | -48.8 [-137.4..+14.5] | 764 [548..1176] s / 97 [60..123] s |
+| REAL-15OCT-PREFIX | 3 | +57.40 [+20.67..+119.52] | -1.3 [-16..+7] | 0 | +101.3 [+59.9..+126.0] | 1048 [792..1176] s / 111 [103..120] s |
+| SYNTH-320 | 5 | +3.28 [-14.40..+25.02] | 0 | 0 | +29.5 [-50.7..+155.6] | 1052 [1047..1061] s / 195 [184..210] s |
+| SYNTH-320-S2 | 5 | +25.39 [-4.87..+64.53] | +3.2 [+3..+4] | 0 | +95.9 [-17.6..+253.0] | 996 [660..1166] s / 222 [186..288] s |
+| SYNTH-400-S3 | 5 | +24.66 [-13.77..+59.64] | +3.2 [-2..+5] | 0 | +106.5 [-47.0..+227.2] | 1121 [1073..1175] s / 318 [242..344] s |
+
+Read Δ cash together with Δ stops served: serving more stops costs more cash.
+
+- **On the two real requests it did not pay in these runs.** On REAL-15OCT, THOROUGH served the same stops and cost more in two
+  seeds (+78.61 and +67.48 OMR, with 2 and 1 trucks more); in the third it was 53.82 OMR cheaper with one truck
+  fewer, but left out a P3 stop that the QUICK run served. On the pre-fix request THOROUGH cost more and drove more
+  estimated km in every seed; it served 5 and 7 more stops in two seeds and 16 fewer in the third. Counted the
+  engine's way (P1 first, then P2, and so on), it did better in 1 of the 3 pairs and worse in 2: in seeds 2 and 3 it
+  left out a P2 stop that the QUICK run served.
+- **The search had settled early on the real days.** On REAL-15OCT two of the three THOROUGH runs stopped under the
+  stall rule (548 and 569 s for the whole request) and the third ran to the cap (1,176 s); the last improvement came
+  between 41 and 495 s, and by 300 s the search's own score (cash-like costs plus ARTIFICIAL prices, not cash) was
+  within 3.5 of its final value. On the pre-fix request the score was within 8.7 of its end by 300 s, and the search
+  had 3 stops unplanned at 300 s and at the end of every run.
+- **Something to look at.** In seed 1 of the pre-fix request the search ended with 3 stops unplanned, but the plan
+  returned after the engine's load re-check left out 21 (19 P3, 2 P4) while carrying the most cases of any run on
+  that request (6,418 of 8,500). Why the re-check left out so many more is not established here.
+- **It paid on the bigger synthetic days that leave stops out.** There THOROUGH served +3.2 stops on average
+  (SYNTH-320-S2: more in all 5 seeds, +3 to +4; SYNTH-400-S3: more in 4 of 5) for about 25 OMR more and more
+  estimated km. These searches were still improving late: 14 of the 15 synthetic THOROUGH runs ran to the time cap,
+  and in 7 of the 10 runs on these two days the search still placed stops after 600 s. On SYNTH-320, where every run
+  of both settings served all 185 stops, THOROUGH cost about the same (+3.28 OMR; cheaper in 3 of 5 seeds) and its
+  RECOMMENDED plans had fewer minutes outside preferred windows: 7,172 [6,653..7,480] against QUICK's 10,222
+  [7,686..12,240]. Those minutes carry an ARTIFICIAL price, not cash.
+- This differs from the earlier benchmark that found THOROUGH about 41 OMR a day cheaper than QUICK on one real
+  83-stop day (section 3.1). One real day each cannot settle it.
+
+**3. Which plan option wins, and does RECOMMENDED leave out stops another option serves?** (the 46 runs that
+returned all three options: 16 on the real days, 30 on the synthetic days)
+
+- **RECOMMENDED never served less.** In all 46 runs the three options served the same number of stops of each
+  priority. In one run (QUICK, the pre-fix request) RECOMMENDED left out a P3 stop that another option served, and
+  served a different P3 stop instead.
+- **Cheapest option.** RECOMMENDED was the cheapest, alone or tied, in 32 of the 46 runs, MIN_TRUCKS in 40 and
+  MIN_DISTANCE in 37; in 25 runs all three cost exactly the same. On the real days RECOMMENDED was the cheapest in 13
+  of 16 runs and at most 0.19 OMR dearer in the other 3. On the synthetic days it was dearer in 11 of 30 runs, by 0.30
+  to 31.47 OMR. On SYNTH-320 with THOROUGH it was dearer in all 5 runs (mean 663.24 OMR against 651.89 for MIN_TRUCKS
+  and 650.83 for MIN_DISTANCE), with fewer minutes outside preferred windows (7,172 against 10,954 and 11,476). In
+  each of the 11 synthetic runs where it was dearer, RECOMMENDED had fewer minutes outside preferred windows than the
+  cheaper option: it trades cash for preferred windows, whose price is ARTIFICIAL. On the real days every run had 0
+  minutes outside preferred windows.
+- **The E4 finding did not repeat at production settings.** In E4, with each option searched alone for 20 s,
+  MIN_TRUCKS beat RECOMMENDED on the pre-fix request in every seed (section 3.7.4). In E6, where the two alternatives
+  start from RECOMMENDED's plan in the same request, RECOMMENDED served as many stops as the other options in all 8
+  runs on that request and was the cheapest in 6.
+
+**4. How far a plan moves after a small change of the day** (QUICKP seed 1, RECOMMENDED; each changed day solved
+from scratch as a new OPTIMIZE and compared with the unchanged day's plan)
+
+| Change | REAL-15OCT: stops moved, of 86 | Δ cash OMR | Δ other stops served | PREFIX: stops moved, of 94 | Δ cash OMR | Δ other stops served |
+|---|---|---|---|---|---|---|
+| P0 nothing changed (the control) | 4 | +29.12 | 0 | 0 | +0.00 | 0 |
+| P1 one small stop removed (an order cancelled) | 67 | +17.79 | 0 | 72 | -12.83 | -2 |
+| P2 +5% cases on 9 stops | 65 | +89.22 | 0 | 71 | -21.08 | -4 |
+| P3 one stop's window 30 min later | 72 | -34.03 | -1 | 74 | +90.70 | -2 |
+| P4 one truck unavailable | 83 | +77.67 | -1 | 65 | -62.87 | -5 |
+| P5 one late order added (a 1-case copy of a small stop, 1 km away) | 74 | +58.14 | 0 | 75 | -22.07 | -6 |
+| Reference: another seed, nothing changed (seeds 2-5 against seed 1) | 75.5 [75..76] | +48.64 [-14.44..+98.24] | -0.5 [-1..0] | 66.0 [58..76] | -16.72 [-27.16..-5.40] | -6.5 [-9..-5] |
+
+"Stops moved": stops on another truck or load number. Every changed plan was VERIFIED.
+
+- **A small change re-shuffles most of the plan.** Removing one small stop, adding a 1-case order, moving one window
+  or taking away one truck moved 65 to 83 of 86 stops on the real day and 65 to 75 of 94 on the pre-fix request:
+  about as many as simply starting from another seed (75.5 and 66.0). Most of the movement is the search's own
+  variation, not the change.
+- **One run per change cannot separate the change from search luck.** The cash changes run from -62.87 to +90.70
+  OMR; a new seed alone gave -14.44 to +98.24 OMR on the real day and -27.16 to -5.40 OMR on the pre-fix request,
+  and the same day run again +29.12 OMR. On the real day, 5% more cases on 9 stops (42 cases in all) ended on 12
+  trucks instead of 10 (+89.22 OMR). On the pre-fix request every change served 2 to 6 fewer other stops, but seed
+  1's unchanged plan served 89 stops, the most of any QUICK run on that request, and the other seeds served 5 to 9
+  fewer with nothing changed.
+- **Not measured: a re-plan with plan continuity.** E6 solved each changed day without the previous plan's trucks.
+  RouteIQ's re-plan sends each stop's previous truck, which the engine tries to keep (an ARTIFICIAL change price);
+  how much that reduces the re-shuffle was not measured.
+
+**5. What it means for daily planning** (two real requests of one day and three synthetic days: guidance, not
+established rules)
+
+1. **Do not expect the 20-minute search to give a cheaper plan.** On both 15 Oct requests THOROUGH was not cheaper
+   than QUICK on average (+30.76 and +57.40 OMR) and did not serve more stops on average; its search had mostly
+   settled by 5 minutes. It served more only on the bigger synthetic days (185-229 stops) that leave stops out. On a
+   day of 86-94 stops, choosing Quick when time is short (as the screen suggests on the delivery day itself) gave up
+   nothing measurable here. Judge a THOROUGH plan by the same checks as a QUICK one.
+2. **Before Lock, check in this order:**
+   - *Stops left out, by priority.* No E6 run left out a P1 stop; on the over-full pre-fix request P2 stops were left
+     out in 2 of 3 THOROUGH runs and 2 of 5 QUICK runs.
+   - *Cases, not only stops.* On that request the plan that served the fewest stops (73) carried the most cases
+     (6,418 of 8,500).
+   - *Trucks used.* On the real day most of the cash difference between runs was truck fixed cost (10 to 12 trucks).
+   - *Cash*, last: runs of the same real day cost 540.22 to 652.90 OMR (QUICK) and 599.09 to 668.75 OMR (THOROUGH).
+3. **RECOMMENDED is a safe default.** It never served fewer stops than another option in 46 runs, and on the real
+   days it was the cheapest or within 0.19 OMR. Where another option was clearly cheaper for the same stops (only on
+   synthetic days), RECOMMENDED had met more preferred windows; pick the other option when those windows do not
+   matter that day. Look at the left-out list of the option you pick: in 1 run of 46, RECOMMENDED left out a
+   different P3 stop.
+4. **Re-running the same day is not a reliable way to a better plan.** Run again with nothing changed, the same
+   request gave the same plan once and a 29.12 OMR dearer plan once; RouteIQ has no seed to choose. A difference of
+   tens of OMR or a truck between two runs is within what the engine does by itself.
+5. **Lock what is already promised before a RE-PLAN.** In a fresh optimization a one-stop change moved most of the
+   stops. Lock the loads already given to the warehouse or the drivers first (orders on locked, loading or dispatched
+   loads stay where they are); expect the planned loads to change, perhaps less than here, since RE-PLAN sends each
+   stop's previous truck (not measured).
+
+**Limits.** Two real requests of one day, 3 THOROUGH seeds each (seeds 4 and 5 not run); synthetic days use invented
+truck costs; each change of the day ran once (QUICK, seed 1); the second route search did not run on these days;
+offline, estimated km.
+
 ---
 
 ## 4. Implemented vs proposed
@@ -986,12 +1190,12 @@ CONFIRM: only the owner can check it.
 | 5.11 | Implementation report and this table | IMPLEMENTED | this file | |
 | 5.12 | Missing inputs and assumptions documented | IMPLEMENTED | section 5 | |
 | 5.13 | Use of the IVMS report | IMPLEMENTED | `ivms`; `data/ivms_aggregates.json` | Aggregates only; used by every module |
-| 5.14 | Evidence at production settings (THOROUGH, second search, road km) | PROPOSED | - | This run: 40 s (synthetic) and 20 s (real) QUICK, no second search, estimated km |
+| 5.14 | Evidence at production settings (THOROUGH, second search, road km) | PARTIAL | E6; section 3.8 | THOROUGH and QUICK as production runs them, on the two 15 Oct requests and three synthetic days. The engine skipped the second search on every E6 day (allowed-truck limits); estimated km, not road km; one real day |
 | 5.15 | Engine fix: a higher priority left out while lower priorities ride | PROPOSED | - | Seen again in E4: on the synthetic tight day (one P3 stop out per seed while 59-61 lower-priority stops were served) and on the real pre-fix request (a P2 stop out in one seed while 48 lower-priority stops were served) |
 | 5.16 | Separate branch, no deploy | IMPLEMENTED | `feat/decision-support` | Not merged, not deployed; the live planner does not use it |
-| 5.17 | Compute on GitHub or the codespace, never the laptop | IMPLEMENTED | section 3.0 | Synthetic days on GitHub Actions run 38674195128; real days on the codespace |
+| 5.17 | Compute on GitHub or the codespace, never the laptop | IMPLEMENTED | section 3.0 | Synthetic days on GitHub Actions runs 38674195128 (E1-E5) and 38726106132 (E6); real days on the codespace |
 | 5.18 | No customer data exposed | PARTIAL until the history squash | section 7.4 | Committed files clean; earlier branch commits held small-region IVMS tables (squash pending) |
-| 5.19 | No new charges | OWNER TO CONFIRM | section 3.0 | GitHub Actions is free for a public repository; the real-day runs (164 solver-minutes on 4 lanes, plus the first overnight attempt) used codespace time after the free quota, under the billing the owner restored |
+| 5.19 | No new charges | OWNER TO CONFIRM | section 3.0 | GitHub Actions is free for a public repository; the real-day runs (164 solver-minutes on 4 lanes, plus the first overnight attempt; E6: 130.6 compute minutes, one run at a time) used codespace time after the free quota, under the billing the owner restored |
 
 ---
 
@@ -1017,7 +1221,7 @@ CONFIRM: only the owner can check it.
 | Seeds inside OR-Tools | True repeated searches | A seed reorders the stops before the search |
 | Evidence that unloading can be faster | Faster-unloading lever | Kept REQUIRES EVIDENCE; basis: the 39% spread in the 13 Oct truck evidence (upper bound) |
 | More real days | One real day is one sample | Two requests of one day (15 Oct 2026) only |
-| THOROUGH and second-search runs; road distances | Production-like noise and costs | Not measured; estimated km |
+| Second-search runs; road distances; more real days at production settings | Production-like noise and costs | THOROUGH measured in E6 on one real day's two requests (section 3.8); the engine skipped the second search on every E6 day; estimated km |
 
 ### 5.2 Assumptions used, and their source
 
@@ -1134,7 +1338,9 @@ the policy-A label fix, number 14, did not), and every reviewer's reproduction w
   again against every real id, code and coordinate, and only then copied into `results/`. A pattern scan of the
   report and the result files also found no code of three capitals and 3-5 digits, no database ids, no phone numbers
   and no coordinates with 4 or more decimals (in the decision-support code and tests the only matches are invented
-  test values and a lint rule name). The real requests themselves never leave the codespace.
+  test values and a lint rule name). E6's result files (15 Oct) were checked the same way before they were copied:
+  no id or truck code of the real requests and no coordinate-like number with 4 or more decimals. The real requests
+  themselves never leave the codespace.
 - **IVMS aggregates: no group smaller than 3.** A region driven by one or two vehicles would describe one or two
   drivers, and the repository is public. `ivms.py` publishes the speed and stop-time figures of a region only when at
   least 3 vehicles drive there (checked by a test in `test_ds_history.py`): Muscat (5 vehicles) and Nizwa (3) are
@@ -1151,17 +1357,21 @@ the policy-A label fix, number 14, did not), and every reviewer's reproduction w
 Each recommendation names its evidence: REAL (the 15 Oct 2026 requests, section 3.7) or SYNTHETIC (invented days with
 invented truck costs, sections 3.2-3.6).
 
-1. **Do not judge a plan or a rule change by one QUICK search; measure the noise at production settings.** REAL: the
-   same 15 Oct request cost 500.48 to 734.12 OMR over six 20 s runs (seed spread 193.97 and 85.16 OMR), half or more
-   of it from using 9 to 12 trucks (section 3.1). SYNTHETIC: 43.68 OMR at 40 s. Run 2-3 real days with THOROUGH, the
-   second route search and several seeds. Until then, a re-plan that differs from the plan in use by tens of OMR, or
-   by a truck, may be search luck.
+1. **Do not judge a plan or a rule change by one search, QUICK or THOROUGH.** REAL: the same 15 Oct request cost
+   500.48 to 734.12 OMR over six 20 s runs (seed spread 193.97 and 85.16 OMR), half or more of it from using 9 to 12
+   trucks (section 3.1). At production settings the noise stays: 599.09 to 668.75 OMR over three THOROUGH runs (11 or
+   12 trucks) and 540.22 to 652.90 OMR over five QUICK runs (10 to 12 trucks), and THOROUGH was not cheaper on average
+   on either 15 Oct request (E6, section 3.8). SYNTHETIC: 43.68 OMR at 40 s. A re-plan that differs from the plan in
+   use by tens of OMR, or by a truck, may be search luck. Before Lock, check stops left out by priority, cases, trucks,
+   then cash (section 3.8, part 5). Repeat E6 on 2-3 more real days.
 2. **Compare the plan options when a day leaves stops out.** REAL (E4, the pre-fix 15 Oct request, 20 s QUICK):
    MIN_TRUCKS was cheaper than RECOMMENDED and served more stops in every seed (5.27-34.01 OMR cheaper and 1, 2 and 8
    more stops; but the mean gaps of 17.75 OMR and 3.7 stops are within this request's seed spread of 21.25 OMR and 6
    stops, and seed 3's 78-stop RECOMMENDED run gives 8 of the 11 extra stops: suggestive, not established), and
-   MIN_DISTANCE served 87 stops on average against RECOMMENDED's 82. Check at production settings whether RECOMMENDED
-   also leaves out stops that the other options serve on real days; why it did here is not established.
+   MIN_DISTANCE served 87 stops on average against RECOMMENDED's 82. At production settings (E6, section 3.8), where
+   the three options come from one request, this did not happen: in 46 runs (16 of them on the two real requests)
+   RECOMMENDED never served fewer stops than another option, and on the real requests it was the cheapest or within
+   0.19 OMR. RECOMMENDED is a safe default; still check the left-out list of the option you pick.
 3. **When a day leaves stops out, compare one more load on a truck with hiring.** REAL (E4, one request, 20 s QUICK):
    one more load on truck-03 served more stops in every seed (+2, +1, +9; mean +4, within the request's 6-stop seed
    spread) at about the same cash (+0.29 OMR, -11.26..+8.28). It served fewer cases on average (-4), and in at least
@@ -1215,3 +1425,7 @@ invented truck costs, sections 3.2-3.6).
     one squashed commit, so no branch shows the small-group IVMS tables (section 7.4). Old commit pages can stay
     reachable on GitHub by their id until GitHub Support purges them; whether to ask, and whether to make the
     repository private, is the owner's decision.
+13. **Lock what is already promised before a RE-PLAN.** REAL (E6, QUICK, one run per change): after one small
+    change of the day (a stop removed or added, a window moved, a truck taken away), a fresh optimization moved 65 to
+    83 of the 86 stops, as many as another seed with nothing changed (75.5). How much RouteIQ's re-plan, which sends
+    each stop's previous truck, reduces this was not measured.

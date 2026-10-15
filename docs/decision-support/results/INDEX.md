@@ -1,6 +1,6 @@
 # Decision-support evidence (DESIGN.md section 6)
 
-Written by `python -m decision_support.experiments all --report` from the run cache. Every compared run has the same budget (search seconds, QUICK, RECOMMENDED only) and runs alone in its lane's process (SOLVER_PARALLEL=0). Production also runs the second route search (PyVRP); it is off here (SOLVER_PYVRP=off) so that every run gets the same single-core search.
+Written by `python -m decision_support.experiments all --report` (E1-E5) and `... e6 --report` (E6) from the run cache. E1-E5: Every compared run has the same budget (search seconds, QUICK, RECOMMENDED only) and runs alone in its lane's process (SOLVER_PARALLEL=0). Production also runs the second route search (PyVRP); it is off here (SOLVER_PYVRP=off) so that every run gets the same single-core search. E6 runs the engine at production settings instead (its file says how).
 
 Distances are HAVERSINE estimates (estimated km). Plans are the best found in the time given, not proven optimal; only E5's oracle proves optimality, on the instances it enumerates completely. Cash is OMR (costing.truck_day_costs); solver penalties are ARTIFICIAL and never added to cash.
 
@@ -17,3 +17,8 @@ Distances are HAVERSINE estimates (estimated km). Plans are the best found in th
 | E4 Verdicts, ranked relaxations and the trade-off frontier | SYNTH-320-TIGHT | COMPLETE | 42/42 | 6b6de09d576c | 30.4 | [E4-explain.md](E4-explain.md), [E4-explain.json](E4-explain.json) |
 | E5 Exact oracle against the engine | DEFAULT | COMPLETE | 100/100 | 6b6de09d576c | 4.9 | [E5-exact.md](E5-exact.md), [E5-exact.json](E5-exact.json) |
 | E5 Exact oracle against the engine | PREFERENCES_OFF | COMPLETE | 100/100 | 6b6de09d576c | 4.8 | [E5-exact.md](E5-exact.md), [E5-exact.json](E5-exact.json) |
+| E6 Model behaviour at production settings | REAL-15OCT | COMPLETE | 14/14 | bdf62d077468 | 57.3 | [E6-production.md](E6-production.md), [E6-production.json](E6-production.json) |
+| E6 Model behaviour at production settings | REAL-15OCT-PREFIX | COMPLETE | 14/14 | bdf62d077468 | 73.3 | [E6-production.md](E6-production.md), [E6-production.json](E6-production.json) |
+| E6 Model behaviour at production settings | SYNTH-320 | COMPLETE | 10/10 | bdf62d077468 | 103.9 | [E6-production.md](E6-production.md), [E6-production.json](E6-production.json) |
+| E6 Model behaviour at production settings | SYNTH-320-S2 | COMPLETE | 10/10 | bdf62d077468 | 101.5 | [E6-production.md](E6-production.md), [E6-production.json](E6-production.json) |
+| E6 Model behaviour at production settings | SYNTH-400-S3 | COMPLETE | 10/10 | bdf62d077468 | 120.0 | [E6-production.md](E6-production.md), [E6-production.json](E6-production.json) |
