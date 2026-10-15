@@ -278,6 +278,7 @@ events exist (StopVisit taps); GPS feeds (Ayun / IVMS) and stock availability ar
 | E3 dynamic | S320 (with new orders) and real 15 Oct (no new orders) under the uncertainty model | policies A/B/C | 10-20 s per re-plan; 5 worlds |
 | E4 explain | real 15 Oct pre-fix request; S320 "tight" (morning windows tightened) | verdicts, ranked relaxations, frontier | 30 / 60 s; 3 seeds |
 | E5 exact | 60 random small instances | oracle vs engine | 3 s per engine run |
+| E6 production settings (added 15 Oct) | real 15 Oct and pre-fix request; synthetic S320 (seeds 1, 2), S400 (seed 3) | the engine as production runs it: all three plan options, worker processes, the second search; spread over seeds, cheapest option at equal service, convergence, PROD vs QUICKP; perturbations P0-P5 on the real days | PROD = THOROUGH, cap 1,200 s, the engine's stall rule; QUICKP = QUICK, automatic time; 5 seeds (3 for PROD on a real day) |
 
 The results go to `docs/decision-support/results/*.json` and `docs/decision-support/REPORT.md`: tables in OMR, the
 compute budget, seeds, machine and commit hash.

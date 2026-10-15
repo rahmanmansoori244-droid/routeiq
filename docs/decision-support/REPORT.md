@@ -22,7 +22,7 @@ They do not replace it and never change a plan in use. They answer five question
    Which small change would serve it?
 5. **How good are the engine's plans?** Checked against proven-best plans on small days.
 
-There are 115 automatic tests. The evidence suite (experiments E1-E5) ran in full: on invented, NMWC-like days
+There are 120 automatic tests (5 of them added on 15 Oct for experiment E6, the engine at production settings, section 7.1). The evidence suite (experiments E1-E5) ran in full: on invented, NMWC-like days
 (SYNTHETIC) on GitHub's servers, and on two real RouteIQ requests of 15 Oct 2026 (REAL, anonymised when read) on the
 project's codespace, where the private data stays (section 3.0). One real day is one sample: the REAL results show
 what the tools say about that day, not a pattern across days.
@@ -314,8 +314,8 @@ python -m pytest tests/test_ds_*.py tests/test_api_process_no_pyvrp.py -q
 | `test_ds_dynamic.py` | 17 | No future information, departed loads never changed, delays push later loads, lateness against genuine closing times |
 | `test_ds_explain.py` | 10 | Proofs vs search failure vs model error, relaxation sentences, ranking, the frontier |
 | `test_ds_exact.py` | 32 | The oracle matches a brute force; never-servable stops proven; the engine never beats the oracle |
-| `test_ds_experiments.py` | 3 | Run lists and lanes, the cache and leak check, the report rebuilt from the cache alone |
-| **Total** | **115** | |
+| `test_ds_experiments.py` | 8 | Run lists and lanes, the cache and leak check, the report rebuilt from the cache alone; E6: its run list, the production engine call, the perturbations, the analysis and its report from a fake cache |
+| **Total** | **120** | |
 
 ---
 
@@ -981,7 +981,7 @@ CONFIRM: only the owner can check it.
 | 5.6 | Exact small-instance checks | IMPLEMENTED | `exact`; E5 | Up to 8 stops, 2 trucks, 1 load each |
 | 5.7 | No optimality claims without proof | IMPLEMENTED | all reports | Only E5's oracle |
 | 5.8 | No future information | IMPLEMENTED | `dynamic` | |
-| 5.9 | Runnable tests | IMPLEMENTED | `tests/test_ds_*.py` | 115 tests |
+| 5.9 | Runnable tests | IMPLEMENTED | `tests/test_ds_*.py` | 120 tests |
 | 5.10 | Scenario results in OMR | IMPLEMENTED | `results/` | Synthetic and real complete (INDEX.md) |
 | 5.11 | Implementation report and this table | IMPLEMENTED | this file | |
 | 5.12 | Missing inputs and assumptions documented | IMPLEMENTED | section 5 | |
@@ -1080,10 +1080,12 @@ From `dynamic.data_requirements()`. "Today" means what RouteIQ has now.
 
 ### 7.1 Tests
 
-115 decision-support tests in 9 files (section 2.5). Two of them need the real 15 Oct day and are skipped where it is
+120 decision-support tests in 9 files (section 2.5; 115 before experiment E6). Two of them need the real 15 Oct day and are skipped where it is
 not present (as on CI). On the codespace, before the history was squashed, the code of commit `6b6de09` (identical
 files) passed all 116 tests (the then 114 plus the 2 import-guard tests) in 71.6 s. The IVMS region rule of section
-7.4 added the 115th test; with it, all 117 tests (115 plus 2) passed on the codespace.
+7.4 added the 115th test; with it, all 117 tests (115 plus 2) passed on the codespace. Experiment E6 (15 Oct, the engine at
+production settings) added 5 tests to `test_ds_experiments.py`: 120 in all. All 122 (120 plus the 2 import-guard tests)
+passed on the codespace in 73.2 s, from an uncommitted copy of the change, before it was committed.
 
 ### 7.2 CI
 

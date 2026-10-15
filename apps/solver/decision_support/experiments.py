@@ -1,9 +1,13 @@
-"""The evidence suite (DESIGN.md sections 1 and 6): experiments E1-E5, run on the codespace.
+"""The evidence suite (DESIGN.md sections 1 and 6): experiments E1-E6, run on the codespace.
 
-    python -m decision_support.experiments {e1,e2,e3,e4,e5,all} [--lane i/n] [--quick] [--report] [...]
+    python -m decision_support.experiments {e1,e2,e3,e4,e5,e6,all} [--lane i/n] [--quick] [--report] [...]
 
 - E1 what-if levers, E2 small-stop economics, E3 dynamic re-planning policies, E4 verdicts, ranked relaxations
   and the trade-off frontier, E5 the exact oracle against the engine. Each one runs its module's own functions.
+  ``all`` runs these five.
+- E6 the engine's behaviour at production settings: all three plan options in one response, worker processes and
+  the second route search, THOROUGH (PROD) and QUICK (QUICKP), several seeds and days, and how far a plan moves
+  after a small change of the day (perturbations). E6 is not equal compute; it sets its own solver switches.
 - Every solve is cached as one JSON file under --cache-dir (default ~/ds-runs), keyed by git commit, experiment,
   day, variant, budget and seed. A lane that is stopped and started again reads back what it already solved.
 - ``--lane i/n`` takes every n-th item of each run list, starting at item i. A lane that has finished its own
@@ -12,8 +16,8 @@
 - ``--report`` solves nothing. It rebuilds every experiment from the cache through the modules' own report
   code and writes one JSON (aggregates only) and one Markdown file per experiment, plus INDEX.md, to --out-dir.
 
-Equal compute: every compared run has the same Budget, runs in-process (SOLVER_PARALLEL=0, one solve at a time
-per lane) and without the second route search (SOLVER_PYVRP=off).
+Equal compute (E1-E5): every compared run has the same Budget, runs in-process (SOLVER_PARALLEL=0, one solve at a
+time per lane) and without the second route search (SOLVER_PYVRP=off).
 
 Real days are anonymised as soon as they are read, and every output is checked against their original ids and
 coordinates before it is written. The cache holds anonymised requests with coordinates, so it stays outside the
@@ -23,24 +27,27 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import logging
+import math
 import os
 import platform
 import re
 import socket
+import statistics
 import subprocess
 import sys
 import time
 import traceback
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import dispatch_solver as ds
-from dispatch_models import DispatchRequest, DispatchResponse, DispatchScenario, DispatchTruck
+from dispatch_models import DAY_MIN, DispatchRequest, DispatchResponse, DispatchScenario, DispatchTruck
 
 from . import core, dynamic, economics, exact, explain, history, ivms, synth, whatif
 from .core import Budget, RunResult
@@ -50,7 +57,8 @@ DEFAULT_OUT = REPO / "docs" / "decision-support" / "results"
 DEFAULT_CACHE = Path.home() / "ds-runs"
 DEFAULT_DATA = Path.home() / "ds-data"
 REAL_FILES = {"REAL-15OCT": "day-2026-10-15-v1-request.json", "REAL-15OCT-PREFIX": "day-2026-10-15-failed-request.json"}
-SYNTH_DAYS = {"SYNTH-320": (320, 1), "SYNTH-400": (400, 2), "SYNTH-320-TIGHT": (320, 1)}
+SYNTH_DAYS = {"SYNTH-320": (320, 1), "SYNTH-400": (400, 2), "SYNTH-320-TIGHT": (320, 1),
+              "SYNTH-320-S2": (320, 2), "SYNTH-400-S3": (400, 3)}  # (invoices, synth seed)
 TIGHT_MIN = 60  # E4's tight day: hypermarket windows close this much earlier
 ENV = {"SOLVER_PARALLEL": "0", "SOLVER_PYVRP": "off"}
 EQUAL_COMPUTE = ("Every compared run has the same budget (search seconds, QUICK, RECOMMENDED only) and runs alone in "
@@ -95,7 +103,10 @@ def _recommended(run: RunResult) -> DispatchScenario:
 @dataclass(frozen=True)
 class Suite:
     """The settings of one invocation. Budgets are search seconds per run; the engine's load re-check comes on
-    top. ``quick``: tiny smoke settings (2 s searches, 2 seeds, a few levers, one world, 4 small instances)."""
+    top. ``quick``: tiny smoke settings (2 s searches, 2 seeds, a few levers, one world, 4 small instances; E6:
+    one seed, a 20 s THOROUGH cap, 2 s QUICK, three days). E6: ``e6_seeds`` for every variant and day, except
+    PROD on a real day, which takes ``e6_real_prod_seeds`` (a 20-minute run each); ``prod_cap`` lowers the
+    THOROUGH cap (production: the request's max_search_sec, 1,200 s)."""
 
     budget_real: int = 20
     budget_synth: int = 40
@@ -105,11 +116,14 @@ class Suite:
     quick: bool = False
     e5_instances: int = 100
     data_dir: Path = DEFAULT_DATA
+    e6_seeds: tuple[int, ...] = (1, 2, 3, 4, 5)
+    e6_real_prod_seeds: tuple[int, ...] = (1, 2, 3)
+    prod_cap: int = ds.THOROUGH_MAX_SEC
 
     @classmethod
     def smoke(cls, data_dir: Path = DEFAULT_DATA) -> "Suite":
         return cls(budget_real=2, budget_synth=2, budget_replan=2, budget_exact=2, seeds=(1, 2), quick=True,
-                   e5_instances=4, data_dir=data_dir)
+                   e5_instances=4, data_dir=data_dir, e6_seeds=(1,), e6_real_prod_seeds=(1,), prod_cap=20)
 
     def budget(self, real: bool) -> Budget:
         return Budget(time_limit_sec=self.budget_real if real else self.budget_synth, seeds=self.seeds)
@@ -353,9 +367,12 @@ class RunCache:
             self._warm = saved
 
     def path(self, req: DispatchRequest, budget: Budget, seed: int, scenario: str = "RECOMMENDED") -> Path:
+        tag = _tag(budget) + ("" if scenario == "RECOMMENDED" else f"-{scenario}") + ("-warm" if self._warm else "")
+        return self._file(req, tag, seed)
+
+    def _file(self, req: DispatchRequest, tag: str, seed: int) -> Path:
         experiment, day = self._where
         d = core.digest(req)
-        tag = _tag(budget) + ("" if scenario == "RECOMMENDED" else f"-{scenario}") + ("-warm" if self._warm else "")
         return self.dir / experiment / day / _slug(self._names.get(d, f"req-{d}")) / f"{tag}-s{seed}.json"
 
     def solve(self, req: DispatchRequest, budget: Budget, seed: int) -> RunResult:
@@ -364,8 +381,26 @@ class RunCache:
     def solve_as(self, req: DispatchRequest, budget: Budget, seed: int, scenario: str) -> RunResult:
         return self._run(req, budget, seed, scenario)
 
+    def solve_setting(self, req: DispatchRequest, setting: "Setting", seed: int) -> RunResult:
+        """E6: one run of ``req`` at ``setting`` (solve_setting: all three plan options), filed as
+        <variant>/<setting tag>-s<seed>.json. Its RunResult's metrics are RECOMMENDED's."""
+        path = self._file(req, setting.tag, seed)
+
+        def solve() -> RunResult:
+            run = _ENGINE_SETTING(req, setting, seed)
+            self._store(path, req, run, seed, "RECOMMENDED", {"setting": asdict(setting), "options": list(OPTIONS)},
+                        None)
+            return run
+
+        return self._get(path, req, seed, "RECOMMENDED", solve)
+
     def _run(self, req: DispatchRequest, budget: Budget, seed: int, scenario: str) -> RunResult:
         path = self.path(req, budget, seed, scenario)
+        return self._get(path, req, seed, scenario, lambda: self._solve(path, req, budget, seed, scenario))
+
+    def _get(self, path: Path, req: DispatchRequest, seed: int, scenario: str, solve: Callable[[], RunResult]) -> RunResult:
+        """The run filed at ``path``: read back, or solved under its lock (another lane holding the lock is
+        waited for), or MissingRun when read-only."""
         lock = path.with_name(path.name + ".lock")
         waited = 0.0
         while True:
@@ -376,7 +411,7 @@ class RunCache:
                 raise MissingRun(str(path.relative_to(self.dir)))
             if _try_lock(lock):
                 try:
-                    run = self._read(path, req, seed, scenario) or self._solve(path, req, budget, seed, scenario)
+                    run = self._read(path, req, seed, scenario) or solve()
                 finally:
                     lock.unlink(missing_ok=True)
                 return run
@@ -398,17 +433,21 @@ class RunCache:
             with _warm_start(_recommended(self._warm).loads) as w:
                 run = call()
             warm_used = w["injected"] and not w["cold"]
+        self._store(path, req, run, seed, scenario,
+                    {"budget": {"time_limit_sec": budget.time_limit_sec, "search_mode": budget.search_mode}}, warm_used)
+        return run
+
+    def _store(self, path: Path, req: DispatchRequest, run: RunResult, seed: int, scenario: str, how: dict,
+               warm_used: bool | None) -> None:
+        """File one run: its key (``how``: the budget, or E6's setting), the request solved and the response."""
         experiment, day = self._where
         data = {"key": {"commit": self.commit, "experiment": experiment, "day": day, "variant": path.parent.name,
-                        "seed": seed, "budget": {"time_limit_sec": budget.time_limit_sec,
-                                                 "search_mode": budget.search_mode},
-                        "scenario": scenario, "warm": self._warm is not None},
+                        "seed": seed, **how, "scenario": scenario, "warm": self._warm is not None},
                 "request_digest": core.digest(req), "seed": seed, "scenario": scenario, "wall_sec": run.wall_sec,
                 "env": run.env, "warm_used": warm_used, "solved_at": _now(), "host": socket.gethostname(),
                 "request": run.request.model_dump(mode="json"), "response": run.response.model_dump(mode="json")}
         _write_json(path, data)
         self.last = {k: v for k, v in data.items() if k not in ("request", "response")}
-        return run
 
     def _read(self, path: Path, req: DispatchRequest, seed: int, scenario: str) -> RunResult | None:
         if not path.is_file():
@@ -581,11 +620,16 @@ class Experiment:
         raise NotImplementedError
 
     def report(self, group: Group, suite: Suite, days: Days, cache: RunCache) -> tuple[dict, list[str]]:
-        """The JSON payload and the Markdown lines of one group, from the cache only."""
+        """The JSON payload and the Markdown lines of one group, from the cache only. A payload key "_status"
+        (PARTIAL) overrides COMPLETE."""
         raise NotImplementedError
 
     def about(self, suite: Suite) -> list[str]:
         return []
+
+    def meta(self, suite: Suite) -> dict:
+        """What this experiment's report header says differently from E1-E5's (budgets, seeds, env, compute)."""
+        return {}
 
 
 class E1(Experiment):
@@ -1165,7 +1209,655 @@ class E5(Experiment):
                 "with one load each (exact.random_instance), each solved exactly by the oracle and once by the engine."]
 
 
-EXPERIMENTS: dict[str, Experiment] = {e.name: e for e in (E1(), E2(), E3(), E4(), E5())}
+# ------------------------------------------------------------------------------------------------------------
+# E6: the engine at production settings
+# ------------------------------------------------------------------------------------------------------------
+
+OPTIONS = ("RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE")  # the plan options production returns in one response
+PROD_ENV = (("SOLVER_PARALLEL", "1"), ("SOLVER_PYVRP", "on"))  # worker processes and the second route search
+# The engine's tuning switches, cleared for every E6 run: the engine then runs on its own rules (the THOROUGH cap
+# and stall rule, the QUICK budget, the second search's stall and CPU gate).
+TUNING_ENV = ("THOROUGH_MAX_SEC", "THOROUGH_STALL_SEC", "THOROUGH_STALL_SHARE", "SOLVER_BUDGET_SEC",
+              "SOLVER_PYVRP_MIN_CPUS", "SOLVER_PYVRP_MAX_ITERS", "SOLVER_PYVRP_STALL_SEC", "SOLVER_PYVRP_STALL_SHARE")
+CONVERGENCE_MARKS = (60, 120, 300, 600)  # seconds into RECOMMENDED's THOROUGH search
+CASH_PARTS = ("fixed", "trip", "distance", "fuel", "driver", "overtime")
+PRODUCTION = ("Not equal compute: E6 runs the engine as production does - all three plan options in one response, "
+              "worker processes (SOLVER_PARALLEL=1), the second route search (SOLVER_PYVRP=on, its seed = the run's "
+              "seed), the engine's own THOROUGH cap and stall rule (every tuning switch cleared) - one run at a time "
+              "per machine. Unlike production it plans offline: HAVERSINE estimated km, not OSRM road distances.")
+
+# Small changes of a real day for the stability test (QUICKP, seed 1). Changes of the day's data, never levers.
+PERTURBATIONS = {
+    "P0": "nothing changed: the same day solved again (the control: how much a timed search varies by itself)",
+    "P1": "one small stop removed (an order cancelled)",
+    "P2": "+5% cases (at least 1) on 10% of the stops",
+    "P3": "one stop's receiving window 30 min later",
+    "P4": "one truck unavailable",
+    "P5": "one late order: a copy of a small stop, 1 km away",
+}
+DEMAND_UP, DEMAND_SHARE = 0.05, 0.10
+WINDOW_LATER_MIN = 30
+LATE_ORDER_KM = 1.0
+KM_PER_DEG_LAT = 111.195
+
+
+@dataclass(frozen=True)
+class Setting:
+    """How E6 runs the engine. ``time_limit_sec`` None: the engine's automatic time for the day (what the web
+    sends); ``cap_sec``: THOROUGH's cap for the whole request (the request's max_search_sec, at most this)."""
+
+    name: str
+    search_mode: str
+    cap_sec: int | None = None
+    time_limit_sec: int | None = None
+    env: tuple[tuple[str, str], ...] = PROD_ENV
+
+    @property
+    def tag(self) -> str:
+        if self.search_mode == "THOROUGH":
+            return f"{self.name}-{self.cap_sec}s"
+        return f"{self.name}-{self.time_limit_sec}s" if self.time_limit_sec else f"{self.name}-auto"
+
+    def describe(self) -> str:
+        quick = f"{self.time_limit_sec} s" if self.time_limit_sec else "the automatic time by day size"
+        what = (f"THOROUGH, cap {self.cap_sec} s for the whole request (the request's own max_search_sec when lower), "
+                f"never less than QUICK's time ({quick}), the engine's stall rule" if self.search_mode == "THOROUGH"
+                else f"QUICK, {quick}")
+        return f"{what}; {' '.join(f'{k}={v}' for k, v in self.env)}; all three plan options"
+
+
+@contextlib.contextmanager
+def _solver_env(values: dict[str, str]) -> Iterator[dict[str, str]]:
+    """``values`` set and every TUNING_ENV switch cleared for the duration (yields the switches the run has);
+    the environment is restored afterwards."""
+    keys = sorted(set(values) | set(TUNING_ENV))
+    saved = {k: os.environ.get(k) for k in keys}
+    for k in TUNING_ENV:
+        os.environ.pop(k, None)
+    os.environ.update(values)
+    try:
+        yield {k: os.environ[k] for k in keys if k in os.environ}
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def solve_setting(req: DispatchRequest, setting: Setting, seed: int) -> RunResult:
+    """One optimize_dispatch run of ``req`` as production runs it: all three plan options in one response, the
+    setting's search mode, times and solver switches; offline (HAVERSINE) and seeded as core.solve (seed s > 0
+    also seeds the second search). Its metrics are RECOMMENDED's. Run from the command line (``__main__``
+    guard): the worker processes are spawned."""
+    run_req = core.offline(core.seeded(req, seed))
+    cfg = run_req.config
+    cfg.scenarios = list(OPTIONS)  # type: ignore[assignment]
+    cfg.search_mode = setting.search_mode  # type: ignore[assignment]
+    cfg.time_limit_sec = setting.time_limit_sec
+    if setting.search_mode == "THOROUGH":
+        cap = setting.cap_sec or ds.THOROUGH_MAX_SEC
+        cfg.max_search_sec = min(req.config.max_search_sec or cap, cap)
+    with _solver_env(dict(setting.env) | ({"SOLVER_PYVRP_SEED": str(seed)} if seed else {})) as env:
+        started = time.perf_counter()
+        response = ds.optimize_dispatch(run_req)
+        wall = time.perf_counter() - started
+    return RunResult(seed=seed, digest=core.digest(req), request=run_req, response=response,
+                     metrics=core.metrics(run_req, response), wall_sec=round(wall, 2), env=env)
+
+
+_ENGINE_SETTING = solve_setting
+
+
+def _option(run: RunResult, name: str) -> DispatchScenario | None:
+    return next((sc for sc in run.response.scenarios if sc.name == name), None)
+
+
+def _served_ids(sc: DispatchScenario | None) -> set[str]:
+    return {st.stop_id for ld in sc.loads for st in ld.stops} if sc is not None else set()
+
+
+def _ranked(ids: Iterable[str], salt: str) -> list[str]:
+    """``ids`` in a fixed pseudo-random order for ``salt``, whatever order they come in."""
+    return sorted(ids, key=lambda i: hashlib.sha256(f"{salt}:{i}".encode()).hexdigest())
+
+
+def perturb(req: DispatchRequest, kind: str, base: DispatchScenario) -> tuple[DispatchRequest, dict]:
+    """The day ``req`` with one small change (PERTURBATIONS ``kind``) and what changed. The stop or truck changed
+    is one the base plan ``base`` uses when there is one (a change the plan does not touch moves nothing), picked
+    by a fixed hash order: the same day and plan always get the same change. These are changes of the day's data
+    for the stability test, never relaxations offered to anyone."""
+    out = req.model_copy(deep=True)
+    served = _served_ids(base)
+    by_id = {s.stop_id: s for s in out.stops}
+    small = [s.stop_id for s in out.stops if s.demand_cases <= economics.SMALL_MAX_CASES]
+    what: dict = {"kind": kind, "label": PERTURBATIONS[kind]}
+
+    def pick(ids: list[str]) -> str:
+        return _ranked([i for i in ids if i in served] or ids, kind)[0]
+
+    if kind == "P0":
+        out.run_id = f"{req.run_id}-again"  # another cache file; the engine plans exactly the same day
+        what["change"] = "none"
+    elif kind in ("P1", "P5"):
+        sid = pick(small or sorted(by_id, key=lambda i: (by_id[i].demand_cases, i))[:5])
+        s = by_id[sid]
+        if kind == "P1":
+            out.stops = [x for x in out.stops if x.stop_id != sid]
+            what |= {"change": f"{sid} removed ({s.demand_cases} cases, P{s.priority})", "stop": sid}
+        else:
+            new = s.model_copy(deep=True)
+            new.stop_id, new.customer_id = f"{sid}-late", f"{s.customer_id}-late"
+            new.order_ids = [f"{o}-late" for o in s.order_ids]
+            new.lat = min(90.0, s.lat + LATE_ORDER_KM / KM_PER_DEG_LAT)
+            new.late, new.previous_truck_id = True, None
+            out.stops.append(new)
+            what |= {"change": f"{new.stop_id} added: a copy of {sid} ({s.demand_cases} cases, P{s.priority}) "
+                               f"{LATE_ORDER_KM:g} km north, as a new customer's late order", "stop": new.stop_id}
+    elif kind == "P2":
+        k = max(1, round(DEMAND_SHARE * len(out.stops)))
+        chosen = _ranked([s.stop_id for s in out.stops if s.demand_cases > 0], kind)[:k]  # any stop: demand grows anywhere
+        added = 0
+        for sid in chosen:
+            s = by_id[sid]
+            up = max(1, round(DEMAND_UP * s.demand_cases))
+            f = (s.demand_cases + up) / s.demand_cases
+            s.demand_cases += up
+            s.demand_kg = round(s.demand_kg * f, 1)
+            if s.demand_pallet_units is not None:
+                s.demand_pallet_units = math.ceil(s.demand_pallet_units * f)
+            s.service_min = min(synth.SERVICE_CAP_MIN, s.service_min + round(synth.SERVICE_PER_CASE * up))
+            added += up
+        what |= {"change": f"{len(chosen)} stops +{DEMAND_UP:.0%} cases (at least 1): {added} cases in all; kg and "
+                           f"pallets in proportion; unloading +{synth.SERVICE_PER_CASE:g} min per case added",
+                 "stops": len(chosen), "cases_added": added}
+    elif kind == "P3":
+        pool = [s.stop_id for s in out.stops if s.hard_end_min is not None and s.hard_end_min + WINDOW_LATER_MIN <= DAY_MIN]
+        if not pool:
+            what["change"] = "none: no stop has a closing time"
+        else:
+            sid = pick(pool)
+            s = by_id[sid]
+
+            def later(v: int | None) -> int | None:
+                return None if v is None else min(DAY_MIN, v + WINDOW_LATER_MIN)
+
+            s.hard_start_min, s.hard_end_min = later(s.hard_start_min), later(s.hard_end_min)
+            s.pref_start_min, s.pref_end_min = later(s.pref_start_min), later(s.pref_end_min)
+            what |= {"change": f"{sid}: receiving window {WINDOW_LATER_MIN} min later (opening, closing and any "
+                               f"preferred window)", "stop": sid}
+    elif kind == "P4":
+        used = sorted({ld.truck_id for ld in base.loads})
+        tid = _ranked(used or [t.id for t in out.trucks], kind)[0]
+        carried = sum(len(ld.stops) for ld in base.loads if ld.truck_id == tid)
+        out.trucks = [t for t in out.trucks if t.id != tid]
+        for s in out.stops:
+            if s.allowed_truck_ids is not None:
+                s.allowed_truck_ids = [t for t in s.allowed_truck_ids if t != tid]
+            if s.previous_truck_id == tid:
+                s.previous_truck_id = None
+        what |= {"change": f"{tid} unavailable (it carried {carried} stops in the base plan)", "truck": tid,
+                 "stops_on_it": carried}
+    else:
+        raise ValueError(f"unknown perturbation {kind!r}")
+    return DispatchRequest.model_validate(out.model_dump()), what  # validated again: unique ids, windows in order
+
+
+def plan_moves(base: RunResult, new: RunResult, option: str = "RECOMMENDED") -> dict | None:
+    """How far ``new``'s plan option moved from ``base``'s (dynamic.Replan's measures): stops of both plans on
+    another (truck, load number) or another truck; stops of both days dropped, added, and the change in stops
+    served; the trucks used before and after and how many differ; cash, loads and estimated km. None when either
+    run lacks the option."""
+    b, n = _option(base, option), _option(new, option)
+    if b is None or n is None:
+        return None
+    old = {st.stop_id: (ld.truck_id, ld.load_no) for ld in b.loads for st in ld.stops}
+    now = {st.stop_id: (ld.truck_id, ld.load_no) for ld in n.loads for st in ld.stops}
+    common = {s.stop_id for s in base.request.stops} & {s.stop_id for s in new.request.stops}
+    both = old.keys() & now.keys()
+    t_old, t_new = {t for t, _ in old.values()}, {t for t, _ in now.values()}
+    mb, mn = core.metrics(base.request, b), core.metrics(new.request, n)
+    return {"stops_moved": sum(1 for s in both if old[s] != now[s]),
+            "stops_other_truck": sum(1 for s in both if old[s][0] != now[s][0]),
+            "dropped": len((old.keys() - now.keys()) & common), "added": len((now.keys() - old.keys()) & common),
+            "served_change": len(now.keys() & common) - len(old.keys() & common),
+            "trucks_before": len(t_old), "trucks_after": len(t_new), "trucks_changed": len(t_old ^ t_new),
+            "cash_change": round(mn.cash.total - mb.cash.total, 3), "loads_change": n.trips - b.trips,
+            "km_change": round(mn.km - mb.km, 2), "feasibility": mn.feasibility}
+
+
+def run_record(run: RunResult) -> dict:
+    """What E6 analyses of one run: per plan option its numbers, and the search report. Keys starting with "_"
+    (the stops served, their priorities) are for the comparisons only and never written."""
+    options: dict[str, dict] = {}
+    for name in OPTIONS:
+        sc = _option(run, name)
+        if sc is None:
+            continue
+        m = core.metrics(run.request, sc)
+        options[name] = {
+            "status": m.status, "cash": asdict(m.cash), "trucks": m.trucks_used, "loads": m.trips,
+            "stops_served": m.stops_served, "stops_total": m.stops_total, "cases_served": m.cases_served,
+            "cases_total": m.cases_total, "served_by_priority": dict(m.served_by_priority),
+            "unserved_by_priority": dict(m.unserved_by_priority), "late_stops": m.late_stops,
+            "minutes_outside_pref": m.minutes_outside_pref, "km": m.km, "feasibility": m.feasibility,
+            "penalties": dict(m.penalties), "search_sec": sc.solver_time_sec, "_served": sorted(_served_ids(sc))}
+    s = run.response.search
+    search = None
+    if s is not None:
+        search = {k: getattr(s, k) for k in ("mode", "cap_sec", "limit_sec", "search_sec", "used_sec", "stop_reason",
+                                             "last_improvement_sec", "stall_sec", "solutions")}
+        search["best_over_time"] = [list(p) for p in s.best_over_time]
+        pv = s.pyvrp
+        search["pyvrp"] = ({k: getattr(pv, k) for k in ("status", "reason", "stop_reason", "search_sec", "iterations",
+                                                        "chosen_for")} if pv is not None else None)
+    return {"seed": run.seed, "wall_sec": run.wall_sec, "env": dict(run.env), "options": options, "search": search,
+            "_priority": {st.stop_id: st.priority for st in run.request.stops}}
+
+
+def _public(obj):
+    """``obj`` without the keys that start with "_" (stop ids kept only for the comparisons)."""
+    if isinstance(obj, dict):
+        return {k: _public(v) for k, v in obj.items() if not str(k).startswith("_")}
+    if isinstance(obj, list):
+        return [_public(v) for v in obj]
+    return obj
+
+
+def _desc(values: list[float]) -> dict:
+    """n, mean, min, max and the sample standard deviation (0 for one value)."""
+    return {"n": len(values), "mean": round(statistics.fmean(values), 3), "min": round(min(values), 3),
+            "max": round(max(values), 3), "sd": round(statistics.stdev(values), 3) if len(values) > 1 else 0.0}
+
+
+def _service(opt: dict) -> tuple[int, ...]:
+    """Stops served by priority, P1 first: how the engine's strict priorities rank service."""
+    return tuple(opt["served_by_priority"][p] for p in range(1, 6))
+
+
+def spread(records: list[dict]) -> dict:
+    """Per plan option, over the runs (seeds): every number's n / mean / min / max / sd, the cash parts' means,
+    the mean stops left out per priority, and how many plans the independent check VERIFIED."""
+    out: dict[str, dict] = {}
+    for name in OPTIONS:
+        rows = [r["options"][name] for r in records if name in r["options"]]
+        if not rows:
+            continue
+        out[name] = {"runs": len(rows), "cash": _desc([x["cash"]["total"] for x in rows]),
+                     "cash_parts_mean": {k: round(statistics.fmean(x["cash"][k] for x in rows), 3) for k in CASH_PARTS},
+                     **{k: _desc([float(x[k]) for x in rows]) for k in ("trucks", "loads", "stops_served", "cases_served",
+                                                                        "km", "late_stops", "minutes_outside_pref",
+                                                                        "search_sec")},
+                     "unserved_by_priority_mean": {p: round(statistics.fmean(x["unserved_by_priority"][p] for x in rows), 2)
+                                                   for p in range(1, 6)},
+                     "stops_total": rows[0]["stops_total"], "cases_total": rows[0]["cases_total"],
+                     "verified": sum(1 for x in rows if x["feasibility"] == "VERIFIED"),
+                     "status": dict(Counter(x["status"] for x in rows))}
+    return out
+
+
+def option_choice(records: list[dict]) -> dict:
+    """Per run: the options that reach the run's best service (most P1 stops served, then P2, ...) and the
+    cheapest of them (a tie counts for each); runs where all three serve alike; runs where RECOMMENDED serves less
+    than the best option; and runs where RECOMMENDED leaves out a stop another option serves (those stops counted
+    by priority)."""
+    cheapest, at_best, left_out = Counter(), Counter(), Counter()
+    runs = alike = behind = out_runs = 0
+    for r in records:
+        opts = r["options"]
+        if not opts:
+            continue
+        runs += 1
+        svc = {k: _service(v) for k, v in opts.items()}
+        best = max(svc.values())
+        top = [k for k in opts if svc[k] == best]
+        low = min(opts[k]["cash"]["total"] for k in top)
+        at_best.update(top)
+        cheapest.update(k for k in top if opts[k]["cash"]["total"] <= low + 0.0005)
+        alike += len(opts) == len(OPTIONS) and len(set(svc.values())) == 1
+        rec = opts.get("RECOMMENDED")
+        if rec is None:
+            continue
+        behind += svc["RECOMMENDED"] < best
+        others = set().union(*(set(v["_served"]) for k, v in opts.items() if k != "RECOMMENDED"))
+        missed = others - set(rec["_served"])
+        if missed:
+            out_runs += 1
+            left_out.update(r["_priority"][s] for s in missed)
+    return {"runs": runs, "cheapest_at_best_service": {k: cheapest[k] for k in OPTIONS},
+            "at_best_service": {k: at_best[k] for k in OPTIONS}, "all_three_alike": alike,
+            "recommended_serves_less": behind, "recommended_leaves_out_runs": out_runs,
+            "recommended_leaves_out_by_priority": {p: left_out[p] for p in range(1, 6)}}
+
+
+def convergence(records: list[dict], marks: tuple[int, ...] = CONVERGENCE_MARKS) -> dict:
+    """THOROUGH runs: why and when RECOMMENDED's search stopped, and how far above its final search objective the
+    best plan found by each mark was (best_over_time). The objective is the route search's own score - cash-like
+    costs plus ARTIFICIAL penalties, 1,000 OMR or more per stop not planned yet - not cash, and it is the search's
+    before the load re-check. The report keeps at most 12 points, so a value at a mark (the last kept point by
+    then) is an upper bound of the true one."""
+    rows = []
+    for r in records:
+        s = r["search"]
+        if not s or s["mode"] != "THOROUGH":
+            continue
+        pts = s["best_over_time"]
+        row = {"seed": r["seed"], "wall_sec": r["wall_sec"], "pyvrp": s["pyvrp"],
+               **{k: s[k] for k in ("stop_reason", "limit_sec", "search_sec", "used_sec", "cap_sec",
+                                    "last_improvement_sec", "stall_sec", "solutions")},
+               "end_objective": pts[-1][1] if pts else None, "at": {}}
+        for x in marks:
+            upto = [p for p in pts if p[0] <= x]
+            row["at"][x] = ({"above_end": round(upto[-1][1] - pts[-1][1], 2),
+                             "not_planned": upto[-1][2] if len(upto[-1]) > 2 else None} if upto else None)
+        rows.append(row)
+    summary = {}
+    for x in marks:
+        vals = [row["at"][x]["above_end"] for row in rows if row["at"][x] is not None]
+        summary[x] = {"runs": len(vals), "above_end": _desc(vals) if vals else None,
+                      "still_searching": sum(1 for row in rows if (row["search_sec"] or 0) > x)}
+    return {"runs": rows, "summary": summary, "stop_reasons": dict(Counter(row["stop_reason"] for row in rows))}
+
+
+def pyvrp_summary(records: list[dict]) -> dict:
+    """What the second route search did over the runs: its status (with the reason) and the options it was
+    chosen for."""
+    status, chosen = Counter(), Counter()
+    for r in records:
+        pv = (r["search"] or {}).get("pyvrp")
+        if pv is None:
+            status["no report"] += 1
+            continue
+        status[pv["status"] + (f" ({pv['reason']})" if pv.get("reason") else "")] += 1
+        chosen.update(pv.get("chosen_for") or [])
+    return {"status": dict(status), "chosen_for": {k: chosen[k] for k in OPTIONS}}
+
+
+def prod_vs_quick(prod: list[dict], quick: list[dict]) -> dict:
+    """PROD - QUICKP per plan option, paired by seed (the same stop order and second-search seed) over the seeds
+    both have, and how often PROD's plan serves more (by priority), less, or alike for less, more or the same cash."""
+    q = {r["seed"]: r for r in quick}
+    pairs = [(p, q[p["seed"]]) for p in prod if p["seed"] in q]
+    out: dict = {"seeds": [p["seed"] for p, _ in pairs], "options": {}}
+    numbers: dict[str, Callable[[dict], float]] = {
+        "cash": lambda o: o["cash"]["total"], "stops_served": lambda o: o["stops_served"],
+        "trucks": lambda o: o["trucks"], "loads": lambda o: o["loads"], "km": lambda o: o["km"]}
+    for name in OPTIONS:
+        both = [(a["options"][name], b["options"][name]) for a, b in pairs if name in a["options"] and name in b["options"]]
+        if not both:
+            continue
+        same = [(a, b) for a, b in both if _service(a) == _service(b)]
+        cheaper = sum(1 for a, b in same if a["cash"]["total"] < b["cash"]["total"] - 0.0005)
+        dearer = sum(1 for a, b in same if a["cash"]["total"] > b["cash"]["total"] + 0.0005)
+        out["options"][name] = {"pairs": len(both), **{k: _desc([get(a) - get(b) for a, b in both]) for k, get in numbers.items()},
+                                "prod_serves_more": sum(1 for a, b in both if _service(a) > _service(b)),
+                                "prod_serves_less": sum(1 for a, b in both if _service(a) < _service(b)),
+                                "alike_prod_cheaper": cheaper, "alike_prod_dearer": dearer,
+                                "alike_same_cash": len(same) - cheaper - dearer}
+    return out
+
+
+def stability(base: RunResult, perturbed: list[tuple[str, dict, RunResult]], reruns: list[RunResult]) -> dict:
+    """Each perturbed day's plans against the base plans (plan_moves, every option), with whether the changed stop
+    is served before and after; and, as the reference, the same day's other seeds against the base (RECOMMENDED):
+    how much a plan moves with no change of the day at all."""
+    rows = []
+    for kind, what, run in perturbed:
+        for name in OPTIONS:
+            mv = plan_moves(base, run, name)
+            if mv is None:
+                continue
+            row = {"perturbation": kind, "option": name, "change": what["change"], **mv}
+            if "stop" in what:
+                row["changed_stop_served_before"] = what["stop"] in _served_ids(_option(base, name))
+                row["changed_stop_served_after"] = what["stop"] in _served_ids(_option(run, name))
+            if "stops_on_it" in what and name == "RECOMMENDED":
+                row["stops_on_unavailable_truck"] = what["stops_on_it"]
+            rows.append(row)
+    seeds = [m for r in reruns if (m := plan_moves(base, r, "RECOMMENDED")) is not None]
+    ref = ({k: _desc([float(m[k]) for m in seeds]) for k in ("stops_moved", "stops_other_truck", "trucks_changed",
+                                                             "cash_change", "served_change")} if seeds else None)
+    return {"rows": rows, "seed_reference": ref, "seed_reference_seeds": [r.seed for r in reruns]}
+
+
+class E6(Experiment):
+    """The engine as production runs it, over several seeds and days: PROD (THOROUGH) and QUICKP (QUICK), all
+    three plan options in one response; on the real days also how far the plan moves after a small change of the
+    day (QUICKP, seed 1, PERTURBATIONS)."""
+
+    name, slug, title = "E6", "E6-production", "Model behaviour at production settings"
+    DAYS = ("REAL-15OCT", "REAL-15OCT-PREFIX", "SYNTH-320", "SYNTH-320-S2", "SYNTH-400-S3")
+    QUICK_DAYS = ("REAL-15OCT", "REAL-15OCT-PREFIX", "SYNTH-320")
+    VARIANTS = ("PROD", "QUICKP")
+    PHASE = 6
+
+    @staticmethod
+    def settings(suite: Suite) -> dict[str, Setting]:
+        return {"PROD": Setting("PROD", "THOROUGH", cap_sec=suite.prod_cap),
+                "QUICKP": Setting("QUICKP", "QUICK", time_limit_sec=2 if suite.quick else None)}
+
+    @staticmethod
+    def seeds(variant: str, day: Day, suite: Suite) -> tuple[int, ...]:
+        return suite.e6_real_prod_seeds if variant == "PROD" and day.real else suite.e6_seeds
+
+    @staticmethod
+    def describe_day(day: Day) -> str:
+        if day.real:
+            return day.describe()
+        n, seed = SYNTH_DAYS[day.name]
+        return f"SYNTHETIC ({n} invoices, synth seed {seed}); {len(day.request.stops)} stops, {len(day.request.trucks)} trucks"
+
+    def groups(self, suite: Suite, days: Days) -> list[Group]:
+        settings, out = self.settings(suite), []
+        for name in self.QUICK_DAYS if suite.quick else self.DAYS:
+            day = days.get(name)
+            if day is None:
+                out.append(Group(self.name, name, self.PHASE, skipped=days.why(name)))
+                continue
+            items = [Item(self.name, name, v, s, settings[v].tag) for v in self.VARIANTS for s in self.seeds(v, day, suite)]
+            if day.real:
+                items += [Item(self.name, name, p, 1, settings["QUICKP"].tag) for p in PERTURBATIONS]
+            out.append(Group(self.name, name, self.PHASE, items))
+        return out
+
+    @staticmethod
+    def _done(run: RunResult) -> dict:
+        s = run.response.search
+        return {"solve_sec": run.wall_sec, "stop_reason": s.stop_reason if s is not None else None}
+
+    def run(self, item: Item, suite: Suite, days: Days, cache: RunCache) -> dict:
+        day = days.get(item.day)
+        settings = self.settings(suite)
+        with cache.scope(self.name, day.name, {core.digest(day.request): "base"}):
+            if item.variant in settings:
+                return self._done(cache.solve_setting(day.request, settings[item.variant], item.seed))
+            base = cache.solve_setting(day.request, settings["QUICKP"], 1)
+        preq, what = perturb(day.request, item.variant, _recommended(base))
+        with cache.scope(self.name, day.name, {core.digest(preq): item.variant}):
+            run = cache.solve_setting(preq, settings["QUICKP"], 1)
+        return {"change": what["change"], **self._done(run)}
+
+    def report(self, group: Group, suite: Suite, days: Days, cache: RunCache) -> tuple[dict, list[str]]:
+        """Every cached run of the day; the runs not cached yet are listed and the day is PARTIAL (MissingRun only
+        when none is cached)."""
+        day = days.get(group.day)
+        settings = self.settings(suite)
+        runs: dict[str, list[RunResult]] = {v: [] for v in self.VARIANTS}
+        missing: list[str] = []
+        with cache.scope(self.name, day.name, {core.digest(day.request): "base"}):
+            for v in self.VARIANTS:
+                for s in self.seeds(v, day, suite):
+                    try:
+                        runs[v].append(cache.solve_setting(day.request, settings[v], s))
+                    except MissingRun as e:
+                        missing.append(str(e))
+        base = next((r for r in runs["QUICKP"] if r.seed == 1), None)
+        perturbed: list[tuple[str, dict, RunResult]] = []
+        for kind in PERTURBATIONS if day.real else ():
+            if base is None:
+                missing.append(f"{kind} (needs QUICKP seed 1)")
+                continue
+            preq, what = perturb(day.request, kind, _recommended(base))
+            try:
+                with cache.scope(self.name, day.name, {core.digest(preq): kind}):
+                    perturbed.append((kind, what, cache.solve_setting(preq, settings["QUICKP"], 1)))
+            except MissingRun as e:
+                missing.append(str(e))
+        if not any(runs.values()):
+            raise MissingRun(missing[0])
+        records = {v: [run_record(r) for r in rs] for v, rs in runs.items()}
+        done = {v: rs for v, rs in records.items() if rs}
+        analysis = {
+            "spread": {v: spread(rs) for v, rs in done.items()},
+            "wall_sec": {v: _desc([r["wall_sec"] for r in rs]) for v, rs in done.items()},
+            "option_choice": {v: option_choice(rs) for v, rs in done.items()},
+            "convergence": convergence(records["PROD"]),
+            "pyvrp": {v: pyvrp_summary(rs) for v, rs in done.items()},
+            "prod_vs_quickp": prod_vs_quick(records["PROD"], records["QUICKP"]),
+            "stability": (stability(base, perturbed, [r for r in runs["QUICKP"] if r.seed != 1])
+                          if day.real and base is not None else None),
+        }
+        payload = {"day": self.describe_day(day), "settings": {v: s.describe() for v, s in settings.items()},
+                   "seeds": {v: [r.seed for r in rs] for v, rs in runs.items()},
+                   "runs": {v: [_public(r) for r in rs] for v, rs in records.items()},
+                   "analysis": analysis, "missing": missing}
+        if missing:
+            payload["_status"] = "PARTIAL"
+        return payload, self._markdown(day, suite, runs, perturbed, analysis, missing)
+
+    def _markdown(self, day: Day, suite: Suite, runs: dict[str, list[RunResult]],
+                  perturbed: list[tuple[str, dict, RunResult]], a: dict, missing: list[str]) -> list[str]:
+        L = [f"## {day.name}: {self.describe_day(day)}", "",
+             "Runs: " + "; ".join(f"{v} seeds {[r.seed for r in runs[v]]} of {list(self.seeds(v, day, suite))}"
+                                  for v in self.VARIANTS)
+             + (f"; perturbations {len(perturbed)} of {len(PERTURBATIONS)} (QUICKP, seed 1)" if day.real else "") + "."]
+        if missing:
+            L += ["", f"PARTIAL: {len(missing)} run(s) not in the cache yet (first: {missing[0]}); the tables use the "
+                      "runs that are."]
+        L += ["", "### Spread over the seeds", "",
+              "| variant | option | runs | cash OMR, mean [min..max] | cash sd | trucks | loads | stops served | cases "
+              "served | stops left out P1/P2/P3/P4/P5 (mean) | late stops (max) | min outside preferred windows | "
+              "estimated km | VERIFIED | option's search s | whole request s |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for v in self.VARIANTS:
+            for name, o in a["spread"].get(v, {}).items():
+                L.append(f"| {v} | {name} | {o['runs']} | {_fmt(o['cash'], 2, False)} | {o['cash']['sd']:.2f} | "
+                         f"{_fmt(o['trucks'], 1, False)} | {_fmt(o['loads'], 1, False)} | "
+                         f"{_fmt(o['stops_served'], 1, False)} of {o['stops_total']} | "
+                         f"{_fmt(o['cases_served'], 0, False)} of {o['cases_total']} | "
+                         + "/".join(f"{o['unserved_by_priority_mean'][p]:g}" for p in range(1, 6))
+                         + f" | {o['late_stops']['max']:g} | {_fmt(o['minutes_outside_pref'], 0, False)} | "
+                         f"{_fmt(o['km'], 1, False)} | {o['verified']}/{o['runs']} | {_fmt(o['search_sec'], 0, False)} | "
+                         f"{_fmt(a['wall_sec'][v], 0, False)} |")
+        L += ["", "Cash parts, mean OMR (costing.truck_day_costs):", "",
+              "| variant | option | " + " | ".join(CASH_PARTS) + " |", "|---|---|" + "---|" * len(CASH_PARTS)]
+        for v in self.VARIANTS:
+            for name, o in a["spread"].get(v, {}).items():
+                L.append(f"| {v} | {name} | " + " | ".join(f"{o['cash_parts_mean'][k]:.2f}" for k in CASH_PARTS) + " |")
+        L += ["", "### Which option is cheapest, and does RECOMMENDED leave out what another option serves", "",
+              "| variant | runs | cheapest at the run's best service: RECOMMENDED / MIN_TRUCKS / MIN_DISTANCE | reach "
+              "the best service: R / MT / MD | all three serve alike | RECOMMENDED serves less than the best option | "
+              "runs where RECOMMENDED leaves out a stop another option serves | those stops, P1/P2/P3/P4/P5 |",
+              "|---|---|---|---|---|---|---|---|"]
+        for v, c in a["option_choice"].items():
+            L.append(f"| {v} | {c['runs']} | " + " / ".join(str(c["cheapest_at_best_service"][k]) for k in OPTIONS)
+                     + " | " + " / ".join(str(c["at_best_service"][k]) for k in OPTIONS)
+                     + f" | {c['all_three_alike']} | {c['recommended_serves_less']} | {c['recommended_leaves_out_runs']} | "
+                     + "/".join(str(c["recommended_leaves_out_by_priority"][p]) for p in range(1, 6)) + " |")
+        L += ["", "Best service: the most P1 stops served, then P2, and so on (the engine's strict priorities). A tie "
+                  "for cheapest counts for each option in it."]
+        conv = a["convergence"]
+        if conv["runs"]:
+            marks = " / ".join(f"{x}" for x in CONVERGENCE_MARKS)
+            L += ["", "### Convergence of PROD (THOROUGH)", "",
+                  f"| seed | stopped | RECOMMENDED search s (limit) | whole request s (cap) | last improvement s | "
+                  f"search objective above its end at {marks} s | stops not yet planned at {marks} s | second search "
+                  "(PyVRP) |", "|---|---|---|---|---|---|---|---|"]
+            for r in conv["runs"]:
+                above = " / ".join("-" if r["at"][x] is None else f"{r['at'][x]['above_end']:.1f}" for x in CONVERGENCE_MARKS)
+                left = " / ".join("-" if r["at"][x] is None or r["at"][x]["not_planned"] is None
+                                  else str(r["at"][x]["not_planned"]) for x in CONVERGENCE_MARKS)
+                pv = r["pyvrp"] or {}
+                pv_text = (f"{pv.get('status')}" + (f" ({pv['reason']})" if pv.get("reason") else "")
+                           + (f", chosen for {', '.join(pv['chosen_for'])}" if pv.get("chosen_for") else "")) if pv else "-"
+                L.append(f"| {r['seed']} | {r['stop_reason']} | {r['search_sec']} ({r['limit_sec']}) | {r['used_sec']} "
+                         f"({r['cap_sec']}) | {r['last_improvement_sec'] if r['last_improvement_sec'] is not None else '-'} | "
+                         f"{above} | {left} | {pv_text} |")
+            over = "; ".join(f"at {x} s mean {s['above_end']['mean']:.1f} [max {s['above_end']['max']:.1f}] above the "
+                             f"end, {s['still_searching']} of {len(conv['runs'])} still searching"
+                             for x, s in conv["summary"].items() if s["above_end"])
+            L += ["", "Search objective: the route search's own score before the load re-check - cash-like costs plus "
+                      "ARTIFICIAL penalties (1,000 OMR or more for each stop not planned yet) - not cash. A value at a "
+                      "mark is the last of at most 12 kept points by then, so the true gap is at most that. '-': no "
+                      "plan by then." + (f" Over the runs: {over}." if over else "")]
+        L += ["", "Second route search (PyVRP): " + "; ".join(
+            f"{v}: " + ", ".join(f"{k} {n}" for k, n in sorted(p["status"].items()))
+            + " - chosen for " + ", ".join(f"{k} {p['chosen_for'][k]}" for k in OPTIONS) for v, p in a["pyvrp"].items()) + "."]
+        pq = a["prod_vs_quickp"]
+        if pq["options"]:
+            L += ["", "### PROD against QUICKP (PROD - QUICKP, paired by seed)", "",
+                  f"Seeds {pq['seeds']}. Whole request: PROD {_fmt(a['wall_sec'].get('PROD'), 0, False)} s, QUICKP "
+                  f"{_fmt(a['wall_sec'].get('QUICKP'), 0, False)} s.", "",
+                  "| option | pairs | Δ cash OMR | Δ stops served | Δ trucks | Δ loads | Δ estimated km | PROD serves more "
+                  "/ less | alike: PROD cheaper / dearer / same cash |", "|---|---|---|---|---|---|---|---|---|"]
+            for name, d in pq["options"].items():
+                L.append(f"| {name} | {d['pairs']} | {_fmt(d['cash'])} | {_fmt(d['stops_served'], 1)} | "
+                         f"{_fmt(d['trucks'], 1)} | {_fmt(d['loads'], 1)} | {_fmt(d['km'], 1)} | "
+                         f"{d['prod_serves_more']} / {d['prod_serves_less']} | {d['alike_prod_cheaper']} / "
+                         f"{d['alike_prod_dearer']} / {d['alike_same_cash']} |")
+            L += ["", "Serving more stops costs more cash: read Δ cash with Δ stops served."]
+        st = a["stability"]
+        if st is not None:
+            L += ["", "### Stability: the plan after a small change of the day (QUICKP, seed 1, RECOMMENDED)", "",
+                  "| change | stops moved (truck or load) | stops on another truck | trucks used before -> after "
+                  "(changed) | Δ cash OMR | Δ other stops served | Δ loads | the changed stop | VERIFIED |",
+                  "|---|---|---|---|---|---|---|---|---|"]
+            for r in (x for x in st["rows"] if x["option"] == "RECOMMENDED"):
+                stop = "-"
+                if "changed_stop_served_before" in r:
+                    stop = {"P1": "served before" if r["changed_stop_served_before"] else "was left out before",
+                            "P5": "served" if r["changed_stop_served_after"] else "left out"}.get(
+                        r["perturbation"], f"served {'yes' if r['changed_stop_served_before'] else 'no'} -> "
+                                           f"{'yes' if r['changed_stop_served_after'] else 'no'}")
+                if "stops_on_unavailable_truck" in r:
+                    stop = f"{r['stops_on_unavailable_truck']} stops had to leave the truck"
+                L.append(f"| {r['perturbation']}: {r['change']} | {r['stops_moved']} | {r['stops_other_truck']} | "
+                         f"{r['trucks_before']} -> {r['trucks_after']} ({r['trucks_changed']}) | {r['cash_change']:+.2f} | "
+                         f"{r['served_change']:+d} | {r['loads_change']:+d} | {stop} | {r['feasibility']} |")
+            ref = st["seed_reference"]
+            if ref:
+                L += ["", f"Reference with no change of the day: the plans of seeds {st['seed_reference_seeds']} "
+                          f"against seed 1's moved {_fmt(ref['stops_moved'], 1, False)} stops "
+                          f"({_fmt(ref['stops_other_truck'], 1, False)} to another truck), cash "
+                          f"{_fmt(ref['cash_change'])} OMR, other stops served {_fmt(ref['served_change'], 1)}."]
+            L += ["", "Each changed day is solved from scratch, as a new OPTIMIZE (no plan continuity: no previous truck "
+                      "ids), and compared with the base plan. 'Stops moved': stops of both plans on another truck or "
+                      "load number. 'Other stops served': stops of both days. P0 is the control: the same day solved "
+                      "again, so whatever moves there is the timed search's own variation. All three options are in "
+                      "the JSON."]
+        return L + [""]
+
+    def about(self, suite: Suite) -> list[str]:
+        return ["Days: the real 15 Oct request (86 stops) and the pre-fix 15 Oct request (94 stops), anonymised, and "
+                "three SYNTHETIC days (320 invoices, synth seeds 1 and 2; 400 invoices, synth seed 3). Variants: "
+                "PROD = THOROUGH as the requests ask (cap 1,200 s for the whole request, the engine's stall rule: stop "
+                "once the best plan has not improved for max(300 s, half the time searched)); QUICKP = QUICK, the "
+                "automatic time by day size. Both return RECOMMENDED, MIN_TRUCKS and MIN_DISTANCE in one response, with "
+                "worker processes and the second route search, as production. Perturbations on the real days: "
+                + "; ".join(f"{k} {v}" for k, v in PERTURBATIONS.items()) + "."
+                + (" QUICK smoke: one seed, a 20 s THOROUGH cap, 2 s QUICK, three days." if suite.quick else "")]
+
+    def meta(self, suite: Suite) -> dict:
+        settings = self.settings(suite)
+        return {"budget_head": "Settings", "budgets": {v: s.describe() for v, s in settings.items()},
+                "seeds": f"PROD on a real day {list(suite.e6_real_prod_seeds)}, every other run {list(suite.e6_seeds)}, "
+                         "perturbations 1",
+                "env": {"set": {v: dict(s.env) for v, s in settings.items()}, "cleared": list(TUNING_ENV)},
+                "equal_compute": PRODUCTION}
+
+
+EXPERIMENTS: dict[str, Experiment] = {e.name: e for e in (E1(), E2(), E3(), E4(), E5(), E6())}
+ALL = ("E1", "E2", "E3", "E4", "E5")  # what `all` runs; E6 runs alone (production settings, hours of compute)
 
 
 # ------------------------------------------------------------------------------------------------------------
@@ -1222,6 +1914,7 @@ def _meta(exp: Experiment, groups: list[Group], suite: Suite, cache: RunCache, p
         budgets = {"engine_sec": suite.budget_exact}
     return {
         "commit": cache.commit, "generated_at": _now(), "quick": suite.quick, "budgets": budgets,
+        "budget_head": "Budgets (search seconds per run; the engine's load re-check comes on top)",
         "seeds": list(suite.seeds) if exp.name in ("E1", "E2", "E4") else [1], "machine": machine(),
         "run_hosts": sorted({x.get("host", "?") for x in done}), "lanes": sorted({x.get("lane", "?") for x in done}),
         "env": dict(ENV), "equal_compute": EQUAL_COMPUTE, "honesty": HONESTY,
@@ -1230,7 +1923,7 @@ def _meta(exp: Experiment, groups: list[Group], suite: Suite, cache: RunCache, p
         "first_start": min((x["started_at"] for x in done), default=None),
         "last_finish": max((x["finished_at"] for x in done), default=None),
         "ivms": params, "labels": dict(core.LABELS),
-    }
+    } | exp.meta(suite)
 
 
 def _elapsed_min(meta: dict) -> float | None:
@@ -1249,15 +1942,16 @@ def write_report(exp: Experiment, groups: list[Group], suite: Suite, days: Days,
     elapsed = _elapsed_min(meta)
     md = [f"# {exp.name}: {exp.title}", "",
           f"- Commit {cache.commit}; written {meta['generated_at']}" + (" (QUICK smoke settings)" if suite.quick else "") + ".",
-          f"- Budgets (search seconds per run; the engine's load re-check comes on top): "
+          f"- {meta['budget_head']}: "
           + ", ".join(f"{k} {v}" for k, v in meta["budgets"].items()) + f"; seeds {meta['seeds']}.",
           f"- Machine: {mc['nproc']} CPUs, {mc['cpu']}; Python {mc['python']}; OR-Tools {mc['ortools']}.",
           f"- Items done {meta['items']['done']}/{meta['items']['total']}; compute {meta['compute_sec'] / 60:.1f} min "
           f"(sum of item wall times); wall time {elapsed if elapsed is not None else '-'} min (first start to last "
           f"finish); lanes {', '.join(meta['lanes']) or '-'}.",
-          f"- {EQUAL_COMPUTE}", f"- {HONESTY}", "", *exp.about(suite), "",
-          "IVMS-derived parameters used (committed aggregates of the owner's IVMS report and the 13 Oct truck evidence):",
-          *_ivms_lines(params, exp.ivms_keys), ""]
+          f"- {meta['equal_compute']}", f"- {HONESTY}", "", *exp.about(suite), ""]
+    if exp.ivms_keys:
+        md += ["IVMS-derived parameters used (committed aggregates of the owner's IVMS report and the 13 Oct truck "
+               "evidence):", *_ivms_lines(params, exp.ivms_keys), ""]
     out_days: dict[str, dict] = {}
     for g in groups:
         markers = [m for m in (cache.done(it) for it in g.items) if m]
@@ -1273,7 +1967,8 @@ def write_report(exp: Experiment, groups: list[Group], suite: Suite, days: Days,
                                "missing": str(e)}
             md += [f"## {g.day}", "", f"INCOMPLETE: {done}/{len(g.items)} items done; first run missing: {e}.", ""]
             continue
-        out_days[g.day] = {"status": "COMPLETE", "items_done": done, "items": len(g.items), "compute_sec": compute,
+        status = payload.pop("_status", "COMPLETE")
+        out_days[g.day] = {"status": status, "items_done": done, "items": len(g.items), "compute_sec": compute,
                            **payload}
         md += lines
     payload = {"experiment": exp.name, "title": exp.title, "meta": meta, "days": out_days}
@@ -1298,8 +1993,9 @@ def report_all(names: list[str], groups: list[Group], suite: Suite, days: Days, 
 def write_index(out_dir: Path) -> None:
     """INDEX.md over every experiment JSON in ``out_dir``."""
     lines = ["# Decision-support evidence (DESIGN.md section 6)", "",
-             "Written by `python -m decision_support.experiments all --report` from the run cache. " + EQUAL_COMPUTE,
-             "", HONESTY, "", "| Experiment | Day | Status | Items done | Commit | Compute min | Files |",
+             "Written by `python -m decision_support.experiments all --report` (E1-E5) and `... e6 --report` (E6) from "
+             "the run cache. E1-E5: " + EQUAL_COMPUTE + " E6 runs the engine at production settings instead (its file "
+             "says how).", "", HONESTY, "", "| Experiment | Day | Status | Items done | Commit | Compute min | Files |",
              "|---|---|---|---|---|---|---|"]
     for path in sorted(out_dir.glob("E*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1336,10 +2032,25 @@ def _lane(text: str) -> tuple[int, int]:
     return i, n
 
 
+def _seeds(text: str) -> tuple[int, ...]:
+    seeds = tuple(int(s) for s in text.split(","))
+    if not seeds or any(s < 0 for s in seeds) or len(set(seeds)) != len(seeds):
+        raise argparse.ArgumentTypeError("seeds: distinct non-negative integers, comma-separated")
+    return seeds
+
+
+def _cap(text: str) -> int:
+    cap = int(text)
+    if not 10 <= cap <= ds.THOROUGH_MAX_SEC:
+        raise argparse.ArgumentTypeError(f"--prod-cap needs 10..{ds.THOROUGH_MAX_SEC} seconds")
+    return cap
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m decision_support.experiments",
                                  description="The decision-support evidence suite (DESIGN.md section 6).")
-    ap.add_argument("experiment", choices=("e1", "e2", "e3", "e4", "e5", "all"))
+    ap.add_argument("experiment", choices=("e1", "e2", "e3", "e4", "e5", "e6", "all"),
+                    help="all = E1-E5; E6 runs alone")
     ap.add_argument("--out-dir", type=Path, help=f"default {DEFAULT_OUT} (QUICK: <cache-dir>/quick-results)")
     ap.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE)
     ap.add_argument("--data-dir", type=Path, default=DEFAULT_DATA, help="the real requests (never in the repository)")
@@ -1348,6 +2059,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--budget-synth", type=int, default=40, help="search seconds per run on a synthetic day")
     ap.add_argument("--budget-replan", type=int, default=10, help="E3: search seconds per re-plan")
     ap.add_argument("--seeds", default="1,2,3", help="comma-separated solver seeds (E1, E2, E4)")
+    ap.add_argument("--e6-seeds", type=_seeds, default=Suite.e6_seeds, metavar="1,2,...",
+                    help="E6: seeds of every variant and day, except PROD on a real day (default 1,2,3,4,5)")
+    ap.add_argument("--e6-real-prod-seeds", type=_seeds, default=Suite.e6_real_prod_seeds, metavar="1,2,...",
+                    help="E6: seeds of PROD on a real day, a 20-minute run each (default 1,2,3)")
+    ap.add_argument("--prod-cap", type=_cap, default=ds.THOROUGH_MAX_SEC,
+                    help="E6: THOROUGH cap in seconds (default the requests' 1200; a lower cap is no longer production)")
     ap.add_argument("--quick", action="store_true", help="tiny smoke settings (ignores the budget and seed options)")
     ap.add_argument("--report", action="store_true", help="only aggregate the cache into the output files")
     ap.add_argument("--plan", action="store_true", help="print the run lists and this lane's share; solve nothing")
@@ -1357,11 +2074,12 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     if a.only and a.report:
         ap.error("--only selects items to run; --report always needs every run of an experiment")
-    os.environ.update(ENV)
+    os.environ.update(ENV)  # E1-E5's equal compute; E6 sets its own switches for each run (Setting.env)
     suite = Suite.smoke(a.data_dir) if a.quick else Suite(
         budget_real=a.budget_real, budget_synth=a.budget_synth, budget_replan=a.budget_replan,
-        seeds=tuple(int(s) for s in a.seeds.split(",")), data_dir=a.data_dir)
-    names = list(EXPERIMENTS) if a.experiment == "all" else [a.experiment.upper()]
+        seeds=tuple(int(s) for s in a.seeds.split(",")), data_dir=a.data_dir, e6_seeds=a.e6_seeds,
+        e6_real_prod_seeds=a.e6_real_prod_seeds, prod_cap=a.prod_cap)
+    names = list(ALL) if a.experiment == "all" else [a.experiment.upper()]
     days = Days(suite.data_dir)
     cache = RunCache(a.cache_dir, a.commit or git_commit(), read_only=a.report)
     groups = plan(names, suite, days)
@@ -1379,7 +2097,8 @@ def main(argv: list[str] | None = None) -> int:
         report_all(names, groups, suite, days, cache, a.out_dir or (a.cache_dir / "quick-results" if a.quick else DEFAULT_OUT))
         return 0
     _say(f"lane {lane}/{lanes}: {len(lane_items(groups, lane, lanes))} own items of "
-         f"{sum(len(g.items) for g in groups)}; cache {cache.dir}; env {ENV}")
+         f"{sum(len(g.items) for g in groups)}; cache {cache.dir}; env "
+         + ("per run (E6 settings)" if names == ["E6"] else str(ENV)))
     failed = run_lane(groups, suite, days, cache, lane, lanes, steal=not a.no_steal)
     _say(f"lane {lane}/{lanes} finished, {failed} failed item(s)")
     return 1 if failed else 0
