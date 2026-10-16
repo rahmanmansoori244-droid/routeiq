@@ -608,58 +608,66 @@ class ThoroughTail:
 
     alt_sec: int  # each alternative's search limit (0 without alternatives)
     repack_cap: float  # each CP-SAT solve of the load re-check
-    stage_sec: int  # kept free for the load re-check (post-solve stage): three sources in one round, and its grace
+    # Kept free for the load re-check (post-solve stage): its sources in one round (three, the options'
+    # searches; one more per other route search best-of-N sends to it), and its grace.
+    stage_sec: int
     total: int  # alternatives + their grace (when asked for) + the re-check
 
     @staticmethod
-    def of(alt_sec: int, repack_cap: float, n_alternatives: int) -> "ThoroughTail":
-        stage = int(math.ceil(round(repack_cap * 3, 6) + STAGE_GRACE_SEC + 5))
+    def of(alt_sec: int, repack_cap: float, n_alternatives: int, n_sources: int = 3) -> "ThoroughTail":
+        stage = int(math.ceil(round(repack_cap * n_sources, 6) + STAGE_GRACE_SEC + 5))
         alt = alt_sec if n_alternatives else 0
         return ThoroughTail(alt, repack_cap, stage, (alt + ALT_GRACE_SEC if n_alternatives else 0) + stage)
 
 
-def thorough_tail(time_limit: int, n_alternatives: int, cap: float | None = None) -> ThoroughTail:
+def thorough_tail(time_limit: int, n_alternatives: int, cap: float | None = None, n_sources: int = 3) -> ThoroughTail:
     """THOROUGH's tail: the alternatives (in parallel, warm-started) with their grace, then the load
     re-check with its grace - at least 60 s per alternative and 30 s per CP-SAT solve. A ``cap`` below
     20 min where that is more than 30% of the cap shrinks the alternatives' and the re-check's times
     in proportion to fit 30%, never below QUICK's own (half the limit; min(15, max(3, limit / 2))).
     Review of the long-search PR: only the total used to be cut, while the alternatives were still
     charged the full re-check reserve, so under ~7 min they were always skipped and up to a third
-    of the cap went unused."""
+    of the cap went unused.
+
+    ``n_sources``: the load re-check's sources - three, the options' own searches (also without
+    alternatives, as before); best-of-N adds one per other route search it sends there (3 + m,
+    best_of.sources). Each keeps one more CP-SAT solve free, taken from RECOMMENDED's own limit - which
+    matters only to a search that would run to the cap. The default 3 gives exactly the values from before."""
     alt_full = _thorough_alt_sec(time_limit)
     repack_full = _repack_cap_sec(time_limit, True)
-    full = ThoroughTail.of(alt_full, repack_full, n_alternatives)
+    full = ThoroughTail.of(alt_full, repack_full, n_alternatives, n_sources)
     budget = int(0.3 * cap) if cap is not None else full.total
     if full.total <= budget:
         return full
     quick_alt, quick_repack = max(2, time_limit // 2), _repack_cap_sec(time_limit, False)
     grace = ALT_GRACE_SEC if n_alternatives else 0
-    # The alternatives' share of what the graces leave; the re-check gets the rest (three solves);
-    # neither below QUICK's. When the re-check is at QUICK's, the alternatives give back the excess.
-    share = max(0, budget - grace - STAGE_GRACE_SEC - 5) / ((alt_full if n_alternatives else 0) + 3 * repack_full)
+    # The alternatives' share of what the graces leave; the re-check gets the rest (one solve per
+    # source); neither below QUICK's. When the re-check is at QUICK's, the alternatives give back the excess.
+    share = max(0, budget - grace - STAGE_GRACE_SEC - 5) / ((alt_full if n_alternatives else 0) + n_sources * repack_full)
     alt = max(quick_alt, int(alt_full * share)) if n_alternatives else 0
-    rest = max(0.0, (budget - alt - grace - STAGE_GRACE_SEC - 5) / 3)
+    rest = max(0.0, (budget - alt - grace - STAGE_GRACE_SEC - 5) / n_sources)
     repack = min(repack_full, max(quick_repack, math.floor(rest * 10) / 10))
-    stage = ThoroughTail.of(0, repack, 0).stage_sec
+    stage = ThoroughTail.of(0, repack, 0, n_sources).stage_sec
     if n_alternatives:
         alt = max(quick_alt, min(alt, budget - grace - stage))
-    return ThoroughTail.of(alt, repack, n_alternatives)
+    return ThoroughTail.of(alt, repack, n_alternatives, n_sources)
 
 
-def thorough_tail_sec(time_limit: int, n_alternatives: int, cap: float | None = None) -> int:
+def thorough_tail_sec(time_limit: int, n_alternatives: int, cap: float | None = None, n_sources: int = 3) -> int:
     """THOROUGH: what RECOMMENDED's search leaves free at the end of the cap (thorough_tail)."""
-    return thorough_tail(time_limit, n_alternatives, cap).total
+    return thorough_tail(time_limit, n_alternatives, cap, n_sources).total
 
 
-def rec_limit_sec(mode: str, time_limit: int, left: float, n_alternatives: int, cap: float | None = None) -> int:
+def rec_limit_sec(mode: str, time_limit: int, left: float, n_alternatives: int, cap: float | None = None,
+                  n_sources: int = 3) -> int:
     """RECOMMENDED's search limit with ``left`` seconds of the request budget left. QUICK: exactly as
     before - the automatic limit, shortened only when a slow road matrix ate the budget. THOROUGH:
-    everything up to the tail (thorough_tail: the alternatives and the load re-check, in proportion
-    to a ``cap`` set below 20 min), never less than QUICK."""
+    everything up to the tail (thorough_tail: the alternatives and the load re-check of ``n_sources``
+    sources, in proportion to a ``cap`` set below 20 min), never less than QUICK."""
     quick = max(1, min(time_limit, int(left) - REC_OVERHEAD_SEC))
     if mode != "THOROUGH":
         return quick
-    return max(quick, int(left) - REC_OVERHEAD_SEC - thorough_tail_sec(time_limit, n_alternatives, cap))
+    return max(quick, int(left) - REC_OVERHEAD_SEC - thorough_tail_sec(time_limit, n_alternatives, cap, n_sources))
 
 
 class SolveControl:
@@ -4930,18 +4938,20 @@ def _pv_start(req: DispatchRequest, solvable: list[DispatchStop], control: Solve
     return pv
 
 
-def _quick_stage_need(time_limit: int) -> float:
-    """QUICK: what the engine's load re-check may need at most (three sources), kept free after the
-    second search's answer so that its budget is never cut by the wait (critique C3)."""
-    return min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2)) * 3 + STAGE_GRACE_SEC + 5
+def _quick_stage_need(time_limit: int, n_sources: int = 3) -> float:
+    """QUICK: what the engine's load re-check may need at most (``n_sources`` sources: the three options'
+    searches, plus one per other route search best-of-N sends to it), kept free after the second
+    search's answer so that its budget is never cut by the wait (critique C3)."""
+    return min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2)) * n_sources + STAGE_GRACE_SEC + 5
 
 
 def _pv_submit(pv: _PvRun, req, solvable, tds, mx, time_limit: int, rec_limit: int, n_alt: int,
-               tail: ThoroughTail | None, budget_end: float) -> None:
+               tail: ThoroughTail | None, budget_end: float, n_sources: int = 3) -> None:
     """Start the second search (after RECOMMENDED was submitted: the engine never queues behind it,
     critique C4). QUICK: until the engine's searches end (search_over), backstop the planned search
     time + ALT_GRACE_SEC; THOROUGH (D3): until the load re-check's reserve, a stop, a cancel or - once
-    the engine's searches ended - its timed stall (pyvrp_candidate.STALL_FLOOR_SEC)."""
+    the engine's searches ended - its timed stall (pyvrp_candidate.STALL_FLOOR_SEC). ``n_sources``: the
+    load re-check's sources, for QUICK's reserve (_quick_stage_need; THOROUGH's tail holds its own)."""
     if not pv.active or pv.args is not None:
         return
     if not solvable:
@@ -4954,7 +4964,7 @@ def _pv_submit(pv: _PvRun, req, solvable, tds, mx, time_limit: int, rec_limit: i
         runtime = budget_end - tail.stage_sec - PV_MARGIN_SEC - now
     else:
         planned = rec_limit + (max(2, time_limit // 2) + ALT_GRACE_SEC if n_alt else 0)
-        runtime = min(planned + ALT_GRACE_SEC, budget_end - _quick_stage_need(time_limit) - now)
+        runtime = min(planned + ALT_GRACE_SEC, budget_end - _quick_stage_need(time_limit, n_sources) - now)
     settings = PV.PvSettings(mode="THOROUGH" if tail is not None else "QUICK", seed=PV.seed(), max_runtime=max(1.0, runtime),
                              min_sec=float(time_limit), stall_floor_sec=PV.stall_floor_sec(), stall_share=PV.stall_share(),
                              max_iters=PV.max_iters())

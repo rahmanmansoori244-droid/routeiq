@@ -130,6 +130,49 @@ def test_thorough_budget_chain_fits_the_cap_and_never_searches_less_than_quick()
     assert ds.rec_limit_sec("THOROUGH", 2, 118, 0, 120) == 118 - ds.REC_OVERHEAD_SEC - 36
 
 
+def test_thorough_tail_is_unchanged_for_three_sources():
+    """Best-of-N (16 Oct 2026) counts the load re-check's sources (n_sources); its default, 3 - the options' own
+    searches - gives every value from before, for every day size and cap, with and without alternatives."""
+    for n in (5, 30, 120, 175, 300, 600):
+        t = ds.auto_time_limit(n)
+        assert ds._quick_stage_need(t, 3) == ds._quick_stage_need(t), n
+        for alts in (0, 2):
+            for cap in (None, 60, 120, 300, 600, 1200, 3600):
+                assert ds.thorough_tail(t, alts, cap, 3) == ds.thorough_tail(t, alts, cap), (n, alts, cap)
+                assert ds.thorough_tail_sec(t, alts, cap, n_sources=3) == ds.thorough_tail_sec(t, alts, cap), (n, alts, cap)
+                for left in (40, 500, 1110):
+                    assert (ds.rec_limit_sec("THOROUGH", t, left, alts, cap, n_sources=3)
+                            == ds.rec_limit_sec("THOROUGH", t, left, alts, cap)), (n, alts, cap, left)
+    assert ds.ThoroughTail.of(60, 30, 2, 3) == ds.ThoroughTail.of(60, 30, 2) == ds.ThoroughTail(60, 30, 115, 195)
+
+
+def test_each_extra_source_keeps_one_repack_cap_free():
+    """Each other route search sent to the load re-check (best_of.sources, at most best_of.MAX_SOURCES) keeps one
+    more CP-SAT solve free: 30 s of RECOMMENDED's limit at the 20-min cap (only a search that runs to the cap
+    loses it), one QUICK repack cap in QUICK's reserve. With the most sources allowed the budget chain still fits
+    the cap for every day size, and RECOMMENDED still gets most of it (at least 0.64 of the cap - 0.69 with
+    three sources, test_thorough_budget_chain_fits_the_cap_and_never_searches_less_than_quick)."""
+    import best_of
+
+    cap = ds.THOROUGH_MAX_SEC
+    matrix = ds.matrix_budget_sec(cap)
+    base = ds.rec_limit_sec("THOROUGH", 20, cap - matrix, 2, cap)
+    for m in range(best_of.MAX_SOURCES + 1):
+        assert ds.rec_limit_sec("THOROUGH", 20, cap - matrix, 2, cap, n_sources=3 + m) == base - 30 * m, m
+        assert ds.thorough_tail(20, 2, cap, 3 + m).stage_sec == math.ceil(30 * (3 + m) + ds.STAGE_GRACE_SEC + 5), m
+        assert ds._quick_stage_need(20, 3 + m) - ds._quick_stage_need(20) == pytest.approx(10 * m), m
+    most = 3 + best_of.MAX_SOURCES
+    for n in range(1, ds.MAX_STOPS + 1):
+        t = ds.auto_time_limit(n)
+        limit = ds.rec_limit_sec("THOROUGH", t, cap - matrix, 2, cap, n_sources=most)
+        tail = ds.thorough_tail_sec(t, 2, cap, n_sources=most)
+        assert limit >= t and matrix + limit + ds.REC_OVERHEAD_SEC + tail <= cap, n
+        assert tail >= ds._thorough_alt_sec(t) + ds.ALT_GRACE_SEC + ds._repack_cap_sec(t, True) * most + ds.STAGE_GRACE_SEC, n
+        assert limit >= 0.64 * cap, (n, limit)
+    # QUICK's search limit never depends on it (QUICK: exactly as before).
+    assert ds.rec_limit_sec("QUICK", 20, 520, 2, None, n_sources=most) == ds.rec_limit_sec("QUICK", 20, 520, 2) == 20
+
+
 @pytest.mark.parametrize("matrix_sec", [1.0, None])  # a quick matrix, and the slowest (its whole budget)
 def test_a_cap_below_20_min_shrinks_the_tail_in_proportion_and_keeps_the_alternatives(matrix_sec):
     """Review of the long-search PR: under ~7 min the 30% bound cut the tail, but the alternatives were
