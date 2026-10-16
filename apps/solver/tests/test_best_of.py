@@ -140,7 +140,7 @@ def test_cpu_gate_caps_k(monkeypatch):
 def test_variant_order_is_a_deterministic_permutation():
     """Seed 0 is the request's order; a seed above 0 is a permutation that depends only on the stop ids, not
     on the order they come in, and a subset keeps its relative order from the whole day's. 50 random days."""
-    rnd = random.Random(20261016)
+    rnd = random.Random(7)
     for _ in range(50):
         n = rnd.randint(1, 60)
         ids = [f"S{rnd.randrange(10**6):06d}-{k}" for k in range(n)]
