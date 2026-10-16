@@ -178,6 +178,25 @@ describe('a dispatched load with a trail', () => {
   });
 });
 
+describe('a swapped tracker and a late webhook (M8, M12)', () => {
+  it("the driver's phone far from the trail: the truck-day is suppressed MISMATCH and nothing is written", async () => {
+    const ev = (t: string, east: number) => ({ id: `ph${t}`, tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't5', loadNo: 1, sequence: 1, visitId: null, kind: 'ARRIVED', source: 'PHONE_AUTO', at: T(t), receivedAt: T(t), ...at(east), idempotencyKey: `dl:${t}`, payloadJson: {} });
+    tables.stopEvent!.push(ev('07:05', 20_000), ev('07:10', 20_000), ev('07:20', 25_000));
+    expect(await processGpsTimes(TEN, 't5', DATE, NOW)).toMatchObject({ skipped: 'MISMATCH', written: 0 });
+    expect(tables.stopEvent!.filter((e) => e.source === 'AYUN')).toEqual([]);
+    expect(tables.ivmsTruckDay![0]).toMatchObject({ suppressReason: 'MISMATCH', suppressedAt: NOW });
+  });
+
+  it('a trail move stored before the webhook of the same move arrived becomes a DUPLICATE', async () => {
+    await processGpsTimes(TEN, 't5', DATE, NOW);
+    expect(tables.ivmsEvent!.map((e) => `${e.kind} ${e.origin} ${e.outcome}`)).toEqual(['DEPOT_OUT TRAIL USED', 'DEPOT_IN TRAIL USED']);
+    tables.ivmsEvent!.push({ id: 'late', tenantId: TEN, truckId: 't5', depotId: 'D1', kind: 'DEPOT_OUT', origin: 'WEBHOOK', eventAt: T('06:59:30'), dedupeKey: 'ayun:latexxxxxx', processedAt: null, outcome: null });
+    await processGpsTimes(TEN, 't5', DATE, NOW);
+    expect(tables.ivmsEvent!.map((e) => `${e.kind} ${e.origin} ${e.outcome}`)).toEqual(['DEPOT_OUT TRAIL DUPLICATE', 'DEPOT_IN TRAIL USED', 'DEPOT_OUT WEBHOOK USED']);
+    expect(tables.stopEvent!.filter((e) => e.source === 'AYUN')).toHaveLength(4);
+  });
+});
+
 describe('the company run and the GPS suppressed marker (M10)', () => {
   it('runs a truck-day whose history was pulled since the last run, and not again until the next pull', async () => {
     tables.ivmsTruckDay!.push({ id: 'td', tenantId: TEN, truckId: 't5', deliveryDate: day, lastPullAt: T('15:00'), processedAt: null, suppressedAt: null });

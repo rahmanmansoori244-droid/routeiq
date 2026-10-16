@@ -4,7 +4,7 @@
  * pins as metre offsets from it; trucks and customers are made up.
  */
 import { describe, expect, it } from 'vitest';
-import { detectTruckDay, matchTripsToLoads, staysAt, trailDepotMoves, tripsOf, type DetectorInput, type DetectorLoad, type DetectorStop, type DetectedTrip } from '@/lib/ivms/stops';
+import { detectTruckDay, matchTripsToLoads, staysAt, trackerMismatch, trailDepotMoves, tripsOf, type DetectorInput, type DetectorLoad, type DetectorStop, type DetectedTrip } from '@/lib/ivms/stops';
 import { DETECTOR_FIXED, type DetectorParams, type TrailPoint } from '@/lib/ivms/types';
 import { T, Trail, at, hhmm } from './ivms-trail';
 
@@ -267,5 +267,19 @@ describe('building blocks', () => {
     const s = staysAt(trail.pts, trail.pts, at(3000), 1, P);
     expect(s).toHaveLength(1);
     expect(hhmm(s[0]!.exit!.fixAt)).toBe('07:03');
+  });
+});
+
+describe('a tracker on another truck (M8)', () => {
+  const trail = new Trail('06:30').park(30).drive(3000).park(10).drive(6000).park(30);
+  const near = (t: string, east: number) => ({ at: T(t), ...at(east) });
+  it("the driver's phone far from the trail at the same moments, over 10 minutes: mismatch", () => {
+    expect(trackerMismatch([near('07:05', 9000), near('07:10', 9000), near('07:20', 12000)], trail.pts)).toBe(true);
+  });
+  it('agreeing positions, a single far one, a short burst, or no trail point near in time: no mismatch', () => {
+    expect(trackerMismatch([near('07:05', 3000), near('07:10', 3010), near('07:20', 6000)], trail.pts)).toBe(false);
+    expect(trackerMismatch([near('07:05', 9000), near('07:10', 3000), near('07:12', 3000)], trail.pts)).toBe(false);
+    expect(trackerMismatch([near('07:05', 9000), near('07:06', 9000), near('07:07', 9000)], trail.pts)).toBe(false);
+    expect(trackerMismatch([near('12:00', 9000), near('12:10', 9000), near('12:20', 9000)], trail.pts)).toBe(false);
   });
 });

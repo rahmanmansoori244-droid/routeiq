@@ -486,6 +486,45 @@ export function detectTruckDay(input: DetectorInput): DetectorOutput {
   return out;
 }
 
+/** A phone position of the truck-day (a driver's arrival, departure or result with its fix). */
+export interface PhoneFix {
+  at: Date;
+  lat: number;
+  lng: number;
+}
+
+/** Tracker and phone more than this far apart at the same moment disagree. */
+export const MISMATCH_DISTANCE_M = 1000;
+/** A phone fix is compared with the trail point at most this far from it in time. */
+export const MISMATCH_PAIR_SEC = 120;
+/** Disagreements over at least this many minutes (and more than the agreements) = the tracker is not on this truck. */
+export const MISMATCH_SPAN_MIN = 10;
+
+/**
+ * Is the mapped tracker on another truck (review M8: a swapped or moved tracker)? The driver's phone and
+ * the trail disagree by more than 1 km at the same moment, at least 3 times over 10 minutes or more, and
+ * more often than they agree. Pure; the writer then suppresses the truck-day's GPS times (MISMATCH).
+ */
+export function trackerMismatch(phone: readonly PhoneFix[], trail: readonly TrailPoint[]): boolean {
+  const pts = sortPoints(trail);
+  if (!pts.length) return false;
+  const disagree: number[] = [];
+  let agree = 0;
+  for (const f of phone) {
+    if (!Number.isFinite(f.lat) || !Number.isFinite(f.lng)) continue;
+    let best: TrailPoint | null = null;
+    for (const pt of pts) {
+      const dt = Math.abs(ms(pt.fixAt) - ms(f.at));
+      if (dt <= MISMATCH_PAIR_SEC * 1000 && (!best || dt < Math.abs(ms(best.fixAt) - ms(f.at)))) best = pt;
+    }
+    if (!best) continue;
+    if (distanceM(best, f) > MISMATCH_DISTANCE_M) disagree.push(ms(f.at));
+    else agree++;
+  }
+  if (disagree.length < 3 || disagree.length <= agree) return false;
+  return Math.max(...disagree) - Math.min(...disagree) >= MISMATCH_SPAN_MIN * MIN;
+}
+
 /** The detector's parameters from the company's settings (lib/ivms/settings.ts) and the fixed rules. */
 export function detectorParams(cfg: { ivmsStopRadiusM: number; ivmsStopDwellMin: number; ivmsDepotRadiusM: number }, fixed: Pick<DetectorParams, 'exitExtraM' | 'outOfSequenceDwellMin' | 'movingKmh' | 'observedMaxGapSec' | 'depotDwellMin'>): DetectorParams {
   return { stopRadiusM: cfg.ivmsStopRadiusM, dwellMin: cfg.ivmsStopDwellMin, depotRadiusM: cfg.ivmsDepotRadiusM, ...fixed };

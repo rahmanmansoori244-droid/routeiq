@@ -37,7 +37,7 @@ import { plannedStopOf } from '../delivery/planned-stop';
 import { truckDayLoads, type TruckDayLoad } from '../driver-link/service';
 import { readIvmsEnv } from './env';
 import { ivmsModeAtLeast, ivmsModeOf } from './settings';
-import { detectTruckDay, detectorParams, type DetectorLoad, type DetectorOutput, type ZoneMove } from './stops';
+import { detectTruckDay, detectorParams, trackerMismatch, type DetectorLoad, type DetectorOutput, type ZoneMove } from './stops';
 import { DETECTOR_FIXED, type StopAmbiguity, type StopCandidate } from './types';
 
 type Tx = Prisma.TransactionClient;
@@ -56,7 +56,7 @@ const WINDOW_AFTER_H = 27;
 /** The lock timeout of a GPS write (shorter than the driver's: GPS can wait for the next run). */
 const GPS_LOCK_TIMEOUT_MS = 3_000;
 
-export type GpsSkip = 'DISABLED' | 'MODE' | 'SUPPRESSED' | 'NO_LOAD' | 'NO_TRAIL';
+export type GpsSkip = 'DISABLED' | 'MODE' | 'SUPPRESSED' | 'NO_LOAD' | 'NO_TRAIL' | 'MISMATCH';
 
 export interface GpsTimesResult {
   truckId: string;
@@ -142,6 +142,20 @@ export async function processGpsTimes(tenantId: string, truckId: string, date: s
   const to = new Date(dayStart.getTime() + WINDOW_AFTER_H * 3600_000);
   const points = await prisma.truckTrailPoint.findMany({ where: { tenantId, truckId, fixAt: { gte: from, lte: to } }, orderBy: { fixAt: 'asc' }, select: { fixAt: true, lat: true, lng: true, speedKmh: true, ignition: true } });
   if (!points.length) return { ...res, skipped: 'NO_TRAIL' };
+  // The tracker is not on this truck (swapped or moved, review M8): the driver's own positions and the
+  // trail disagree. Nothing is written for the truck-day, now or later (suppressed MISMATCH).
+  const phone = await prisma.stopEvent.findMany({
+    where: { tenantId, truckId, deliveryDate: dateOnly(date), source: { in: ['PHONE_AUTO', 'PHONE_MANUAL'] }, lat: { not: null }, lng: { not: null } },
+    select: { at: true, lat: true, lng: true },
+  });
+  if (trackerMismatch(phone.map((e) => ({ at: e.at, lat: e.lat!, lng: e.lng! })), points)) {
+    await prisma.ivmsTruckDay.upsert({
+      where: { tenantId_truckId_deliveryDate: { tenantId, truckId, deliveryDate: dateOnly(date) } },
+      create: { tenantId, truckId, deliveryDate: dateOnly(date), processedAt: now, suppressedAt: now, suppressReason: 'MISMATCH' },
+      update: { processedAt: now, suppressedAt: now, suppressReason: 'MISMATCH' },
+    });
+    return { ...res, skipped: 'MISMATCH' };
+  }
 
   const input = await detectorInput(tenantId, truckId, date, dayStart, loads, company, from, to);
   const out = detectTruckDay({ ...input.detector, points });
@@ -152,6 +166,16 @@ export async function processGpsTimes(tenantId: string, truckId: string, date: s
   for (const outcome of ['USED', 'UNCONFIRMED'] as const) {
     const ids = out.zoneOutcomes.filter((z) => z.outcome === outcome).map((z) => z.id);
     if (ids.length) await prisma.ivmsEvent.updateMany({ where: { tenantId, id: { in: ids }, OR: [{ outcome: null }, { outcome: { not: outcome } }] }, data: { outcome, processedAt: now } });
+  }
+  // A trail move stored before the provider's zone move of it arrived (a late webhook): the zone move is
+  // the move from now on, the trail's is kept as a DUPLICATE (review M12).
+  for (const z of out.zoneOutcomes.filter((x) => x.outcome === 'USED')) {
+    const zm = input.detector.zoneMoves.find((m) => m.id === z.id);
+    if (!zm) continue;
+    await prisma.ivmsEvent.updateMany({
+      where: { tenantId, truckId, origin: 'TRAIL', kind: zm.kind, outcome: 'USED', eventAt: { gte: new Date(zm.at.getTime() - 10 * 60_000), lte: new Date(zm.at.getTime() + 10 * 60_000) } },
+      data: { outcome: 'DUPLICATE', processedAt: now },
+    });
   }
 
   // The stop events, one transaction per visit.
