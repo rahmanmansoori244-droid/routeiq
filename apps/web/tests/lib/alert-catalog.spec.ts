@@ -269,14 +269,14 @@ describe('migration 20261016180000_ops_alerts and the schema repeat the catalog'
     expect(MIGRATION).toContain(`CHECK ("tier" BETWEEN 1 AND 3)`);
     // The rule codes are checked in the app (a new rule needs no migration: review L6).
     expect(MIGRATION).not.toMatch(/CHECK \("rule"/);
-    // The warehouse's Loaded action (A3): nullable, no default.
-    expect(MIGRATION).toContain(`ALTER TABLE "PlanLoad" ADD COLUMN     "loadedAt" TIMESTAMP(3),\nADD COLUMN     "loadedById" TEXT;`);
-    // PlanLoad first (a re-plan may hold it for seconds; TenantConfig, read by every page, is then held only briefly: review M3).
-    expect(MIGRATION.indexOf('ALTER TABLE "PlanLoad" ADD COLUMN')).toBeLessThan(MIGRATION.indexOf('ALTER TABLE "TenantConfig" ADD COLUMN'));
+    // No warehouse Loaded columns: the A3 action was removed before release (owner decision of 16 Oct
+    // 2026: R2 is measured from the driver's taps). The only table altered is TenantConfig.
+    expect(MIGRATION).not.toContain('"PlanLoad"');
+    expect(MIGRATION).not.toMatch(/loadedAt|loadedById/);
+    expect(block('PlanLoad')).not.toMatch(/loadedAt|loadedBy/);
     // Each rule's own switch-on time (review H2): nullable JSON, no default, not a Settings field.
     expect(MIGRATION).toContain(`ADD COLUMN     "alertRuleOnAtJson" JSONB,`);
     expect(block('TenantConfig')).toMatch(/alertRuleOnAtJson\s+Json\?/);
-    expect(block('PlanLoad')).toMatch(/loadedBy\s+User\?\s+@relation\("PlanLoadLoadedBy", fields: \[loadedById\], references: \[id\], onDelete: SetNull\)/);
   });
 });
 

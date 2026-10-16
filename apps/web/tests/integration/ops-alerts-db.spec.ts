@@ -14,13 +14,11 @@
  *     the priority alert as CORRECTED; T07's load gone from the plan closes its alert as NOT_IN_PLAN.
  *  4. The database refuses what the catalog refuses (CHECKs on severity, kind and tier) and a second row
  *     for the same rule and subject.
- *  5. The warehouse's Loaded press on a Loading load: PlanLoad.loadedAt / loadedById, audited LOAD_LOADED.
  * Invented names and codes.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 import { runAlertSweep, resetAlertSweepClock, sweepTenant, type AlertTenantConfig } from '@/lib/alerts/sweep';
-import { updateLoad } from '@/lib/dispatch/plan-service';
 import { zonedDayStart } from '@/lib/dispatch/time';
 
 const TZ = 'Asia/Muscat';
@@ -173,14 +171,5 @@ describe('operations alerts on the real database', () => {
     // The settings CHECKs (bounds of lib/alerts/catalog.ts).
     await expect(prisma.tenantConfig.update({ where: { tenantId: A.tenantId }, data: { alertEtaLateMin: 5 } })).rejects.toThrow();
     await expect(prisma.tenantConfig.update({ where: { tenantId: A.tenantId }, data: { alertQuietFromMin: 600, alertQuietToMin: null } })).rejects.toThrow();
-  });
-
-  it('5. the warehouse\'s Loaded press on a Loading load: loadedAt and who, audited LOAD_LOADED; the next sweep reads it', async () => {
-    await updateLoad(A.tenantId, A.runId, A.loads.T05L2!, { loaded: true }, { id: A.userId, role: 'PLANNER' }, () => true, { now: at('09:52') });
-    const l = await prisma.planLoad.findUniqueOrThrow({ where: { id: A.loads.T05L2 } });
-    expect(l).toMatchObject({ status: 'LOADING', loadedAt: at('09:52'), loadedById: A.userId });
-    const audit = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: A.tenantId, action: 'LOAD_LOADED', entityId: A.loads.T05L2 } });
-    expect(audit.afterJson).toMatchObject({ loadNo: 2, loadingMin: 52 });
-    await expect(updateLoad(A.tenantId, A.runId, A.loads.T05!, { loaded: true }, { id: A.userId, role: 'PLANNER' }, () => true)).rejects.toMatchObject({ status: 409 });
   });
 });

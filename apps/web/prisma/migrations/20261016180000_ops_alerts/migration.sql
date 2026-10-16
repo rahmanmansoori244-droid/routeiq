@@ -11,8 +11,6 @@
 --   warehouse records loading start and end per truck), "alertDeliveredNote" (on/off), the e-mail
 --   settings (recipients NULL = in the app only; HIGH alerts only; quiet hours 22:00-06:00). Constant
 --   defaults: on PostgreSQL 11+ a catalog change only, no table rewrite.
--- - PlanLoad."loadedAt" / "loadedById" (FK User ON DELETE SET NULL): the warehouse's "Loaded" action
---   (allowed only while the load is LOADING). Nullable, no default: a catalog change only.
 -- - New table "OpsAlert": one row per rule and physical subject (UNIQUE tenantId, rule, subjectKey: two
 --   sweeps during a deploy overlap raise one row), CASCADE with the company, SET NULL with the user who
 --   acknowledged it. "rule" is checked in the app (a new rule needs no migration); kind, severity and the
@@ -23,18 +21,14 @@
 -- an app rollback is safe at any time.
 --
 -- Railway runs migrations while the previous version still serves (docs/PROJECT_HANDBOOK.md 5.6). The
--- ALTER TABLEs need a short exclusive lock on "TenantConfig" and "PlanLoad"; waiting behind a long
--- transaction would queue every reader of those tables behind it. So the migration waits at most 5 s
--- for each lock: if a lock is not free, the deploy fails, nothing is applied (Prisma runs this file as
--- one transaction: see 20260930120000_orders_always_have_depot) and the old version keeps serving.
--- Deploy again later. SET LOCAL ends with this migration's transaction, so later migrations are not
--- affected. "PlanLoad" is altered first: a re-plan can hold it for seconds, and while the migration
--- waits for it, it holds nothing else; "TenantConfig" (read by every page, in short reads) comes second,
--- so it is held only for that short second wait. Deploy outside the busy hours anyway (not 06:00-07:30
--- Dispatch, not the evening planning, not the 21:00 loading).
+-- ALTER TABLE needs a short exclusive lock on "TenantConfig"; waiting behind a long transaction would
+-- queue every reader of that table behind it. So the migration waits at most 5 s for the lock: if it is
+-- not free, the deploy fails, nothing is applied (Prisma runs this file as one transaction: see
+-- 20260930120000_orders_always_have_depot) and the old version keeps serving. Deploy again later. SET
+-- LOCAL ends with this migration's transaction, so later migrations are not affected. Deploy outside
+-- the busy hours anyway (not 06:00-07:30 Dispatch, not the evening planning, not the 21:00 loading).
 --
 -- Rollback: DROP TABLE "OpsAlertDigest"; DROP TABLE "OpsAlert";
---           ALTER TABLE "PlanLoad" DROP COLUMN "loadedAt", DROP COLUMN "loadedById";
 --           ALTER TABLE "TenantConfig" DROP COLUMN "alertsEnabled", DROP COLUMN "alertsEnabledAt",
 --             DROP COLUMN "alertUnloadOverMin", DROP COLUMN "alertLoadingOverMin", DROP COLUMN "alertEtaLateMin",
 --             DROP COLUMN "alertDepartLateMin", DROP COLUMN "alertSilentMin", DROP COLUMN "alertPageNotOpenedMin",
@@ -45,10 +39,6 @@
 --           (each CHECK below goes with its columns or table).
 
 SET LOCAL lock_timeout = '5s';
-
--- AlterTable
-ALTER TABLE "PlanLoad" ADD COLUMN     "loadedAt" TIMESTAMP(3),
-ADD COLUMN     "loadedById" TEXT;
 
 -- AlterTable
 ALTER TABLE "TenantConfig" ADD COLUMN     "alertAfterClosingMin" INTEGER DEFAULT 15,
@@ -139,9 +129,6 @@ CREATE UNIQUE INDEX "OpsAlert_tenantId_rule_subjectKey_key" ON "OpsAlert"("tenan
 
 -- CreateIndex
 CREATE INDEX "OpsAlertDigest_tenantId_createdAt_idx" ON "OpsAlertDigest"("tenantId", "createdAt");
-
--- AddForeignKey
-ALTER TABLE "PlanLoad" ADD CONSTRAINT "PlanLoad_loadedById_fkey" FOREIGN KEY ("loadedById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "OpsAlert" ADD CONSTRAINT "OpsAlert_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE ON UPDATE CASCADE;

@@ -5,7 +5,7 @@
  * the company or takes ids read for it.
  *
  * What it saves: the plan in use of the date (every depot, or one), each load with its status moves
- * (the LOAD_<status> and LOAD_LOADED audit rows of the load and of the loads it was copied from: a
+ * (the LOAD_<status> audit rows of the load and of the loads it was copied from: a
  * re-plan copies loads, the moves were recorded on the version that was in use then), its Back at depot
  * taps, its planned stops (priority, verified pin) with their visits' events and photos (times,
  * distances and the few payload keys the visit rebuild reads), and each truck-day's first and last page
@@ -55,7 +55,7 @@ async function statusHistory(db: Db, tenantId: string, loads: readonly { id: str
     for (const id of frontier) if (!parent.has(id)) parent.set(id, null);
     frontier = [...new Set(rows.map((r) => r.carriedFromLoadId).filter((x): x is string => !!x && !parent.has(x)))];
   }
-  const actions = [...LOAD_STATUS_NAMES.map((s) => `LOAD_${s}`), 'LOAD_LOADED'];
+  const actions = LOAD_STATUS_NAMES.map((s) => `LOAD_${s}`);
   const audits = await findInParts([...parent.keys()], (part) =>
     db.auditLog.findMany({ where: { tenantId, entity: 'PlanLoad', entityId: { in: part }, action: { in: actions } }, select: { entityId: true, action: true, createdAt: true } }),
   );

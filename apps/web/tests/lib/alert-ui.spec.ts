@@ -8,8 +8,7 @@
  *   switched off meanwhile: it hides.
  * - The day screen's Alerts card: one block per truck, worst first; what is over behind "Show N over";
  *   polls only for yesterday, today and tomorrow; Acknowledge all sends the open rows.
- * - The "Loaded" button next to Dispatch on a Loading load not marked Loaded (PATCH { loaded: true }),
- *   and the "Loaded hh:mm" badge.
+ * - No warehouse "Loaded" button next to Dispatch (removed before release, owner decision of 16 Oct 2026).
  * - The pure helpers: where, state words, the toast choice, the ack body, the settings checks.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -59,7 +58,7 @@ import { AlertBell } from '@/components/alert-bell';
 import { AlertsCard, alertDayIsLive } from '@/app/t/[slug]/dispatch/alerts-card';
 import { PlanView } from '@/app/t/[slug]/dispatch/plan-view';
 import { alertSettingsProblem, ruleMeaning } from '@/app/t/[slug]/settings/alert-settings-card';
-import { ackBody, alertStateText, alertWhere, bellTone, canMarkLoaded, groupByTruck, loadedActionOn, newAlertToasts, sweepCheckText } from '@/lib/alerts/view';
+import { ackBody, alertStateText, alertWhere, bellTone, groupByTruck, newAlertToasts, sweepCheckText } from '@/lib/alerts/view';
 import { visibleNavItems } from '@/lib/nav';
 import { ALERT_POLL_MS, ALERT_RULE_SPECS, ALERT_TOAST_MAX } from '@/lib/alerts/catalog';
 import { fixture } from './plan-detail-fixture';
@@ -290,12 +289,12 @@ describe("the day screen's Alerts card", () => {
   });
 });
 
-describe('the Loaded button next to Dispatch (rule R2)', () => {
-  async function mountPlan(mut: (d: any) => void, loadedAction = true) {
+describe('no warehouse Loaded button (owner decision of 16 Oct 2026: R2 is measured from the driver taps)', () => {
+  async function mountPlan(mut: (d: any) => void) {
     const d = fixture() as any;
     mut(d);
     net.plan = d;
-    const host: Host<any> = new Host(PlanView as any, { slug: 'example', runId: 'run1', canPlan: true, canDispatch: true, phoneCountryCode: '968', reloadSignal: 0, onBusyChange: () => {}, onChanged: async () => {}, loadedAction });
+    const host: Host<any> = new Host(PlanView as any, { slug: 'example', runId: 'run1', canPlan: true, canDispatch: true, phoneCountryCode: '968', reloadSignal: 0, onBusyChange: () => {}, onChanged: async () => {} });
     host.render();
     await host.settle();
     return host;
@@ -309,46 +308,14 @@ describe('the Loaded button next to Dispatch (rule R2)', () => {
       .map((e) => ({ label: textOf(e.props.children).trim(), click: e.props.onClick as () => void, disabled: !!e.props.disabled }));
   }
 
-  it('a Loading load not marked Loaded: Back to locked, Loaded, Dispatch; pressing it sends { loaded: true } only', async () => {
+  it('a Loading load offers Back to locked and Dispatch only; a Locked load Unlock, Loading and Dispatch', async () => {
     const host = await mountPlan((d) => {
       d.loads[0].status = 'LOADING';
-    });
-    const buttons = buttonsOf(host, 'T01', 1);
-    expect(buttons.map((b) => b.label)).toEqual(['Back to locked', 'Loaded', 'Dispatch']);
-    buttons[1]!.click();
-    await host.settle();
-    expect(net.sent.filter((s) => s.method === 'PATCH')).toEqual([{ method: 'PATCH', url: '/api/runs/run1/loads/L1', json: { loaded: true } }]);
-    expect(toasts.success).toContain('T01 Load 1: loaded');
-  });
-
-  it('marked Loaded: no button, a "Loaded hh:mm" badge; a Locked load has no Loaded button', async () => {
-    const host = await mountPlan((d) => {
-      d.loads[0].status = 'LOADING';
-      d.loads[0].loadedAt = '2026-10-15T22:10:00.000Z';
-      d.timezone = 'Asia/Muscat';
     });
     expect(buttonsOf(host, 'T01', 1).map((b) => b.label)).toEqual(['Back to locked', 'Dispatch']);
-    expect(textOf(byTestId(host.tree, 'load-loaded-T01-1')[0])).toBe('Loaded 02:10');
+    expect(byTestId(host.tree, 'load-loaded-T01-1')).toEqual([]);
     const locked = await mountPlan(() => {});
     expect(buttonsOf(locked, 'T01', 1).map((b) => b.label)).toEqual(['Unlock', 'Loading', 'Dispatch']);
-  });
-
-  it('alerts off, or the loading rule off: no Loaded button at all (merging changes nothing)', async () => {
-    const host = await mountPlan((d) => {
-      d.loads[0].status = 'LOADING';
-    }, false);
-    expect(buttonsOf(host, 'T01', 1).map((b) => b.label)).toEqual(['Back to locked', 'Dispatch']);
-    expect(loadedActionOn({ alertsEnabled: true, alertLoadingOverMin: 40 })).toBe(true);
-    expect(loadedActionOn({ alertsEnabled: true, alertLoadingOverMin: null })).toBe(false);
-    expect(loadedActionOn({ alertsEnabled: false, alertLoadingOverMin: 40 })).toBe(false);
-    expect(loadedActionOn(null)).toBe(false);
-  });
-
-  it('canMarkLoaded: the dispatcher and up, Loading, not yet Loaded', () => {
-    expect(canMarkLoaded({ status: 'LOADING' }, true)).toBe(true);
-    expect(canMarkLoaded({ status: 'LOADING', loadedAt: '2026-10-15T22:10:00Z' }, true)).toBe(false);
-    expect(canMarkLoaded({ status: 'LOADING' }, false)).toBe(false);
-    for (const s of ['PLANNED', 'LOCKED', 'DISPATCHED', 'COMPLETED']) expect(canMarkLoaded({ status: s }, true)).toBe(false);
   });
 });
 

@@ -114,16 +114,13 @@ function day(): AlertDayExport {
 }
 
 describe('the state as of a time', () => {
-  it('a load\'s status from its moves: Planned before the first, Loading in the night, Dispatched from 07:32; Loaded only after the last Loading', () => {
+  it('a load\'s status from its moves: Planned before the first, Loading in the night, Dispatched from 07:32', () => {
     const l = day().loads[0]!;
     expect(statusAsOf(l, Date.parse(iso('19:00', -1)))).toMatchObject({ status: 'PLANNED', statusChangedAt: null });
     expect(statusAsOf(l, Date.parse(iso('23:00', -1)))).toMatchObject({ status: 'LOADING', statusChangedAt: new Date(iso('21:00', -1)) });
     expect(statusAsOf(l, Date.parse(iso('08:00')))).toMatchObject({ status: 'DISPATCHED', statusChangedAt: new Date(iso('07:32')) });
-    const loaded = { finalStatus: 'LOADING', history: [{ status: 'LOADING', at: iso('21:00', -1) }, { status: 'LOADED', at: iso('21:50', -1) }, { status: 'LOCKED', at: iso('22:00', -1) }, { status: 'LOADING', at: iso('22:10', -1) }] };
-    expect(statusAsOf(loaded, Date.parse(iso('21:55', -1))).loadedAt).toEqual(new Date(iso('21:50', -1)));
-    expect(statusAsOf(loaded, Date.parse(iso('22:15', -1))).loadedAt).toBeNull();
     // No moves exported: the final status, no time.
-    expect(statusAsOf({ finalStatus: 'COMPLETED', history: [] }, 0)).toEqual({ status: 'COMPLETED', statusChangedAt: null, loadedAt: null });
+    expect(statusAsOf({ finalStatus: 'COMPLETED', history: [] }, 0)).toEqual({ status: 'COMPLETED', statusChangedAt: null });
   });
 
   it('a visit is rebuilt from the events received by then (L12): later events are not known yet', () => {

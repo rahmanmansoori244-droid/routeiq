@@ -5,7 +5,7 @@
  *
  *  1. the plan in use per depot and date (liveRunsInRange) and its loads, every status (loadsOfRuns);
  *  2. per load: the receiving-hours rule it was planned with (its truck snapshot's echo; none = START,
- *     the earlier rule: critique L2), the Loaded press, the planned stops and their times;
+ *     the earlier rule: critique L2), the planned stops and their times;
  *  3. for the loads that left (DISPATCHED / COMPLETED): the planned stops (stopsOfLoads), their orders'
  *     priority, whether each customer's pin is verified and whether it moved since the visit was planned
  *     (PIN_MOVED_M), the visits, their photos (source, old photo and time too: R9 and the projection);
@@ -65,7 +65,7 @@ export async function readAlertFacts(
   const onRoad = loads.filter((l) => ON_ROAD.has(l.status));
 
   const [extra, rowsOfPlan, planned, visits, backs, links, rows] = await Promise.all([
-    findInParts(loadIds, (part) => db.planLoad.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, truckSnapshotJson: true, loadedAt: true } })),
+    findInParts(loadIds, (part) => db.planLoad.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, truckSnapshotJson: true } })),
     // The load ids came from this company's plans (loadsOfRuns): RouteAssignment has no company column.
     findInParts(loadIds, (part) =>
       db.routeAssignment.findMany({
@@ -184,7 +184,6 @@ export async function readAlertFacts(
       departMin: l.departMin,
       returnMin: l.returnMin,
       statusChangedAt: l.statusChangedAt,
-      loadedAt: x?.loadedAt ?? null,
       // A load planned before the rule was echoed was checked by the earlier rule (unloading had to start by closing).
       windowRule: echoedWindowRule(readTruckSnapshot(x?.truckSnapshotJson ?? null)?.rules?.windowRule) ?? 'START',
       breakMin: brk ? { startMin: brk.startMin, endMin: brk.endMin } : null,

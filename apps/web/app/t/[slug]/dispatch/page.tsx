@@ -1,6 +1,5 @@
 import { getCurrentTenant } from '@/lib/tenant';
 import { prisma } from '@/lib/db';
-import { loadedActionOn } from '@/lib/alerts/view';
 import { canManageMasterData, canPlan } from '@/lib/rbac';
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
 import { PageShell } from '@/components/page-shell';
@@ -13,7 +12,7 @@ export default async function DispatchPage({ params, searchParams }: { params: {
   const { tenant, user } = await getCurrentTenant(params.slug);
   // Operations alerts (owner request 16 Oct 2026): the day's Alerts card, only while they are on and in the
   // user's own company (the alert API answers for the session's company).
-  const alerts = user.tenantId === tenant.id ? await prisma.tenantConfig.findUnique({ where: { tenantId: tenant.id }, select: { alertsEnabled: true, alertLoadingOverMin: true } }) : null;
+  const alerts = user.tenantId === tenant.id ? await prisma.tenantConfig.findUnique({ where: { tenantId: tenant.id }, select: { alertsEnabled: true } }) : null;
   return (
     <PageShell
       title="Daily dispatch planning"
@@ -29,7 +28,6 @@ export default async function DispatchPage({ params, searchParams }: { params: {
         initialDepot={searchParams.depot ?? null}
         phoneCountryCode={phoneCountryCode(tenant.country)}
         alertsEnabled={!!alerts?.alertsEnabled}
-        loadedAction={loadedActionOn(alerts)}
       />
     </PageShell>
   );

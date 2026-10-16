@@ -405,7 +405,6 @@ model User {
   driverLeavesAdded    DriverLeave[]        @relation("DriverLeaveCreatedBy")
   driverLeavesChanged  DriverLeave[]        @relation("DriverLeaveUpdatedBy")
   loadHelpersSet       PlanLoad[]           @relation("PlanLoadHelpersSetBy")
-  loadsLoaded          PlanLoad[]           @relation("PlanLoadLoadedBy")
   opsAlertsAcked       OpsAlert[]           @relation("OpsAlertAckedBy")
 
   @@index([tenantId])
@@ -1126,13 +1125,6 @@ model PlanLoad {
   helpersSetById      String?
   helpersSetBy        User?             @relation("PlanLoadHelpersSetBy", fields: [helpersSetById], references: [id], onDelete: SetNull)
   helpersSetAt        DateTime?
-  /// (16 Oct 2026, operations alerts) The warehouse finished loading this truck: the Loaded action, allowed
-  /// only while the load is LOADING (the Loading press is the start of loading: statusChangedAt). Entering
-  /// LOADING again clears it. Rule R2 "loading over N min" measures Loading -> Loaded (or Dispatch).
-  /// Copied by a re-plan's copies, like the status.
-  loadedAt            DateTime?
-  loadedById          String?
-  loadedBy            User?             @relation("PlanLoadLoadedBy", fields: [loadedById], references: [id], onDelete: SetNull)
   createdAt           DateTime          @default(now())
   assignments         RouteAssignment[]
   helpers             PlanLoadHelper[]

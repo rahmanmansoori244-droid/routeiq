@@ -105,23 +105,3 @@ export function sweepCheckText(s: SweepCheck | null | undefined, timezone: strin
 export function bellTone(s: { open: number; high: number }): 'high' | 'warn' | 'none' {
   return s.high > 0 ? 'high' : s.open > 0 ? 'warn' : 'none';
 }
-
-/**
- * The day screen's "Loaded" button (operations alerts, rule R2): the warehouse finished loading this
- * truck. Offered to the dispatcher and up on a Loading load not marked Loaded yet; the server allows it
- * only while the load is Loading (PATCH /api/runs/:id/loads/:loadId { loaded: true }).
- */
-export function canMarkLoaded(l: { status: string; loadedAt?: string | null }, canPlan: boolean): boolean {
-  return canPlan && l.status === 'LOADING' && !l.loadedAt;
-}
-
-/**
- * Whether the day screen offers Loaded at all: the company has alerts on and the loading rule (R2) on.
- * Otherwise the button would only add a step nobody reads (merging changes nothing while alerts are off).
- */
-export function loadedActionOn(cfg: { alertsEnabled: boolean; alertLoadingOverMin: number | null } | null | undefined): boolean {
-  return !!cfg?.alertsEnabled && cfg.alertLoadingOverMin != null;
-}
-
-/** The body of the Loaded action (agreed with the load route: only this field). */
-export const LOADED_PATCH = { loaded: true } as const;

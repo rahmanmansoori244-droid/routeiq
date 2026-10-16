@@ -9,7 +9,7 @@
  * "As of t" (critique L12: a visit is rebuilt from its events, so masking the stored visit's times is
  * not the state at t):
  * - a load's status and its Loading / Dispatch times come from its status moves (the LOAD_<status> audit
- *   rows of the load and of the loads it was copied from); Loaded from LOAD_LOADED after the last Loading;
+ *   rows of the load and of the loads it was copied from);
  * - each visit is rebuilt with deriveVisit (lib/delivery/visit.ts) from the events the server had
  *   received by t; photos and Back at depot by their receipt time too;
  * - the driver page counts as opened from its first recorded open (the link's device list) or the first
@@ -75,7 +75,7 @@ export interface ExportLoad {
   /** The status at export time. */
   finalStatus: string;
   stopCount: number;
-  /** The status moves, oldest first ('LOADED' = the Loaded press). */
+  /** The status moves, oldest first. */
   history: { status: string; at: string }[];
   /** Back at depot taps (load level). */
   backEvents: ExportEvent[];
@@ -116,23 +116,17 @@ const PHONE = new Set(['PHONE_AUTO', 'PHONE_MANUAL']);
 const ms = (iso: string) => Date.parse(iso);
 const known = (iso: string | null | undefined, t: number) => !!iso && ms(iso) <= t;
 
-/** A load's status, its time and the Loaded press as of t. */
-export function statusAsOf(l: Pick<ExportLoad, 'history' | 'finalStatus'>, t: number): { status: string; statusChangedAt: Date | null; loadedAt: Date | null } {
-  if (!l.history.length) return { status: l.finalStatus, statusChangedAt: null, loadedAt: null };
+/** A load's status and its time as of t. */
+export function statusAsOf(l: Pick<ExportLoad, 'history' | 'finalStatus'>, t: number): { status: string; statusChangedAt: Date | null } {
+  if (!l.history.length) return { status: l.finalStatus, statusChangedAt: null };
   const moves = [...l.history].filter((h) => ms(h.at) <= t).sort((a, b) => ms(a.at) - ms(b.at));
   let status = 'PLANNED';
   let changed: Date | null = null;
-  let loaded: Date | null = null;
   for (const h of moves) {
-    if (h.status === 'LOADED') {
-      if (status === 'LOADING') loaded = new Date(h.at);
-      continue;
-    }
     status = h.status;
     changed = new Date(h.at);
-    if (status === 'LOADING' || status === 'PLANNED') loaded = null;
   }
-  return { status, statusChangedAt: changed, loadedAt: loaded };
+  return { status, statusChangedAt: changed };
 }
 
 function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: { startMin: number; endMin: number } | null; radiusM: number }): FactVisit | null {
@@ -216,7 +210,6 @@ export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert
       departMin: l.departMin,
       returnMin: l.returnMin,
       statusChangedAt: st.statusChangedAt,
-      loadedAt: st.loadedAt,
       windowRule: l.windowRule,
       breakMin: l.breakMin,
       backAt: back.length ? new Date(Math.min(...back.map((d) => d.getTime()))) : null,

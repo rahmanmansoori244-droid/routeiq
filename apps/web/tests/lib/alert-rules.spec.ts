@@ -105,7 +105,6 @@ function load(over: Partial<FactLoad> = {}): FactLoad {
     departMin: 450,
     returnMin: 720,
     statusChangedAt: at('07:30', over.date ?? D),
-    loadedAt: null,
     windowRule: 'FINISH',
     breakMin: null,
     backAt: null,
@@ -288,8 +287,7 @@ describe('R2 LOADING_OVER (owner rule 2: loading more than 40 min; H1: off by de
     expect(run(loading(), at('23:11')).one('LOADING_OVER').tier).toBe(3);
   });
 
-  it('the Loaded press ends it with the loading time; Dispatch ends it; back to Locked ends it', () => {
-    expect(run(loading({ loadedAt: at('21:45') }), at('22:00')).ended('LOADING_OVER', key)?.text).toBe('T05 L1: loaded in 35 min (21:10-21:45).');
+  it('Dispatch ends it; back to Locked ends it', () => {
     expect(run(loading({ status: 'DISPATCHED', statusChangedAt: at('22:02') }), at('22:05')).ended('LOADING_OVER', key)?.text).toBe('T05 L1: loading ended with Dispatch at 22:02.');
     expect(run(loading({ status: 'LOCKED' }), at('22:05')).ended('LOADING_OVER', key)?.text).toBe('T05 L1: loading stopped, the load is Locked.');
   });

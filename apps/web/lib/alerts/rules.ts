@@ -29,9 +29,9 @@
  *   stop, the truck being back or the planned return + 60 min (a result recorded hours later is not the
  *   end). Not on a load the office completed. While it is raised, R3 and the projected R6 of the load
  *   are held (M2: one long unloading is one alert; its text names the next stop's new time).
- * - R2 LOADING_OVER: a LOADING load not marked Loaded, whose Loading press (statusChangedAt) is more than
- *   T ago and less than 12 h ago (H1: off by default; it means something only when the warehouse presses
- *   Loading as it starts each truck and Loaded when done).
+ * - R2 LOADING_OVER: a LOADING load whose Loading press (statusChangedAt) is more than T ago and less than
+ *   12 h ago (H1: off by default; it means something only when the warehouse presses Loading as it starts
+ *   each truck).
  * - R3 ETA_LATE: the projected arrival at the next stop (projection.ts) more than T after its plan;
  *   closes 10 min under T (hysteresis). A delivery photo counts as being at its stop, and the clock pushes
  *   a stop not reached only while the phone has been silent since before it was expected (M3). Not while
@@ -190,8 +190,6 @@ export interface FactLoad {
   returnMin: number;
   /** The latest status move (a DISPATCHED load: the Dispatch press; LOADING: the Loading press). */
   statusChangedAt: Date | null;
-  /** The warehouse's Loaded press (PlanLoad.loadedAt). */
-  loadedAt: Date | null;
   /** The receiving-hours rule the load was planned with (a load planned before the echo: START). */
   windowRule: WindowRuleName;
   /** The planned driver break, minutes of the delivery day. */
@@ -564,9 +562,9 @@ function loadingOver(out: Out, c: LoadCtx): void {
   const tz = out.facts.tz;
   const start = l.statusChangedAt;
   const when = (at: Date) => clockText(at, out.facts.today, tz);
-  if (l.status === 'LOADING' && start && !l.loadedAt) {
+  if (l.status === 'LOADING' && start) {
     const elapsed = minutesBetween(start, out.now);
-    if (elapsed > LOADING_START_MAX_AGE_MIN) return out.unfollow(rule, c.key, `${c.label}: no Loaded press ${fmtDuration(LOADING_START_MAX_AGE_MIN)} after Loading at ${when(start)}: no longer followed.`);
+    if (elapsed > LOADING_START_MAX_AGE_MIN) return out.unfollow(rule, c.key, `${c.label}: still Loading ${fmtDuration(LOADING_START_MAX_AGE_MIN)} after the Loading press at ${when(start)}: no longer followed.`);
     const tier = tierAt(elapsed, T);
     if (!tier) return out.end(rule, c.key, `${c.label}: loading within ${T} min.`);
     const dep = l.date === out.facts.today ? planTime(l.departMin) : `${fmtDayMonth(l.date)} ${planTime(l.departMin)}`;
@@ -582,9 +580,6 @@ function loadingOver(out: Out, c: LoadCtx): void {
       occurredAt: new Date(start.getTime() + T * 60_000),
       facts: { loadingSince: start.toISOString() },
     });
-  }
-  if (l.status === 'LOADING' && start && l.loadedAt) {
-    return out.end(rule, c.key, `${c.label}: loaded in ${fmtDuration(minutesBetween(start, l.loadedAt))} (${when(start)}-${when(l.loadedAt)}).`);
   }
   if (ON_ROAD.has(l.status)) {
     return out.end(rule, c.key, l.status === 'DISPATCHED' && start ? `${c.label}: loading ended with Dispatch at ${when(start)}.` : `${c.label}: ${STATUS_WORD[l.status] ?? l.status}.`);

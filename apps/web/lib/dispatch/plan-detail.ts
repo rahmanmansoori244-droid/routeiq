@@ -219,11 +219,6 @@ export interface DetailLoad {
   helpersHandSet?: boolean;
   loadNo: number;
   status: string;
-  /**
-   * Operations alerts (16 Oct 2026): when the warehouse pressed Loaded (ISO), the end of loading this truck
-   * (PlanLoad.loadedAt; entering Loading again clears it). Null / absent: not pressed.
-   */
-  loadedAt?: string | null;
   /** Kept unchanged from the previous version: carried by a re-plan and frozen (isCarriedFrozen). */
   carried: boolean;
   departMin: number;
@@ -833,7 +828,6 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       helpersHandSet: isHandSetHelpers({ helperIds: (l.helpers ?? []).map((h) => h.helper.id), helpersSetById: l.helpersSetById, helpersSetAt: l.helpersSetAt }),
       loadNo: l.loadNo,
       status: l.status,
-      loadedAt: l.loadedAt ? l.loadedAt.toISOString() : null,
       carried: isCarriedFrozen(l),
       departMin: l.departMin,
       returnMin: l.returnMin,

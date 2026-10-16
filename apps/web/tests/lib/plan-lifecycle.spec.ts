@@ -57,7 +57,6 @@ import {
 } from '@/lib/dispatch/plan-service';
 import { driverClashes, isHandSetDriver } from '@/lib/dispatch/load-state';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
-import { notLoadingText } from '@/lib/dispatch/load-loaded';
 import { isLockBusy, PlanBusyError } from '@/lib/dispatch/plan-locks';
 import { SolveAdmission, type SolveTicket } from '@/lib/dispatch/solve-admission';
 import { failJob, PREEMPT_RETRY, scheduleDispatchOptimize, type DispatchJobArgs } from '@/lib/jobs/dispatch-job';
@@ -2370,8 +2369,7 @@ describe('a driver on leave that day: Lock, Loading and Dispatch ask first (demo
   it('the route takes the answer (leaveConfirmed) and passes it on', () => {
     const route = readFileSync(path.resolve(__dirname, '../../app/api/runs/[id]/loads/[loadId]/route.ts'), 'utf8');
     expect(route).toContain('leaveConfirmed: z.boolean().optional()');
-    // (16 Oct 2026: the operations alerts' Loaded press goes with it: `loaded`.)
-    expect(route).toMatch(/updateLoad\(user\.tenantId, params\.id, params\.loadId, \{ status, driverId, helperIds, leaveConfirmed, loaded \}/);
+    expect(route).toMatch(/updateLoad\(user\.tenantId, params\.id, params\.loadId, \{ status, driverId, helperIds, leaveConfirmed \}/);
   });
 });
 
@@ -2424,56 +2422,5 @@ describe('completeLoadAsDriver: Back at depot closes the trip (delivery outcome,
     tables.stopVisit = [visit(1, 'DELIVERED')];
     expect(await completeLoadAsDriver(T, ref, { label: 'x' })).toEqual({ completed: false, reason: 'NOT_DISPATCHED' });
     expect(row('planLoad', 'L1').status).toBe('LOADING');
-  });
-});
-
-describe("the warehouse's Loaded press (operations alerts, owner request 16 Oct 2026: loading over 40 min)", () => {
-  const started = new Date('2026-09-27T17:10:00Z');
-  const loaded = new Date('2026-09-27T18:02:00Z');
-  const audits = (action: string) => (tables.auditLog ?? []).filter((a) => a.action === action);
-
-  it('only while the load is LOADING (409 NOT_LOADING), audited LOAD_LOADED with the loading time; a second press changes nothing', async () => {
-    seedAppliedPlan();
-    const refused = await updateLoad(T, 'P', 'L1', { loaded: true }, user, allow, { now: loaded }).catch((e) => e);
-    expect(refused).toBeInstanceOf(PlanError);
-    expect(refused).toMatchObject({ status: 409, details: { code: 'NOT_LOADING' }, message: notLoadingText(1, 'LOCKED') });
-    expect(row('planLoad', 'L1').loadedAt ?? null).toBeNull();
-    await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
-    row('planLoad', 'L1').statusChangedAt = started;
-    await updateLoad(T, 'P', 'L1', { loaded: true }, user, allow, { now: loaded });
-    expect(row('planLoad', 'L1')).toMatchObject({ status: 'LOADING', loadedAt: loaded, loadedById: 'u1' });
-    expect(audits('LOAD_LOADED')).toHaveLength(1);
-    expect(audits('LOAD_LOADED')[0]).toMatchObject({ entity: 'PlanLoad', entityId: 'L1', userId: 'u1' });
-    expect(audits('LOAD_LOADED')[0]!.afterJson).toEqual({ runId: 'P', truckId: 'T1', loadNo: 1, loadingStartedAt: started.toISOString(), loadedAt: loaded.toISOString(), loadingMin: 52 });
-    await updateLoad(T, 'P', 'L1', { loaded: true }, user, allow, { now: new Date(loaded.getTime() + 60_000) });
-    expect(row('planLoad', 'L1').loadedAt).toEqual(loaded);
-    expect(audits('LOAD_LOADED')).toHaveLength(1);
-    // The plan screen reads it (the Loaded button and the time).
-    expect((await getPlanDetail(T, 'P'))!.loads.find((l) => l.id === 'L1')!.loadedAt).toBe(loaded.toISOString());
-  });
-
-  it('a re-plan keeps it with the load; back to Locked keeps it; pressing Loading again clears it (a new loading time)', async () => {
-    seedAppliedPlan();
-    await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
-    await updateLoad(T, 'P', 'L1', { loaded: true }, user, allow, { now: loaded });
-    const { child } = await createNextVersion(T, 'P', 'REOPTIMIZE', null, 'u1');
-    const copy = tables.planLoad!.find((l) => l.runId === child.id && l.carriedFromLoadId === 'L1')!;
-    expect(copy).toMatchObject({ status: 'LOADING', loadedAt: loaded, loadedById: 'u1' });
-    seedAppliedPlan();
-    await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
-    await updateLoad(T, 'P', 'L1', { loaded: true }, user, allow, { now: loaded });
-    await updateLoad(T, 'P', 'L1', { status: 'LOCKED' }, user, allow);
-    expect(row('planLoad', 'L1').loadedAt).toEqual(loaded);
-    await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
-    expect(row('planLoad', 'L1')).toMatchObject({ loadedAt: null, loadedById: null });
-  });
-
-  it('"Loaded and Dispatch" in one request records both, Loaded first', async () => {
-    seedAppliedPlan();
-    await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
-    row('planLoad', 'L1').driverId = 'DRV1'; // owner rule 20: a load never leaves without a driver
-    await updateLoad(T, 'P', 'L1', { loaded: true, status: 'DISPATCHED' }, user, allow, { now: loaded });
-    expect(row('planLoad', 'L1')).toMatchObject({ status: 'DISPATCHED', loadedAt: loaded });
-    expect(tables.auditLog!.map((a) => a.action).slice(-2)).toEqual(['LOAD_LOADED', 'LOAD_DISPATCHED']);
   });
 });

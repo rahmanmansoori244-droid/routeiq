@@ -2,8 +2,6 @@ import { notFound } from 'next/navigation';
 import { getCurrentTenant } from '@/lib/tenant';
 import { canManageMasterData, canPlan } from '@/lib/rbac';
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
-import { prisma } from '@/lib/db';
-import { loadedActionOn } from '@/lib/alerts/view';
 import { PageShell } from '@/components/page-shell';
 import { PlanVersionClient } from './plan-version-client';
 
@@ -14,8 +12,6 @@ export default async function PlanVersionPage({ params }: { params: { slug: stri
   const { db, tenant, user } = await getCurrentTenant(params.slug);
   const run = await db.runPlan.findUnique({ where: { id: params.id }, select: { id: true, version: true, runDate: true, depotId: true } });
   if (!run) notFound();
-  // Operations alerts (16 Oct 2026): Loaded next to Dispatch only with alerts and the loading rule on.
-  const alerts = user.tenantId === tenant.id ? await prisma.tenantConfig.findUnique({ where: { tenantId: tenant.id }, select: { alertsEnabled: true, alertLoadingOverMin: true } }) : null;
   return (
     <PageShell title={`Plan version ${run.version}`} description="Every optimization and re-plan is kept as its own version.">
       <PlanVersionClient
@@ -27,7 +23,6 @@ export default async function PlanVersionPage({ params }: { params: { slug: stri
         canEditProducts={canManageMasterData(user.role)}
         phoneCountryCode={phoneCountryCode(tenant.country)}
         dayHref={`/t/${params.slug}/dispatch?date=${run.runDate.toISOString().slice(0, 10)}&depot=${run.depotId}`}
-        loadedAction={loadedActionOn(alerts)}
       />
     </PageShell>
   );

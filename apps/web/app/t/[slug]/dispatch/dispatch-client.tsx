@@ -184,11 +184,9 @@ interface Props {
   phoneCountryCode: string | null;
   /** Operations alerts (owner request 16 Oct 2026) are switched on: the Alerts card above Deliveries. */
   alertsEnabled?: boolean;
-  /** Alerts on with the loading rule (R2): the plan offers Loaded next to Dispatch. */
-  loadedAction?: boolean;
 }
 
-export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, initialDate, initialDepot, phoneCountryCode, alertsEnabled = false, loadedAction = false }: Props) {
+export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, initialDate, initialDepot, phoneCountryCode, alertsEnabled = false }: Props) {
   const router = useRouter();
   const [date, setDate] = useState<string | null>(initialDate);
   const [depotId, setDepotId] = useState<string | null>(initialDepot);
@@ -800,7 +798,6 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             reloadSignal={planReload}
             onResultRecorded={() => void refreshResults()}
             today={day.today}
-            loadedAction={loadedAction}
             onChanged={async () => {
               // The plan's action keeps its buttons (and Step 3) waiting until the day shows its
               // result; then the plan screen is loaded fresh. When the day could not be loaded, the
