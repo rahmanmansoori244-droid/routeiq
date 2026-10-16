@@ -441,6 +441,23 @@ describe("a load's helpers: set like the driver, audited, kept by the next versi
     expect(helpersOn('L2')).toEqual(['SAIF', 'OMAR', 'NASR']);
   });
 
+  it('operations alerts (16 Oct 2026): the route takes `loaded: true` only, answers 409 NOT_LOADING on a load not Loading, and VIEWER 403', async () => {
+    seedPlan();
+    const ctx = { params: { id: 'P', loadId: 'L1' } };
+    expect((await patchLoad(json('PATCH', { loaded: false }), ctx)).status).toBe(400);
+    expect((await patchLoad(json('PATCH', {}), ctx)).status).toBe(400);
+    const locked = await answer(await patchLoad(json('PATCH', { loaded: true }), ctx));
+    expect(locked.status).toBe(409);
+    expect(locked.body.error).toMatchObject({ code: 'NOT_LOADING' });
+    row('planLoad', 'L1').status = 'LOADING';
+    const ok = await answer(await patchLoad(json('PATCH', { loaded: true }), ctx));
+    expect(ok.status).toBe(200);
+    expect(row('planLoad', 'L1').loadedById).toBe('u-PLANNER');
+    expect(audits('LOAD_LOADED')).toHaveLength(1);
+    as('VIEWER');
+    expect((await patchLoad(json('PATCH', { loaded: true }), ctx)).status).toBe(403);
+  });
+
   it('a new plan version copies each load\'s helpers and the hand-set marker with the load', async () => {
     seedPlan();
     await updateLoad(T, 'P', 'L1', { helperIds: ['OMAR', 'SAIF'] }, user, () => true);

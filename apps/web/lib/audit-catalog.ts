@@ -62,6 +62,8 @@ export const AUDIT_ACTIONS = {
   PLAN_VERSION_CREATED: { label: 'Plan version created (re-plan)' },
   ...LOAD_ACTIONS,
   LOAD_DRIVER_SET: { label: 'Load driver set' },
+  // Operations alerts (owner request 16 Oct 2026): the warehouse finished loading a truck (a time, not a status).
+  LOAD_LOADED: { label: 'Load marked Loaded (warehouse finished loading)' },
   // Delivery outcome and the driver page (owner request 4 Oct 2026).
   DRIVER_LINK_ISSUED: { label: 'Driver link (QR) made' },
   DRIVER_LINK_REISSUED: { label: 'Driver link reissued (the old one stopped working)' },
@@ -148,6 +150,6 @@ export function auditActionTone(action: string): 'default' | 'success' | 'warnin
   if (action === 'CREATE' || action === 'OPTIMIZE_SUCCEEDED' || action === 'LOAD_DISPATCHED' || action === 'LOAD_COMPLETED' || action === 'DISPATCH') return 'success';
   if (action === 'OVERRIDE' || action === 'ROUTE_MANUALLY_CHANGED' || action === 'LOAD_PLANNED' || action === 'PLAN_RESET' || action === 'CROSS_TENANT_VIEW' || action.startsWith('PLATFORM_ADMIN')) return 'warning';
   if (action === 'DRIVER_LINK_REVOKED' || action === 'DRIVER_LINK_REISSUED' || action === 'DELIVERY_CARRY_CONFLICT' || action === 'ORDER_CANCELLED') return 'warning';
-  if (action === 'LOGIN' || action === 'SIGNUP' || action === 'LOAD_LOCKED' || action === 'LOAD_LOADING') return 'secondary';
+  if (action === 'LOGIN' || action === 'SIGNUP' || action === 'LOAD_LOCKED' || action === 'LOAD_LOADING' || action === 'LOAD_LOADED') return 'secondary';
   return 'outline';
 }

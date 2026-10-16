@@ -13,12 +13,16 @@ const schema = z
     helperIds: loadHelperIdsSchema.optional(),
     // The dispatcher's answer about a driver on leave that day (409 DRIVER_ON_LEAVE otherwise).
     leaveConfirmed: z.boolean().optional(),
+    // The warehouse finished loading this truck (operations alerts, 16 Oct 2026): only `true`.
+    loaded: z.literal(true).optional(),
   })
-  .refine((b) => b.status !== undefined || b.driverId !== undefined || b.helperIds !== undefined, { message: 'Send a status, a driverId or helperIds.' });
+  .refine((b) => b.status !== undefined || b.driverId !== undefined || b.helperIds !== undefined || b.loaded !== undefined, { message: 'Send a status, a driverId, helperIds or loaded.' });
 
-// PATCH /api/runs/:id/loads/:loadId { status?, driverId?, helperIds?, leaveConfirmed? } - lock / unlock /
-// loading / dispatch / complete, assign the driver (null = none) and the helpers (0-3, [] = none; the
-// same states as the driver, audited LOAD_HELPERS_CHANGED: lib/dispatch/load-helpers.ts). Rules live in lib/dispatch/load-state.ts
+// PATCH /api/runs/:id/loads/:loadId { status?, driverId?, helperIds?, leaveConfirmed?, loaded? } - lock /
+// unlock / loading / dispatch / complete, assign the driver (null = none) and the helpers (0-3, [] = none;
+// the same states as the driver, audited LOAD_HELPERS_CHANGED: lib/dispatch/load-helpers.ts), and mark
+// the load Loaded (operations alerts: only while it is LOADING, else 409 NOT_LOADING; audited
+// LOAD_LOADED: lib/dispatch/load-loaded.ts). Rules live in lib/dispatch/load-state.ts
 // (loads go out in order; dispatched is immutable). With both, one transaction: the driver is set
 // first (a load being dispatched can still get its driver in the same request), and a refused status
 // change leaves the driver unchanged too. Lock, Loading and Dispatch of a load whose driver is on
@@ -27,9 +31,9 @@ const schema = z
 export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { user }) => {
-      const { status, driverId, helperIds, leaveConfirmed } = await parseBody(r, schema);
+      const { status, driverId, helperIds, leaveConfirmed, loaded } = await parseBody(r, schema);
       // A refusal is a PlanError (an HttpError): it answers with its status and code (review L16).
-      const load = await updateLoad(user.tenantId, params.id, params.loadId, { status, driverId, helperIds, leaveConfirmed }, user, (role) => hasRole(user.role, role));
+      const load = await updateLoad(user.tenantId, params.id, params.loadId, { status, driverId, helperIds, leaveConfirmed, loaded }, user, (role) => hasRole(user.role, role));
       return ok(load);
     },
     { role: 'PLANNER' },

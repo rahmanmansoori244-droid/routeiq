@@ -124,6 +124,7 @@ import {
 import { copyRowData } from './prisma-copy';
 import { planHelpers, type HelperChangeNote } from './load-helpers';
 import { copyLoadHelpers, deleteHelpersOfLoads, helperEvidenceOf, setHelpersTx, writeLoadHelpers } from './load-helpers-service';
+import { markLoadedTx } from './load-loaded';
 import { lockWarningsOf } from '../delivery/carry-conflicts';
 import { windowRuleOf } from './window-rule';
 import {
@@ -2664,13 +2665,19 @@ export interface LoadChange {
    * of a load whose driver is on leave that day goes through (else 409 DRIVER_ON_LEAVE; leaveGate).
    */
   leaveConfirmed?: boolean;
+  /**
+   * The warehouse finished loading this truck (operations alerts, 16 Oct 2026): sets PlanLoad.loadedAt.
+   * Only while the load is LOADING (409 NOT_LOADING); audited LOAD_LOADED (load-loaded.ts).
+   */
+  loaded?: true;
 }
 
 /**
  * One request on one load - its driver and/or its status - in ONE transaction under the plan's
  * row lock, so a refused status change also leaves the driver as it was. The driver goes first:
- * a load being dispatched can get its driver in the same request. `now`: the clock (tests fix it;
- * the words of a refusal say "today" for a load of the company's today).
+ * a load being dispatched can get its driver in the same request. Loaded comes before the status, so
+ * "Loaded and Dispatch" in one request records both. `now`: the clock (tests fix it; the words of a
+ * refusal say "today" for a load of the company's today).
  */
 export async function updateLoad(
   tenantId: string,
@@ -2686,6 +2693,7 @@ export async function updateLoad(
     let load: Awaited<ReturnType<typeof setDriverTx>> | null = null;
     if (change.driverId !== undefined) load = await setDriverTx(tx, tenantId, run, loadId, change.driverId, user);
     if (change.helperIds !== undefined) load = await setHelpersTx(tx, tenantId, run, loadId, change.helperIds, user);
+    if (change.loaded) load = await markLoadedTx(tx, tenantId, run, loadId, user, opts.now ?? new Date());
     if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole, opts.now ?? new Date(), change.leaveConfirmed === true);
     // Delivery outcome (spec section 9.4): Lock of a load holding a brought-forward order whose original
     // result changed after the carry warns in the answer ("may not be needed"); it is never refused.
@@ -2806,9 +2814,12 @@ async function changeStatusCore(
   // other gate (their refusals keep their words), on the load as it is after the driver step of the
   // same request (updateLoad sets the driver first). Lock, Loading and Completed are not affected.
   if (to === 'DISPATCHED') await driverGate(tx, tenantId, load);
+  // Operations alerts (16 Oct 2026): the Loading press starts the loading time again, so an earlier
+  // Loaded press (load-loaded.ts) no longer counts; back to Planned the load is unloaded too.
+  const loadedReset = to === 'LOADING' || to === 'PLANNED' ? { loadedAt: null, loadedById: null } : {};
   const updated = await tx.planLoad.update({
     where: { id: loadId },
-    data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: actor.userId },
+    data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: actor.userId, ...loadedReset },
   });
   const orderIds = [...new Set((await tx.routeAssignment.findMany({ where: { loadId }, select: { orderId: true } })).map((a) => a.orderId))];
   if (to === 'DISPATCHED' && orderIds.length) {
