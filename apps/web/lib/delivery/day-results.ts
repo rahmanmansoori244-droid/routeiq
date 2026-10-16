@@ -212,10 +212,10 @@ export async function truckDaysWithLinkOrVisit(db: Db, tenantId: string, from: s
   return new Set([...links, ...visits].map((x) => `${isoOf(x.deliveryDate)}|${x.truckId}`));
 }
 
-/** Loads that reported Back at depot (`depotId|date|truckId|loadNo`). */
-export async function backAtDepot(db: Db, tenantId: string, from: string, to: string, depotId?: string | null): Promise<Map<string, Date>> {
+/** The earliest load-level event of a kind per load (`depotId|date|truckId|loadNo`). */
+async function earliestLoadEvents(db: Db, tenantId: string, kind: 'BACK_AT_DEPOT' | 'DEPOT_DEPART', from: string, to: string, depotId?: string | null): Promise<Map<string, Date>> {
   const rows = await db.stopEvent.findMany({
-    where: { tenantId, kind: 'BACK_AT_DEPOT', deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) }, ...(depotId ? { depotId } : {}) },
+    where: { tenantId, kind, deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) }, ...(depotId ? { depotId } : {}) },
     select: { depotId: true, deliveryDate: true, truckId: true, loadNo: true, at: true },
   });
   const out = new Map<string, Date>();
@@ -225,6 +225,19 @@ export async function backAtDepot(db: Db, tenantId: string, from: string, to: st
     if (!cur || b.at < cur) out.set(k, b.at);
   }
   return out;
+}
+
+/** Loads that reported Back at depot (`depotId|date|truckId|loadNo`). */
+export async function backAtDepot(db: Db, tenantId: string, from: string, to: string, depotId?: string | null): Promise<Map<string, Date>> {
+  return earliestLoadEvents(db, tenantId, 'BACK_AT_DEPOT', from, to, depotId);
+}
+
+/**
+ * Loads the truck left the depot with after a trip: the driver's "Leaving for next load" (StopEvent
+ * DEPOT_DEPART, owner decision 16 Oct 2026), by the same key as backAtDepot (backKey).
+ */
+export async function leftDepot(db: Db, tenantId: string, from: string, to: string, depotId?: string | null): Promise<Map<string, Date>> {
+  return earliestLoadEvents(db, tenantId, 'DEPOT_DEPART', from, to, depotId);
 }
 
 export const backKey = (l: Pick<RoadLoad, 'depotId' | 'date' | 'truckId' | 'loadNo'>) => `${l.depotId}|${l.date}|${l.truckId}|${l.loadNo}`;

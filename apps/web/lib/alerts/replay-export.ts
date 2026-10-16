@@ -7,7 +7,7 @@
  * What it saves: the plan in use of the date (every depot, or one), each load with its status moves
  * (the LOAD_<status> audit rows of the load and of the loads it was copied from: a
  * re-plan copies loads, the moves were recorded on the version that was in use then), its Back at depot
- * taps, its planned stops (priority, verified pin) with their visits' events and photos (times,
+ * and Leaving for next load taps, its planned stops (priority, verified pin) with their visits' events and photos (times,
  * distances and the few payload keys the visit rebuild reads), and each truck-day's first and last page
  * open. Never a position, an IP, a device id or a phone number. It does hold customer names and driver
  * notes: the file must stay outside the repository (the script refuses a path inside it), and running it
@@ -131,11 +131,13 @@ export async function exportAlertDay(db: Db, tenantId: string, date: string, opt
   const visitOf = new Map(visits.map((v) => [keyOfVisit(v), v]));
   const eventsOf = new Map<string, ExportEvent[]>();
   const backOf = new Map<string, ExportEvent[]>();
+  const departOf = new Map<string, ExportEvent[]>();
   for (const e of events) {
     const ev = eventOf(e);
-    if (e.kind === 'BACK_AT_DEPOT') {
+    if (e.kind === 'BACK_AT_DEPOT' || e.kind === 'DEPOT_DEPART') {
       const k = `${e.depotId}|${e.truckId}|${e.loadNo}`;
-      backOf.set(k, [...(backOf.get(k) ?? []), ev]);
+      const into = e.kind === 'BACK_AT_DEPOT' ? backOf : departOf;
+      into.set(k, [...(into.get(k) ?? []), ev]);
     } else if (e.visitId) eventsOf.set(e.visitId, [...(eventsOf.get(e.visitId) ?? []), ev]);
   }
   const photosOf = new Map<string, ExportPhoto[]>();
@@ -195,6 +197,7 @@ export async function exportAlertDay(db: Db, tenantId: string, date: string, opt
       stopCount: new Set(own.map((r) => r.sequenceInTruck)).size,
       history: history.get(l.id) ?? [],
       backEvents: backOf.get(`${l.depotId}|${l.truckId}|${l.loadNo}`) ?? [],
+      departEvents: departOf.get(`${l.depotId}|${l.truckId}|${l.loadNo}`) ?? [],
       stops,
     };
   });

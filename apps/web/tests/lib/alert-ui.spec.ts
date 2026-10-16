@@ -351,7 +351,7 @@ describe('the pure helpers', () => {
   });
 
   it('the settings card: the meaning with the threshold, and the same checks as the API', () => {
-    expect(ruleMeaning(ALERT_RULE_SPECS.LOADING_OVER, 40)).toContain('for more than 40 min');
+    expect(ruleMeaning(ALERT_RULE_SPECS.LOADING_OVER, 40)).toContain('has not left with its next load 40 min after the driver tapped Back at depot');
     expect(ruleMeaning(ALERT_RULE_SPECS.PRIORITY_NOT_DELIVERED, null)).toContain('priority 2 or better');
     const c = {
       alertsEnabled: true,

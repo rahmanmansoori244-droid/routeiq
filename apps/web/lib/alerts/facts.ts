@@ -9,7 +9,7 @@
  *  3. for the loads that left (DISPATCHED / COMPLETED): the planned stops (stopsOfLoads), their orders'
  *     priority, whether each customer's pin is verified and whether it moved since the visit was planned
  *     (PIN_MOVED_M), the visits, their photos (source, old photo and time too: R9 and the projection);
- *  4. Back at depot per load (backAtDepot);
+ *  4. Back at depot per load (backAtDepot) and the driver's Leaving for next load (leftDepot: rule R2);
  *  5. per truck-day (one driver link): the link's lastSeenAt and the last thing the phone sent (driver
  *     events PHONE_AUTO / PHONE_MANUAL and photos, by the server's receipt time: the phone holds its
  *     events while offline and before Dispatch);
@@ -24,7 +24,7 @@ import { findInParts } from '../in-parts';
 import { addDaysIso, dateOnly, isoOf, todayIso } from '../dispatch/time';
 import { echoedWindowRule } from '../dispatch/window-rule';
 import { parseLoadBreak, readTruckSnapshot } from '../dispatch/snapshots';
-import { backAtDepot, backKey, keyOfVisit, liveRunsInRange, loadsOfRuns, stopsOfLoads, visitKey, visitsInRange } from '../delivery/day-results';
+import { backAtDepot, backKey, keyOfVisit, leftDepot, liveRunsInRange, loadsOfRuns, stopsOfLoads, visitKey, visitsInRange } from '../delivery/day-results';
 import { PIN_FAR_M } from '../delivery/pin-check';
 import { distanceM, PIN_MOVED_M } from '../dispatch/snapshots';
 import { pinCheckList } from '../delivery/customer-stats';
@@ -64,7 +64,7 @@ export async function readAlertFacts(
   const loadIds = loads.map((l) => l.id);
   const onRoad = loads.filter((l) => ON_ROAD.has(l.status));
 
-  const [extra, rowsOfPlan, planned, visits, backs, links, rows] = await Promise.all([
+  const [extra, rowsOfPlan, planned, visits, backs, lefts, links, rows] = await Promise.all([
     findInParts(loadIds, (part) => db.planLoad.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, truckSnapshotJson: true } })),
     // The load ids came from this company's plans (loadsOfRuns): RouteAssignment has no company column.
     findInParts(loadIds, (part) =>
@@ -77,6 +77,7 @@ export async function readAlertFacts(
     stopsOfLoads(db, onRoad),
     visitsInRange(db, tenantId, from, to),
     backAtDepot(db, tenantId, from, to),
+    leftDepot(db, tenantId, from, to),
     db.driverLink.findMany({ where: { tenantId, deliveryDate: range }, select: { truckId: true, deliveryDate: true, lastSeenAt: true } }),
     db.opsAlert.findMany({ where: { tenantId, OR: [{ resolvedAt: null }, { deliveryDate: { gte: dateOnly(from) } }] }, select: STORED_SELECT }),
   ]);
@@ -188,6 +189,7 @@ export async function readAlertFacts(
       windowRule: echoedWindowRule(readTruckSnapshot(x?.truckSnapshotJson ?? null)?.rules?.windowRule) ?? 'START',
       breakMin: brk ? { startMin: brk.startMin, endMin: brk.endMin } : null,
       backAt: backs.get(backKey(l)) ?? null,
+      leftTapAt: lefts.get(backKey(l)) ?? null,
       stopCount: new Set(own.map((r) => r.sequenceInTruck)).size,
       stops,
     };

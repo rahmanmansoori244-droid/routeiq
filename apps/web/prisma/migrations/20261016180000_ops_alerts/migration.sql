@@ -7,8 +7,8 @@
 -- - TenantConfig: the master switch "alertsEnabled" (NOT NULL DEFAULT false: every company stays off),
 --   "alertsEnabledAt" (set by the save that switches alerts on: nothing older raises an alert),
 --   "alertRuleOnAtJson" (the same stamp per rule, when a rule is switched on or set to catch more), one
---   nullable threshold per rule (NULL = the rule is off; "alertLoadingOverMin" is NULL, off, until the
---   warehouse records loading start and end per truck), "alertDeliveredNote" (on/off), the e-mail
+--   nullable threshold per rule (NULL = the rule is off; "alertLoadingOverMin" 40: R2 is measured from the
+--   driver's Back at depot to his Leaving for next load, below), "alertDeliveredNote" (on/off), the e-mail
 --   settings (recipients NULL = in the app only; HIGH alerts only; quiet hours 22:00-06:00). Constant
 --   defaults: on PostgreSQL 11+ a catalog change only, no table rewrite.
 -- - New table "OpsAlert": one row per rule and physical subject (UNIQUE tenantId, rule, subjectKey: two
@@ -60,7 +60,7 @@ ADD COLUMN     "alertEmailEveryMin" INTEGER NOT NULL DEFAULT 15,
 ADD COLUMN     "alertEmailMinSeverity" TEXT NOT NULL DEFAULT 'HIGH',
 ADD COLUMN     "alertEmails" TEXT,
 ADD COLUMN     "alertEtaLateMin" INTEGER DEFAULT 30,
-ADD COLUMN     "alertLoadingOverMin" INTEGER,
+ADD COLUMN     "alertLoadingOverMin" INTEGER DEFAULT 40,
 ADD COLUMN     "alertNotClosedMin" INTEGER DEFAULT 120,
 ADD COLUMN     "alertPageNotOpenedMin" INTEGER DEFAULT 30,
 ADD COLUMN     "alertPriorityMax" INTEGER DEFAULT 2,

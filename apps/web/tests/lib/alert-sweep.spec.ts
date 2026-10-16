@@ -40,7 +40,7 @@ const NOW = at(8 * 60 + 15);
 function lateFacts(): { facts: AlertFacts; rows: [] } {
   const load: FactLoad = {
     id: 'l1', depotId: 'D1', date: D, truckId: 'TR1', truckCode: 'T05', loadNo: 1, status: 'LOCKED', departMin: 450, returnMin: 720,
-    statusChangedAt: at(300), windowRule: 'FINISH', breakMin: null, backAt: null, stopCount: 3, stops: [],
+    statusChangedAt: at(300), windowRule: 'FINISH', breakMin: null, backAt: null, leftTapAt: null, stopCount: 3, stops: [],
   };
   return { facts: { tz: TZ, today: D, dates: ['2026-10-19', D, '2026-10-21'], loads: [load], truckDays: [], open: new Map() }, rows: [] };
 }

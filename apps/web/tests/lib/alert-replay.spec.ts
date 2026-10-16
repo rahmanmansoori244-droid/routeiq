@@ -156,7 +156,7 @@ describe('replayDay', () => {
     expect(by.PRIORITY_NOT_DELIVERED!.samples[0]).toContain('Note: "closed, call [number]"');
     expect(by.DRIVER_SILENT!.raised).toBe(1);
     expect(by.LOAD_NOT_CLOSED!.raised).toBe(1);
-    // Off in the saved settings (H1): nothing for the 21:00 Loading press.
+    // Off in the saved settings: nothing.
     expect(by.LOADING_OVER).toMatchObject({ threshold: null, raised: 0 });
     // Nothing for the hired truck beyond its one WARN (H3).
     expect(r.timeline.filter((e) => e.text.startsWith('T07') && e.kind === 'RAISED').map((e) => e.rule)).toEqual(['PAGE_NOT_OPENED']);
@@ -183,11 +183,44 @@ describe('replayDay', () => {
     expect(by.LOAD_NOT_CLOSED!.raised).toBe(1);
   });
 
-  it('the loading rule tried on the night before: the 21:00 Loading press of every load is what H1 warned about', () => {
+  it('the loading rule (R2, from the driver taps) tried on the night before: the 21:00 Loading press of every first trip raises nothing', () => {
     const r = replayDay(day(), { fromMin: parseDayMinute('20:00-1'), toMin: parseDayMinute('07:00'), overrides: { alertLoadingOverMin: 40 } });
     const loading = r.rules.find((s) => s.rule === 'LOADING_OVER')!;
-    expect(loading).toMatchObject({ raised: 1, escalated: 2, first: '21:45 -1' });
+    expect(loading).toMatchObject({ threshold: 40, raised: 0 });
     expect(r.from).toBe('20:00 -1');
+  });
+
+  it('R2 between two trips: live from Back at depot (by its receipt), over once the Leaving tap is received; an export from before has no taps', () => {
+    const d = day();
+    const t05 = d.loads[0]!;
+    t05.backEvents = [ev('BACK_AT_DEPOT', '11:20')];
+    d.loads.push({
+      ...t05,
+      id: 'l-t05-2',
+      loadNo: 2,
+      departMin: 780,
+      returnMin: 1000,
+      finalStatus: 'DISPATCHED',
+      history: [{ status: 'LOCKED', at: iso('20:00', -1) }, { status: 'DISPATCHED', at: iso('12:30') }],
+      backEvents: [],
+      // Tapped 12:10, received 12:12 (no signal at the gate).
+      departEvents: [ev('DEPOT_DEPART', '12:10', { receivedAt: iso('12:12') })],
+      stops: [stop(1, 800, 'Shop Example D')],
+    });
+    const r = replayDay(d, { fromMin: parseDayMinute('11:00'), toMin: parseDayMinute('13:00'), overrides: { alertLoadingOverMin: 40 } });
+    const loading = r.rules.find((s) => s.rule === 'LOADING_OVER')!;
+    expect(loading).toMatchObject({ threshold: 40, raised: 1, first: '12:05' });
+    expect(loading.samples[0]).toBe('T05 L2: at the depot for 45 min since Back at depot of L1 at 11:20, not left with L2 yet (limit 40 min). Planned departure 13:00, load is Locked.');
+    const closed = r.timeline.find((e) => e.rule === 'LOADING_OVER' && e.kind === 'CLOSED');
+    expect(closed).toMatchObject({ at: '12:15' });
+    expect(closed!.text).toBe('T05 L2: 50 min at the depot between L1 and L2 (back 11:20, left 12:10, by Leaving tapped), limit 40 min.');
+    // As of 12:11 the tap is not received yet: still at the depot.
+    const at1211 = factsAsOf(d, new Date(iso('12:11')), []);
+    expect(at1211.loads.find((l) => l.loadNo === 2)!.leftTapAt).toBeNull();
+    expect(factsAsOf(d, new Date(iso('12:12')), []).loads.find((l) => l.loadNo === 2)!.leftTapAt).toEqual(new Date(iso('12:10')));
+    // An export from before 16 Oct 2026 (no departEvents): read as no tap.
+    delete d.loads[2]!.departEvents;
+    expect(factsAsOf(d, new Date(iso('12:20')), []).loads.find((l) => l.loadNo === 2)!.leftTapAt).toBeNull();
   });
 });
 

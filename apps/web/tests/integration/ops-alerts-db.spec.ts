@@ -14,11 +14,16 @@
  *     the priority alert as CORRECTED; T07's load gone from the plan closes its alert as NOT_IN_PLAN.
  *  4. The database refuses what the catalog refuses (CHECKs on severity, kind and tier) and a second row
  *     for the same rule and subject.
+ *  5. R2 from the driver's taps (owner decision 16 Oct 2026): T05 L1 Back at depot 09:50 through the
+ *     driver action path; at 10:35 the sweep raises LOADING_OVER live on T05 L2 (still Loading); the
+ *     driver's "Leaving for next load" at 10:40 is stored once (StopEvent DEPOT_DEPART, audited; a retry
+ *     and a second tap store nothing) and the next sweep closes the row with the final minutes.
  * Invented names and codes.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 import { runAlertSweep, resetAlertSweepClock, sweepTenant, type AlertTenantConfig } from '@/lib/alerts/sweep';
+import { recordDriverActions } from '@/lib/delivery/event-service';
 import { zonedDayStart } from '@/lib/dispatch/time';
 
 const TZ = 'Asia/Muscat';
@@ -171,5 +176,55 @@ describe('operations alerts on the real database', () => {
     // The settings CHECKs (bounds of lib/alerts/catalog.ts).
     await expect(prisma.tenantConfig.update({ where: { tenantId: A.tenantId }, data: { alertEtaLateMin: 5 } })).rejects.toThrow();
     await expect(prisma.tenantConfig.update({ where: { tenantId: A.tenantId }, data: { alertQuietFromMin: 600, alertQuietToMin: null } })).rejects.toThrow();
+  });
+
+  it('5. R2 from the driver taps: Back at depot of L1, the sweep raises it live on L2, the Leaving for next load tap is stored once and closes it', async () => {
+    const cfg = await cfgOf(A);
+    // R2 is on at 40 for a company that never changed it (the column default).
+    expect(cfg.alertLoadingOverMin).toBe(40);
+    const depotId = (await prisma.runPlan.findUniqueOrThrow({ where: { id: A.runId } })).depotId;
+    const link = await prisma.driverLink.findFirstOrThrow({ where: { tenantId: A.tenantId, truckId: A.trucks.T05 } });
+    const ctx = (now: Date) => ({
+      tenantId: A.tenantId,
+      truckId: A.trucks.T05!,
+      date: D,
+      link: { id: link.id, generation: link.generation, driverIdAtIssue: link.driverIdAtIssue, expiresAt: link.expiresAt },
+      ip: null,
+      deviceId: null,
+      session: null,
+      now,
+    });
+    const depot = { lat: 24.95, lng: 59.55, accuracyM: 12 };
+    const back = { key: '6f1d3a52-1c2b-4c1e-9a43-5e0c2b7d8a01', type: 'BACK_AT_DEPOT', load: 1, depot: depotId, at: at('09:50').toISOString(), pos: { ...depot, at: at('09:50').toISOString() } };
+    const r1 = await recordDriverActions(ctx(at('09:50')), { clientNow: at('09:50').toISOString(), actions: [back] });
+    expect(r1.results).toEqual([{ key: back.key, status: 'ok' }]);
+
+    // 45 min later, still at the depot (L2 Loading, no tap): raised live.
+    const s1 = await sweepTenant(cfg, at('10:35'));
+    expect(s1!.raised).toBeGreaterThanOrEqual(1);
+    const live = await prisma.opsAlert.findFirstOrThrow({ where: { tenantId: A.tenantId, rule: 'LOADING_OVER' } });
+    expect(live).toMatchObject({ truckCode: 'T05', loadNo: 2, tier: 1, severity: 'WARN', value: 45, threshold: 40, resolvedAt: null, occurredAt: at('10:30') });
+    expect(live.text).toBe('T05 L2: at the depot for 45 min since Back at depot of L1 at 09:50, not left with L2 yet (limit 40 min). Planned departure 13:00, load is Loading.');
+
+    // The driver taps Leaving for next load at 10:40; a retry of the same key and a second tap store nothing.
+    const leave = { key: '0b6e2f7c-8d4a-4f3b-b1c2-9e8d7a6b5c40', type: 'DEPOT_DEPART', load: 2, depot: depotId, at: at('10:40').toISOString(), pos: { ...depot, at: at('10:40').toISOString() } };
+    const r2 = await recordDriverActions(ctx(at('10:40')), { clientNow: at('10:40').toISOString(), actions: [leave] });
+    expect(r2.results).toEqual([{ key: leave.key, status: 'ok' }]);
+    expect(r2.left).toEqual({ [`${depotId}:2`]: at('10:40').toISOString() });
+    const again = { ...leave, key: 'c3a9e1d2-4b5f-4a6e-8c7d-1f2e3d4c5b69', at: at('10:41').toISOString() };
+    const r3 = await recordDriverActions(ctx(at('10:41')), { clientNow: at('10:41').toISOString(), actions: [leave, again] });
+    expect(r3.results).toEqual([{ key: leave.key, status: 'duplicate' }, { key: again.key, status: 'duplicate' }]);
+    const departs = await prisma.stopEvent.findMany({ where: { tenantId: A.tenantId, kind: 'DEPOT_DEPART' } });
+    expect(departs).toHaveLength(1);
+    expect(departs[0]).toMatchObject({ truckId: A.trucks.T05, loadNo: 2, sequence: null, visitId: null, source: 'PHONE_MANUAL', distanceM: 0, at: at('10:40'), idempotencyKey: `dl:${leave.key}` });
+    const audit = await prisma.auditLog.findMany({ where: { tenantId: A.tenantId, action: 'DRIVER_DEPOT_DEPART' } });
+    expect(audit).toHaveLength(1);
+    expect(audit[0]!.afterJson).toMatchObject({ loadNo: 2, previousLoadNo: 1, status: 'LOADING' });
+
+    // The next sweep closes the row with the final words.
+    const s2 = await sweepTenant(cfg, at('10:42'));
+    expect(s2!.resolved.ENDED ?? 0).toBeGreaterThanOrEqual(1);
+    const closed = await prisma.opsAlert.findUniqueOrThrow({ where: { id: live.id } });
+    expect(closed).toMatchObject({ resolvedReason: 'ENDED', text: 'T05 L2: 50 min at the depot between L1 and L2 (back 09:50, left 10:40, by Leaving tapped), limit 40 min.' });
   });
 });

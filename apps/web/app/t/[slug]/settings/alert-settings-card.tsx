@@ -168,8 +168,8 @@ export function AlertSettingsCard({
                       <p className="text-xs text-muted-foreground">{ruleMeaning(spec, value)}</p>
                       {spec.rule === 'LOADING_OVER' && on ? (
                         <p className="text-xs text-amber-700" data-testid="loading-rule-note">
-                          Needs the warehouse to press Loading when it starts each truck (Daily dispatch). If all loads are put on Loading together in the
-                          evening, every load will be reported.
+                          Measured from the driver&apos;s taps on his phone: Back at depot, then Leaving for next load. A driver who does not tap is
+                          counted by the Dispatch press or his arrival at the first customer of the next trip.
                         </p>
                       ) : null}
                     </div>

@@ -43,6 +43,7 @@ import { loadKeyOf, maybeSameStop, parseStopKey as readStopKey, stopKeyOf, type 
 import type { DriverActionResult, DriverResults, NotDeliveredReasonName, StopResult } from '../driver-link/manifest-types';
 import { lockOutcomesDay } from './locks';
 import { plannedStopOf, type PlannedStop } from './planned-stop';
+import { previousTrip } from './turnaround';
 import {
   actionTime,
   carryChangeCheck,
@@ -456,14 +457,6 @@ export const MAX_EVENTS_PER_VISIT = 40;
 /** At most this many Back at depot events per load. */
 export const MAX_BACK_EVENTS_PER_LOAD = 5;
 
-/**
- * The truck-day load before `loadId` in departure order (the trip the truck came back from), or null
- * for the first load of the day (pure). The loads come in departure order (truckDayLoads).
- */
-export function previousDayLoad<L extends { id: string }>(loads: readonly L[], loadId: string): L | null {
-  const i = loads.findIndex((l) => l.id === loadId);
-  return i > 0 ? loads[i - 1]! : null;
-}
 
 /**
  * Whether a result repeats the visit's current one exactly (same source kind, outcome, reason, note,
@@ -507,7 +500,7 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
   if (!found.ok) return { result: refused(a.key, found.code) };
   const dayLoad = found.load;
   // Leaving for next load: never on the truck-day's first load (there is no trip to leave from).
-  const previous = a.type === 'DEPOT_DEPART' ? previousDayLoad(facts.loads, dayLoad.id) : null;
+  const previous = a.type === 'DEPOT_DEPART' ? previousTrip(facts.loads, dayLoad.id) : null;
   if (a.type === 'DEPOT_DEPART' && !previous) return { result: refused(a.key, 'INVALID') };
   const here: LoadRef = { depotId: dayLoad.depotId, loadNo: dayLoad.loadNo };
   const pos = a.pos;

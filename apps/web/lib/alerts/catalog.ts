@@ -49,7 +49,7 @@ export type AlertTier = 1 | 2 | 3;
 
 /**
  * Why a row closed (OpsAlert.resolvedReason; text, no CHECK). NOT_FOLLOWED: the rule stopped following
- * the subject while it was still true (past the planned return + 60 min, a Loading press 12 h old, a load
+ * the subject while it was still true (past the planned return + 60 min, a truck at the depot 4 h after Back at depot, a load
  * not dispatched 4 h after its time): not "over", so never listed as over in an e-mail.
  */
 export const RESOLVED_REASONS = ['ENDED', 'CORRECTED', 'NOT_IN_PLAN', 'EXPIRED', 'RULE_OFF', 'NOT_FOLLOWED'] as const;
@@ -158,17 +158,17 @@ export const ALERT_RULE_SPECS: Record<AlertRule, AlertRuleSpec> = {
     rule: 'LOADING_OVER',
     no: 2,
     owner: true,
-    label: 'Loading in the warehouse too long',
-    meaning: 'A truck has been loading for more than N min: from the Loading press to Loaded (or Dispatch). Switch it on only when the warehouse presses Loading as it starts each truck and Loaded when it is done.',
+    label: 'Loading between trips too long',
+    meaning: 'A truck back from a trip has not left with its next load N min after the driver tapped Back at depot (until he taps Leaving for next load; without that tap the Dispatch press or the arrival at its first stop counts). Not for the first trip of the day (loaded the night before), not without Back at depot (see Load not closed).',
     kind: 'CONDITION',
     subject: 'LOAD',
     unit: 'min',
     setting: 'alertLoadingOverMin',
-    defaultOn: false,
+    defaultOn: true,
     threshold: 40,
     bounds: { min: 5, max: 480 },
     maxTier: 3,
-    needsDriverPage: false,
+    needsDriverPage: true,
   }),
   ETA_LATE: spec({
     rule: 'ETA_LATE',
@@ -469,8 +469,8 @@ export const ALERT_SWEEP_STALE_MS = 10 * 60_000;
 export const ALERT_HYSTERESIS_MIN = 10;
 /** A value or text change of the same tier is written only when the value moved this much (or the text changed). */
 export const ALERT_VALUE_STEP = 5;
-/** LOADING_OVER only for a load whose Loading press is this recent. */
-export const LOADING_START_MAX_AGE_MIN = 12 * 60;
+/** LOADING_OVER stops following a truck still at the depot this long after Back at depot (no tap, Dispatch or arrival). */
+export const TURNAROUND_MAX_MIN = 4 * 60;
 /** DEPART_LATE expires this long after the planned departure (the load is then history; R3 follows the truck). */
 export const DEPART_LATE_EXPIRE_MIN = 4 * 60;
 /** DEPART_LATE found only after the Dispatch press, within this long of it: one history row (no toast, no e-mail). */

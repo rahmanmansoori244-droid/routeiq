@@ -325,10 +325,11 @@ model TenantConfig {
   alertRuleOnAtJson        Json?
   // R1 unloading longer than planned by more than N min (owner rule 1: 30).
   alertUnloadOverMin       Int?     @default(30)
-  // R2 loading in the warehouse longer than N min (owner rule 2: 40 when switched on). OFF (NULL) by
-  // default until the warehouse records each truck's start (Loading) and end (Loaded): the 21:00 bulk
-  // Loading press would otherwise raise it on every load every night.
-  alertLoadingOverMin      Int?
+  // R2 loading between trips longer than N min (owner rule 2: 40). Owner decision 16 Oct 2026: measured
+  // from the driver's Back at depot to his "Leaving for next load" (StopEvent DEPOT_DEPART; the Dispatch
+  // press or the first arrival when he did not tap), never for the first trip of the day (loaded the night
+  // before), so it is on (40) like the other rules, under the master switch (off).
+  alertLoadingOverMin      Int?     @default(40)
   // R3 the projected arrival at the next stop is more than N min late (owner rule 3: 30).
   alertEtaLateMin          Int?     @default(30)
   // R4 a Locked or Loading load still not dispatched N min after its planned departure (today only).

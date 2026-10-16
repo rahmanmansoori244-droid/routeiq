@@ -120,7 +120,7 @@ describe('Settings > Operations alerts (owner request 16 Oct 2026)', () => {
     for (const k of ALERT_DETAIL_FIELDS) expect(off, k).not.toContain(`id="${k}"`);
     const on = renderAlerts('ADMIN', true);
     for (const k of ALERT_DETAIL_FIELDS) expect(on, k).toContain(`id="${k}"`);
-    // Loading (R2) is off by default: its number is empty and disabled, the others hold their defaults.
+    // A rule switched off (here Loading between trips, R2): its number is empty and disabled; the others hold their values.
     expect(on).toMatch(/id="alertLoadingOverMin"[^>]*disabled=""[^>]*value=""|disabled=""[^>]*id="alertLoadingOverMin"/);
     expect(on).toMatch(/id="alertUnloadOverMin"[^>]*value="30"|value="30"[^>]*id="alertUnloadOverMin"/);
   });

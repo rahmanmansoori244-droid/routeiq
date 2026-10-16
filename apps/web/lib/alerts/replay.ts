@@ -11,7 +11,7 @@
  * - a load's status and its Loading / Dispatch times come from its status moves (the LOAD_<status> audit
  *   rows of the load and of the loads it was copied from);
  * - each visit is rebuilt with deriveVisit (lib/delivery/visit.ts) from the events the server had
- *   received by t; photos and Back at depot by their receipt time too;
+ *   received by t; photos, Back at depot and Leaving for next load by their receipt time too;
  * - the driver page counts as opened from its first recorded open (the link's device list) or the first
  *   thing the phone sent.
  * Known limits: the plan is the day's final plan in use (a load re-solved during the day is replayed as
@@ -79,6 +79,8 @@ export interface ExportLoad {
   history: { status: string; at: string }[];
   /** Back at depot taps (load level). */
   backEvents: ExportEvent[];
+  /** Leaving for next load taps on this load (load level, rule R2); absent in an export from before 16 Oct 2026. */
+  departEvents?: ExportEvent[];
   /** The planned stops with their visits (loads that left only). */
   stops: ExportStop[];
 }
@@ -188,7 +190,8 @@ export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert
   const loads: FactLoad[] = exp.loads.map((l) => {
     const st = statusAsOf(l, t);
     const back = l.backEvents.filter((e) => known(e.receivedAt, t)).map((e) => new Date(e.at));
-    for (const e of l.backEvents) if (PHONE.has(e.source) && known(e.receivedAt, t)) take(l.truckId, { at: new Date(e.receivedAt), kind: e.kind, depotId: l.depotId, loadNo: l.loadNo, sequence: null });
+    const departs = (l.departEvents ?? []).filter((e) => known(e.receivedAt, t)).map((e) => new Date(e.at));
+    for (const e of [...l.backEvents, ...(l.departEvents ?? [])]) if (PHONE.has(e.source) && known(e.receivedAt, t)) take(l.truckId, { at: new Date(e.receivedAt), kind: e.kind, depotId: l.depotId, loadNo: l.loadNo, sequence: null });
     const left = st.status === 'DISPATCHED' || st.status === 'COMPLETED';
     const stops: FactStop[] = left
       ? l.stops.map((s) => {
@@ -213,6 +216,7 @@ export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert
       windowRule: l.windowRule,
       breakMin: l.breakMin,
       backAt: back.length ? new Date(Math.min(...back.map((d) => d.getTime()))) : null,
+      leftTapAt: departs.length ? new Date(Math.min(...departs.map((d) => d.getTime()))) : null,
       stopCount: l.stopCount,
       stops,
     };

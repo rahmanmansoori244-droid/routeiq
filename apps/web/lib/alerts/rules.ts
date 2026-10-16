@@ -29,9 +29,13 @@
  *   stop, the truck being back or the planned return + 60 min (a result recorded hours later is not the
  *   end). Not on a load the office completed. While it is raised, R3 and the projected R6 of the load
  *   are held (M2: one long unloading is one alert; its text names the next stop's new time).
- * - R2 LOADING_OVER: a LOADING load whose Loading press (statusChangedAt) is more than T ago and less than
- *   12 h ago (H1: off by default; it means something only when the warehouse presses Loading as it starts
- *   each truck).
+ * - R2 LOADING_OVER (owner decision of 16 Oct 2026: measured from the driver's taps): a trip after the
+ *   truck's first of the day whose truck is back at the depot (Back at depot of the trip before) and has
+ *   not left with it more than T later. The leave is the driver's "Leaving for next load"; without it the
+ *   Dispatch press of the trip or the first arrival at one of its stops (marked as such in the text;
+ *   lib/delivery/turnaround.ts). Live while waiting, final once left (history when it ended over T before
+ *   a sweep saw it); not without Back at depot (R10 follows that trip), never for the first trip (loaded
+ *   the night before), not across two depots; no longer followed TURNAROUND_MAX_MIN after Back at depot.
  * - R3 ETA_LATE: the projected arrival at the next stop (projection.ts) more than T after its plan;
  *   closes 10 min under T (hysteresis). A delivery photo counts as being at its stop, and the clock pushes
  *   a stop not reached only while the phone has been silent since before it was expected (M3). Not while
@@ -69,7 +73,7 @@
  */
 import { actualMinutes, OUTCOME_LABEL, reasonLabel, sourceWord } from '../delivery/office-text';
 import { arrivalIsObserved } from '../delivery/kpis';
-import { fmtDayMonth, zonedDayStart } from '../dispatch/time';
+import { zonedDayStart } from '../dispatch/time';
 import {
   ALERT_EVIDENCE_MAX_ACCURACY_M,
   ALERT_HYSTERESIS_MIN,
@@ -77,7 +81,7 @@ import {
   ALERT_RULES,
   DEPART_LATE_EXPIRE_MIN,
   DEPART_LATE_HISTORY_MIN,
-  LOADING_START_MAX_AGE_MIN,
+  TURNAROUND_MAX_MIN,
   PROOF_FAR_HIGH_FACTOR,
   RETURN_GRACE_MIN,
   SILENT_AFTER_NEXT_ETA_MIN,
@@ -88,6 +92,7 @@ import {
   type AlertRule,
   type AlertTier,
 } from './catalog';
+import { leftHowText, previousTrip, turnaroundOf } from '../delivery/turnaround';
 import { projectLoad, type ProjectedStop, type Projection, type ProjectionIn } from './projection';
 import {
   clockText,
@@ -196,6 +201,8 @@ export interface FactLoad {
   breakMin: { startMin: number; endMin: number } | null;
   /** The earliest Back at depot of the load. */
   backAt: Date | null;
+  /** The driver's "Leaving for next load" for this load: the truck left the depot with it (the earliest DEPOT_DEPART). */
+  leftTapAt: Date | null;
   stopCount: number;
   /** The planned stops with their visits: loads that left only (DISPATCHED / COMPLETED); [] otherwise. */
   stops: FactStop[];
@@ -551,40 +558,59 @@ function unloadOver(out: Out, c: LoadCtx): void {
 }
 
 // ---------------------------------------------------------------------------------------------
-// R2 LOADING_OVER
+// R2 LOADING_OVER: the turnaround at the depot between two trips (owner decision of 16 Oct 2026)
 // ---------------------------------------------------------------------------------------------
 
-function loadingOver(out: Out, c: LoadCtx): void {
+/** The first arrival at a stop of a load that left (null: none yet; a load not out has no stops here). */
+function firstArrivalOf(l: FactLoad): Date | null {
+  return earliest(l.stops.map((s) => (s.visit?.arrivedAt ? { at: s.visit.arrivedAt } : null)))?.at ?? null;
+}
+
+/**
+ * R2: one row per trip after the first (subject: the load the truck leaves with). Measured from the
+ * driver's Back at depot of the trip before to his Leaving for next load (or a fallback: the Dispatch
+ * press, the first arrival) by lib/delivery/turnaround.ts. Live while the truck is still at the depot
+ * (now - Back at depot), final once it left; a turnaround that ended over the limit before any sweep saw
+ * it live is kept as history. Not for the first trip of the day (loaded the night before), not without
+ * Back at depot ("Load not closed" follows that trip), not across two depots.
+ */
+function loadingOver(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): void {
   const rule: AlertRule = 'LOADING_OVER';
   const T = out.on(rule);
   if (T === null) return;
   const l = c.load;
-  const tz = out.facts.tz;
-  const start = l.statusChangedAt;
-  const when = (at: Date) => clockText(at, out.facts.today, tz);
-  if (l.status === 'LOADING' && start) {
-    const elapsed = minutesBetween(start, out.now);
-    if (elapsed > LOADING_START_MAX_AGE_MIN) return out.unfollow(rule, c.key, `${c.label}: still Loading ${fmtDuration(LOADING_START_MAX_AGE_MIN)} after the Loading press at ${when(start)}: no longer followed.`);
-    const tier = tierAt(elapsed, T);
-    if (!tier) return out.end(rule, c.key, `${c.label}: loading within ${T} min.`);
-    const dep = l.date === out.facts.today ? planTime(l.departMin) : `${fmtDayMonth(l.date)} ${planTime(l.departMin)}`;
-    return out.raise({
-      ...base(c),
-      rule,
-      kind: 'CONDITION',
-      subjectKey: c.key,
-      tier,
-      value: elapsed,
-      threshold: T,
-      text: `${c.label}: loading for ${fmtDuration(elapsed)} (since ${when(start)}), limit ${T} min. Planned departure ${dep}.`,
-      occurredAt: new Date(start.getTime() + T * 60_000),
-      facts: { loadingSince: start.toISOString() },
-    });
+  const when = (at: Date) => clockText(at, l.date, out.facts.tz);
+  const prev = previousTrip(truckDayLoads, l.id);
+  if (!prev) return out.end(rule, c.key, `${c.label}: the first trip of the day (loaded before it): not measured.`);
+  if (prev.depotId !== l.depotId) return out.end(rule, c.key, `${c.label}: the trip before (L${prev.loadNo}) was at another depot: not measured.`);
+  const t = turnaroundOf({ backAt: prev.backAt, leftTapAt: l.leftTapAt, dispatchAt: l.status === 'DISPATCHED' ? l.statusChangedAt : null, firstArrivalAt: firstArrivalOf(l), now: out.now });
+  if (!t) return out.end(rule, c.key, `${c.label}: no Back at depot tapped for L${prev.loadNo}: the time at the depot is not known (see "Load not closed").`);
+  const occurredAt = new Date(t.backAt.getTime() + T * 60_000);
+  const facts = { afterLoadNo: prev.loadNo, backAt: t.backAt.toISOString(), leftAt: t.leftAt?.toISOString() ?? null, how: t.how, minutes: Math.round(t.minutes) };
+  if (t.final && t.leftAt) {
+    const final = `${c.label}: ${fmtDuration(t.minutes)} at the depot between L${prev.loadNo} and L${l.loadNo} (back ${when(t.backAt)}, left ${when(t.leftAt)}, by ${leftHowText(t)}), limit ${T} min.`;
+    const tier = tierAt(t.minutes, T);
+    // Over the limit before any sweep saw it live (a tap sent late, the sweep not running): history.
+    if (!out.isOpen(rule, c.key) && tier) return out.raise({ ...base(c), rule, kind: 'CONDITION', subjectKey: c.key, tier, value: t.minutes, threshold: T, text: final, occurredAt, history: true, facts });
+    return out.end(rule, c.key, final);
   }
-  if (ON_ROAD.has(l.status)) {
-    return out.end(rule, c.key, l.status === 'DISPATCHED' && start ? `${c.label}: loading ended with Dispatch at ${when(start)}.` : `${c.label}: ${STATUS_WORD[l.status] ?? l.status}.`);
+  if (t.minutes > TURNAROUND_MAX_MIN) {
+    return out.unfollow(rule, c.key, `${c.label}: no Leaving tap, Dispatch or arrival ${fmtDuration(TURNAROUND_MAX_MIN)} after Back at depot of L${prev.loadNo} at ${when(t.backAt)}: no longer followed.`);
   }
-  return out.end(rule, c.key, `${c.label}: loading stopped, the load is ${STATUS_WORD[l.status] ?? l.status}.`);
+  const tier = tierAt(t.minutes, T);
+  if (!tier) return out.end(rule, c.key, `${c.label}: at the depot ${fmtDuration(t.minutes)} since Back at depot of L${prev.loadNo} at ${when(t.backAt)}, within ${T} min.`);
+  return out.raise({
+    ...base(c),
+    rule,
+    kind: 'CONDITION',
+    subjectKey: c.key,
+    tier,
+    value: t.minutes,
+    threshold: T,
+    text: `${c.label}: at the depot for ${fmtDuration(t.minutes)} since Back at depot of L${prev.loadNo} at ${when(t.backAt)}, not left with L${l.loadNo} yet (limit ${T} min). Planned departure ${planTime(l.departMin)}, load is ${STATUS_WORD[l.status] ?? l.status}.`,
+    occurredAt,
+    facts,
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -731,6 +757,7 @@ function departLate(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): v
   const tier = tierAt(late, T);
   if (!tier) return out.end(rule, c.key, `${c.label}: not late.`);
   const seen = c.td?.linkSeenAt ? ` Driver page last open ${clockText(c.td.linkSeenAt, l.date, tz)}.` : '';
+  const left = l.leftTapAt ? ` The driver tapped Leaving for next load at ${clockText(l.leftTapAt, l.date, tz)}.` : '';
   return out.raise({
     ...base(c),
     rule,
@@ -739,7 +766,7 @@ function departLate(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): v
     tier,
     value: late,
     threshold: T,
-    text: `${c.label} not dispatched: planned departure ${planTime(l.departMin)}${r.text}, now ${clockText(out.now, l.date, tz)} (${fmtDuration(late)} late), load is ${STATUS_WORD[l.status] ?? l.status}.${seen} Dispatch it if it has left.`,
+    text: `${c.label} not dispatched: planned departure ${planTime(l.departMin)}${r.text}, now ${clockText(out.now, l.date, tz)} (${fmtDuration(late)} late), load is ${STATUS_WORD[l.status] ?? l.status}.${seen}${left} Dispatch it if it has left.`,
     occurredAt: dateAt(c.dayStart, r.ref + T),
     facts: { departMin: l.departMin, refMin: r.ref, status: l.status },
   });
@@ -752,6 +779,7 @@ function departLate(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): v
 /** What the last signal was: "left stop 2 Shop Example D", "Back at depot". */
 function signalText(sig: FactSignal, loads: readonly FactLoad[]): string {
   if (sig.kind === 'BACK_AT_DEPOT') return `Back at depot (L${sig.loadNo})`;
+  if (sig.kind === 'DEPOT_DEPART') return `Leaving for next load (L${sig.loadNo})`;
   const s = loads.find((l) => l.depotId === sig.depotId && l.loadNo === sig.loadNo)?.stops.find((x) => x.sequence === sig.sequence);
   const stop = s ? stopLabel(s) : sig.sequence !== null ? `stop ${sig.sequence}` : 'a stop';
   const prefix = loads.some((l) => l.loadNo !== sig.loadNo) ? `L${sig.loadNo} ` : '';
@@ -1229,7 +1257,7 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
         out.failed(rule, c.key, err);
       }
     };
-    run('LOADING_OVER', () => loadingOver(out, c));
+    run('LOADING_OVER', () => loadingOver(out, c, truckDayLoads));
     run('DEPART_LATE', () => departLate(out, c, truckDayLoads));
     // DRIVER_SILENT and UNLOAD_OVER first: ETA_LATE and the projected AFTER_CLOSING are held while either is raised.
     run('DRIVER_SILENT', () => driverSilent(out, c, truckDayLoads));

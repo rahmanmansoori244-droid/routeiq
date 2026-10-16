@@ -59,7 +59,7 @@ const DEFAULTS: AlertConfig = {
   alertsEnabled: true,
   alertsEnabledAt: new Date('2026-10-16T05:00:00Z'),
   alertUnloadOverMin: 30,
-  alertLoadingOverMin: null,
+  alertLoadingOverMin: 40,
   alertEtaLateMin: 30,
   alertDepartLateMin: 30,
   alertSilentMin: 120,
@@ -93,11 +93,15 @@ describe('the rule catalog', () => {
     expect(thresholdsOf(DEFAULTS)).toMatchObject({ UNLOAD_OVER: 30, ETA_LATE: 30 });
   });
 
-  it('loading (R2) is off by default: switched on, Settings fills in 40', () => {
-    expect(ALERT_RULE_SPECS.LOADING_OVER).toMatchObject({ defaultOn: false, threshold: 40 });
-    expect(thresholdsOf(DEFAULTS).LOADING_OVER).toBeNull();
-    expect(thresholdsOf({ ...DEFAULTS, alertLoadingOverMin: 40 }).LOADING_OVER).toBe(40);
-    for (const s of ALERT_RULE_LIST.filter((x) => x.rule !== 'LOADING_OVER')) expect(s.defaultOn, s.rule).toBe(true);
+  it('loading between trips (R2) is on at 40 like the others now that it is measured from the driver taps (owner decision 16 Oct 2026), under the master switch', () => {
+    expect(ALERT_RULE_SPECS.LOADING_OVER).toMatchObject({ defaultOn: true, threshold: 40, subject: 'LOAD', needsDriverPage: true });
+    expect(ALERT_RULE_SPECS.LOADING_OVER.meaning).toMatch(/Back at depot/);
+    expect(ALERT_RULE_SPECS.LOADING_OVER.meaning).toMatch(/Leaving for next load/);
+    expect(ALERT_RULE_SPECS.LOADING_OVER.meaning).not.toMatch(/Loaded/);
+    expect(thresholdsOf(DEFAULTS).LOADING_OVER).toBe(40);
+    expect(thresholdsOf({ ...DEFAULTS, alertsEnabled: false }).LOADING_OVER).toBeNull();
+    expect(thresholdsOf({ ...DEFAULTS, alertLoadingOverMin: null }).LOADING_OVER).toBeNull();
+    for (const s of ALERT_RULE_LIST) expect(s.defaultOn, s.rule).toBe(true);
   });
 
   it('every rule is off while the master switch is off; a NULL threshold or a false switch turns one rule off', () => {
@@ -109,7 +113,7 @@ describe('the rule catalog', () => {
     expect(t.ETA_LATE).toBeNull();
     expect(t.DELIVERED_WITH_NOTE).toBeNull();
     expect(thresholdsOf(DEFAULTS).DELIVERED_WITH_NOTE).toBe(0);
-    expect(rulesOn(DEFAULTS)).toEqual(ALERT_RULES.filter((r) => r !== 'LOADING_OVER'));
+    expect(rulesOn(DEFAULTS)).toEqual([...ALERT_RULES]);
   });
 
   it('tiers start at WARN: tier 1 WARN, tiers 2 and 3 HIGH; HIGH sorts first by rank, not by the alphabet', () => {
@@ -142,7 +146,8 @@ describe('the rule catalog', () => {
   });
 
   it('only the rules that follow the phone need an opened driver page (review H3)', () => {
-    expect(ALERT_RULE_LIST.filter((s) => s.needsDriverPage).map((s) => s.rule)).toEqual(['UNLOAD_OVER', 'ETA_LATE', 'DRIVER_SILENT', 'AFTER_CLOSING', 'LOAD_NOT_CLOSED']);
+    // R2 too: it is measured from the driver's Back at depot and Leaving for next load taps.
+    expect(ALERT_RULE_LIST.filter((s) => s.needsDriverPage).map((s) => s.rule)).toEqual(['UNLOAD_OVER', 'LOADING_OVER', 'ETA_LATE', 'DRIVER_SILENT', 'AFTER_CLOSING', 'LOAD_NOT_CLOSED']);
     expect(ALERT_RULE_SPECS.PAGE_NOT_OPENED).toMatchObject({ subject: 'TRUCK_DAY', maxTier: 1 });
   });
 
