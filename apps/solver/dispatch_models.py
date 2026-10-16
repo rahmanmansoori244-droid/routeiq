@@ -757,6 +757,9 @@ class SearchReport(BaseModel):
     # The second route search (PyVRP), when this solver has it (pyvrp_candidate.py). None from a
     # solver before it.
     pyvrp: "PyvrpReport | None" = None
+    # The OR-Tools version that made this plan (requirements.txt pins it: 9.15.6755 since 16 Oct 2026),
+    # so every stored response records its engine. None from a solver before it, or when unreadable.
+    ortools_version: str | None = None
 
 
 class PyvrpReport(BaseModel):

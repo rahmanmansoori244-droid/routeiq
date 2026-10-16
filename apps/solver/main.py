@@ -31,7 +31,15 @@ from pydantic import BaseModel
 from fastapi.responses import JSONResponse
 
 from dispatch_models import DispatchRequest, DispatchResponse, GeometryRequest, GeometryResponse
-from dispatch_solver import WORKER_HEALTH, SolveAborted, SolveControl, WorkersUnavailable, optimize_dispatch
+from dispatch_solver import (
+    ORTOOLS_VERSION,
+    WORKER_HEALTH,
+    SolveAborted,
+    SolveControl,
+    WorkersUnavailable,
+    optimize_dispatch,
+    ortools_version,
+)
 import pyvrp_candidate
 from models import OptimizeRequest, OptimizeResponse
 from providers import HaversineProvider, OSRMProvider, configured_osrm_url
@@ -113,7 +121,26 @@ def log_startup_warnings() -> None:
             (log.error if _on_railway() else log.warning)(warning)
 
 
+def engine_version_line() -> tuple[bool, str]:
+    """(as pinned, the startup line) for the route engine: the OR-Tools version this process runs
+    against the one requirements.txt pins. Every plan is tested on the pinned version only; a solver
+    built without the pin (an old image, a hand-installed venv) says so at startup."""
+    found = ortools_version()
+    if found == ORTOOLS_VERSION:
+        return True, f"Route engine: OR-Tools {found} (the version requirements.txt pins)"
+    return False, (f"Route engine: OR-Tools {found or 'of unknown version'} is installed, but requirements.txt pins "
+                   f"{ORTOOLS_VERSION}: plans are tested on the pinned version only. Reinstall from requirements.txt.")
+
+
+def log_engine_version() -> None:
+    """At startup: the OR-Tools version - read by RAILWAY_DEPLOYMENT.md's check. Not the pinned one:
+    an ERROR on Railway, a WARNING elsewhere (like the development-only switches above)."""
+    pinned, line = engine_version_line()
+    (log.info if pinned else log.error if _on_railway() else log.warning)(line)
+
+
 log_startup_warnings()
+log_engine_version()
 # The second route search (PyVRP): on or off, and why - read by RAILWAY_DEPLOYMENT.md's check.
 log.info(pyvrp_candidate.startup_line())
 
@@ -186,6 +213,8 @@ def ready_endpoint(
         "workers": workers,
         # The second route search (PyVRP): enabled, version, effective CPUs and why not. Never affects ok.
         "pyvrp": pyvrp_candidate.status(),
+        # The route engine's version (requirements.txt pins ORTOOLS_VERSION); None when unreadable. Never affects ok.
+        "ortools": ortools_version(),
     }
 
 

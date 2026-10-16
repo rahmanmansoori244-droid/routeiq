@@ -990,3 +990,15 @@ def test_pyvrp_version_is_pinned():
     assert version("pyvrp") == PV.VERSION == "0.14.0"
     lines = open(os.path.join(HERE, "..", "requirements.txt"), encoding="utf-8").read().splitlines()
     assert [ln.split("#")[0].strip() for ln in lines if ln.startswith("pyvrp")] == ["pyvrp==0.14.0"]
+
+
+def test_ortools_version_is_pinned():
+    """The route engine is pinned exactly to what production runs (16 Oct 2026): a range let any 9.x arrive on the
+    next deploy, docs-only merges included. A bump fails here on purpose: update the pin only after the replay of
+    saved real requests (PROJECT_HANDBOOK.md 5.4). Every plan records the version (SearchReport.ortools_version)."""
+    assert version("ortools") == ds.ORTOOLS_VERSION == ds.ortools_version() == "9.15.6755"
+    lines = open(os.path.join(HERE, "..", "requirements.txt"), encoding="utf-8").read().splitlines()
+    assert [ln.split("#")[0].strip() for ln in lines if ln.startswith("ortools")] == ["ortools==9.15.6755"]
+    report = ds._search_report("QUICK", 540, {"limit": 5, "search_sec": 1.0, "status": "OPTIMIZED"}, time.monotonic())
+    assert report.ortools_version == "9.15.6755"
+    assert report.model_dump(mode="json")["ortools_version"] == "9.15.6755"

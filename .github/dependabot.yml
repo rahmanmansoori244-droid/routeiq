@@ -28,6 +28,9 @@ updates:
         patterns:
           - '@types/*'
 
+  # apps/solver pins ortools and pyvrp exactly (requirements.txt): a PR bumping either is an engine change. It
+  # fails test_ortools_version_is_pinned / test_pyvrp_version_is_pinned on purpose; merge it only after the
+  # replay of saved real requests (docs/PROJECT_HANDBOOK.md 5.4), never on CI alone.
   - package-ecosystem: pip
     directory: /apps/solver
     schedule:

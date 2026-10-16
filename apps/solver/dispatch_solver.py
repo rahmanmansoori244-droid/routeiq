@@ -164,6 +164,10 @@ REPACK_MIN_SEC = 3
 # Worker start-up, exact timing of every candidate and pickling around the repack solves.
 STAGE_GRACE_SEC = 20
 ENGINE = "ortools-routing"
+# requirements.txt pins exactly this OR-Tools (test_ortools_version_is_pinned): the version production
+# installed (solver build of 15 Oct 2026). /ready, the startup log and SearchReport.ortools_version report
+# the one really installed (ortools_version()).
+ORTOOLS_VERSION = "9.15.6755"
 
 # THOROUGH search (owner decision 29 Sep 2026: "night plans long, day re-plans quick"; see
 # docs/OPTIMIZER_BENCHMARK.md section 11 for the measurements behind these values). The whole
@@ -820,6 +824,30 @@ def _stop_reason(mode: str, watch: dict | None, search_sec: float, limit: int, s
     return "CAP" if search_sec >= limit - 1 else "CONVERGED"
 
 
+_ORTOOLS_INSTALLED: list[str | None] = []
+
+
+def ortools_version() -> str | None:
+    """The OR-Tools version this process runs (requirements.txt pins ORTOOLS_VERSION), for /ready, the
+    startup log and SearchReport.ortools_version. Read once (it cannot change while the process runs);
+    None when it cannot be read - never an error."""
+    if not _ORTOOLS_INSTALLED:
+        found: object = None
+        try:
+            from importlib.metadata import version  # noqa: PLC0415
+
+            found = version("ortools")
+        except Exception:  # noqa: BLE001 - no package metadata: the loaded module's own
+            try:
+                import ortools  # noqa: PLC0415 - already loaded with the routing solver above
+
+                found = getattr(ortools, "__version__", None)
+            except Exception:  # noqa: BLE001
+                found = None
+        _ORTOOLS_INSTALLED.append(str(found) if found else None)
+    return _ORTOOLS_INSTALLED[0]
+
+
 def _search_report(mode: str, cap: int, state: dict, started: float) -> SearchReport:
     watch = state.get("watch")
     limit = int(state.get("limit") or 0)
@@ -836,6 +864,7 @@ def _search_report(mode: str, cap: int, state: dict, started: float) -> SearchRe
         best_over_time=list((watch or {}).get("points") or []),
         solutions=(watch or {}).get("solutions"),
         pyvrp=PyvrpReport(**state["pyvrp"]) if state.get("pyvrp") else None,
+        ortools_version=ortools_version(),
     )
 
 
@@ -2108,7 +2137,8 @@ def _solve_scenario(
             # Owner request 13 Oct 2026 ("small truck only" customers): only the trucks it may go on, or left
             # out (-1, the disjunction). Each routing vehicle is one truck with all its loads, so this holds
             # for every load of the truck. SetValues, not SetAllowedVehiclesForIndex: that binding refuses a
-            # Python list in the OR-Tools this solver pins (9.15). A stop that fills a truck alone (full)
+            # Python list in OR-Tools 9.15.6755, the version requirements.txt pins (ORTOOLS_VERSION,
+            # test_ortools_version_is_pinned). A stop that fills a truck alone (full)
             # only on the trucks whose one-customer room holds it (_fits_capacity, which keeps the
             # allowed trucks too): one list, the intersection of both rules.
             allowed = [v for v, td in enumerate(vehicles) if (_fits_capacity(s, td) if full[k] else truck_allowed(s, td.truck))]

@@ -236,6 +236,8 @@ export interface SearchReport {
   solutions?: number | null;
   /** The second route search (PyVRP); absent from a solver before it. */
   pyvrp?: PyvrpReport | null;
+  /** The OR-Tools version that made the plan (the solver pins 9.15.6755); absent from a solver before it. */
+  ortools_version?: string | null;
 }
 
 /**

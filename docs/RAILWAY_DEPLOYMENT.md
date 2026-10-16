@@ -266,12 +266,28 @@ never worse than the engine alone would have chosen from the same search. See `d
   the second search's note is one of the plan's own warnings; an old web shows the new status `SECOND_SEARCH` as the code
   itself, a new web as "plan from the second route search").
 - **Verify after the deploy:** the solver's startup log has the line `PyVRP second search: on for every search (pyvrp 0.14.0,
-  effective CPUs N, min 2)` (or `off (...)` with the reason); `GET /ready` (with the solver token, or through the web's
-  `/api/health`) has `"pyvrp": {"enabled": true, "version": "0.14.0", "effective_cpus": N, ...}`, and N is the vCPU count the
+  effective CPUs N, min 2)` (or `off (...)` with the reason); `GET /ready` (with the solver token; the web's `/api/health`
+  passes on only `ok`, `workers` and `routing`) has `"pyvrp": {"enabled": true, "version": "0.14.0", "effective_cpus": N, ...}`, and N is the vCPU count the
   container really gets. One Quick optimization of a normal day: the solver log shows `pyvrp run=<id> done: stop=SEARCH_END ...`
   and, when its plan was used, the option carries the note *"A second route search found a better plan for this option ..."*.
 - **Rollback:** set `SOLVER_PYVRP=off` (no code change). A full rollback to the previous solver image also works: the web
   treats a missing `search.pyvrp` as "no second search".
+
+## The route engine version: OR-Tools pinned (16 Oct 2026)
+
+`apps/solver/requirements.txt` pins `ortools==9.15.6755`, the version the solver build of 15 Oct 2026 installed. Before, it
+was a range (`>=9.10,<10`) and Railway re-resolves pip on every solver deploy, so any new 9.x would have arrived with the next
+merge to `main`, a docs-only one included. The pin itself changes nothing in production (it installs the same version).
+
+- **A bump is an engine change**, not a routine dependency update: a Dependabot PR that raises it fails
+  `test_ortools_version_is_pinned` on purpose. Merge one only after replaying saved real requests on both versions
+  (`docs/PROJECT_HANDBOOK.md` 5.4), and outside the evening's planning.
+- **Verify after the deploy:** the solver's startup log (`railway logs --service solver`) has the line
+  `Route engine: OR-Tools 9.15.6755 (the version requirements.txt pins)`; any other version logs an ERROR line
+  `Route engine: OR-Tools X is installed, but requirements.txt pins 9.15.6755 ...`. `GET /ready` (with the solver token) has
+  `"ortools": "9.15.6755"`, and the next optimization's stored response (`RunJob.responseJson`) has
+  `search.ortools_version` = `"9.15.6755"`.
+- **Rollback:** revert the commit (the range comes back); the new response field is additive, an old web ignores it.
 
 ## Private networking notes
 
