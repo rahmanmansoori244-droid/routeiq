@@ -30,12 +30,17 @@
  *   end). Not on a load the office completed. While it is raised, R3 and the projected R6 of the load
  *   are held (M2: one long unloading is one alert; its text names the next stop's new time).
  * - R2 LOADING_OVER (owner decision of 16 Oct 2026: measured from the driver's taps): a trip after the
- *   truck's first of the day whose truck is back at the depot (Back at depot of the trip before) and has
- *   not left with it more than T later. The leave is the driver's "Leaving for next load"; without it the
- *   Dispatch press of the trip or the first arrival at one of its stops (marked as such in the text;
- *   lib/delivery/turnaround.ts). Live while waiting, final once left (history when it ended over T before
- *   a sweep saw it); not without Back at depot (R10 follows that trip), never for the first trip (loaded
- *   the night before), not across two depots; no longer followed TURNAROUND_MAX_MIN after Back at depot.
+ *   truck's first of the day whose truck is back at the depot (Back at depot of the trip before; a trip
+ *   planned later - a late order, a re-plan - counts from then) and has not left with it more than T
+ *   later. The leave is the driver's latest "Leaving for next load" before the truck reached a stop;
+ *   without it the Dispatch press of the trip (from the audit: completing the load keeps it) or the
+ *   first sign at one of its stops less the planned drive (marked as such in the text;
+ *   lib/delivery/turnaround.ts). Live while
+ *   waiting (dispatched before Back at depot and no tap: the planned drive to the first stop is allowed
+ *   first), final once left (history when it ended over T before a sweep saw it); not without Back at
+ *   depot (R10 follows that trip), never for the first trip (loaded the night before), not across two
+ *   depots, never live on a Completed load, not when the trip had started before Back at depot was
+ *   tapped; no longer followed TURNAROUND_MAX_MIN after Back at depot.
  * - R3 ETA_LATE: the projected arrival at the next stop (projection.ts) more than T after its plan;
  *   closes 10 min under T (hysteresis). A delivery photo counts as being at its stop, and the clock pushes
  *   a stop not reached only while the phone has been silent since before it was expected (M3). Not while
@@ -92,7 +97,7 @@ import {
   type AlertRule,
   type AlertTier,
 } from './catalog';
-import { leftHowText, previousTrip, turnaroundOf } from '../delivery/turnaround';
+import { firstSignOf, leftHowText, plannedDriveOf, previousTrip, turnaroundOf, type TurnaroundIn } from '../delivery/turnaround';
 import { projectLoad, type ProjectedStop, type Projection, type ProjectionIn } from './projection';
 import {
   clockText,
@@ -201,8 +206,18 @@ export interface FactLoad {
   breakMin: { startMin: number; endMin: number } | null;
   /** The earliest Back at depot of the load. */
   backAt: Date | null;
-  /** The driver's "Leaving for next load" for this load: the truck left the depot with it (the earliest DEPOT_DEPART). */
+  /** The driver's "Leaving for next load" for this load: the truck left the depot with it (the LATEST DEPOT_DEPART: a tap made too early is corrected by tapping again). */
   leftTapAt: Date | null;
+  /** Every Leaving for next load tap of this load; absent (an older replay file): leftTapAt alone. */
+  leftTaps?: Date[];
+  /**
+   * The Dispatch press of this load whatever its status now (the LOAD_DISPATCHED audit row of the load
+   * or of the load it was copied from: completing the load overwrites statusChangedAt); absent or null:
+   * a DISPATCHED load's statusChangedAt.
+   */
+  dispatchedAt?: Date | null;
+  /** When this load first existed on the truck's plan (the first plan version it was copied from); absent or null: not known. */
+  existedAt?: Date | null;
   stopCount: number;
   /** The planned stops with their visits: loads that left only (DISPATCHED / COMPLETED); [] otherwise. */
   stops: FactStop[];
@@ -561,18 +576,39 @@ function unloadOver(out: Out, c: LoadCtx): void {
 // R2 LOADING_OVER: the turnaround at the depot between two trips (owner decision of 16 Oct 2026)
 // ---------------------------------------------------------------------------------------------
 
-/** The first arrival at a stop of a load that left (null: none yet; a load not out has no stops here). */
-function firstArrivalOf(l: FactLoad): Date | null {
-  return earliest(l.stops.map((s) => (s.visit?.arrivedAt ? { at: s.visit.arrivedAt } : null)))?.at ?? null;
+/** The first sign of the truck at a stop of a load that left (lib/delivery/turnaround.ts firstSignOf; a load not out has no stops here). */
+function firstSignOfLoad(l: FactLoad): Date | null {
+  return firstSignOf(
+    l.stops.map((s) => s.visit),
+    l.stops.flatMap((s) => (s.visit?.photos ?? []).filter(phonePhoto).map((p) => p.takenAt ?? p.receivedAt)),
+  );
+}
+
+/** The inputs of turnaroundOf for a load after a trip whose Back at depot is `prevBackAt`. */
+function turnaroundInOf(l: FactLoad, prevBackAt: Date | null, now: Date): TurnaroundIn {
+  return {
+    backAt: prevBackAt,
+    leftTaps: l.leftTaps ?? (l.leftTapAt ? [l.leftTapAt] : []),
+    dispatchAt: l.dispatchedAt ?? (l.status === 'DISPATCHED' ? l.statusChangedAt : null),
+    firstSignAt: firstSignOfLoad(l),
+    plannedDriveMin: plannedDriveOf(l.departMin, l.stops),
+    existedAt: l.existedAt ?? null,
+    completed: l.status === 'COMPLETED',
+    now,
+  };
 }
 
 /**
  * R2: one row per trip after the first (subject: the load the truck leaves with). Measured from the
- * driver's Back at depot of the trip before to his Leaving for next load (or a fallback: the Dispatch
- * press, the first arrival) by lib/delivery/turnaround.ts. Live while the truck is still at the depot
- * (now - Back at depot), final once it left; a turnaround that ended over the limit before any sweep saw
- * it live is kept as history. Not for the first trip of the day (loaded the night before), not without
- * Back at depot ("Load not closed" follows that trip), not across two depots.
+ * driver's Back at depot of the trip before (or from when the trip was planned, if later) to
+ * his Leaving for next load (or a fallback: the Dispatch press, the first stop reached less the planned
+ * drive) by lib/delivery/turnaround.ts. Live while the truck is still at the depot (now - Back at depot;
+ * with the Dispatch press already behind and no tap the planned drive to the first stop is allowed
+ * first: the truck may be on the road), final once it left; a turnaround that ended over the limit before
+ * any sweep saw it live is kept as history. Not for the first trip of the day (loaded the night before),
+ * not without Back at depot ("Load not closed" follows that trip), not across two depots, not for a load
+ * without stops, never "still at the depot" on a Completed load, and not when this trip had started
+ * before Back at depot of the trip before was tapped (the second review of 16 Oct 2026, H1-H3, M1).
  */
 function loadingOver(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): void {
   const rule: AlertRule = 'LOADING_OVER';
@@ -583,33 +619,46 @@ function loadingOver(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): 
   const prev = previousTrip(truckDayLoads, l.id);
   if (!prev) return out.end(rule, c.key, `${c.label}: the first trip of the day (loaded before it): not measured.`);
   if (prev.depotId !== l.depotId) return out.end(rule, c.key, `${c.label}: the trip before (L${prev.loadNo}) was at another depot: not measured.`);
-  const t = turnaroundOf({ backAt: prev.backAt, leftTapAt: l.leftTapAt, dispatchAt: l.status === 'DISPATCHED' ? l.statusChangedAt : null, firstArrivalAt: firstArrivalOf(l), now: out.now });
+  if (!l.stopCount) return out.end(rule, c.key, `${c.label}: no stops.`);
+  const t = turnaroundOf(turnaroundInOf(l, prev.backAt, out.now));
   if (!t) return out.end(rule, c.key, `${c.label}: no Back at depot tapped for L${prev.loadNo}: the time at the depot is not known (see "Load not closed").`);
-  const occurredAt = new Date(t.backAt.getTime() + T * 60_000);
-  const facts = { afterLoadNo: prev.loadNo, backAt: t.backAt.toISOString(), leftAt: t.leftAt?.toISOString() ?? null, how: t.how, minutes: Math.round(t.minutes) };
+  if (t.notMeasured === 'BACK_LATE') {
+    return out.end(rule, c.key, `${c.label}: Back at depot of L${prev.loadNo} was tapped at ${when(t.backAt)}, after L${l.loadNo} had already started: the time at the depot is not known.`);
+  }
+  if (t.notMeasured === 'NO_LEAVE') {
+    return out.end(rule, c.key, `${c.label}: completed with no Leaving tap, Dispatch press or stop reached after Back at depot of L${prev.loadNo} at ${when(t.backAt)}: not measured.`);
+  }
+  const from = t.addedLater ? `L${l.loadNo} was planned at ${when(t.startAt)} (after Back at depot of L${prev.loadNo} at ${when(t.backAt)})` : `Back at depot of L${prev.loadNo} at ${when(t.backAt)}`;
+  const occurredAt = new Date(t.startAt.getTime() + (T + t.graceMin) * 60_000);
+  const facts = { afterLoadNo: prev.loadNo, backAt: t.backAt.toISOString(), startAt: t.startAt.toISOString(), leftAt: t.leftAt?.toISOString() ?? null, how: t.how, minutes: Math.round(t.minutes) };
   if (t.final && t.leftAt) {
-    const final = `${c.label}: ${fmtDuration(t.minutes)} at the depot between L${prev.loadNo} and L${l.loadNo} (back ${when(t.backAt)}, left ${when(t.leftAt)}, by ${leftHowText(t)}), limit ${T} min.`;
+    const span = t.addedLater ? `back ${when(t.backAt)}, L${l.loadNo} planned ${when(t.startAt)}` : `back ${when(t.backAt)}`;
+    const left = t.how === 'ARRIVAL' ? `left by ${when(t.leftAt)}` : `left ${when(t.leftAt)}`;
+    const final = `${c.label}: ${fmtDuration(t.minutes)} at the depot between L${prev.loadNo} and L${l.loadNo} (${span}, ${left}, by ${leftHowText(t, when)}), limit ${T} min.`;
     const tier = tierAt(t.minutes, T);
     // Over the limit before any sweep saw it live (a tap sent late, the sweep not running): history.
     if (!out.isOpen(rule, c.key) && tier) return out.raise({ ...base(c), rule, kind: 'CONDITION', subjectKey: c.key, tier, value: t.minutes, threshold: T, text: final, occurredAt, history: true, facts });
     return out.end(rule, c.key, final);
   }
   if (t.minutes > TURNAROUND_MAX_MIN) {
-    return out.unfollow(rule, c.key, `${c.label}: no Leaving tap, Dispatch or arrival ${fmtDuration(TURNAROUND_MAX_MIN)} after Back at depot of L${prev.loadNo} at ${when(t.backAt)}: no longer followed.`);
+    return out.unfollow(rule, c.key, `${c.label}: no Leaving tap, Dispatch or stop reached ${fmtDuration(TURNAROUND_MAX_MIN)} after ${from}: no longer followed.`);
   }
-  const tier = tierAt(t.minutes, T);
-  if (!tier) return out.end(rule, c.key, `${c.label}: at the depot ${fmtDuration(t.minutes)} since Back at depot of L${prev.loadNo} at ${when(t.backAt)}, within ${T} min.`);
+  // Dispatched before Back at depot and no tap: the truck may be on its way to the first stop already.
+  const counted = t.minutes - t.graceMin;
+  const grace = t.graceMin ? `; the planned ${t.graceMin} min drive to the first stop allowed, as the load was dispatched before and no stop is reached yet` : '';
+  const tier = tierAt(counted, T);
+  if (!tier) return out.end(rule, c.key, `${c.label}: at the depot ${fmtDuration(t.minutes)} since ${from}, within ${T} min${grace}.`);
   return out.raise({
     ...base(c),
     rule,
     kind: 'CONDITION',
     subjectKey: c.key,
     tier,
-    value: t.minutes,
+    value: counted,
     threshold: T,
-    text: `${c.label}: at the depot for ${fmtDuration(t.minutes)} since Back at depot of L${prev.loadNo} at ${when(t.backAt)}, not left with L${l.loadNo} yet (limit ${T} min). Planned departure ${planTime(l.departMin)}, load is ${STATUS_WORD[l.status] ?? l.status}.`,
+    text: `${c.label}: at the depot for ${fmtDuration(t.minutes)} since ${from}, not left with L${l.loadNo} yet (limit ${T} min${grace}). Planned departure ${planTime(l.departMin)}, load is ${STATUS_WORD[l.status] ?? l.status}.`,
     occurredAt,
-    facts,
+    facts: { ...facts, graceMin: t.graceMin },
   });
 }
 

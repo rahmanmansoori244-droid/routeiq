@@ -356,6 +356,13 @@ describe('the turnaround on the load row (owner decision 16 Oct 2026: rule R2 fr
     expect(lineOf(host, 'T01-1')).toBeNull();
     const fallback = await mount({ L2: { afterLoadNo: 1, backAt: '2026-10-16T07:20:00.000Z', leftAt: '2026-10-16T08:25:00.000Z', how: 'DISPATCH', tapLate: false, minutes: 65, final: true, line: 'back 11:20, left 12:25 (Dispatch press), 1 h 05 min' } });
     expect(lineOf(fallback, 'T01-2')!.props.title).toContain('the Dispatch press (the driver did not tap Leaving for next load)');
+    // Second review of 16 Oct 2026: Back at depot tapped after the trip had started, and no leave recorded.
+    const late = await mount({ L2: { afterLoadNo: 1, backAt: '2026-10-16T08:00:00.000Z', leftAt: null, how: null, tapLate: false, minutes: 0, final: false, notMeasured: 'BACK_LATE', line: 'back 12:00, tapped after this trip had started: not measured' } });
+    expect(textOf(lineOf(late, 'T01-2')!)).toBe('After L1: back 12:00, tapped after this trip had started: not measured');
+    expect(lineOf(late, 'T01-2')!.props.title).toBe('Not measured: the driver tapped Back at depot of L1 after this trip had already started.');
+    const none = await mount({ L2: { afterLoadNo: 1, backAt: '2026-10-16T07:20:00.000Z', leftAt: null, how: null, tapLate: false, minutes: 0, final: false, notMeasured: 'NO_LEAVE', line: 'back 11:20, no leave recorded' } });
+    expect(textOf(lineOf(none, 'T01-2')!)).toBe('After L1: back 11:20, no leave recorded');
+    expect(lineOf(none, 'T01-2')!.props.title).toContain('nothing says when it left');
   });
 
   it('while the truck is still at the depot: the minutes so far; nothing when the server knows no turnaround', async () => {

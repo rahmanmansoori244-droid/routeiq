@@ -5,8 +5,8 @@
  * Every action (ARRIVE, DEPART, OUTCOME, BACK_AT_DEPOT, DEPOT_DEPART) runs in ONE short transaction, in this order:
  * the lock timeout, the outcome-day lock, the live load and its planned stop (read under the lock),
  * the idempotency check (`dl:<uuid>`, a duplicate only for the same link), the rules (section 8.3),
- * the caps (40 arrivals, departures and results per stop, 5 Back at depot per load, 1 Leaving for next
- * load per load: a second one is answered "duplicate" and not stored), the StopEvent,
+ * the caps (40 arrivals, departures and results per stop, 5 Back at depot and 5 Leaving for next load per
+ * load), the StopEvent,
  * the StopVisit rebuilt from all its events (visit.ts), the audit row. A result equal to the stop's
  * current one and not dated after its latest stored result is answered ok and stores nothing. After
  * an action answered 'error', the later actions of its stop in the same request are answered 'error'
@@ -22,10 +22,13 @@
  * Leaving for next load (DEPOT_DEPART, owner decision 16 Oct 2026): tapped after Back at depot of one
  * trip when the truck leaves the depot again with its next load. Stored on THAT load (the one it leaves
  * with), at load level like Back at depot, with the phone's position and its distance from the depot pin;
- * never on the truck-day's first load (loaded the night before: there is no turnaround to measure).
- * Alert rule R2 measures the turnaround at the depot from the previous trip's Back at depot to it
- * (lib/alerts/rules.ts); the dispatcher's Dispatch press or the arrival at the load's first stop stand
- * in for it when the driver did not tap (lib/delivery/turnaround.ts).
+ * never on the truck-day's first load (loaded the night before: there is no turnaround to measure) nor
+ * on one whose trip before was at another depot (nothing is measured there). A tap made too early is
+ * corrected by tapping again: every tap is kept (at most MAX_LEAVE_EVENTS_PER_LOAD) and the latest one
+ * before the truck reached a stop counts (second review of 16 Oct 2026, finding 2). Alert rule R2
+ * measures the turnaround at the depot from the previous trip's Back at depot to it (lib/alerts/rules.ts);
+ * the dispatcher's Dispatch press or the first stop reached stand in for it when the driver did not tap
+ * (lib/delivery/turnaround.ts). Moving the load back to Planned removes its taps (plan-service.ts).
  */
 import { Prisma, type DriverLink } from '@prisma/client';
 import { z } from 'zod';
@@ -456,7 +459,8 @@ export async function carryBases(tx: Tx, tenantId: string, planned: PlannedStop)
 export const MAX_EVENTS_PER_VISIT = 40;
 /** At most this many Back at depot events per load. */
 export const MAX_BACK_EVENTS_PER_LOAD = 5;
-
+/** At most this many Leaving for next load events per load (a tap too early is corrected by tapping again). */
+export const MAX_LEAVE_EVENTS_PER_LOAD = 5;
 
 /**
  * Whether a result repeats the visit's current one exactly (same source kind, outcome, reason, note,
@@ -499,9 +503,10 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
   const found = await resolveTarget(facts.loads, where, (ids, seq) => loadsWithStop(prisma, ids, seq));
   if (!found.ok) return { result: refused(a.key, found.code) };
   const dayLoad = found.load;
-  // Leaving for next load: never on the truck-day's first load (there is no trip to leave from).
+  // Leaving for next load: never on the truck-day's first load (there is no trip to leave from), nor after
+  // a trip at another depot (no turnaround is measured across two depots).
   const previous = a.type === 'DEPOT_DEPART' ? previousTrip(facts.loads, dayLoad.id) : null;
-  if (a.type === 'DEPOT_DEPART' && !previous) return { result: refused(a.key, 'INVALID') };
+  if (a.type === 'DEPOT_DEPART' && (!previous || previous.depotId !== dayLoad.depotId)) return { result: refused(a.key, 'INVALID') };
   const here: LoadRef = { depotId: dayLoad.depotId, loadNo: dayLoad.loadNo };
   const pos = a.pos;
   const posAt = posDate(pos, skew);
@@ -543,9 +548,9 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
         const backs = await tx.stopEvent.count({ where: { tenantId: ctx.tenantId, deliveryDate: dateOnly(ctx.date), truckId: ctx.truckId, depotId: dayLoad.depotId, loadNo: where.loadNo, kind: 'BACK_AT_DEPOT' } });
         if (backs >= MAX_BACK_EVENTS_PER_LOAD) return { result: refused(a.key, 'INVALID') };
       } else if (a.type === 'DEPOT_DEPART') {
-        // One per load: a second tap (another phone, a key made again) changes nothing.
+        // Every tap is kept (the latest before the truck reached a stop counts), within a cap.
         const left = await tx.stopEvent.count({ where: { tenantId: ctx.tenantId, deliveryDate: dateOnly(ctx.date), truckId: ctx.truckId, depotId: dayLoad.depotId, loadNo: where.loadNo, kind: 'DEPOT_DEPART' } });
-        if (left >= 1) return { result: { key: a.key, status: 'duplicate' } };
+        if (left >= MAX_LEAVE_EVENTS_PER_LOAD) return { result: refused(a.key, 'INVALID') };
       } else if (visit) {
         const n = await tx.stopEvent.count({ where: { tenantId: ctx.tenantId, visitId: visit.id, kind: { in: ['ARRIVED', 'DEPARTED', 'OUTCOME'] } } });
         if (n >= MAX_EVENTS_PER_VISIT) return { result: refused(a.key, 'INVALID') };
@@ -1010,11 +1015,16 @@ export async function truckDayResults(db: Db, tenantId: string, truckId: string,
     }),
   ]);
   const live = new Set(loads.map((l) => loadKeyOf(l.depotId, l.loadNo)));
+  // A load that is Planned now has no Leaving tap that counts (moving it back to Planned removes them).
+  const planned = new Set(loads.filter((l) => l.status === 'PLANNED').map((l) => loadKeyOf(l.depotId, l.loadNo)));
   for (const b of backs) {
     const k = loadKeyOf(b.depotId, b.loadNo);
     if (!live.has(k)) continue;
-    const into = b.kind === 'DEPOT_DEPART' ? left : back;
-    if (!into[k] || b.at.toISOString() < into[k]!) into[k] = b.at.toISOString();
+    const at = b.at.toISOString();
+    // Back at depot: the earliest tap; Leaving for next load: the latest (a tap too early is corrected by tapping again).
+    if (b.kind === 'DEPOT_DEPART') {
+      if (!planned.has(k) && (!left[k] || at > left[k]!)) left[k] = at;
+    } else if (!back[k] || at < back[k]!) back[k] = at;
   }
   const visitIds = visits.map((v) => v.id);
   const [photos, results] = visitIds.length

@@ -6,8 +6,8 @@
  *
  * What it saves: the plan in use of the date (every depot, or one), each load with its status moves
  * (the LOAD_<status> audit rows of the load and of the loads it was copied from: a
- * re-plan copies loads, the moves were recorded on the version that was in use then), its Back at depot
- * and Leaving for next load taps, its planned stops (priority, verified pin) with their visits' events and photos (times,
+ * re-plan copies loads, the moves were recorded on the version that was in use then), when it was
+ * planned (rule R2), its Back at depot and Leaving for next load taps, its planned stops (priority, verified pin) with their visits' events and photos (times,
  * distances and the few payload keys the visit rebuild reads), and each truck-day's first and last page
  * open. Never a position, an IP, a device id or a phone number. It does hold customer names and driver
  * notes: the file must stay outside the repository (the script refuses a path inside it), and running it
@@ -20,7 +20,7 @@ import { dateOnly, isoOf } from '../dispatch/time';
 import { echoedWindowRule } from '../dispatch/window-rule';
 import { parseLoadBreak, readTruckSnapshot } from '../dispatch/snapshots';
 import { readDevices } from '../driver-link/service';
-import { keyOfVisit, liveRunsInRange, loadsOfRuns, stopsOfLoads, visitKey } from '../delivery/day-results';
+import { keyOfVisit, liveRunsInRange, loadOrigins, loadsOfRuns, stopsOfLoads, visitKey } from '../delivery/day-results';
 import { pinCheckList } from '../delivery/customer-stats';
 import { LOAD_STATUS_NAMES } from '../audit-catalog';
 import { ALERT_THRESHOLD_COLUMNS, type AlertConfig } from './catalog';
@@ -93,10 +93,11 @@ export async function exportAlertDay(db: Db, tenantId: string, date: string, opt
   const ids = loads.map((l) => l.id);
   const left = loads.filter((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED');
   const extra = await findInParts(ids, (part) => db.planLoad.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, truckSnapshotJson: true, carriedFromLoadId: true } }));
-  const [rowsOfPlan, planned, history] = await Promise.all([
+  const [rowsOfPlan, planned, history, origins] = await Promise.all([
     findInParts(ids, (part) => db.routeAssignment.findMany({ where: { loadId: { in: part } }, select: { loadId: true, sequenceInTruck: true, orderId: true, serviceStartMin: true, departureMin: true }, orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }] })),
     stopsOfLoads(db, left),
     statusHistory(db, tenantId, extra),
+    loadOrigins(db, tenantId, ids),
   ]);
   const day = dateOnly(date);
   const depotWhere = opts.depotId ? { depotId: opts.depotId } : {};
@@ -198,6 +199,7 @@ export async function exportAlertDay(db: Db, tenantId: string, date: string, opt
       history: history.get(l.id) ?? [],
       backEvents: backOf.get(`${l.depotId}|${l.truckId}|${l.loadNo}`) ?? [],
       departEvents: departOf.get(`${l.depotId}|${l.truckId}|${l.loadNo}`) ?? [],
+      plannedAt: origins.get(l.id)?.firstAt?.toISOString() ?? null,
       stops,
     };
   });

@@ -81,6 +81,8 @@ export interface ExportLoad {
   backEvents: ExportEvent[];
   /** Leaving for next load taps on this load (load level, rule R2); absent in an export from before 16 Oct 2026. */
   departEvents?: ExportEvent[];
+  /** When the load was planned (the first plan version it was copied from: day-results.ts loadOrigins); absent in an older export. */
+  plannedAt?: string | null;
   /** The planned stops with their visits (loads that left only). */
   stops: ExportStop[];
 }
@@ -190,7 +192,12 @@ export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert
   const loads: FactLoad[] = exp.loads.map((l) => {
     const st = statusAsOf(l, t);
     const back = l.backEvents.filter((e) => known(e.receivedAt, t)).map((e) => new Date(e.at));
-    const departs = (l.departEvents ?? []).filter((e) => known(e.receivedAt, t)).map((e) => new Date(e.at));
+    const departs = (l.departEvents ?? [])
+      .filter((e) => known(e.receivedAt, t))
+      .map((e) => new Date(e.at))
+      .sort((a, b) => a.getTime() - b.getTime());
+    // The Dispatch press as of t, whatever the status became after it (completing a load keeps it).
+    const pressed = l.history.filter((h) => h.status === 'DISPATCHED' && ms(h.at) <= t).map((h) => ms(h.at));
     for (const e of [...l.backEvents, ...(l.departEvents ?? [])]) if (PHONE.has(e.source) && known(e.receivedAt, t)) take(l.truckId, { at: new Date(e.receivedAt), kind: e.kind, depotId: l.depotId, loadNo: l.loadNo, sequence: null });
     const left = st.status === 'DISPATCHED' || st.status === 'COMPLETED';
     const stops: FactStop[] = left
@@ -216,7 +223,11 @@ export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert
       windowRule: l.windowRule,
       breakMin: l.breakMin,
       backAt: back.length ? new Date(Math.min(...back.map((d) => d.getTime()))) : null,
-      leftTapAt: departs.length ? new Date(Math.min(...departs.map((d) => d.getTime()))) : null,
+      // The latest tap counts (a tap made too early is corrected by tapping again); none on a Planned load.
+      leftTapAt: st.status !== 'PLANNED' && departs.length ? departs[departs.length - 1]! : null,
+      leftTaps: st.status !== 'PLANNED' ? departs : [],
+      dispatchedAt: pressed.length ? new Date(Math.max(...pressed)) : null,
+      existedAt: l.plannedAt ? new Date(l.plannedAt) : null,
       stopCount: l.stopCount,
       stops,
     };

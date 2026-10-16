@@ -11,7 +11,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetDb, row, tables } from './fake-plan-db';
+import { fakePrisma, resetDb, row, tables } from './fake-plan-db';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 vi.mock('@/lib/tenant', async () => {
@@ -207,25 +207,71 @@ describe('GET /api/runs/<id>/outcomes: the results on the plan', () => {
     });
     const trip2 = (over: Record<string, unknown> = {}) =>
       tables.planLoad.push({ id: 'L2', tenantId: T, runId: 'P1', truckId: 'T5', loadNo: 2, status: 'LOADING', departMin: 900, returnMin: 1100, driverId: 'dr1', breakJson: null, statusChangedAt: local('13:30'), ...over });
-
-    it('Back at depot of L1 to the Leaving for next load tap on L2: on L2 only, with both times and the minutes', async () => {
-      trip2();
-      tables.stopEvent.push(loadEvent('BACK_AT_DEPOT', 1, '13:20'), loadEvent('DEPOT_DEPART', 2, '14:08'));
-      const o = await overlay();
-      expect(Object.keys(o.turnarounds)).toEqual(['L2']);
-      expect(o.turnarounds.L2).toEqual({ afterLoadNo: 1, backAt: local('13:20').toISOString(), leftAt: local('14:08').toISOString(), how: 'TAP', tapLate: false, minutes: 48, final: true, line: 'back 13:20, left 14:08, 48 min' });
+    // The line goes with the driver's Leaving button: only while the alerts and rule R2 are on (review finding 1).
+    beforeEach(() => {
+      Object.assign(tables.tenantConfig[0]!, { alertsEnabled: true, alertLoadingOverMin: 40 });
     });
 
-    it('no tap: the Dispatch press after Back at depot stands in (named); still at the depot: the minutes so far; no Back at depot: nothing', async () => {
+    it('Back at depot of L1 to the Leaving for next load tap on L2: on L2 only, with both times and the minutes; the latest tap counts', async () => {
+      trip2();
+      tables.stopEvent.push(loadEvent('BACK_AT_DEPOT', 1, '13:20'), loadEvent('DEPOT_DEPART', 2, '13:40'), loadEvent('DEPOT_DEPART', 2, '14:08'));
+      const o = await overlay();
+      expect(Object.keys(o.turnarounds)).toEqual(['L2']);
+      expect(o.turnarounds.L2).toEqual({ afterLoadNo: 1, backAt: local('13:20').toISOString(), leftAt: local('14:08').toISOString(), how: 'TAP', tapLate: false, minutes: 48, final: true, notMeasured: null, line: 'back 13:20, left 14:08, 48 min' });
+    });
+
+    it('not shown while the alerts or rule R2 are off (merging changes nothing on the screens)', async () => {
+      trip2();
+      tables.stopEvent.push(loadEvent('BACK_AT_DEPOT', 1, '13:20'), loadEvent('DEPOT_DEPART', 2, '14:08'));
+      tables.tenantConfig[0]!.alertsEnabled = false;
+      expect((await overlay()).turnarounds).toEqual({});
+      Object.assign(tables.tenantConfig[0]!, { alertsEnabled: true, alertLoadingOverMin: null });
+      expect((await overlay()).turnarounds).toEqual({});
+    });
+
+    it('no tap: the Dispatch press after Back at depot stands in (named), also once the load is completed (its audit row); a day that is over: no leave recorded; no Back at depot: nothing', async () => {
       trip2({ status: 'DISPATCHED', statusChangedAt: local('14:15') });
       tables.stopEvent.push(loadEvent('BACK_AT_DEPOT', 1, '13:20'));
       expect((await overlay()).turnarounds.L2).toMatchObject({ how: 'DISPATCH', minutes: 55, final: true, line: 'back 13:20, left 14:15 (Dispatch press), 55 min' });
-      row('planLoad', 'L2').status = 'LOCKED';
+      // Review H2: completing L2 overwrites its status time; the Dispatch press is read from its audit row.
+      Object.assign(row('planLoad', 'L2'), { status: 'COMPLETED', statusChangedAt: local('17:00') });
+      tables.auditLog.push({ id: 'a-disp', tenantId: T, action: 'LOAD_DISPATCHED', entity: 'PlanLoad', entityId: 'L2', createdAt: local('14:15') });
+      expect((await overlay()).turnarounds.L2).toMatchObject({ how: 'DISPATCH', minutes: 55, line: 'back 13:20, left 14:15 (Dispatch press), 55 min' });
+      // Still Locked on a day that is over (D is yesterday): never "22 h so far" (review M3).
+      tables.auditLog = [];
+      Object.assign(row('planLoad', 'L2'), { status: 'LOCKED', statusChangedAt: local('13:30') });
       const waiting = (await overlay()).turnarounds.L2;
-      expect(waiting).toMatchObject({ leftAt: null, how: null, final: false });
-      expect(waiting.line).toMatch(/^back 13:20, not left yet, \d+ h( \d\d min)? so far$/);
+      expect(waiting).toMatchObject({ leftAt: null, how: null, final: false, line: 'back 13:20, no leave recorded' });
       tables.stopEvent = [];
       expect((await overlay()).turnarounds).toEqual({});
+    });
+
+    it('review H1: Back at depot of L1 tapped after L2 had reached its first stop is not measured', async () => {
+      trip2({ status: 'DISPATCHED', statusChangedAt: local('07:00') });
+      tables.stopEvent.push(loadEvent('BACK_AT_DEPOT', 1, '13:20'));
+      tables.stopVisit.push({ id: 'V2', tenantId: T, depotId: 'DA', deliveryDate: day(D), truckId: 'T5', loadNo: 2, sequence: 1, customerId: 'c-ACME', arrivedAt: local('13:05'), departedAt: null, outcomeAt: null, outcomeSource: null, outcome: null });
+      expect((await overlay()).turnarounds.L2).toMatchObject({ notMeasured: 'BACK_LATE', final: false, minutes: 0, line: 'back 13:20, tapped after this trip had started: not measured' });
+    });
+
+    it('a failure while reading it leaves the line out, never the delivery results', async () => {
+      trip2();
+      tables.stopEvent.push(loadEvent('BACK_AT_DEPOT', 1, '13:20'));
+      const real = fakePrisma.tenantConfig.findFirst;
+      const spy = vi.spyOn(fakePrisma.tenantConfig, 'findFirst').mockImplementation(async (...args: unknown[]) => {
+        const a = args[0] as { select?: Record<string, unknown> } | undefined;
+        if (a?.select?.alertsEnabled) throw new Error('database gone');
+        return real(a);
+      });
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const o = await overlay();
+        expect(o.turnarounds).toEqual({});
+        expect(o.loads.L1).toMatchObject({ total: 2 });
+        expect(errors).toHaveBeenCalledWith('[delivery] turnaround line not read', 'database gone');
+      } finally {
+        spy.mockRestore();
+        errors.mockRestore();
+      }
     });
   });
 

@@ -9,7 +9,9 @@
  *  3. for the loads that left (DISPATCHED / COMPLETED): the planned stops (stopsOfLoads), their orders'
  *     priority, whether each customer's pin is verified and whether it moved since the visit was planned
  *     (PIN_MOVED_M), the visits, their photos (source, old photo and time too: R9 and the projection);
- *  4. Back at depot per load (backAtDepot) and the driver's Leaving for next load (leftDepot: rule R2);
+ *  4. Back at depot per load (backAtDepot) and the driver's Leaving for next load taps (leftDepotTaps: rule
+ *     R2; none on a load that is Planned now), and for the trips after one with Back at depot their Dispatch
+ *     press and when they were planned (loadOrigins: completing a load overwrites its status time);
  *  5. per truck-day (one driver link): the link's lastSeenAt and the last thing the phone sent (driver
  *     events PHONE_AUTO / PHONE_MANUAL and photos, by the server's receipt time: the phone holds its
  *     events while offline and before Dispatch);
@@ -24,7 +26,8 @@ import { findInParts } from '../in-parts';
 import { addDaysIso, dateOnly, isoOf, todayIso } from '../dispatch/time';
 import { echoedWindowRule } from '../dispatch/window-rule';
 import { parseLoadBreak, readTruckSnapshot } from '../dispatch/snapshots';
-import { backAtDepot, backKey, keyOfVisit, leftDepot, liveRunsInRange, loadsOfRuns, stopsOfLoads, visitKey, visitsInRange } from '../delivery/day-results';
+import { backAtDepot, backKey, keyOfVisit, leftDepotTaps, liveRunsInRange, loadOrigins, loadsOfRuns, stopsOfLoads, visitKey, visitsInRange } from '../delivery/day-results';
+import { previousTrip } from '../delivery/turnaround';
 import { PIN_FAR_M } from '../delivery/pin-check';
 import { distanceM, PIN_MOVED_M } from '../dispatch/snapshots';
 import { pinCheckList } from '../delivery/customer-stats';
@@ -77,7 +80,7 @@ export async function readAlertFacts(
     stopsOfLoads(db, onRoad),
     visitsInRange(db, tenantId, from, to),
     backAtDepot(db, tenantId, from, to),
-    leftDepot(db, tenantId, from, to),
+    leftDepotTaps(db, tenantId, from, to),
     db.driverLink.findMany({ where: { tenantId, deliveryDate: range }, select: { truckId: true, deliveryDate: true, lastSeenAt: true } }),
     db.opsAlert.findMany({ where: { tenantId, OR: [{ resolvedAt: null }, { deliveryDate: { gte: dateOnly(from) } }] }, select: STORED_SELECT }),
   ]);
@@ -136,6 +139,19 @@ export async function readAlertFacts(
   // The last thing each truck-day's phone sent (events and photos, by receipt time).
   const signals = await lastSignals(db, tenantId, range, visits, photos);
 
+  // Rule R2 reads, for a trip after one that has Back at depot, its Dispatch press whatever its status now
+  // and when it was planned (a trip added after the truck came back counts from then).
+  const r2Ids = loads
+    .filter((l) => {
+      const prev = previousTrip(
+        loads.filter((x) => x.date === l.date && x.truckId === l.truckId),
+        l.id,
+      );
+      return !!prev && backs.has(backKey(prev));
+    })
+    .map((l) => l.id);
+  const origins = opts.thresholds.LOADING_OVER !== null ? await loadOrigins(db, tenantId, r2Ids) : new Map<string, { firstAt: Date | null; dispatchedAt: Date | null }>();
+
   const extraOf = new Map(extra.map((x) => [x.id, x]));
   const stopRowsOf = new Map<string, typeof rowsOfPlan>();
   for (const r of rowsOfPlan) {
@@ -189,7 +205,11 @@ export async function readAlertFacts(
       windowRule: echoedWindowRule(readTruckSnapshot(x?.truckSnapshotJson ?? null)?.rules?.windowRule) ?? 'START',
       breakMin: brk ? { startMin: brk.startMin, endMin: brk.endMin } : null,
       backAt: backs.get(backKey(l)) ?? null,
-      leftTapAt: lefts.get(backKey(l)) ?? null,
+      // A load moved back to Planned loses its taps (plan-service.ts); one still Planned has none that count.
+      leftTapAt: l.status === 'PLANNED' ? null : (lefts.get(backKey(l))?.at(-1) ?? null),
+      leftTaps: l.status === 'PLANNED' ? [] : (lefts.get(backKey(l)) ?? []),
+      dispatchedAt: origins.get(l.id)?.dispatchedAt ?? null,
+      existedAt: origins.get(l.id)?.firstAt ?? null,
       stopCount: new Set(own.map((r) => r.sequenceInTruck)).size,
       stops,
     };

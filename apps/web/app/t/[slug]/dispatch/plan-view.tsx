@@ -1903,9 +1903,11 @@ function LoadProgress({ o, tag, tz }: { o: NonNullable<OutcomeOverlay['loads'][s
 }
 
 /**
- * The turnaround at the depot before this trip (owner decision of 16 Oct 2026, alert rule R2): "After L1:
- * back 11:20, left 12:08, 48 min" from the driver's Back at depot and Leaving for next load; a fallback
- * (the Dispatch press, the first arrival) is named; "not left yet, 25 min so far" while the truck waits.
+ * The turnaround at the depot before this trip (owner decision of 16 Oct 2026, alert rule R2; shown while
+ * the alerts and R2 are on): "After L1: back 11:20, left 12:08, 48 min" from the driver's Back at depot and
+ * Leaving for next load; a fallback (the Dispatch press, the first stop reached less the planned drive) is
+ * named; "not left yet, 25 min so far" while the truck waits; "no leave recorded"; "not measured" when Back
+ * at depot came after this trip had started.
  */
 function TurnaroundLine({ t, tag }: { t: LoadTurnaround; tag: string }) {
   const how =
@@ -1915,11 +1917,17 @@ function TurnaroundLine({ t, tag }: { t: LoadTurnaround; tag: string }) {
         ? 'the Dispatch press (the driver did not tap Leaving for next load)'
         : t.how === 'ARRIVAL'
           ? t.tapLate
-            ? 'the arrival at the first customer (Leaving for next load was tapped after it)'
-            : 'the arrival at the first customer (the driver did not tap Leaving for next load)'
-          : 'now: the truck has not left yet';
+            ? 'the first stop reached, less the planned drive to it (Leaving for next load was tapped after it)'
+            : 'the first stop reached, less the planned drive to it (the driver did not tap Leaving for next load)'
+          : null;
+  const title =
+    t.notMeasured === 'BACK_LATE'
+      ? `Not measured: the driver tapped Back at depot of L${t.afterLoadNo} after this trip had already started.`
+      : how
+        ? `Time at the depot between L${t.afterLoadNo} and this trip: from the driver's Back at depot to ${how}.`
+        : `Time at the depot between L${t.afterLoadNo} and this trip: from the driver's Back at depot; the truck has not left yet, or nothing says when it left.`;
   return (
-    <span className="mt-1 block text-xs text-muted-foreground" data-testid={`load-turnaround-${tag}`} title={`Time at the depot between L${t.afterLoadNo} and this trip: from the driver's Back at depot to ${how}.`}>
+    <span className="mt-1 block text-xs text-muted-foreground" data-testid={`load-turnaround-${tag}`} title={title}>
       After L{t.afterLoadNo}: {t.line}
     </span>
   );

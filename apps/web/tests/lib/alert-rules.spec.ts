@@ -273,9 +273,9 @@ describe('R2 LOADING_OVER (owner rule 2: loading more than 40 min; owner decisio
   const day = (o1: Partial<FactLoad> = {}, o2: Partial<FactLoad> = {}, f: FactsOpts = {}) => facts([trip1(o1), trip2(o2)], f);
   const key2 = loadKey({ depotId: 'D1', date: D, truckId: 'TR1', loadNo: 2 });
   const key1 = loadKey();
-  /** Trip 2 out, its first stop reached at `arr`. */
-  const out2 = (arr: string, over: Partial<FactLoad> = {}) =>
-    trip2({ status: 'DISPATCHED', statusChangedAt: at('07:00'), stops: [stop(1, 800, { visit: visit({ arrivedAt: at(arr) }) }), stop(2, 840)], ...over });
+  /** Trip 2 out (dispatched 07:00 with every load), its first stop (planned 13:20, 20 min from the depot) reached at `arr`. */
+  const out2 = (arr: string | null, over: Partial<FactLoad> = {}) =>
+    trip2({ status: 'DISPATCHED', statusChangedAt: at('07:00'), stops: [stop(1, 800, { visit: arr ? visit({ arrivedAt: at(arr) }) : null }), stop(2, 840)], ...over });
 
   it('never for the first trip of the day (loaded the night before): a Loading press at 21:10 for tomorrow raises nothing', () => {
     const night = facts([load({ date: TOMORROW, status: 'LOADING', statusChangedAt: at('21:10'), stops: [], stopCount: 4 })]);
@@ -293,7 +293,7 @@ describe('R2 LOADING_OVER (owner rule 2: loading more than 40 min; owner decisio
     expect(c.text).toBe('T05 L2: at the depot for 41 min since Back at depot of L1 at 11:20, not left with L2 yet (limit 40 min). Planned departure 13:00, load is Loading.');
     // Dated to when the limit was crossed (no backlog at a switch-on after 12:00).
     expect(c.occurredAt).toEqual(at('12:00'));
-    expect(c.facts).toMatchObject({ afterLoadNo: 1, backAt: at('11:20').toISOString(), leftAt: null, how: null });
+    expect(c.facts).toMatchObject({ afterLoadNo: 1, backAt: at('11:20').toISOString(), leftAt: null, how: null, graceMin: 0 });
     expect(run(day(), at('12:41')).one('LOADING_OVER').tier).toBe(2);
     expect(run(day(), at('13:21')).one('LOADING_OVER').tier).toBe(3);
     // Within the limit: nothing, the words say so.
@@ -312,38 +312,102 @@ describe('R2 LOADING_OVER (owner rule 2: loading more than 40 min; owner decisio
     expect(quick.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: 30 min at the depot between L1 and L2 (back 11:20, left 11:50, by Leaving tapped), limit 40 min.');
   });
 
-  it('without the tap: the Dispatch press after Back at depot or the first arrival counts, marked as such; a Dispatch pressed in the morning does not', () => {
+  it('review finding 2: a tap made too early is corrected by tapping again; the latest tap before a stop is reached counts', () => {
+    // Tapped at 11:35 while still loading, again at 12:15 when the truck really left.
+    const again = day({}, { leftTapAt: at('12:15'), leftTaps: [at('11:35'), at('12:15')] });
+    const r = run(facts(again.loads, { open: [['LOADING_OVER', key2]] }), at('12:20'));
+    expect(r.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: 55 min at the depot between L1 and L2 (back 11:20, left 12:15, by Leaving tapped), limit 40 min.');
+  });
+
+  it('without the tap: the Dispatch press after Back at depot, or the first stop reached less the planned drive; a Dispatch pressed in the morning does not count', () => {
     // Dispatch pressed 12:05 (after Back at depot), no tap: 45 min.
     const byDispatch = run(day({}, { status: 'DISPATCHED', statusChangedAt: at('12:05') }), at('12:10')).one('LOADING_OVER', key2);
     expect(byDispatch).toMatchObject({ history: true, value: 45 });
     expect(byDispatch.text).toBe('T05 L2: 45 min at the depot between L1 and L2 (back 11:20, left 12:05, by the Dispatch press (no Leaving tap)), limit 40 min.');
-    // Dispatch pressed at 07:00 for every load: not the leave. Arrived at its first stop 12:30: 70 min.
+    // Review M1: dispatched at 07:00 with every load; first stop reached 12:30, 20 min from the depot: left by 12:10, 50 min.
     const byArrival = run(facts([trip1(), out2('12:30')]), at('12:35')).one('LOADING_OVER', key2);
-    expect(byArrival.text).toBe('T05 L2: 1 h 10 min at the depot between L1 and L2 (back 11:20, left 12:30, by the first arrival (no Leaving tap)), limit 40 min.');
-    expect(byArrival.value).toBe(70);
-    // The morning press and no arrival yet: still at the depot (live).
-    const live = run(facts([trip1(), trip2({ status: 'DISPATCHED', statusChangedAt: at('07:00') })]), at('12:25')).one('LOADING_OVER', key2);
-    expect(live).toMatchObject({ value: 65, tier: 1 });
-    expect(live.history).toBeFalsy();
+    expect(byArrival.text).toBe('T05 L2: 50 min at the depot between L1 and L2 (back 11:20, left by 12:10, by the first stop reached at 12:30 less the planned 20 min drive (no Leaving tap)), limit 40 min.');
+    expect(byArrival.value).toBe(50);
     // Tapped late, at the customer (after the arrival): the arrival is when the truck had left.
     const late = run(facts([trip1(), out2('12:30', { leftTapAt: at('13:00') })], { open: [['LOADING_OVER', key2]] }), at('13:05'));
-    expect(late.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: 1 h 10 min at the depot between L1 and L2 (back 11:20, left 12:30, by the first arrival (Leaving tapped later)), limit 40 min.');
+    expect(late.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: 50 min at the depot between L1 and L2 (back 11:20, left by 12:10, by the first stop reached at 12:30 less the planned 20 min drive (Leaving tapped later)), limit 40 min.');
   });
 
-  it('no alert without Back at depot of the trip before ("Load not closed" follows it), nor across two depots', () => {
+  it('review M1: dispatched in the morning, no tap and no stop reached: the planned drive to the first stop is allowed before it is raised live', () => {
+    // 11:20 + 40 min + the 20 min drive: nothing at 12:20 (the truck may be on the road), raised at 12:21.
+    const r = run(facts([trip1(), out2(null)]), at('12:20'));
+    r.none('LOADING_OVER');
+    expect(r.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: at the depot 1 h since Back at depot of L1 at 11:20, within 40 min; the planned 20 min drive to the first stop allowed, as the load was dispatched before and no stop is reached yet.');
+    const live = run(facts([trip1(), out2(null)]), at('12:21')).one('LOADING_OVER', key2);
+    expect(live).toMatchObject({ value: 41, tier: 1, occurredAt: at('12:20') });
+    expect(live.history).toBeFalsy();
+    expect(live.text).toBe('T05 L2: at the depot for 1 h 01 min since Back at depot of L1 at 11:20, not left with L2 yet (limit 40 min; the planned 20 min drive to the first stop allowed, as the load was dispatched before and no stop is reached yet). Planned departure 13:00, load is Dispatched.');
+  });
+
+  it('review H1: Back at depot tapped after the next trip had started is not measured (no false alert for hours)', () => {
+    // L2 out since 07:00, at its first stop 11:30; Back at depot of L1 tapped only at 12:00.
+    const f = facts([trip1({ backAt: at('12:00') }), out2('11:30')]);
+    for (const now of ['13:00', '13:20', '15:00']) {
+      const r = run(f, at(now));
+      r.none('LOADING_OVER');
+      expect(r.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: Back at depot of L1 was tapped at 12:00, after L2 had already started: the time at the depot is not known.');
+    }
+    // A photo of the phone at a stop of L2 before Back at depot counts as the trip having started.
+    const photo = { positionStatus: 'OK', distanceM: 20, accuracyM: 10, exifDistanceM: null, receivedAt: at('11:40'), source: 'PHONE_MANUAL', takenAt: at('11:40') };
+    const byPhoto = facts([trip1({ backAt: at('12:00') }), out2(null, { stops: [stop(1, 800, { visit: visit({ photos: [photo] }) }), stop(2, 840)] })]);
+    expect(run(byPhoto, at('13:00')).ended('LOADING_OVER', key2)?.text).toContain('after L2 had already started');
+  });
+
+  it('review H2: the Dispatch press is kept after the load is completed; a Completed load is never "not left yet"', () => {
+    // L1 back 11:20; L2 dispatched 11:50, first stop 12:35, completed by its own Back at depot at 15:00.
+    const completed = out2('12:35', { status: 'COMPLETED', statusChangedAt: at('15:00'), dispatchedAt: at('11:50'), backAt: at('15:00') });
+    const r = run(facts([trip1(), completed]), at('15:05'));
+    r.none('LOADING_OVER');
+    expect(r.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: 30 min at the depot between L1 and L2 (back 11:20, left 11:50, by the Dispatch press (no Leaving tap)), limit 40 min.');
+    // Dispatched in the morning, results recorded by the office (no sign of the truck): not measured, not live.
+    const office = out2(null, {
+      status: 'COMPLETED',
+      statusChangedAt: at('16:00'),
+      dispatchedAt: at('07:00'),
+      stops: [stop(1, 800, { visit: visit({ arrivedAt: null, outcome: 'DELIVERED', outcomeAt: at('15:50'), outcomeSource: 'DISPATCHER' }) }), stop(2, 840)],
+    });
+    const o = run(facts([trip1(), office]), at('16:05'));
+    o.none('LOADING_OVER');
+    expect(o.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: completed with no Leaving tap, Dispatch press or stop reached after Back at depot of L1 at 11:20: not measured.');
+  });
+
+  it('review H3: a trip planned after the truck came back counts from when it was planned', () => {
+    // L1 back 13:00; a late order adds L2 at 15:00: nothing at 15:01, raised at 15:41 (40 min after it was planned).
+    const f = day({ backAt: at('13:00') }, { status: 'LOCKED', existedAt: at('15:00'), departMin: 960 });
+    const r = run(f, at('15:01'));
+    r.none('LOADING_OVER');
+    expect(r.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: at the depot 1 min since L2 was planned at 15:00 (after Back at depot of L1 at 13:00), within 40 min.');
+    run(f, at('15:40')).none('LOADING_OVER');
+    const c = run(f, at('15:41')).one('LOADING_OVER', key2);
+    expect(c).toMatchObject({ tier: 1, value: 41, occurredAt: at('15:40') });
+    expect(c.text).toBe('T05 L2: at the depot for 41 min since L2 was planned at 15:00 (after Back at depot of L1 at 13:00), not left with L2 yet (limit 40 min). Planned departure 16:00, load is Locked.');
+    // Its final words name both times.
+    const left = run(day({ backAt: at('13:00') }, { status: 'LOCKED', existedAt: at('15:00'), departMin: 960, leftTapAt: at('15:30') }), at('15:35'));
+    expect(left.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: 30 min at the depot between L1 and L2 (back 13:00, L2 planned 15:00, left 15:30, by Leaving tapped), limit 40 min.');
+  });
+
+  it('no alert without Back at depot of the trip before ("Load not closed" follows it), across two depots, or for a load without stops', () => {
     const noBack = run(day({ backAt: null, status: 'DISPATCHED' }), at('14:00'));
     noBack.none('LOADING_OVER');
     expect(noBack.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: no Back at depot tapped for L1: the time at the depot is not known (see "Load not closed").');
     const twoDepots = run(facts([trip1({ depotId: 'D2' }), trip2()]), at('13:00'));
     twoDepots.none('LOADING_OVER');
     expect(twoDepots.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: the trip before (L1) was at another depot: not measured.');
+    const empty = run(day({}, { stopCount: 0 }), at('13:00'));
+    empty.none('LOADING_OVER');
+    expect(empty.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: no stops.');
   });
 
-  it('no longer followed 4 h after Back at depot with no tap, Dispatch or arrival; off when its threshold is off', () => {
+  it('no longer followed 4 h after Back at depot with no tap, Dispatch or stop reached; off when its threshold is off', () => {
     const r = run(day(), at('15:21'));
     r.none('LOADING_OVER');
     expect(r.ended('LOADING_OVER', key2)).toMatchObject({ reason: 'NOT_FOLLOWED' });
-    expect(r.ended('LOADING_OVER', key2)?.text).toContain('no longer followed');
+    expect(r.ended('LOADING_OVER', key2)?.text).toBe('T05 L2: no Leaving tap, Dispatch or stop reached 4 h after Back at depot of L1 at 11:20: no longer followed.');
     const off = run(day(), at('12:30'), thresholdsOf({ ...ON, alertLoadingOverMin: null }));
     off.none('LOADING_OVER');
     expect(off.ended('LOADING_OVER', key2)).toBeNull();

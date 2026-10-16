@@ -97,7 +97,7 @@ export interface ManifestInput {
   truck: { code: string; hired: boolean };
   /** Casual (daily) flag per driver id of the truck-day's loads. */
   casualOf: ReadonlyMap<string, boolean>;
-  settings: { radiusM: number; photoRequired: boolean; locationRetentionDays: number; photoRetentionDays: number; dispatcherPhone: string | null };
+  settings: { radiusM: number; photoRequired: boolean; locationRetentionDays: number; photoRetentionDays: number; dispatcherPhone: string | null; leaveTap?: boolean };
   office: { userName: string } | null;
   /** The company's calling code for a local phone number (phoneCountryCode of its country); absent = none. */
   callingCode?: string | null;
@@ -194,6 +194,16 @@ export function _clearManifestMemo(): void {
   memo.clear();
 }
 
+/**
+ * "Leaving for next load" is offered on the driver page only while the company has the operations alerts
+ * on with rule R2 (loading between trips) on: the button feeds that rule alone, and merging the alerts
+ * (master switch off) must change nothing the drivers see (second review of 16 Oct 2026, finding 1). The
+ * server still takes a tap kept on a phone from before the switch went off.
+ */
+export function leaveTapOffered(cfg: { alertsEnabled?: boolean | null; alertLoadingOverMin?: number | null } | null | undefined): boolean {
+  return !!cfg?.alertsEnabled && typeof cfg.alertLoadingOverMin === 'number';
+}
+
 /** The manifest of a resolved link (the route reads it on every poll). */
 export async function driverManifest(args: {
   tenantId: string;
@@ -208,7 +218,16 @@ export async function driverManifest(args: {
     prisma.tenant.findFirst({ where: { id: tenantId }, select: { name: true, country: true } }),
     prisma.tenantConfig.findFirst({
       where: { tenantId },
-      select: { timezone: true, geofenceRadiusM: true, photoProofRequired: true, locationRetentionDays: true, photoRetentionDays: true, dispatcherPhone: true },
+      select: {
+        timezone: true,
+        geofenceRadiusM: true,
+        photoProofRequired: true,
+        locationRetentionDays: true,
+        photoRetentionDays: true,
+        dispatcherPhone: true,
+        alertsEnabled: true,
+        alertLoadingOverMin: true,
+      },
     }),
     prisma.truck.findFirst({ where: { id: truckId, tenantId }, select: { code: true, hired: true } }),
     truckDayLoads(prisma, tenantId, truckId, date),
@@ -235,6 +254,7 @@ export async function driverManifest(args: {
       // The first-open location notice states both periods (photos 90 days by default, owner decision 1).
       photoRetentionDays: cfg?.photoRetentionDays ?? DEFAULT_PHOTO_RETENTION_DAYS,
       dispatcherPhone: dispatcherPhoneFor(dayLoads, new Map(depots.map((d) => [d.id, d.dispatcherPhone])), cfg?.dispatcherPhone ?? null),
+      leaveTap: leaveTapOffered(cfg),
     },
     office: args.office,
     callingCode: phoneCountryCode(tenant?.country),

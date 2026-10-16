@@ -222,6 +222,32 @@ describe('replayDay', () => {
     delete d.loads[2]!.departEvents;
     expect(factsAsOf(d, new Date(iso('12:20')), []).loads.find((l) => l.loadNo === 2)!.leftTapAt).toBeNull();
   });
+
+  it('R2 as of a time (second review of 16 Oct 2026): the Dispatch press from the moves, kept once completed; the latest tap; when the trip was planned', () => {
+    const d = day();
+    const t05 = d.loads[0]!;
+    t05.backEvents = [ev('BACK_AT_DEPOT', '11:20')];
+    d.loads.push({
+      ...t05,
+      id: 'l-t05-2',
+      loadNo: 2,
+      departMin: 780,
+      returnMin: 1000,
+      finalStatus: 'COMPLETED',
+      history: [{ status: 'LOCKED', at: iso('20:00', -1) }, { status: 'DISPATCHED', at: iso('11:50') }, { status: 'COMPLETED', at: iso('15:00') }],
+      backEvents: [],
+      departEvents: [ev('DEPOT_DEPART', '11:30'), ev('DEPOT_DEPART', '11:45')],
+      plannedAt: iso('18:00', -1),
+      stops: [stop(1, 800, 'Shop Example D')],
+    });
+    const l2 = (hhmm: string) => factsAsOf(d, new Date(iso(hhmm)), []).loads.find((l) => l.loadNo === 2)!;
+    expect(l2('16:00')).toMatchObject({ status: 'COMPLETED', statusChangedAt: new Date(iso('15:00')), dispatchedAt: new Date(iso('11:50')), leftTapAt: new Date(iso('11:45')), existedAt: new Date(iso('18:00', -1)) });
+    expect(l2('16:00').leftTaps).toEqual([new Date(iso('11:30')), new Date(iso('11:45'))]);
+    expect(l2('11:40')).toMatchObject({ status: 'LOCKED', dispatchedAt: null, leftTapAt: new Date(iso('11:30')) });
+    // An export from before (no plannedAt): not known.
+    delete d.loads[2]!.plannedAt;
+    expect(l2('16:00').existedAt).toBeNull();
+  });
 });
 
 describe('the script\'s inputs', () => {

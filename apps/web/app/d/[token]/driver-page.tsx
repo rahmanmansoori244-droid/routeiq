@@ -33,7 +33,7 @@ import { LinkState } from './link-state';
 import { OutcomeFlow, type DraftPhoto } from './outcome-flow';
 import { ResultChip, StopSheet } from './stop-sheet';
 import { SyncBadge } from './sync-badge';
-import { posOf, useTracker } from './use-tracker';
+import { posOf, recentPosOf, useTracker } from './use-tracker';
 import { WebviewGate } from './webview-gate';
 import { WhichCustomer } from './which-customer';
 
@@ -96,6 +96,9 @@ function buildTag(): string {
   for (let i = 0; i < srcs.length; i++) h = (Math.imul(h, 33) ^ srcs.charCodeAt(i)) >>> 0;
   return h.toString(36);
 }
+
+/** Leaving for next load sends the phone's position only from a fix at most this old. */
+const LEAVE_FIX_MAX_AGE_MS = 2 * 60_000;
 
 /** The truck-day's results laid into the manifest (the action and photo answers carry them). */
 function withResults(m: DriverManifest, r: DriverResults): DriverManifest {
@@ -267,9 +270,17 @@ export function DriverPage() {
       const s = store.current;
       if (s) {
         // Load keys, and the numbers for items saved before the depot was in the keys (queue.ts itemLoadKey).
-        const out = new Set(m.loads.filter((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED').flatMap((l) => [l.key, String(l.loadNo)]));
-        const released = releaseHeld(await s.items(n), out, Date.now());
-        if (released.length) await s.put(released);
+        const keysOf = (statuses: readonly string[]) => new Set(m.loads.filter((l) => statuses.includes(l.status)).flatMap((l) => [l.key, String(l.loadNo)]));
+        const all = await s.items(n);
+        const released = releaseHeld(all, keysOf(['DISPATCHED', 'COMPLETED']), Date.now());
+        // A Leaving for next load kept while its load was Planned goes out once it is Locked or Loading:
+        // the server takes it then (second review of 16 Oct 2026, finding 6).
+        const leaving = releaseHeld(
+          all.filter((i) => i.kind === 'action' && (i.body as DriverAction).type === 'DEPOT_DEPART' && !released.some((r) => r.key === i.key)),
+          keysOf(['LOCKED', 'LOADING']),
+          Date.now(),
+        );
+        if (released.length || leaving.length) await s.put([...released, ...leaving]);
       }
       await refreshItems();
       void flush();
@@ -614,14 +625,17 @@ export function DriverPage() {
   };
 
   /**
-   * Leaving for next load: one tap per trip, kept on the phone like every action (sent when there is
-   * signal, never twice). The trip the truck leaves with, by its depot and number; the phone's last fix.
+   * Leaving for next load, kept on the phone like every action (sent when there is signal, each tap with
+   * its own key so a retry never records twice). Tapped again to correct a tap made too early: the latest
+   * one counts. The trip the truck leaves with, by its depot and number; the phone's fix only when it is
+   * at most 2 min old (the tracker may have been stopped since Back at depot).
    */
   const leaveDepot = (loadKey: string) => {
     setConfirmLeave(null);
     const l = overlay?.find((x) => x.key === loadKey);
-    if (!l || l.left || !l.depotId) return;
-    void enqueue({ key: newKey(), type: 'DEPOT_DEPART', load: l.loadNo, depot: l.depotId, at: new Date().toISOString(), pos: posOf(tracker.lastFix()) }, false);
+    if (!l || !l.depotId) return;
+    const now = Date.now();
+    void enqueue({ key: newKey(), type: 'DEPOT_DEPART', load: l.loadNo, depot: l.depotId, at: new Date(now).toISOString(), pos: recentPosOf(tracker.lastFix(), now, LEAVE_FIX_MAX_AGE_MS) }, false);
   };
 
   // Photos of the open stop, fetched with the token in the header into blob URLs.
@@ -653,7 +667,8 @@ export function DriverPage() {
   const whenStop = stopOf(tracker.arrivedWhen);
   const linkDown = phase.kind === 'link';
   const unsent = linkDown && overlay ? unsentList(overlay, items) : [];
-  const leave = overlay ? leaveOffer(overlay) : null;
+  // Offered only while the company has the alerts and rule R2 on (manifest.ts leaveTapOffered).
+  const leave = overlay && manifest?.settings.leaveTap ? leaveOffer(overlay, nowTick) : null;
 
   const flow =
     entering && open && stopOf(entering.stopKey)?.stop.key === open.stop.key ? (
@@ -1036,9 +1051,23 @@ function BackAtDepotDialog({ lang, load, onYes, onNo }: { lang: Lang; load: Over
   );
 }
 
-/** "Back at depot 10:42 (trip 1). Tap when the truck leaves with trip 2." and the Leaving for next load button. */
+/**
+ * "Back at depot 10:42 (trip 1). Tap when the truck leaves with trip 2." and the Leaving for next load
+ * button; once tapped, for a while: "Left depot 10:55 with trip 2. Tapped too early? Tap again when the
+ * truck really leaves." and a smaller button (the latest tap counts).
+ */
 function LeaveBar({ lang, tz, from, to, onLeave }: { lang: Lang; tz: string; from: OverlayLoad; to: OverlayLoad; onLeave: () => void }) {
   const back = from.backAt !== null ? clockTime(new Date(from.backAt).toISOString(), tz) : '';
+  if (to.left && to.leftAt !== null) {
+    return (
+      <div className="space-y-2 rounded-xl border border-blue-200 bg-white p-3" data-testid="leave-bar">
+        <p className="text-sm">{t(lang, 'leftRetap', { time: clockTime(new Date(to.leftAt).toISOString(), tz), m: to.loadNo })}</p>
+        <button type="button" onClick={onLeave} className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-blue-800 text-base font-semibold text-blue-900" data-testid={`leaving-next-${to.loadNo}`}>
+          <LogOut className="h-5 w-5" aria-hidden /> {t(lang, 'leavingNext')}
+        </button>
+      </div>
+    );
+  }
   return (
     <div className="space-y-2 rounded-xl bg-blue-50 p-3" data-testid="leave-bar">
       <p className="text-sm font-semibold">{t(lang, 'leavingNextFor', { time: back, n: from.loadNo, m: to.loadNo })}</p>

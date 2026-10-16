@@ -7,13 +7,13 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DriverAction, DriverManifest, ManifestStop, StopResult } from '@/lib/driver-link/manifest-types';
-import { applyQueued, leaveOffer, stopInProgress, unsentList } from '@/lib/driver-page/overlay';
+import { applyQueued, LEAVE_RETAP_MIN, leaveOffer, stopInProgress, unsentList } from '@/lib/driver-page/overlay';
 import { actionItem, newKey, type QueueItem } from '@/lib/driver-page/queue';
 import { Host } from './hook-host';
 
 // The tracker hook (app/d/[token]/use-tracker.ts) runs on the hook host: React's hooks replaced.
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
-const { useTracker } = await import('@/app/d/[token]/use-tracker');
+const { recentPosOf, useTracker } = await import('@/app/d/[token]/use-tracker');
 
 const NS = 't5|2026-10-05';
 const T0 = Date.parse('2026-10-05T06:00:00Z');
@@ -302,8 +302,8 @@ describe('Leaving for next load (owner decision 16 Oct 2026: R2 is measured from
   });
   const at = (min: number) => new Date(T0 + min * 60_000).toISOString();
   const day = (...loads: DriverManifest['loads']) => ({ loads });
-  const offerOf = (m: Pick<DriverManifest, 'loads'>, items: QueueItem[] = []) => {
-    const o = leaveOffer(applyQueued(m, items));
+  const offerOf = (m: Pick<DriverManifest, 'loads'>, items: QueueItem[] = [], now?: number) => {
+    const o = leaveOffer(applyQueued(m, items), now);
     return o ? { from: o.from.loadNo, to: o.to.loadNo } : null;
   };
 
@@ -322,7 +322,7 @@ describe('Leaving for next load (owner decision 16 Oct 2026: R2 is measured from
     expect(offerOf(day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300), leftDepotAt: null }), trip(2, { leftDepotAt: at(330), backAtDepotAt: at(520) })))).toBeNull();
   });
 
-  it('one tap per trip: gone once tapped (on the server, still on the phone, or held for a Planned trip); not when the truck is already at a stop of it', () => {
+  it('gone once tapped (on the server, still on the phone, or held for a Planned trip) when the page does not say the time; not when the truck is already at a stop of it', () => {
     const backDay = (over: Partial<DriverManifest['loads'][number]> = {}) => day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300) }), trip(2, over));
     expect(offerOf(backDay({ leftDepotAt: at(330) }))).toBeNull();
     const leave = item({ key: newKey(), type: 'DEPOT_DEPART', load: 2, depot: 'D1', at: at(330) });
@@ -333,6 +333,37 @@ describe('Leaving for next load (owner decision 16 Oct 2026: R2 is measured from
     const arrived = item({ key: newKey(), type: 'ARRIVE', stop: 'D1:2:1', at: at(360), mode: 'MANUAL' });
     expect(offerOf(backDay(), [arrived])).toBeNull();
     expect(offerOf(backDay({ status: 'COMPLETED' }))).toBeNull();
+  });
+
+  it('review finding 2: offered again for 30 min after the tap, to correct a tap made too early; then gone', () => {
+    const backDay = (over: Partial<DriverManifest['loads'][number]> = {}) => day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300) }), trip(2, over));
+    const ms = (min: number) => T0 + min * 60_000;
+    expect(offerOf(backDay({ leftDepotAt: at(330) }), [], ms(331))).toEqual({ from: 1, to: 2 });
+    expect(offerOf(backDay({ leftDepotAt: at(330) }), [], ms(330 + LEAVE_RETAP_MIN))).toEqual({ from: 1, to: 2 });
+    expect(offerOf(backDay({ leftDepotAt: at(330) }), [], ms(331 + LEAVE_RETAP_MIN))).toBeNull();
+    // A second tap still on the phone restarts the 30 min and is the one shown.
+    const again = item({ key: newKey(), type: 'DEPOT_DEPART', load: 2, depot: 'D1', at: at(350) });
+    expect(offerOf(backDay({ leftDepotAt: at(330) }), [again], ms(331 + LEAVE_RETAP_MIN))).toEqual({ from: 1, to: 2 });
+    const [, l2] = applyQueued(backDay({ leftDepotAt: at(330) }), [again]);
+    expect(l2).toMatchObject({ left: true, leftAt: ms(350), leftPending: true });
+    // The server's later tap wins over an older one still on the phone.
+    const older = item({ key: newKey(), type: 'DEPOT_DEPART', load: 2, depot: 'D1', at: at(320) });
+    expect(applyQueued(backDay({ leftDepotAt: at(330) }), [older])[1]).toMatchObject({ leftAt: ms(330), leftPending: false });
+    // Not once the truck is at a stop of the trip.
+    const arrived = item({ key: newKey(), type: 'ARRIVE', stop: 'D1:2:1', at: at(345), mode: 'MANUAL' });
+    expect(offerOf(backDay({ leftDepotAt: at(330) }), [arrived], ms(346))).toBeNull();
+  });
+
+  it('review finding 5: never when the next trip is at another depot (nothing is measured across two depots)', () => {
+    const m = day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300) }), trip(1, { key: 'D2:1', depotId: 'D2', departMin: 800, stops: [{ ...stop(1, 'SHOPX'), key: 'D2:1:1' }] }));
+    expect(offerOf(m)).toBeNull();
+  });
+
+  it('review finding 8: the position of a Leaving tap only from a fix at most 2 min old', () => {
+    const fix = { at: T0, gpsAt: null, lat: 23.6, lng: 58.4, accuracyM: 12.34, speedMps: null };
+    expect(recentPosOf(fix, T0 + 120_000, 120_000)).toMatchObject({ lat: 23.6, lng: 58.4, accuracyM: 12.3 });
+    expect(recentPosOf(fix, T0 + 120_001, 120_000)).toBeUndefined();
+    expect(recentPosOf(null, T0, 120_000)).toBeUndefined();
   });
 
   it('the latest trip back decides: after trip 2 is back, trip 3 is offered', () => {

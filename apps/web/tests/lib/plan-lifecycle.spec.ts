@@ -414,6 +414,24 @@ describe('load changes on a version without an applied plan (F03 / L14)', () => 
   });
 });
 
+describe("unlock and the driver's Leaving for next load taps (operations alerts R2, second review of 16 Oct 2026, finding 3)", () => {
+  it('moving a load back to Planned removes its taps (counted in the audit row); its Back at depot, other loads and trucks keep theirs', async () => {
+    seedAppliedPlan();
+    const tap = (id: string, loadNo: number, over: Record<string, unknown> = {}) => ({
+      id, tenantId: T, depotId: 'D1', deliveryDate: DAY, truckId: 'T1', loadNo, sequence: null, visitId: null, kind: 'DEPOT_DEPART', source: 'PHONE_MANUAL', at: new Date(), receivedAt: new Date(), ...over,
+    });
+    tables.stopEvent = [tap('e1', 1), tap('e2', 1), tap('e3', 2), tap('e4', 1, { kind: 'BACK_AT_DEPOT' }), tap('e5', 1, { truckId: 'T9' }), tap('e6', 1, { depotId: 'D2' })];
+    await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('PLANNED');
+    expect(tables.stopEvent.map((e) => e.id).sort()).toEqual(['e3', 'e4', 'e5', 'e6']);
+    expect(tables.auditLog.find((a) => a.action === 'LOAD_PLANNED')!.afterJson).toMatchObject({ status: 'PLANNED', leavingTapsRemoved: 2 });
+    // Locked again: nothing to remove, nothing said.
+    await updateLoad(T, 'P', 'L1', { status: 'LOCKED' }, user, allow);
+    expect(tables.stopEvent).toHaveLength(4);
+    expect(tables.auditLog.find((a) => a.action === 'LOAD_LOCKED')!.afterJson).not.toHaveProperty('leavingTapsRemoved');
+  });
+});
+
 describe("load changes and the owner's location rule (audit PR A5, second review)", () => {
   // The customer of O1 (on LOCKED L1) and O2 (on PLANNED L2), as it is NOW: the gate reads it by id.
   const customerNow = (over: Record<string, unknown>) => {

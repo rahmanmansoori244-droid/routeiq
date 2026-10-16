@@ -126,8 +126,8 @@ export interface DriverResults {
   /** Back at depot per load key (`<depotId>:<loadNo>`, stop-key.ts) (ISO time). */
   back: Record<string, string>;
   /**
-   * Leaving for next load per load key: the time the truck left the depot WITH that load (ISO). Absent in
-   * an answer of a server from before 16 Oct 2026.
+   * Leaving for next load per load key: the time the truck left the depot WITH that load (ISO; the latest
+   * tap). Absent in an answer of a server from before 16 Oct 2026.
    */
   left?: Record<string, string>;
 }
@@ -206,7 +206,8 @@ export interface ManifestLoad {
   backAtDepotAt: string | null;
   /**
    * When the driver tapped "Leaving for next load" for THIS load (the truck left the depot with it, after
-   * Back at depot of the trip before); null = not yet. Absent on a manifest kept on the phone from before.
+   * Back at depot of the trip before; the latest tap: a tap too early is corrected by tapping again);
+   * null = not yet. Absent on a manifest kept on the phone from before.
    */
   leftDepotAt?: string | null;
   stops: ManifestStop[];
@@ -228,7 +229,19 @@ export interface DriverManifest {
    */
   helpers?: string[];
   depot: { code: string; name: string; lat: number; lng: number };
-  settings: { radiusM: number; photoRequired: boolean; maxPhotos: 3; locationRetentionDays: number; photoRetentionDays: number; dispatcherPhone: string | null };
+  settings: {
+    radiusM: number;
+    photoRequired: boolean;
+    maxPhotos: 3;
+    locationRetentionDays: number;
+    photoRetentionDays: number;
+    dispatcherPhone: string | null;
+    /**
+     * "Leaving for next load" is offered (the company has the operations alerts and rule R2 on:
+     * manifest.ts leaveTapOffered). Absent on a manifest kept on the phone from before: not offered.
+     */
+    leaveTap?: boolean;
+  };
   /** Set when a signed-in RouteIQ user opened the page: results are then recorded as the office. */
   office: { userName: string } | null;
   loads: ManifestLoad[];

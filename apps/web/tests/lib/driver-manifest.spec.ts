@@ -16,7 +16,7 @@ vi.mock('@/lib/tenant', async () => {
   return { tenantDb: () => m.fakePrisma };
 });
 
-import { _clearManifestMemo, driverManifest, mergeResults, navUrl, projectManifest, type ManifestInput } from '@/lib/driver-link/manifest';
+import { _clearManifestMemo, driverManifest, leaveTapOffered, mergeResults, navUrl, projectManifest, type ManifestInput } from '@/lib/driver-link/manifest';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { plannedStopOf } from '@/lib/delivery/planned-stop';
 import { fakePrisma } from './fake-plan-db';
@@ -234,6 +234,17 @@ describe('getPlanDetail: the additive stop fields (orderLines, plannedHours, pro
     expect(m.loads.flatMap((l) => l.stops).map((s) => [s.customerCode, s.customerPhone, s.customerTel])).toEqual([['ACME', '9123 4567', 'tel:+96891234567']]);
     expect(JSON.stringify(m)).not.toMatch(/2456 ?7890|Other Shop/);
     expect((await read('T6')).loads[0]!.stops[0]).toMatchObject({ customerCode: 'OTHER', customerPhone: '2456 7890', customerTel: 'tel:+96824567890' });
+    // Operations alerts off (the default): "Leaving for next load" is not offered (second review of 16 Oct 2026, finding 1).
+    expect(m.settings.leaveTap).toBe(false);
+    Object.assign(tables.tenantConfig[0]!, { alertsEnabled: true, alertLoadingOverMin: 40 });
+    expect((await read('T5')).settings.leaveTap).toBe(true);
+  });
+
+  it('"Leaving for next load" is offered only while the alerts are on with rule R2 on', () => {
+    expect(leaveTapOffered(null)).toBe(false);
+    expect(leaveTapOffered({ alertsEnabled: false, alertLoadingOverMin: 40 })).toBe(false);
+    expect(leaveTapOffered({ alertsEnabled: true, alertLoadingOverMin: null })).toBe(false);
+    expect(leaveTapOffered({ alertsEnabled: true, alertLoadingOverMin: 40 })).toBe(true);
   });
 
   it('Part 2: the planned stop of the driver API has exactly the manifest\'s order lines (whole and split), so the two paths cannot drift', async () => {

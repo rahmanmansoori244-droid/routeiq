@@ -16,8 +16,9 @@
  *     for the same rule and subject.
  *  5. R2 from the driver's taps (owner decision 16 Oct 2026): T05 L1 Back at depot 09:50 through the
  *     driver action path; at 10:35 the sweep raises LOADING_OVER live on T05 L2 (still Loading); the
- *     driver's "Leaving for next load" at 10:40 is stored once (StopEvent DEPOT_DEPART, audited; a retry
- *     and a second tap store nothing) and the next sweep closes the row with the final minutes.
+ *     driver's "Leaving for next load" at 10:40 is stored (StopEvent DEPOT_DEPART, audited; a retry of
+ *     the same key stores nothing, a second tap at 10:41 is stored too: the latest tap counts, second
+ *     review of 16 Oct 2026) and the next sweep closes the row with the final minutes.
  * Invented names and codes.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -64,11 +65,13 @@ async function seed(c: Co, alertsOn: boolean) {
   const o2 = await order(c200, 3);
   const o3 = await order(c200, 3);
   const o4 = await order(c200, 3);
+  const o5 = await order(c200, 3);
   c.runId = (await prisma.runPlan.create({ data: { tenantId, depotId, runDate: day, status: 'READY', createdById: c.userId, reconciliationJson: { ok: true } } })).id;
   const load = async (truck: string, status: 'DISPATCHED' | 'LOCKED' | 'LOADING', departMin: number, changed: string, loadNo = 1) =>
     (
       await prisma.planLoad.create({
-        data: { tenantId, runId: c.runId, truckId: c.trucks[truck]!, loadNo, status, departMin, returnMin: 720, distanceKm: 20, durationMin: 200, cases: 20, weightKg: 200, utilizationPct: 5, driverId, statusChangedAt: at(changed) },
+        // Planned in the morning of the day (rule R2 counts a trip planned after Back at depot from then).
+        data: { tenantId, runId: c.runId, truckId: c.trucks[truck]!, loadNo, status, departMin, returnMin: 720, distanceKm: 20, durationMin: 200, cases: 20, weightKg: 200, utilizationPct: 5, driverId, statusChangedAt: at(changed), createdAt: at('04:00') },
       })
     ).id;
   c.loads.T05 = await load('T05', 'DISPATCHED', 450, '07:30');
@@ -83,6 +86,7 @@ async function seed(c: Co, alertsOn: boolean) {
   await ra(c.loads.T05!, 'T05', o2, 2, 540);
   await ra(c.loads.T07!, 'T07', o3, 1, 480);
   await ra(c.loads.T09!, 'T09', o4, 1, 520);
+  await ra(c.loads.T05L2!, 'T05', o5, 1, 800, 2);
   // T05: the driver page open; stop 1 Not delivered by the driver at 08:20.
   await prisma.driverLink.create({
     data: { tenantId, truckId: c.trucks.T05!, deliveryDate: day, salt: 'salt', keyId: 'k1', tokenHash: `hash-${c.slug}`, expiresAt: at('23:59'), lastSeenAt: at('07:35') },
@@ -178,7 +182,7 @@ describe('operations alerts on the real database', () => {
     await expect(prisma.tenantConfig.update({ where: { tenantId: A.tenantId }, data: { alertQuietFromMin: 600, alertQuietToMin: null } })).rejects.toThrow();
   });
 
-  it('5. R2 from the driver taps: Back at depot of L1, the sweep raises it live on L2, the Leaving for next load tap is stored once and closes it', async () => {
+  it('5. R2 from the driver taps: Back at depot of L1, the sweep raises it live on L2, the Leaving for next load taps are stored (the latest counts) and close it', async () => {
     const cfg = await cfgOf(A);
     // R2 is on at 40 for a company that never changed it (the column default).
     expect(cfg.alertLoadingOverMin).toBe(40);
@@ -206,25 +210,26 @@ describe('operations alerts on the real database', () => {
     expect(live).toMatchObject({ truckCode: 'T05', loadNo: 2, tier: 1, severity: 'WARN', value: 45, threshold: 40, resolvedAt: null, occurredAt: at('10:30') });
     expect(live.text).toBe('T05 L2: at the depot for 45 min since Back at depot of L1 at 09:50, not left with L2 yet (limit 40 min). Planned departure 13:00, load is Loading.');
 
-    // The driver taps Leaving for next load at 10:40; a retry of the same key and a second tap store nothing.
+    // The driver taps Leaving for next load at 10:40; a retry of the same key stores nothing, a second tap is stored.
     const leave = { key: '0b6e2f7c-8d4a-4f3b-b1c2-9e8d7a6b5c40', type: 'DEPOT_DEPART', load: 2, depot: depotId, at: at('10:40').toISOString(), pos: { ...depot, at: at('10:40').toISOString() } };
     const r2 = await recordDriverActions(ctx(at('10:40')), { clientNow: at('10:40').toISOString(), actions: [leave] });
     expect(r2.results).toEqual([{ key: leave.key, status: 'ok' }]);
     expect(r2.left).toEqual({ [`${depotId}:2`]: at('10:40').toISOString() });
     const again = { ...leave, key: 'c3a9e1d2-4b5f-4a6e-8c7d-1f2e3d4c5b69', at: at('10:41').toISOString() };
     const r3 = await recordDriverActions(ctx(at('10:41')), { clientNow: at('10:41').toISOString(), actions: [leave, again] });
-    expect(r3.results).toEqual([{ key: leave.key, status: 'duplicate' }, { key: again.key, status: 'duplicate' }]);
-    const departs = await prisma.stopEvent.findMany({ where: { tenantId: A.tenantId, kind: 'DEPOT_DEPART' } });
-    expect(departs).toHaveLength(1);
+    expect(r3.results).toEqual([{ key: leave.key, status: 'duplicate' }, { key: again.key, status: 'ok' }]);
+    expect(r3.left).toEqual({ [`${depotId}:2`]: at('10:41').toISOString() });
+    const departs = await prisma.stopEvent.findMany({ where: { tenantId: A.tenantId, kind: 'DEPOT_DEPART' }, orderBy: { at: 'asc' } });
+    expect(departs).toHaveLength(2);
     expect(departs[0]).toMatchObject({ truckId: A.trucks.T05, loadNo: 2, sequence: null, visitId: null, source: 'PHONE_MANUAL', distanceM: 0, at: at('10:40'), idempotencyKey: `dl:${leave.key}` });
     const audit = await prisma.auditLog.findMany({ where: { tenantId: A.tenantId, action: 'DRIVER_DEPOT_DEPART' } });
-    expect(audit).toHaveLength(1);
+    expect(audit).toHaveLength(2);
     expect(audit[0]!.afterJson).toMatchObject({ loadNo: 2, previousLoadNo: 1, status: 'LOADING' });
 
     // The next sweep closes the row with the final words.
     const s2 = await sweepTenant(cfg, at('10:42'));
     expect(s2!.resolved.ENDED ?? 0).toBeGreaterThanOrEqual(1);
     const closed = await prisma.opsAlert.findUniqueOrThrow({ where: { id: live.id } });
-    expect(closed).toMatchObject({ resolvedReason: 'ENDED', text: 'T05 L2: 50 min at the depot between L1 and L2 (back 09:50, left 10:40, by Leaving tapped), limit 40 min.' });
+    expect(closed).toMatchObject({ resolvedReason: 'ENDED', text: 'T05 L2: 51 min at the depot between L1 and L2 (back 09:50, left 10:41, by Leaving tapped), limit 40 min.' });
   });
 });

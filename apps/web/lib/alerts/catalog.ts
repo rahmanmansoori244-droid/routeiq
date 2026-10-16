@@ -469,8 +469,8 @@ export const ALERT_SWEEP_STALE_MS = 10 * 60_000;
 export const ALERT_HYSTERESIS_MIN = 10;
 /** A value or text change of the same tier is written only when the value moved this much (or the text changed). */
 export const ALERT_VALUE_STEP = 5;
-/** LOADING_OVER stops following a truck still at the depot this long after Back at depot (no tap, Dispatch or arrival). */
-export const TURNAROUND_MAX_MIN = 4 * 60;
+/** LOADING_OVER stops following a truck still at the depot this long after Back at depot (no tap, Dispatch or stop reached). */
+export { TURNAROUND_MAX_MIN } from '../delivery/turnaround';
 /** DEPART_LATE expires this long after the planned departure (the load is then history; R3 follows the truck). */
 export const DEPART_LATE_EXPIRE_MIN = 4 * 60;
 /** DEPART_LATE found only after the Dispatch press, within this long of it: one history row (no toast, no e-mail). */

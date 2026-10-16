@@ -16,11 +16,12 @@
  * read from the driver's own results, so a stop the office corrected stays listed. And (owner decision of
  * 16 Oct 2026, alert rule R2) the turnaround at the depot before each trip after the truck's first: Back
  * at depot of the trip before to the driver's Leaving for next load (or the Dispatch press / the first
- * arrival when he did not tap; lib/delivery/turnaround.ts), live while the truck is still at the depot.
+ * stop reached less the planned drive when he did not tap; lib/delivery/turnaround.ts), live while the
+ * truck is still at the depot; only while the company has the alerts and rule R2 on.
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
-import { fmtHhmm, isoOf, localDateIso, localMinutes } from '../dispatch/time';
+import { isoOf, localDateIso, localMinutes } from '../dispatch/time';
 import { readDevices } from '../driver-link/service';
 import { deliveryKpis, inOutcomeScope, type DeliveryKpis } from './kpis';
 import { cameraExceptionOf, cameraLinkAlerts, noPhotoKind, sortCameraExceptions, truckDayKey, type CameraException, type CameraLinkAlert } from './camera-exceptions';
@@ -30,8 +31,9 @@ import {
   cameraCountsByTruckDay,
   keyOfVisit,
   kpiVisitOf,
-  leftDepot,
+  leftDepotTaps,
   liveRunsInRange,
+  loadOrigins,
   loadIsBack,
   loadsOfRuns,
   outcomeSettings,
@@ -43,7 +45,8 @@ import {
   type NoResultStop,
   type RoadLoad,
 } from './day-results';
-import { previousTrip, turnaroundLine, turnaroundOf, type LeftHow } from './turnaround';
+import { firstSignOf, plannedDriveOf, previousTrip, turnaroundLine, turnaroundOf, type LeftHow, type NotMeasured, type SignVisit } from './turnaround';
+import { clockText } from '../alerts/text';
 import { actualMinutes, arrivalNote, departureNote, noPhotoText, OUTCOME_LABEL, reasonText, sourceWord } from './office-text';
 import { copyConflicts } from './carry-conflicts';
 import { readVisitLines, type VisitLine } from './visit';
@@ -138,7 +141,9 @@ export interface LoadTurnaround {
   tapLate: boolean;
   minutes: number;
   final: boolean;
-  /** "back 11:20, left 12:08, 48 min" / "back 11:20, not left yet, 25 min so far" (company time). */
+  /** BACK_LATE: Back at depot of the trip before was tapped after this trip had started; NO_LEAVE: no leave recorded (Completed). */
+  notMeasured: NotMeasured | null;
+  /** "back 11:20, left 12:08, 48 min" / "back 11:20, not left yet, 25 min so far" / "back 11:20, no leave recorded" (company time). */
   line: string;
 }
 
@@ -221,7 +226,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
     visitIds.length
       ? db.deliveryPhoto.findMany({
           where: { tenantId, visitId: { in: visitIds } },
-          select: { id: true, visitId: true, takenAt: true, distanceM: true, positionStatus: true, oldPhoto: true, purgedAt: true },
+          select: { id: true, visitId: true, source: true, takenAt: true, distanceM: true, positionStatus: true, oldPhoto: true, purgedAt: true },
           orderBy: [{ takenAt: 'asc' }],
         })
       : [],
@@ -380,47 +385,86 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
   empty.cameraExceptions = sortCameraExceptions(empty.cameraExceptions);
   empty.cameraAlerts = cameraLinkAlerts(empty.cameraExceptions, cameraCounts);
   // A Back at depot is needed for any turnaround: none tapped at this depot that day, nothing more to read.
-  if (backs.size) empty.turnarounds = await turnaroundsOf(db, tenantId, { id: run.id, depotId: run.depotId, date }, { backs, visits, tz: set.tz, now });
+  // A failure here never takes the delivery results down with it (second review of 16 Oct 2026, M3).
+  if (backs.size) {
+    try {
+      empty.turnarounds = await turnaroundsOf(db, tenantId, { id: run.id, depotId: run.depotId, date }, { backs, visits, photos, stopsBy, tz: set.tz, now, today });
+    } catch (e) {
+      console.error('[delivery] turnaround line not read', (e as Error)?.message ?? e);
+      empty.turnarounds = {};
+    }
+  }
   return empty;
 }
 
 const ALL_STATUSES = ['PLANNED', 'LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED'] as const;
 
+/** A visit as turnaroundsOf reads it. */
+type TurnaroundVisit = { id: string; depotId: string; deliveryDate: Date; truckId: string; loadNo: number } & SignVisit;
+
 /**
  * The turnaround before each load of the version (every status: a trip still Locked or Loading shows the
- * time so far). The trip before is the truck-day's load before it in departure order, the other depots'
- * plans in use included (a trip after one at another depot is not measured, as rule R2 does not).
+ * time so far), read with rule R2's own inputs (lib/delivery/turnaround.ts): the driver's latest Leaving
+ * tap before the truck reached a stop (none on a Planned load), the Dispatch press whatever the status now
+ * and when the trip was planned (loadOrigins), the first sign at a stop (arrival, departure, the phone's
+ * result or photo) and the planned drive to the first stop. The trip before is the truck-day's load before
+ * it in departure order, the other depots' plans in use included (a trip after one at another depot is
+ * not measured, as rule R2 does not). Shown only while the company has the alerts on with rule R2 on: the
+ * driver's Leaving button is offered then only (lib/driver-link/manifest.ts), so merging changes nothing
+ * on the screens until the owner turns them on (second review of 16 Oct 2026, M1 and M3). A day that is
+ * over shows "no leave recorded" for a trip that never left, as does a wait over TURNAROUND_MAX_MIN.
  */
 async function turnaroundsOf(
   db: Db,
   tenantId: string,
   run: { id: string; depotId: string; date: string },
-  known: { backs: ReadonlyMap<string, Date>; visits: readonly { depotId: string; deliveryDate: Date; truckId: string; loadNo: number; arrivedAt: Date | null }[]; tz: string; now: Date },
+  known: {
+    backs: ReadonlyMap<string, Date>;
+    visits: readonly TurnaroundVisit[];
+    photos: readonly { visitId: string; source: string; takenAt: Date; oldPhoto: boolean }[];
+    stopsBy: ReadonlyMap<string, readonly { sequence: number; etaMin: number | null }[]>;
+    tz: string;
+    now: Date;
+    today: string;
+  },
 ): Promise<Record<string, LoadTurnaround>> {
   const out: Record<string, LoadTurnaround> = {};
+  const cfg = await db.tenantConfig.findFirst({ where: { tenantId }, select: { alertsEnabled: true, alertLoadingOverMin: true } });
+  if (!cfg?.alertsEnabled || cfg.alertLoadingOverMin === null || cfg.alertLoadingOverMin === undefined) return out;
   const mine = await loadsOfRuns(db, tenantId, [run], { statuses: ALL_STATUSES });
   if (mine.length < 2) return out;
   const trucks = new Set(mine.map((l) => l.truckId));
   const others = (await liveRunsInRange(db, tenantId, run.date, run.date)).filter((r) => r.depotId !== run.depotId);
   const elsewhere = others.length ? (await loadsOfRuns(db, tenantId, others, { statuses: ALL_STATUSES })).filter((l) => trucks.has(l.truckId)) : [];
-  const lefts = await leftDepot(db, tenantId, run.date, run.date, run.depotId);
-  const firstArrival = new Map<string, Date>();
-  for (const v of known.visits) {
-    if (!v.arrivedAt) continue;
-    const k = backKey({ depotId: v.depotId, date: isoOf(v.deliveryDate), truckId: v.truckId, loadNo: v.loadNo });
-    const cur = firstArrival.get(k);
-    if (!cur || v.arrivedAt < cur) firstArrival.set(k, v.arrivedAt);
-  }
-  const clock = (d: Date) => fmtHhmm(localMinutes(d, known.tz));
   const dayOf = (l: RoadLoad) => [...mine, ...elsewhere].filter((x) => x.truckId === l.truckId);
-  for (const l of mine) {
-    const prev = previousTrip(dayOf(l), l.id);
-    if (!prev || prev.depotId !== l.depotId) continue;
+  const pairs = mine
+    .map((l) => ({ l, prev: previousTrip(dayOf(l), l.id) }))
+    .filter((p): p is { l: RoadLoad; prev: RoadLoad } => !!p.prev && p.prev.depotId === p.l.depotId && known.backs.has(backKey(p.prev)));
+  if (!pairs.length) return out;
+  const [lefts, origins] = await Promise.all([leftDepotTaps(db, tenantId, run.date, run.date, run.depotId), loadOrigins(db, tenantId, pairs.map((p) => p.l.id))]);
+  const visitsOf = new Map<string, TurnaroundVisit[]>();
+  for (const v of known.visits) {
+    const k = backKey({ depotId: v.depotId, date: isoOf(v.deliveryDate), truckId: v.truckId, loadNo: v.loadNo });
+    visitsOf.set(k, [...(visitsOf.get(k) ?? []), v]);
+  }
+  const phoneTimes = new Map<string, Date[]>();
+  for (const p of known.photos) {
+    if ((p.source !== 'PHONE_AUTO' && p.source !== 'PHONE_MANUAL') || p.oldPhoto) continue;
+    phoneTimes.set(p.visitId, [...(phoneTimes.get(p.visitId) ?? []), p.takenAt]);
+  }
+  const clock = (d: Date) => clockText(d, run.date, known.tz);
+  const dayOver = run.date < known.today;
+  for (const { l, prev } of pairs) {
+    const vs = visitsOf.get(backKey(l)) ?? [];
+    const o = origins.get(l.id);
     const t = turnaroundOf({
       backAt: known.backs.get(backKey(prev)) ?? null,
-      leftTapAt: lefts.get(backKey(l)) ?? null,
-      dispatchAt: l.status === 'DISPATCHED' ? l.statusChangedAt : null,
-      firstArrivalAt: firstArrival.get(backKey(l)) ?? null,
+      leftTaps: l.status === 'PLANNED' ? [] : (lefts.get(backKey(l)) ?? []),
+      dispatchAt: o?.dispatchedAt ?? (l.status === 'DISPATCHED' ? l.statusChangedAt : null),
+      firstSignAt: firstSignOf(vs, vs.flatMap((v) => phoneTimes.get(v.id) ?? [])),
+      plannedDriveMin: plannedDriveOf(l.departMin, known.stopsBy.get(l.id) ?? []),
+      existedAt: o?.firstAt ?? null,
+      completed: l.status === 'COMPLETED',
       now: known.now,
     });
     if (!t) continue;
@@ -432,7 +476,8 @@ async function turnaroundsOf(
       tapLate: t.tapLate,
       minutes: Math.round(t.minutes),
       final: t.final,
-      line: turnaroundLine(t, clock),
+      notMeasured: t.notMeasured,
+      line: turnaroundLine(t, clock, { dayOver }),
     };
   }
   return out;
