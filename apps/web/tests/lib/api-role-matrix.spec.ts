@@ -118,6 +118,12 @@ import { describe, expect, it } from 'vitest';
 import { apiRoleMatrix } from './api-role-matrix';
 
 const EXPECTED: Record<string, string> = {
+  // Operations alerts (owner request 16 Oct 2026): every role reads them; the dispatcher and up acknowledge;
+  // the test e-mail is the company admin's (Settings > Operations alerts).
+  'GET /api/alerts': 'ANY',
+  'POST /api/alerts/ack': 'PLANNER',
+  'GET /api/alerts/summary': 'ANY',
+  'POST /api/alerts/test-email': 'TENANT_ADMIN',
   'GET /api/audit': 'TENANT_ADMIN',
   'GET /api/auth/[...nextauth]': 'PUBLIC',
   'POST /api/auth/[...nextauth]': 'PUBLIC',

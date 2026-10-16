@@ -95,6 +95,8 @@ export const AUDIT_ACTIONS = {
   HIRE_SUGGESTION_USED: { label: 'Hire suggestion used ("Use this plan")' },
   HIRED_TRUCKS_ADDED: { label: 'One-day hired trucks added' },
   HIRED_TRUCK_CHANGED: { label: 'One-day hired truck: plate or driver set' },
+  // Operations alerts (owner request 16 Oct 2026): one row per acknowledgement (raising an alert is not audited).
+  ALERTS_ACKNOWLEDGED: { label: 'Operations alerts acknowledged' },
   ONE_DAY_TRUCKS_RETIRED: { label: 'One-day hired trucks retired after their day' },
   BASELINE_UPLOADED: { label: 'Baseline uploaded (legacy run)' },
   ROUTE_MANUALLY_CHANGED: { label: 'Route changed by hand (legacy run)' },
@@ -137,6 +139,7 @@ export const AUDIT_ENTITIES = {
   StopVisit: { label: 'Delivery stop' },
   HireOption: { label: 'Truck to hire (hire option)' },
   HireSuggestion: { label: 'Hire suggestion' },
+  OpsAlert: { label: 'Operations alert' },
   RunJob: { label: 'Optimization job', legacy: true },
   DriverShift: { label: 'Driver shift (retired app)', legacy: true },
 } as const satisfies Record<string, AuditActionInfo>;
