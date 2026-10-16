@@ -256,9 +256,15 @@ describe('Part 2: results merged into the manifest', () => {
     const merged = mergeResults(m, {
       stops: { [key]: { state: 'DONE', arrivedAt: null, arrivalObserved: true, departedAt: null, minutes: null, outcome: 'DELIVERED', reason: null, note: null, outcomeAt: null, by: 'DRIVER', casesDelivered: 1, lines: null, photoIds: [], proofPhotos: 0, noPhotoReason: null, late: false, editable: true, carriedTo: null } },
       back: { [first.key]: '2026-10-05T12:00:00.000Z' },
+      left: { [first.key]: '2026-10-05T12:40:00.000Z' },
     });
     expect(merged.loads[0]!.stops[0]!.result).toMatchObject({ outcome: 'DELIVERED' });
     expect(merged.loads[0]!.stops[1]?.result ?? null).toBeNull();
     expect(merged.loads[0]!.backAtDepotAt).toBe('2026-10-05T12:00:00.000Z');
+    // Leaving for next load (16 Oct 2026): the time the truck left the depot WITH this load.
+    expect(merged.loads[0]!.leftDepotAt).toBe('2026-10-05T12:40:00.000Z');
+    expect(m.loads.every((l) => l.leftDepotAt === null)).toBe(true);
+    // An answer of a server from before it (no `left`): none.
+    expect(mergeResults(m, { stops: {}, back: {} }).loads[0]!.leftDepotAt).toBeNull();
   });
 });

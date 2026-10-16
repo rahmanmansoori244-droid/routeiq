@@ -7,6 +7,7 @@
  * - an unsent result shows with "Saved on phone - waiting to send" and ends the stop for the tracker;
  * - an unsent arrival shows "Arrived 10:02" and the running timer;
  * - an unsent Back at depot closes the trip on the phone (the tracker moves to the next trip);
+ * - an unsent Leaving for next load shows the trip as left (the button is not offered again);
  * - a server result that differs from what this phone sent, with nothing left to send for the stop,
  *   shows "Changed by office / another phone" instead of flipping silently.
  */
@@ -46,7 +47,16 @@ export interface StopView {
 }
 
 export type OverlayStop = ManifestStop & { view: StopView };
-export type OverlayLoad = Omit<ManifestLoad, 'stops'> & { stops: OverlayStop[]; back: boolean; backAt: number | null; backPending: boolean };
+export type OverlayLoad = Omit<ManifestLoad, 'stops'> & {
+  stops: OverlayStop[];
+  back: boolean;
+  backAt: number | null;
+  backPending: boolean;
+  /** "Leaving for next load" was tapped for this load (the truck left the depot with it): on the server or still on the phone. */
+  left: boolean;
+  leftAt: number | null;
+  leftPending: boolean;
+};
 
 const ms = (iso: string | null | undefined): number | null => {
   if (!iso) return null;
@@ -117,11 +127,18 @@ export function applyQueued(m: Pick<DriverManifest, 'loads'>, items: readonly Qu
     const backItem = actions.find((i) => (i.body as DriverAction).type === 'BACK_AT_DEPOT' && manifestLoadKey(m.loads, i) === l.key);
     const serverBack = ms(l.backAtDepotAt);
     const backAt = serverBack ?? (backItem ? ms((backItem.body as DriverAction).at) : null);
+    // Held too (a load still Planned keeps it on the phone until it is dispatched): it was tapped.
+    const leftItem = items.find((i) => i.kind === 'action' && (i.body as DriverAction).type === 'DEPOT_DEPART' && manifestLoadKey(m.loads, i) === l.key);
+    const serverLeft = ms(l.leftDepotAt);
+    const leftAt = serverLeft ?? (leftItem ? ms((leftItem.body as DriverAction).at) : null);
     return {
       ...l,
       back: backAt !== null,
       backAt,
       backPending: serverBack === null && !!backItem,
+      left: leftAt !== null,
+      leftAt,
+      leftPending: serverLeft === null && !!leftItem,
       stops: l.stops.map((s) => ({ ...s, view: stopView(s, l, actions.filter((i) => stopOf.get(i) === s.key), live.filter((i) => i.kind === 'photo' && stopOf.get(i) === s.key).length, sent[s.key]) })),
     };
   });
@@ -175,6 +192,25 @@ function stopView(s: ManifestStop, l: ManifestLoad, mine: QueueItem[], localPhot
   }
   if (!mine.length && sentByPhone && r && (r.outcome ?? null) !== sentByPhone.outcome) base.changedByOffice = true;
   return base;
+}
+
+/**
+ * "Leaving for next load" (owner decision 16 Oct 2026, pure): offered after Back at depot of a trip when
+ * the truck has a later trip that day - never after the last one - until it is tapped. The latest trip
+ * that is back decides: its next trip (departure order) must not be left, back or completed yet, have no
+ * arrival or result at a stop yet (the truck is already out), and name its depot (the action needs it).
+ * `from`: the trip the truck came back from; `to`: the one it leaves with.
+ */
+export function leaveOffer(loads: readonly OverlayLoad[]): { from: OverlayLoad; to: OverlayLoad } | null {
+  for (let i = loads.length - 2; i >= 0; i--) {
+    const from = loads[i]!;
+    if (!from.back) continue;
+    const to = loads[i + 1]!;
+    if (to.left || to.back || to.status === 'COMPLETED' || !to.depotId) return null;
+    if (to.stops.some((s) => s.view.arrivedAt !== null || s.view.doneAt !== null)) return null;
+    return { from, to };
+  }
+  return null;
 }
 
 /** The stop in progress for restoreTracker: a server ARRIVED stop or an unsent arrival without a result. */

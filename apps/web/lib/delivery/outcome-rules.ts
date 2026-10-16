@@ -172,7 +172,7 @@ export function proofPhotoKeys(events: readonly { kind: string; source: string; 
   return keys;
 }
 
-export type WriteKind = 'ARRIVE' | 'DEPART' | 'OUTCOME' | 'BACK_AT_DEPOT' | 'PHOTO';
+export type WriteKind = 'ARRIVE' | 'DEPART' | 'OUTCOME' | 'BACK_AT_DEPOT' | 'PHOTO' | 'DEPOT_DEPART';
 
 export type WriteDecision = { ok: true; late: boolean } | { ok: false; code: RefusalCode; transient: boolean };
 
@@ -187,6 +187,11 @@ export type WriteDecision = { ok: true; late: boolean } | { ok: false; code: Ref
  *   result at completion; ARRIVE, DEPART, PHOTO and BACK_AT_DEPOT add timing or proof only; all late;
  * - LOCKED / LOADING: ARRIVE and DEPART are kept on the phone (transient LOAD_NOT_DISPATCHED); the rest refused;
  * - PLANNED: refused.
+ *
+ * DEPOT_DEPART ("Leaving for next load", owner decision 16 Oct 2026) is written on the load the truck
+ * leaves with, which the dispatcher may not have dispatched yet: accepted on a LOCKED or LOADING load as
+ * on a DISPATCHED one (late after the link's expiry); on a PLANNED load (it may still change) it is kept
+ * on the phone (transient LOAD_NOT_DISPATCHED) until the load is dispatched; COMPLETED as above.
  */
 export function writeRule(a: {
   kind: WriteKind;
@@ -200,7 +205,8 @@ export function writeRule(a: {
   expiresAt: Date;
 }): WriteDecision {
   const s = a.loadStatus;
-  if (s === 'PLANNED') return { ok: false, code: 'LOAD_NOT_DISPATCHED', transient: false };
+  if (a.kind === 'DEPOT_DEPART' && (s === 'LOCKED' || s === 'LOADING')) return { ok: true, late: !a.office && a.receivedAt.getTime() > a.expiresAt.getTime() };
+  if (s === 'PLANNED') return { ok: false, code: 'LOAD_NOT_DISPATCHED', transient: a.kind === 'DEPOT_DEPART' };
   if (s === 'LOCKED' || s === 'LOADING') {
     return { ok: false, code: 'LOAD_NOT_DISPATCHED', transient: a.kind === 'ARRIVE' || a.kind === 'DEPART' };
   }

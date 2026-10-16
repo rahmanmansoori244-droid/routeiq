@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DriverAction, DriverManifest, ManifestStop, StopResult } from '@/lib/driver-link/manifest-types';
-import { applyQueued, stopInProgress, unsentList } from '@/lib/driver-page/overlay';
+import { applyQueued, leaveOffer, stopInProgress, unsentList } from '@/lib/driver-page/overlay';
 import { actionItem, newKey, type QueueItem } from '@/lib/driver-page/queue';
 import { Host } from './hook-host';
 
@@ -280,5 +280,80 @@ describe('the result sheet (review of 4 Oct 2026)', () => {
     const [q] = applyQueued(manifest([stop(1, 'ACME')]), [queued]);
     expect(proofPhotos(q!.stops[0]!)).toBe(0);
     expect(canSave(q!.stops[0]!, draft({ outcome: 'DELIVERED', reason: null }), true)).toBe(false);
+  });
+});
+
+describe('Leaving for next load (owner decision 16 Oct 2026: R2 is measured from the driver taps)', () => {
+  const trip = (loadNo: number, over: Partial<DriverManifest['loads'][number]> = {}): DriverManifest['loads'][number] => ({
+    key: `D1:${loadNo}`,
+    depotId: 'D1',
+    loadNo,
+    trips: 3,
+    status: 'DISPATCHED',
+    actionable: true,
+    departMin: 400 + loadNo * 200,
+    returnMin: 560 + loadNo * 200,
+    driverName: 'Salim',
+    cases: 40,
+    backAtDepotAt: null,
+    leftDepotAt: null,
+    stops: [{ ...stop(1, `SHOP${loadNo}`), key: `D1:${loadNo}:1` }],
+    ...over,
+  });
+  const at = (min: number) => new Date(T0 + min * 60_000).toISOString();
+  const day = (...loads: DriverManifest['loads']) => ({ loads });
+  const offerOf = (m: Pick<DriverManifest, 'loads'>, items: QueueItem[] = []) => {
+    const o = leaveOffer(applyQueued(m, items));
+    return o ? { from: o.from.loadNo, to: o.to.loadNo } : null;
+  };
+
+  it('is offered after Back at depot when the truck has a later trip that day, for that next trip', () => {
+    // Trip 1 out: nothing to offer yet.
+    expect(offerOf(day(trip(1), trip(2, { status: 'LOCKED', actionable: false })))).toBeNull();
+    // Trip 1 back: leave with trip 2 (not dispatched yet: the dispatcher may press Dispatch later).
+    expect(offerOf(day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300) }), trip(2, { status: 'LOCKED', actionable: false })))).toEqual({ from: 1, to: 2 });
+    // A Back at depot still on the phone counts too.
+    const back = item({ key: newKey(), type: 'BACK_AT_DEPOT', load: 1, depot: 'D1', at: at(300) });
+    expect(offerOf(day(trip(1), trip(2, { status: 'LOADING' })), [back])).toEqual({ from: 1, to: 2 });
+  });
+
+  it('never after the last trip, and never on a one-trip day', () => {
+    expect(offerOf(day(trip(1, { trips: 1, backAtDepotAt: at(300) })))).toBeNull();
+    expect(offerOf(day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300), leftDepotAt: null }), trip(2, { leftDepotAt: at(330), backAtDepotAt: at(520) })))).toBeNull();
+  });
+
+  it('one tap per trip: gone once tapped (on the server, still on the phone, or held for a Planned trip); not when the truck is already at a stop of it', () => {
+    const backDay = (over: Partial<DriverManifest['loads'][number]> = {}) => day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300) }), trip(2, over));
+    expect(offerOf(backDay({ leftDepotAt: at(330) }))).toBeNull();
+    const leave = item({ key: newKey(), type: 'DEPOT_DEPART', load: 2, depot: 'D1', at: at(330) });
+    expect(offerOf(backDay(), [leave])).toBeNull();
+    const held = item({ key: newKey(), type: 'DEPOT_DEPART', load: 2, depot: 'D1', at: at(330) }, T0, true);
+    expect(offerOf(backDay({ status: 'PLANNED', actionable: false }), [held])).toBeNull();
+    // The driver forgot to tap and is already at trip 2's first stop: the arrival stands in for it.
+    const arrived = item({ key: newKey(), type: 'ARRIVE', stop: 'D1:2:1', at: at(360), mode: 'MANUAL' });
+    expect(offerOf(backDay(), [arrived])).toBeNull();
+    expect(offerOf(backDay({ status: 'COMPLETED' }))).toBeNull();
+  });
+
+  it('the latest trip back decides: after trip 2 is back, trip 3 is offered', () => {
+    const m = day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300) }), trip(2, { status: 'COMPLETED', leftDepotAt: at(330), backAtDepotAt: at(520) }), trip(3, { status: 'LOCKED', actionable: false }));
+    expect(offerOf(m)).toEqual({ from: 2, to: 3 });
+  });
+
+  it('the overlay shows the trip as left: from the server, or a tap still on the phone (pending)', () => {
+    const leave = item({ key: newKey(), type: 'DEPOT_DEPART', load: 2, depot: 'D1', at: at(330) });
+    const [, queued] = applyQueued(day(trip(1, { backAtDepotAt: at(300) }), trip(2)), [leave]);
+    expect(queued).toMatchObject({ left: true, leftAt: T0 + 330 * 60_000, leftPending: true });
+    const [, server] = applyQueued(day(trip(1, { backAtDepotAt: at(300) }), trip(2, { leftDepotAt: at(331) })), []);
+    expect(server).toMatchObject({ left: true, leftAt: T0 + 331 * 60_000, leftPending: false });
+    // A manifest kept on the phone from before (no leftDepotAt): not left.
+    const old = trip(2);
+    delete (old as Partial<typeof old>).leftDepotAt;
+    expect(applyQueued(day(old), [])[0]).toMatchObject({ left: false, leftAt: null });
+  });
+
+  it('a queued tap is a load-level item: no stop, the load it leaves with as its key', () => {
+    const leave = item({ key: newKey(), type: 'DEPOT_DEPART', load: 2, depot: 'D1', at: at(330) });
+    expect(leave).toMatchObject({ kind: 'action', stopKey: null, loadNo: 2, loadKey: 'D1:2', state: 'ready' });
   });
 });

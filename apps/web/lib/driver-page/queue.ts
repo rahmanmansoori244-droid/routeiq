@@ -45,7 +45,7 @@ export interface QueueItem {
   createdAt: number;
   attempts: number;
   nextAt: number;
-  /** The stop (`<depotId>:<loadNo>:<sequence>`, stop-key.ts; `loadNo:sequence` on an item saved before 7 Oct 2026); null for Back at depot. */
+  /** The stop (`<depotId>:<loadNo>:<sequence>`, stop-key.ts; `loadNo:sequence` on an item saved before 7 Oct 2026); null for Back at depot and Leaving for next load. */
   stopKey: string | null;
   loadNo: number;
   /** The load (`<depotId>:<loadNo>`); absent on an item saved before 7 Oct 2026 (itemLoadKey). */
@@ -225,7 +225,7 @@ export function retryAll(batch: readonly QueueItem[], now: number): QueueItem[] 
 export function itemLoadKey(i: Pick<QueueItem, 'loadKey' | 'stopKey' | 'loadNo' | 'body'>): string {
   if (i.loadKey) return i.loadKey;
   const b = i.body as DriverAction;
-  if (b.type === 'BACK_AT_DEPOT') return b.depot ? loadKeyOf(b.depot, b.load) : String(b.load);
+  if (b.type === 'BACK_AT_DEPOT' || b.type === 'DEPOT_DEPART') return b.depot ? loadKeyOf(b.depot, b.load) : String(b.load);
   return i.stopKey ? loadKeyOfStop(i.stopKey) || String(i.loadNo) : String(i.loadNo);
 }
 
@@ -325,10 +325,10 @@ export async function flushQueue(deps: SendDeps, rounds = 20): Promise<FlushResu
       const ans = readSendAnswer(res.status, res.body, res.retryAfter);
       if (!(await handleWhole(deps, ans, actions, out))) break;
       if (ans.kind === 'ok') {
-        const data = ans.data as { results?: DriverActionResult[]; stops?: DriverResults['stops']; back?: DriverResults['back'] };
+        const data = ans.data as { results?: DriverActionResult[]; stops?: DriverResults['stops']; back?: DriverResults['back']; left?: DriverResults['left'] };
         const applied = applyResults(actions, Array.isArray(data.results) ? data.results : [], deps.now());
         if (data.stops) {
-          out.results = { stops: data.stops, back: data.back ?? {} };
+          out.results = { stops: data.stops, back: data.back ?? {}, left: data.left ?? {} };
           await deps.onResults?.(out.results);
         }
         await persist(deps, applied);
@@ -348,10 +348,10 @@ export async function flushQueue(deps: SendDeps, rounds = 20): Promise<FlushResu
       }
       if (!(await handleWhole(deps, ans, [photo], out))) break;
       if (ans.kind === 'ok') {
-        const data = ans.data as { status?: string; code?: string; message?: { en: string; ar: string }; stops?: DriverResults['stops']; back?: DriverResults['back'] };
+        const data = ans.data as { status?: string; code?: string; message?: { en: string; ar: string }; stops?: DriverResults['stops']; back?: DriverResults['back']; left?: DriverResults['left'] };
         const applied = applyResults([photo], [{ key: photo.key, status: (data.status as DriverActionResult['status']) ?? 'error', code: data.code, message: data.message }], deps.now());
         if (data.stops) {
-          out.results = { stops: data.stops, back: data.back ?? {} };
+          out.results = { stops: data.stops, back: data.back ?? {}, left: data.left ?? {} };
           await deps.onResults?.(out.results);
         }
         await persist(deps, applied);
@@ -413,8 +413,9 @@ export function newKey(c: Pick<Crypto, 'getRandomValues'> & { randomUUID?: () =>
 
 /** A queue item for an action. */
 export function actionItem(ns: string, action: DriverAction, now: number, held = false): QueueItem {
-  const stopKey = action.type === 'BACK_AT_DEPOT' ? null : action.stop;
-  const loadNo = action.type === 'BACK_AT_DEPOT' ? action.load : (parseStopKey(action.stop)?.loadNo ?? 0);
+  const loadLevel = action.type === 'BACK_AT_DEPOT' || action.type === 'DEPOT_DEPART';
+  const stopKey = loadLevel ? null : action.stop;
+  const loadNo = loadLevel ? action.load : (parseStopKey(action.stop)?.loadNo ?? 0);
   const item: QueueItem = { key: action.key, ns, kind: 'action', state: held ? 'held' : 'ready', createdAt: now, attempts: 0, nextAt: now, stopKey, loadNo, body: action };
   return { ...item, loadKey: itemLoadKey(item) };
 }

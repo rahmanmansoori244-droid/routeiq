@@ -1326,6 +1326,10 @@ enum StopEventKind {
   PHOTO          // payload: { photoId }
   BACK_AT_DEPOT  // load level: sequence is NULL
   CARRY_CONFLICT // a result change refused because the order was brought forward; ignored by deriveVisit
+  // Load level (sequence NULL), on the load the truck leaves with: the driver's "Leaving for next load"
+  // after Back at depot of his previous trip (owner decision 16 Oct 2026: alert rule R2 measures the
+  // turnaround at the depot from these two taps). At most one per load.
+  DEPOT_DEPART
 }
 
 enum PhotoPositionStatus {
@@ -1338,7 +1342,7 @@ enum PhotoPositionStatus {
 
 enum StopEventSource {
   PHONE_AUTO     // the driver page's geofence (no tap)
-  PHONE_MANUAL   // the driver tapped (I have arrived, a result, a photo, Back at depot)
+  PHONE_MANUAL   // the driver tapped (I have arrived, a result, a photo, Back at depot, Leaving for next load)
   DISPATCHER     // recorded or corrected on the plan screen
   AYUN           // later: Ayun GPS stop events
   SYSTEM         // derived by RouteIQ (for example the janitor completing a returned load)
@@ -1492,7 +1496,7 @@ model StopEvent {
   deliveryDate    DateTime        @db.Date
   truckId         String
   loadNo          Int
-  sequence        Int? // NULL = load level (BACK_AT_DEPOT)
+  sequence        Int? // NULL = load level (BACK_AT_DEPOT, DEPOT_DEPART)
   visitId         String?
   visit           StopVisit?      @relation(fields: [visitId], references: [id], onDelete: Cascade)
   kind            StopEventKind
@@ -1502,7 +1506,7 @@ model StopEvent {
   lat             Float?
   lng             Float?
   accuracyM       Float?
-  distanceM       Float? // from the stop's planned pin (the depot pin for BACK_AT_DEPOT)
+  distanceM       Float? // from the stop's planned pin (the depot pin for BACK_AT_DEPOT and DEPOT_DEPART)
   speedMps        Float?
   driverLinkId    String?
   driverLink      DriverLink?     @relation(fields: [driverLinkId], references: [id], onDelete: SetNull)

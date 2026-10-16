@@ -27,6 +27,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 
 **At the end of the trip**
 9. Drive back and tap **Back at depot**. Stops without a result are recorded by your dispatcher.
+   - **You have another trip today?** After **Back at depot** the page shows **Leaving for next load**. Tap it **when the truck leaves the depot with the next load** (not before), then confirm. Once per trip; it is not shown after your last trip of the day. Your dispatcher sees how long the truck stayed at the depot between the two trips. Forgot to tap? Nothing to do: the office takes the time the trip was dispatched or your arrival at its first customer instead. Tapped too early by mistake? Tell your dispatcher (it cannot be undone on the phone, like **Back at depot**).
 
 **No signal?**
 10. Open your link once where there is signal: after that the page opens again on the same phone even without signal. Everything is **saved on the phone** and sent when there is signal. *Waiting to send (3)* means 3 items are waiting; *All sent* means everything arrived. Do not clear the browser before *All sent*. A delivery photo that never reaches the office counts like *Camera not working*: open the page where there is signal until *All sent*, and if your dispatcher gives you a new link, open it on the same phone so the waiting photos are sent.
@@ -71,6 +72,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 **في نهاية الرحلة**
 
 9. عد إلى المستودع واضغط **«عدت إلى المستودع»**. المحطات التي ليس لها نتيجة يسجلها مسؤول التوزيع.
+   - **لديك رحلة أخرى اليوم؟** بعد «عدت إلى المستودع» تُظهر الصفحة زر **«المغادرة بالحمولة التالية»**. اضغطه **عندما تغادر الشاحنة المستودع بالحمولة التالية** (وليس قبل ذلك)، ثم أكّد. مرة واحدة لكل رحلة، ولا يظهر بعد آخر رحلة في اليوم. يرى مسؤول التوزيع المدة التي بقيت فيها الشاحنة في المستودع بين الرحلتين. نسيت الضغط؟ لا مشكلة: يأخذ المكتب وقت إرسال الرحلة أو وقت وصولك إلى أول عميل فيها بدلًا منه. ضغطته مبكرًا بالخطأ؟ أخبر مسؤول التوزيع (لا يمكن التراجع عنه من الهاتف، مثل «عدت إلى المستودع»).
 
 **لا توجد إشارة؟**
 

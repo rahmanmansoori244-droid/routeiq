@@ -136,6 +136,7 @@ export function projectManifest(details: readonly PlanDetail[], input: ManifestI
     driverName: l.driverName,
     cases: l.cases,
     backAtDepotAt: null,
+    leftDepotAt: null,
     stops: [...l.stops].sort((a, b) => a.sequence - b.sequence).map((s) => stopOf(d.run.depot.id, l, s, input.callingCode ?? null)),
   }));
   return {
@@ -256,13 +257,14 @@ export async function driverManifest(args: {
   return mergeResults(manifest, results);
 }
 
-/** The manifest with the truck-day's results laid in: each stop's result and each trip's Back at depot. Pure. */
+/** The manifest with the truck-day's results laid in: each stop's result, each trip's Back at depot and Leaving for next load. Pure. */
 export function mergeResults(manifest: DriverManifest, results: DriverResults): DriverManifest {
   return {
     ...manifest,
     loads: manifest.loads.map((l) => ({
       ...l,
       backAtDepotAt: results.back[l.key] ?? null,
+      leftDepotAt: results.left?.[l.key] ?? null,
       stops: l.stops.map((s) => ({ ...s, result: results.stops[s.key] ?? null })),
     })),
   };

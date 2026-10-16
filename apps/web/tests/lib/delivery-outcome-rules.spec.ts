@@ -113,6 +113,18 @@ describe('writeRule (spec section 8.3)', () => {
     expect(rule({ loadStatus: 'PLANNED', kind: 'ARRIVE' })).toEqual({ ok: false, code: 'LOAD_NOT_DISPATCHED', transient: false });
   });
 
+  it('Leaving for next load (owner decision 16 Oct 2026): on the load the truck leaves with, accepted Locked, Loading or Dispatched; a Planned one keeps it on the phone', () => {
+    for (const s of ['LOCKED', 'LOADING', 'DISPATCHED']) expect(rule({ loadStatus: s, kind: 'DEPOT_DEPART' })).toEqual({ ok: true, late: false });
+    expect(rule({ loadStatus: 'LOADING', kind: 'DEPOT_DEPART', receivedAt: new Date('2026-10-07T08:00:00Z') })).toEqual({ ok: true, late: true });
+    expect(rule({ loadStatus: 'PLANNED', kind: 'DEPOT_DEPART' })).toEqual({ ok: false, code: 'LOAD_NOT_DISPATCHED', transient: true });
+    // Completed: gap-filling only, like every driver write.
+    const closed = { loadStatus: 'COMPLETED', statusChangedAt: COMPLETED_AT, kind: 'DEPOT_DEPART' as const };
+    expect(rule({ ...closed, at: new Date('2026-10-05T12:00:00Z') })).toEqual({ ok: true, late: true });
+    expect(rule({ ...closed, at: new Date('2026-10-05T13:30:00Z') })).toEqual({ ok: false, code: 'LOAD_COMPLETED', transient: false });
+    // Back at depot on a load not out keeps its old answer.
+    expect(rule({ loadStatus: 'LOCKED', kind: 'BACK_AT_DEPOT' })).toEqual({ ok: false, code: 'LOAD_NOT_DISPATCHED', transient: false });
+  });
+
   it('COMPLETED (E10): gap-filling only, always late', () => {
     const closed = { loadStatus: 'COMPLETED', statusChangedAt: COMPLETED_AT, receivedAt: new Date('2026-10-05T17:00:00Z') };
     // A stop that had a result at completion: refused whatever its time.

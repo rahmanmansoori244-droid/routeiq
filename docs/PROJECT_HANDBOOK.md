@@ -1317,6 +1317,7 @@ The page is `apps/web/app/t/[slug]/audit/page.tsx` with `audit-client.tsx`, limi
 | `DELIVERY_PHOTO_ADDED` | StopVisit | (Part 2) a delivery photo received |
 | `STOP_ARRIVAL_MANUAL` | StopVisit | (Part 2) "I have arrived" or a dispatcher's arrival time. Automatic arrivals and departures are not audited: `StopEvent` is their record (about 600 rows a day otherwise) |
 | `DRIVER_BACK_AT_DEPOT` | PlanLoad | (Part 2) the driver tapped Back at depot |
+| `DRIVER_DEPOT_DEPART` | PlanLoad | (16 Oct 2026, owner decision for alert rule R2) the driver tapped **Leaving for next load** after Back at depot of his previous trip (`recordDriverActions`, `lib/delivery/event-service.ts`): on the load the truck leaves with; `afterJson { truckId, depotId, loadNo, previousLoadNo, date, at, status, late }` plus the driver link's actor, or the office user on the driver page |
 | `DELIVERY_CARRY_CONFLICT` | StopVisit | (Parts 2-3) a result change refused because the order was brought forward (the office: one row per copy the change would shrink) |
 | `ORDERS_CARRY_UNDONE` | Order | (Part 3) Undo bring forward |
 | `DELIVERY_PHOTOS_PURGED`, `DELIVERY_LOCATIONS_PURGED`, `CASUAL_DRIVERS_CLEARED` | Tenant | (Part 3) the retention janitor: one row per company and sweep that changed something |

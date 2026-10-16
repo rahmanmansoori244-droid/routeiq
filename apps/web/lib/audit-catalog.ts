@@ -79,6 +79,8 @@ export const AUDIT_ACTIONS = {
   DELIVERY_PHOTO_ADDED: { label: 'Delivery photo added' },
   STOP_ARRIVAL_MANUAL: { label: 'Arrival at a stop recorded by hand' },
   DRIVER_BACK_AT_DEPOT: { label: 'Driver back at the depot' },
+  // Owner decision 16 Oct 2026 (alert rule R2): the driver left the depot again with his next load.
+  DRIVER_DEPOT_DEPART: { label: 'Driver left the depot with the next load' },
   DELIVERY_CARRY_CONFLICT: { label: 'Result change refused: already brought forward' },
   ORDERS_CARRY_UNDONE: { label: 'Bring forward undone' },
   DELIVERY_PHOTOS_PURGED: { label: 'Old delivery photos removed (retention)' },

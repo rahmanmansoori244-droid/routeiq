@@ -17,8 +17,15 @@
 --   tiers are CHECKed here.
 -- - New table "OpsAlertDigest": one row per alert e-mail (counts only, never an address): the e-mail
 --   throttle and the daily cap count them.
--- Nothing existing is rewritten. Code from before this release never reads the new columns or tables, so
--- an app rollback is safe at any time.
+-- - StopEventKind DEPOT_DEPART (owner decision 16 Oct 2026): the driver's "Leaving for next load" tap, a
+--   load-level StopEvent on the load the truck leaves with; rule R2 measures the turnaround at the depot
+--   from Back at depot to it. The driver page offers it whether alerts are on or not. ADD VALUE is not
+--   used in this migration's own statements (PostgreSQL 12+ allows it inside the migration's transaction
+--   then: see 20261013120000_small_truck_only).
+-- Nothing existing is rewritten. Code from before this release never reads the new columns or tables, and
+-- never a StopEvent row of the new kind (its reads of the kind filter by kind or by a stop's visit; the
+-- new event has none), so an app rollback is safe at any time; the page from before shows no "Leaving
+-- for next load" and its server refuses one still queued on a phone (INVALID).
 --
 -- Railway runs migrations while the previous version still serves (docs/PROJECT_HANDBOOK.md 5.6). The
 -- ALTER TABLE needs a short exclusive lock on "TenantConfig"; waiting behind a long transaction would
@@ -36,9 +43,14 @@
 --             DROP COLUMN "alertProofFarM", DROP COLUMN "alertNotClosedMin", DROP COLUMN "alertEmails",
 --             DROP COLUMN "alertEmailEveryMin", DROP COLUMN "alertEmailMinSeverity", DROP COLUMN "alertQuietFromMin",
 --             DROP COLUMN "alertQuietToMin", DROP COLUMN "alertRuleOnAtJson";
---           (each CHECK below goes with its columns or table).
+--           (each CHECK below goes with its columns or table). An enum value cannot be dropped: to
+--           remove the drivers' taps, DELETE FROM "StopEvent" WHERE "kind" = 'DEPOT_DEPART'; the unused
+--           value is harmless.
 
 SET LOCAL lock_timeout = '5s';
+
+-- AlterEnum
+ALTER TYPE "StopEventKind" ADD VALUE 'DEPOT_DEPART';
 
 -- AlterTable
 ALTER TABLE "TenantConfig" ADD COLUMN     "alertAfterClosingMin" INTEGER DEFAULT 15,
