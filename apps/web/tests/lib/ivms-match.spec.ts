@@ -165,7 +165,9 @@ describe('PUT /api/ivms/trucks/[id]/tracker (company admin)', () => {
 
 describe('suggestions from Ayun', () => {
   const call = vi.fn(async () => ({ ok: true as const, data: [{ imei: IMEI_A, name: 'Driver Example', plate_number: '1234 AB' }] }));
-  afterEach(() => call.mockClear());
+  afterEach(() => {
+    call.mockClear();
+  });
 
   it('never call Ayun while GPS tracking is OFF, while the kill switch is set, or without the server variables', async () => {
     expect(await trackerSuggestions(TEN, call)).toMatchObject({ ok: false, reason: 'MODE_OFF' });

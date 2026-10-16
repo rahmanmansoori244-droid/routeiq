@@ -200,6 +200,41 @@ WHERE s."tenantId" = '<tenantId>' AND r."runDate" = '2026-10-07'
 ORDER BY s."createdAt";
 ```
 
+## GPS tracking (Ayun), 16 Oct 2026
+
+The trucks' GPS trackers at **Ayun** (a GPS-Server.net platform) feed live truck positions to the day screen and, optionally, arrival and departure times. **Everything is OFF** until a company admin changes the GPS tracking setting (`ivmsMode` and the other `ivms*` settings of the company's settings, `PATCH /api/tenant/config`, company admin only; a dispatcher's save is refused); while OFF RouteIQ never contacts Ayun and nothing changes on any screen (only this section's tracker card and settings exist). Design and rules: `docs/PROJECT_HANDBOOK.md` 3.20.
+
+**Railway variables** (web service; set them in Railway only - never in a file, a chat or an e-mail; names only here):
+- `AYUN_BASE_URL` - the provider's address, `https://` and the host only (no path: RouteIQ adds the fixed API path and never follows a redirect).
+- `AYUN_API_KEY` - the user API key Ayun issued for RouteIQ (ask them for a dedicated key). Server only; never logged.
+- `AYUN_TENANT_SLUG` - the company slug the Ayun account belongs to: no other company is ever polled with that key.
+- `AYUN_WEBHOOK_SECRET` (and `AYUN_WEBHOOK_SECRET_PREVIOUS` during a rotation) - the secret in the webhook URL's path, 32-128 characters of A-Z, a-z, 0-9, `_` and `-`.
+- `AYUN_API_TIME_OFFSET_MIN`, `AYUN_WEBHOOK_TIME_OFFSET_MIN` - only if Ayun's times are not UTC (Muscat local time would be `-240`).
+- `ROUTEIQ_DISABLE_IVMS=1` - the kill switch: stops every GPS call, write and screen at once, whatever the setting.
+
+The startup log names a variable that is missing or unusable (never its value).
+
+**Rollout, one step at a time:**
+1. Set the variables, redeploy, check the startup log.
+2. **Map the trackers**: Trucks page, card **GPS trackers (Ayun)** (company admin): type each truck's tracker IMEI (digits only, from the Ayun portal). **Suggest from Ayun** (one call, only once GPS tracking is MAP or TIMES) lists, per truck without a tracker, the trackers with the same plate digits (*same plate*, *same plate digits*, or *one of several*): check before **Use** + **Save**. A one-day hired truck never gets a tracker; a tracker is on one truck at most. Each change is in the audit log (*UPDATE Truck*, with the tracker's last 4 digits).
+3. **GPS tracking MAP** (`ivmsMode` MAP) for a few days: dispatchers compare the live trucks with phone calls to the drivers; watch the provider allowance (`IvmsState`) and the startup warnings.
+4. **GPS tracking TIMES** (`ivmsMode` TIMES): GPS arrival and departure times start filling the gaps the phones leave. Check the next morning on a few trucks (day screen, Excel actuals).
+
+**What GPS never does** (by design, review of 16 Oct 2026): record a result, close a trip (only the driver's or the office's Back at depot completes a load), press Dispatch, replace a driver's or the office's time, feed "Use measured time", show positions to a Viewer, store a provider object name, plate or driver name, or put a position in an export or a sheet.
+
+**A tracker moved to another truck**: clear it on the old truck, then set it on the new one. Changing or clearing a tracker after that day's history was pulled stops that day's GPS times for the truck (they could be the other truck's); the driver's phone still times it.
+
+**A bad day of GPS times** (wrong tracker, wrong clock): 1) set GPS tracking below TIMES (or `ROUTEIQ_DISABLE_IVMS=1`); 2) a developer runs the undo for that truck and day (`suppressGpsTimes` in `lib/ivms/stop-events.ts`; a dry run first, then with the owner's OK): it marks the truck-day suppressed, deletes its GPS stop events and rebuilds the stops from the phone's and the office's entries (no result changes, no load reopens); 3) only then, if needed, roll the app back. Rolling back the app alone is safe for the database (the new tables are ignored), but do the first two steps first.
+
+**Useful query** (one company's GPS stop events of a day, read only):
+
+```sql
+SELECT "truckId", "loadNo", sequence, kind, "at", "payloadJson"->>'observed' AS observed
+FROM "StopEvent"
+WHERE "tenantId" = '<tenantId>' AND source = 'AYUN' AND "deliveryDate" = '2026-10-20'
+ORDER BY "truckId", "at";
+```
+
 ## Drivers page: the dispatcher's since 6 Oct 2026
 Owner request of 6 Oct 2026: the dispatcher (role **Planner**, and Supervisor) keeps the **Drivers** page: adds drivers, edits names and mobiles, deactivates and reactivates them, makes a daily driver a regular one, enters **leave** (from, until, an optional cover driver and note) and sets each truck's **usual (default) driver**. A **Viewer** only reads it.
 - **Still the company admin's:** a driver's **code** and making a regular driver a daily one (both in the Drivers page's **Edit** form, which shows the *Code* field and the *Daily driver* switch to a company admin only), deleting (deactivating through `DELETE /api/drivers/:id`), adding and removing trucks, and every other truck setting (bays, capacity, costs, hours, depot, code, active, hired). The server answers 403 `ADMIN_ONLY_DRIVER_FIELD` / `ADMIN_ONLY_TRUCK_FIELD` and saves nothing.
