@@ -485,6 +485,17 @@ def test_quick_best_of_runs_k_searches_and_reports_each(parallel, monkeypatch):
     assert resp.search.stop_reason == "TIME_LIMIT" and {sc.name for sc in resp.scenarios} == set(ALL3)
     for sc in resp.scenarios:
         assert_plan_rules(r, sc)
+    # Integration (the search side and the load re-check side): a re-checked search reaches _post_solve as an
+    # extra source - one gain per option, against the best plan without it - and an option is in chosen_for
+    # exactly when its plan came from it (its note says so). None re-checked (its plan equal to the main one's):
+    # no gains, nothing chosen.
+    noted = {sc.name for sc in resp.scenarios if any("(started from another order of the stops)" in w for w in sc.warnings)}
+    if any(s.rechecked for s in b.searches):
+        assert sorted(g.option for g in b.gains) == sorted(ALL3)
+        assert all(g.source is None or best_of.from_extra(g.source) for g in b.gains)
+        assert set(b.chosen_for) == {g.option for g in b.gains if g.used} and noted <= set(b.chosen_for)
+    else:
+        assert (b.gains, b.chosen_for, noted) == ([], [], set())
 
 
 def test_failed_lost_and_hung_other_searches_cost_nothing(parallel, monkeypatch):
