@@ -91,6 +91,7 @@ def _names(objs: list) -> list[str]:
     return sorted(type(o).__name__ for o in objs)
 
 
+BEST_OF_3 = {"SOLVER_BEST_OF_QUICK": "3", "MAX_CONCURRENT_DISPATCH": "1"}
 # Every way a solve ends: (env, config, what it raises, a control action after N seconds). The test's
 # parametrize list names each one (a literal: the handbook's test count reads it).
 PATHS = {
@@ -109,14 +110,28 @@ PATHS = {
     "recommended_worker_killed": ({"ROUTEIQ_TEST_KILL_SCENARIO": "RECOMMENDED"}, dict(scenarios=ALL3), ds.SolveAborted, None),
     "rule22_refused": ({"ROUTEIQ_TEST_WORKER_START_EXIT": "1", "SOLVER_WORKER_START_SEC": "3"}, dict(scenarios=ALL3),
                        ds.WorkersUnavailable, None),
+    # Best-of-N (best_of.py): three searches of RECOMMENDED, the other two in their own pool with pipe flags
+    # (one solve at a time, so the 4 CPUs of the fixture leave room for them and the second search).
+    "best_of": ({**BEST_OF_3}, dict(scenarios=ALL3), None, None),
+    "best_of_join": ({"SOLVER_BEST_OF": "3", "MAX_CONCURRENT_DISPATCH": "1", "THOROUGH_STALL_SEC": "0.5",
+                      "SOLVER_PYVRP_STALL_SEC": "1", "ROUTEIQ_TEST_NO_STALL_VARIANT": "1", "SOLVER_BEST_OF_JOIN_SEC": "1"},
+                     # A 90 s cap: the main search's limit is then above QUICK's 2 s, so its stall rule ends it and
+                     # search 1 (no stall rule) is joined; at 60 s every search ended on its 2 s limit, unjoined
+                     # (review of 16 Oct 2026).
+                     dict(scenarios=["RECOMMENDED"], search_mode="THOROUGH", max_search_sec=90), None, None),
+    "best_of_other_searches_lost": ({**BEST_OF_3, "ROUTEIQ_TEST_KILL_VARIANT": "1", "ROUTEIQ_TEST_HANG_VARIANT": "2"},
+                                    dict(scenarios=ALL3), None, None),
+    "best_of_main_search_killed": ({**BEST_OF_3, "ROUTEIQ_TEST_KILL_SCENARIO": "RECOMMENDED"}, dict(scenarios=ALL3), None, None),
+    "best_of_cancel": ({**BEST_OF_3}, dict(scenarios=ALL3, time_limit_sec=30), ds.SolveAborted, ("cancel", 3.0)),
 }
 
 
-@pytest.mark.parametrize("path", ["normal", "stall", "stop_request", "cancel", "second_search_killed", "second_search_stage_killed", "second_search_deadline", "second_search_fails", "alternative_worker_killed", "alternative_deadline", "recommended_worker_killed", "rule22_refused"])  # noqa: E501 - one line: the handbook guard sizes it
+@pytest.mark.parametrize("path", ["normal", "stall", "stop_request", "cancel", "second_search_killed", "second_search_stage_killed", "second_search_deadline", "second_search_fails", "alternative_worker_killed", "alternative_deadline", "recommended_worker_killed", "rule22_refused", "best_of", "best_of_join", "best_of_other_searches_lost", "best_of_main_search_killed", "best_of_cancel"])  # noqa: E501 - one line: the handbook guard sizes it
 def test_a_solve_releases_every_process_pipe_and_lock_itself(path, monkeypatch):
     """Normal end, THOROUGH stall, stop request, cancel, a worker killed (the second search's, its
     load re-check's, an alternative's, RECOMMENDED's), a deadline (the second search's, an
-    alternative's), a failure, rule 22's refusal: after optimize_dispatch returns or raises, no
+    alternative's), a failure, rule 22's refusal, and best-of-N's (a normal end, a THOROUGH join, other
+    searches killed or hung, the main search killed and replaced, a cancel): after optimize_dispatch returns or raises, no
     multiprocessing object of the solve is alive, the garbage collector finds none, no child process
     and no pool thread is left, and the solve's control keeps no flag."""
     env, cfg, raises, action = PATHS[path]
@@ -138,6 +153,13 @@ def test_a_solve_releases_every_process_pipe_and_lock_itself(path, monkeypatch):
         assert not isinstance(out, BaseException), repr(out)
     else:
         assert isinstance(out, raises), repr(out)
+    if path.startswith("best_of") and raises is None:
+        # Best-of really ran its three searches (review of 16 Oct 2026: a CPU gate of one would have made these the
+        # one-search paths, unnoticed), and the join path joined.
+        b = out.search.best_of  # type: ignore[union-attr]
+        assert b is not None and b.used == 3, b
+        if path == "best_of_join":
+            assert b.searches[1].stop_reason == "JOINED", b.searches
     assert _names(left) == [], f"left alive after the solve (only the garbage collector could free them): {_names(left)}"
     assert _names(garbage) == [], f"freed only by the garbage collector: {_names(garbage)}"
     assert mp.active_children() == []
@@ -270,6 +292,10 @@ def test_the_resource_tracker_finds_no_leaked_semaphore():
             ds.optimize_dispatch(req(*nmwc_day(20), scenarios=["RECOMMENDED"], time_limit_sec=30), control=control)
         except ds.SolveAborted as exc:
             kept = exc  # its traceback's frames stay alive
+        # Best-of-N: three searches of RECOMMENDED, the other two in their own pool (pipe flags, no Event).
+        os.environ.update(SOLVER_BEST_OF_QUICK="3", MAX_CONCURRENT_DISPATCH="1")
+        ds.PV.effective_cpus = lambda: 4
+        assert ds.optimize_dispatch(req(*nmwc_day(20), scenarios=["RECOMMENDED", "MIN_TRUCKS"], time_limit_sec=2)).search.best_of.used == 3
         assert mp.active_children() == []
         print("SOLVES DONE", flush=True)
         sys.stderr.flush()

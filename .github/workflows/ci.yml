@@ -149,6 +149,9 @@ jobs:
   solver:
     name: Solver (pytest)
     runs-on: ubuntu-latest
+    # About 25 min today; a hung worker-pool test must not hold the run for GitHub's 6-hour default
+    # (solver search upgrade, critique of its design #11).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 

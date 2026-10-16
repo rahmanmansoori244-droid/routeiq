@@ -11,7 +11,11 @@ python-dotenv>=1.0,<2
 # /optimize endpoint (kept for comparison). Pinned exactly: 0.14 changed the Model API
 # (add_location / add_depot(location) / add_client(location)), and a future release may again.
 pyvrp==0.14.0
-ortools>=9.10,<10  # NMWC dispatch engine (/optimize-dispatch)
+# Pinned exactly to the version production installed (solver build of 15 Oct 2026): the engine's plans
+# depend on it (PR #71: OR-Tools 9.15 treats unperformed nodes differently with one unary transit per
+# truck). A bump is a reviewed change: update test_ortools_version_is_pinned and run the replay of saved
+# real requests before merging it, not only CI (docs/PROJECT_HANDBOOK.md 5.4).
+ortools==9.15.6755  # NMWC dispatch engine (/optimize-dispatch)
 # Module B: Mapbox Directions Matrix HTTP client.
 httpx>=0.27,<0.30
 

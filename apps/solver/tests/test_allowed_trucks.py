@@ -5,19 +5,22 @@ suitable for 3-ton trucks; the plan gave them big trucks and the dispatcher had 
 The web marks such a customer "Small truck only (3-ton)" and sends, on each of its stops, the day's
 trucks with at most the company's "small truck" bays. The solver keeps that list in every engine - the
 route search, the load re-check (repack, fit fallback, recovery), the hire what-if, the second search
-(skipped while a list decides something) - and the independent check flags a stop on another truck.
-A request without the field is planned exactly as before.
+(skipped while a list decides something; since 16 Oct 2026 SOLVER_PYVRP_ALLOWED=model / thorough lets it
+model the lists, and its plan is judged like any day's) - and the independent check flags a stop on
+another truck. A request without the field is planned exactly as before.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 
 import pytest
 
 import dispatch_solver as ds
 import feasibility as FZ
 import load_repack as LR
+import pyvrp_candidate as PV
 from dispatch_models import DispatchStop, DispatchTruck
 from dispatch_solver import optimize_dispatch
 from tests.test_dispatch import assert_reconciled, rec, req, served_ids, stop, truck, unserved_map
@@ -332,6 +335,144 @@ def test_the_second_search_is_skipped_while_a_limit_decides_something(_pyvrp_in_
     resp3 = optimize_dispatch(spent)
     assert resp3.search.pyvrp.status in ("CHOSEN", "NOT_CHOSEN"), resp3.search.pyvrp
     assert_allowed(spent, rec(resp3))
+
+
+def _big_and_small(**cfg):
+    """day() on a 12-bay truck that is far cheaper and has room for the whole day, and the 6-bay truck."""
+    trucks = [btruck("BIG", bays=12, max_trips=2, fixed_cost=5), btruck("SMALL", bays=6, cap=570, max_trips=2, fixed_cost=40)]
+    return req(day(), trucks, **{"scenarios": ALL, "time_limit_sec": 2, **cfg})
+
+
+def test_solver_pyvrp_allowed_decides_where_the_second_search_runs(monkeypatch):
+    """SOLVER_PYVRP_ALLOWED (16 Oct 2026), read on every solve: skip - the default, and any value not
+    listed - skips the second search on a day where a list decides something, as since 13 Oct 2026; model
+    runs it on every solve (hire checks included); thorough on Thorough solves only. A day where no list
+    decides anything runs it whatever the setting."""
+    monkeypatch.setenv("SOLVER_PYVRP", "on")
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    monkeypatch.setattr(PV, "effective_cpus", lambda: 4)
+    quick = _big_and_small()
+    thorough = _big_and_small(search_mode="THOROUGH")
+    moot = req(day(), [btruck("SMALL", bays=6, cap=570, max_trips=3)])
+    assert ds._limits_decide(quick, quick.stops) and not ds._limits_decide(moot, moot.stops)
+    for value, setting, on_quick, on_thorough in ((None, "skip", False, False), ("skip", "skip", False, False), ("on", "skip", False, False),
+                                                  ("model", "model", True, True), (" Model ", "model", True, True),
+                                                  ("thorough", "thorough", False, True)):
+        if value is None:
+            monkeypatch.delenv("SOLVER_PYVRP_ALLOWED", raising=False)
+        else:
+            monkeypatch.setenv("SOLVER_PYVRP_ALLOWED", value)
+        assert PV.allowed_setting() == setting, value
+        for r, runs in ((quick, on_quick), (thorough, on_thorough), (moot, True)):
+            pv = ds._pv_start(r, r.stops, None, False)
+            assert (pv.inprocess, pv.report["status"], pv.report["reason"]) == (
+                (True, "SKIPPED", None) if runs else (False, "SKIPPED", "ALLOWED_TRUCKS")), (value, r.config.search_mode)
+
+
+@pytest.mark.usefixtures("_pyvrp_in_process")
+def test_with_model_the_second_search_runs_on_a_limited_day(monkeypatch, caplog):
+    """SOLVER_PYVRP_ALLOWED=model: the second search runs on the day the default skips (above), with the
+    limit modelled (the model log line says limits=1, the penalties raised and started low), and every
+    option keeps HYPER on the 6-bay truck, VERIFIED. A PyVRP answer that puts HYPER on the big truck never
+    gets further than the mapping back (INVALID_PLAN)."""
+    import logging
+
+    monkeypatch.setenv("SOLVER_PYVRP_ALLOWED", "model")
+    caplog.set_level(logging.INFO, logger="routeiq.dispatch")
+    r = _big_and_small()
+    resp = optimize_dispatch(r)
+    p = resp.search.pyvrp
+    assert p.status in ("CHOSEN", "NOT_CHOSEN") and p.feasible and p.penalty_mode == "RAISED", p
+    assert re.search(r"pyvrp run=r model: .* penalty_start=default limits=1$", caplog.text, re.M), caplog.text
+    for sc in resp.scenarios:
+        assert where(sc)["HYPER"] == "SMALL", (sc.name, where(sc))
+        assert sc.feasibility.status == "VERIFIED" and sc.allowed_trucks_rule is True
+        assert_allowed(r, sc)
+    tds, solvable, *_ = _day_of(r)
+    big, hyper = next(td.idx for td in tds if td.truck.id == "BIG"), next(k for k, s in enumerate(solvable) if s.stop_id == "HYPER")
+    monkeypatch.setenv("ROUTEIQ_TEST_PYVRP_PLAN", json.dumps({big: [[hyper, 0]]}))
+    resp = optimize_dispatch(_big_and_small(scenarios=["RECOMMENDED"]))
+    assert (resp.search.pyvrp.status, resp.search.pyvrp.reason, resp.search.pyvrp.chosen_for) == ("NOT_CHOSEN", "INVALID_PLAN", [])
+    for sc in resp.scenarios:
+        assert where(sc)["HYPER"] == "SMALL" and sc.feasibility.status == "VERIFIED", sc.name
+
+
+def _short_of_small_trucks(limited: bool = True):
+    """A day like the prototype of 16 Oct 2026: 24 stops, every 4th for the 6-bay truck only (one truck,
+    two loads), three 12-bay trucks that are cheaper by the km and have room for all of it."""
+    stops = [pstop(f"S{i:02d}", 23.54 + (i % 6) * 0.02, 58.34 + (i // 6) * 0.04, cases=40, units=1_200 + 100 * (i % 5), priority=2 + i % 3,
+                   **({"allowed_truck_ids": ["SMALL"], "allowed_trucks_label": SMALL} if limited and i % 4 == 0 else {}))
+             for i in range(24)]
+    trucks = [btruck(f"BIG{j}", bays=12, max_trips=2, fixed_cost=20, cost_per_km=0.10) for j in (1, 2, 3)]
+    trucks.append(btruck("SMALL", bays=6, cap=570, max_trips=2, fixed_cost=25, cost_per_km=0.15))
+    return req(stops, trucks)
+
+
+def test_pyvrp_never_puts_a_small_truck_only_stop_on_a_big_truck():
+    """The model itself (no engine judge yet): on a day where the big trucks would carry the limited stops
+    (the same day without lists: some of them ride a big truck), PyVRP's plan with the limits modelled is
+    feasible, serves them on the 6-bay truck only - every truck of the vehicle type a route took may carry
+    each of its stops, so the mapping back can pick any - and maps back (plan_of)."""
+    free = _short_of_small_trucks(limited=False)
+    tds, solvable, _, mx, _ = _day_of(free)
+    out = PV.solve_in_worker((free, solvable, tds, mx, PV.PvSettings(mode="QUICK", seed=1, max_runtime=30.0, min_sec=1.0, max_iters=800)))
+    plan, _ = PV.plan_of(out, tds, solvable)
+    limited_ids = {f"S{i:02d}" for i in range(0, 24, 4)}
+    assert any(solvable[k].stop_id in limited_ids and tds[idx].truck.id != "SMALL" for idx, loads in plan.items() for ld in loads for k in ld)
+    r = _short_of_small_trucks()
+    tds, solvable, _, mx, _ = _day_of(r)
+    for seed in (1, 2):
+        out = PV.solve_in_worker((r, solvable, tds, mx, PV.PvSettings(mode="QUICK", seed=seed, max_runtime=30.0, min_sec=1.0,
+                                                                         max_iters=800)))
+        assert out["status"] == "OK" and out["feasible"] and out["summary"]["limits"] == 6, (seed, out.get("reason"))
+        for route in out["routes"]:
+            for ld in route["trips"]:
+                for k in ld:
+                    assert all(ds.truck_allowed(solvable[k], tds[idx].truck) for idx in out["type_trucks"][route["vt"]]), (seed, k)
+        plan, why = PV.plan_of(out, tds, solvable)
+        assert why is None, seed
+        on = {solvable[k].stop_id: tds[idx].truck.id for idx, loads in plan.items() for ld in loads for k in ld}
+        assert {on[s] for s in limited_ids if s in on} <= {"SMALL"} and len(limited_ids & set(on)) >= 3, (seed, on)
+
+
+@pytest.mark.usefixtures("_pyvrp_in_process")
+def test_the_engines_checks_still_judge_a_pyvrp_plan_that_breaks_a_limit(monkeypatch, caplog):
+    """Belt and braces with the limits modelled: were the mapping back to let HYPER through on the big truck
+    (a bug, simulated), the exact timing refuses that truck (load_repack.fits_truck) and the load re-check
+    only offers repairs that keep the limit; and a raw candidate that keeps HYPER on the big truck is refused
+    by the independent check (TRUCK_NOT_ALLOWED: NOT_VERIFIED). Every option stays the engine's or a
+    checked plan: HYPER on the 6-bay truck, VERIFIED."""
+    import logging
+
+    monkeypatch.setenv("SOLVER_PYVRP_ALLOWED", "model")
+    r = _big_and_small()
+    tds, solvable, _, _, _ = _day_of(r)
+    big = next(td.idx for td in tds if td.truck.id == "BIG")
+    everything = list(range(len(solvable)))
+    monkeypatch.setenv("ROUTEIQ_TEST_PYVRP_PLAN", json.dumps({big: [everything]}))
+    monkeypatch.setattr(PV, "plan_of", lambda result, tds_, solvable_: (
+        {int(i): [tuple(ld) for ld in loads] for i, loads in result["plan"].items()}, None))
+    caplog.set_level(logging.INFO, logger="routeiq.dispatch")
+    resp = optimize_dispatch(r)
+    assert "PYVRP: no exact timetable; its loads are repaired like a search's" in caplog.text
+    assert resp.search.pyvrp.status in ("CHOSEN", "NOT_CHOSEN"), resp.search.pyvrp
+    for sc in resp.scenarios:
+        assert where(sc)["HYPER"] == "SMALL" and sc.feasibility.status == "VERIFIED", sc.name
+        assert not [v for v in sc.feasibility.violations if v.code == "TRUCK_NOT_ALLOWED"]
+    # Its stage hands back the raw plan as a candidate, timed as if HYPER could ride the big truck.
+    free = r.model_copy(update={"stops": [s.model_copy(update={"allowed_truck_ids": None}) for s in r.stops]})
+    _, _, _, _, ctx = _day_of(free)
+    timed = LR.time_plan(ctx.day, {big: [tuple(everything)]}, ctx.rec_pricing)
+    assert timed is not None
+    fake = LR.Candidate("PYVRP", timed, LR.Score(unserved=0, cost=1, trucks=1, loads=1, metres=1, operating=1))
+    monkeypatch.setattr(PV, "stage_in_worker", lambda job: ([fake], ["PYVRP: injected"]))
+    caplog.clear()
+    resp = optimize_dispatch(_big_and_small(scenarios=["RECOMMENDED"]))
+    assert "candidate failed the independent check" in caplog.text
+    assert (resp.search.pyvrp.status, resp.search.pyvrp.reason, resp.search.pyvrp.chosen_for) == ("NOT_CHOSEN", "NOT_VERIFIED", [])
+    for sc in resp.scenarios:
+        assert where(sc)["HYPER"] == "SMALL" and sc.feasibility.status == "VERIFIED", sc.name
+        assert_allowed(r, sc)
 
 
 # ---------------------------------------------------------------------------------------------

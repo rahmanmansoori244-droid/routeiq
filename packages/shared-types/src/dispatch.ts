@@ -236,6 +236,74 @@ export interface SearchReport {
   solutions?: number | null;
   /** The second route search (PyVRP); absent from a solver before it. */
   pyvrp?: PyvrpReport | null;
+  /** The OR-Tools version that made the plan (the solver pins 9.15.6755); absent from a solver before it. */
+  ortools_version?: string | null;
+  /**
+   * Best-of-N route search: every route search of RECOMMENDED. Null when one search ran (the default) and
+   * absent from a solver before it. The fields above stay the main search's (or the one that replaced it).
+   */
+  best_of?: BestOfReport | null;
+}
+
+/**
+ * Best-of-N route search (apps/solver dispatch_models.BestOfReport). requested / used: searches asked for
+ * and run (fewer under gate: CPU_GATE, IN_PROCESS, NO_WORKERS). primary_status / promoted: the main search gave no plan
+ * and that search replaced it. chosen_for: options whose plan came from another search. gains: per option,
+ * what the other searches' best candidate gained. searches: every search, index 0 (the main one) first.
+ */
+export interface BestOfReport {
+  requested: number;
+  used: number;
+  gate?: string | null;
+  join_sec?: number | null;
+  primary_status?: string | null;
+  promoted?: number | null;
+  chosen_for?: string[];
+  gains?: BestOfGain[];
+  searches?: SearchRunReport[];
+}
+
+/**
+ * One route search of a best-of-N solve (apps/solver dispatch_models.SearchRunReport). status: OPTIMIZED,
+ * NO_SOLUTION, NOTHING_TO_PLAN, NOT_RUN, FAILED, LOST or TIMEOUT; stop_reason: TIME_LIMIT, CONVERGED, CAP,
+ * STOPPED or JOINED (ended with the main search). Plain strings: an unknown value must be shown, not refused.
+ * cost_omr: cost with the customer time preferences (the rank after service); unserved_by_priority: P1..P5.
+ */
+export interface SearchRunReport {
+  index: number;
+  order_seed?: number;
+  first_solution?: string;
+  status: string;
+  stop_reason?: string | null;
+  search_sec?: number | null;
+  last_improvement_sec?: number | null;
+  solutions?: number | null;
+  rank_sec?: number | null;
+  exact?: boolean | null;
+  cost_omr?: number | null;
+  operating_omr?: number | null;
+  km?: number | null;
+  trucks?: number | null;
+  loads?: number | null;
+  unserved_by_priority?: number[];
+  rechecked?: boolean;
+  warm_start?: boolean;
+}
+
+/**
+ * For one option: the best candidate from another route search against the best without any
+ * (apps/solver dispatch_models.BestOfGain). Gains are "without minus with" (positive = the other search's
+ * is better); served_delta: stops it serves more; used: the option's plan came from it.
+ */
+export interface BestOfGain {
+  option: string;
+  source?: string | null;
+  gain_omr?: number | null;
+  gain_operating_omr?: number | null;
+  gain_km?: number | null;
+  gain_trucks?: number | null;
+  served_delta?: number | null;
+  used?: boolean;
 }
 
 /**
