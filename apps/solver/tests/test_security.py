@@ -110,6 +110,26 @@ def test_ready_with_the_right_token_answers_without_solving(configured, monkeypa
     assert main._DISPATCH_SLOTS._value == before
 
 
+def test_ready_and_the_startup_log_name_the_engine_version(configured, monkeypatch, caplog):
+    """(OR-Tools pin, 16 Oct 2026) /ready names the OR-Tools version the solver runs (requirements.txt pins
+    9.15.6755) beside PyVRP's, and the startup log says it too: without them only the build log showed which
+    engine a deployed solver runs. Neither affects ok. A solver not on the pinned version says so - an ERROR on
+    Railway."""
+    monkeypatch.delenv("OSRM_URL", raising=False)
+    body = TestClient(main.app).get("/ready", headers={"X-Solver-Token": TOKEN}).json()
+    assert {"ok", "service", "version", "max_concurrent_dispatch", "routing", "workers", "pyvrp", "ortools"} <= set(body)
+    assert body["ortools"] == "9.15.6755"
+    assert body["pyvrp"]["version"] == "0.14.0"
+    assert main.engine_version_line() == (True, "Route engine: OR-Tools 9.15.6755 (the version requirements.txt pins)")
+    monkeypatch.setattr(main, "ortools_version", lambda: "9.16.0")
+    monkeypatch.setattr(main, "_on_railway", lambda: True)
+    with caplog.at_level("INFO", logger="routeiq.api"):
+        main.log_engine_version()
+    [rec] = [r for r in caplog.records if r.name == "routeiq.api"]
+    assert rec.levelname == "ERROR"
+    assert "OR-Tools 9.16.0 is installed, but requirements.txt pins 9.15.6755" in rec.getMessage()
+
+
 def test_ready_goes_through_check_token(configured, monkeypatch):
     calls = []
 

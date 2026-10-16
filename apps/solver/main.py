@@ -31,7 +31,18 @@ from pydantic import BaseModel
 from fastapi.responses import JSONResponse
 
 from dispatch_models import DispatchRequest, DispatchResponse, GeometryRequest, GeometryResponse
-from dispatch_solver import WORKER_HEALTH, SolveAborted, SolveControl, WorkersUnavailable, optimize_dispatch
+from dispatch_solver import (
+    ORTOOLS_VERSION,
+    WORKER_HEALTH,
+    SolveAborted,
+    SolveControl,
+    WorkersUnavailable,
+    optimize_dispatch,
+    ortools_version,
+    priority_repair_line,
+    priority_repair_on,
+)
+import best_of
 import pyvrp_candidate
 from models import OptimizeRequest, OptimizeResponse
 from providers import HaversineProvider, OSRMProvider, configured_osrm_url
@@ -63,8 +74,10 @@ def _env_int(name: str, default: int) -> int:
 
 
 # Review F16 (defence in depth): one solver process serves every company, and each dispatch solve
-# can use up to 3 OR-Tools processes for up to 540 s (QUICK) or THOROUGH_MAX_SEC (THOROUGH, 20 min
-# by default; mostly one process: RECOMMENDED's search). At most MAX_CONCURRENT_DISPATCH solves run
+# uses a pool of max(1, alternatives) = 2 OR-Tools processes (and a fresh one for the load re-check
+# when needed), the second search's process when it runs, and - with best-of-N (SOLVER_BEST_OF, off by
+# default) - K-1 more for RECOMMENDED's other searches, for up to 540 s (QUICK) or THOROUGH_MAX_SEC
+# (THOROUGH, 20 min by default; mostly RECOMMENDED's search). At most MAX_CONCURRENT_DISPATCH solves run
 # at once (default 2; size it to the solver's CPUs); another one is refused at once with 503
 # "solver busy" instead of slowing every running solve past its deadline. The web's solve
 # admission (lib/dispatch/solve-admission.ts) queues before this limit is ever reached; the 503
@@ -113,9 +126,32 @@ def log_startup_warnings() -> None:
             (log.error if _on_railway() else log.warning)(warning)
 
 
+def engine_version_line() -> tuple[bool, str]:
+    """(as pinned, the startup line) for the route engine: the OR-Tools version this process runs
+    against the one requirements.txt pins. Every plan is tested on the pinned version only; a solver
+    built without the pin (an old image, a hand-installed venv) says so at startup."""
+    found = ortools_version()
+    if found == ORTOOLS_VERSION:
+        return True, f"Route engine: OR-Tools {found} (the version requirements.txt pins)"
+    return False, (f"Route engine: OR-Tools {found or 'of unknown version'} is installed, but requirements.txt pins "
+                   f"{ORTOOLS_VERSION}: plans are tested on the pinned version only. Reinstall from requirements.txt.")
+
+
+def log_engine_version() -> None:
+    """At startup: the OR-Tools version - read by RAILWAY_DEPLOYMENT.md's check. Not the pinned one:
+    an ERROR on Railway, a WARNING elsewhere (like the development-only switches above)."""
+    pinned, line = engine_version_line()
+    (log.info if pinned else log.error if _on_railway() else log.warning)(line)
+
+
 log_startup_warnings()
+log_engine_version()
 # The second route search (PyVRP): on or off, and why - read by RAILWAY_DEPLOYMENT.md's check.
 log.info(pyvrp_candidate.startup_line())
+# Best-of-N route search (best_of.py): off (the default) or how many searches per solve, and why fewer.
+log.info(best_of.startup_line())
+# The priority repair after the load re-check (SOLVER_PRIORITY_REPAIR): off (the default) or on.
+log.info(priority_repair_line())
 
 
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
@@ -186,6 +222,12 @@ def ready_endpoint(
         "workers": workers,
         # The second route search (PyVRP): enabled, version, effective CPUs and why not. Never affects ok.
         "pyvrp": pyvrp_candidate.status(),
+        # The route engine's version (requirements.txt pins ORTOOLS_VERSION); None when unreadable. Never affects ok.
+        "ortools": ortools_version(),
+        # Best-of-N route search: searches asked for and run per mode, why fewer, its settings. Never affects ok.
+        "best_of": best_of.status(),
+        # The priority repair (SOLVER_PRIORITY_REPAIR, off by default; read on every solve). Never affects ok.
+        "priority_repair": "on" if priority_repair_on() else "off",
     }
 
 

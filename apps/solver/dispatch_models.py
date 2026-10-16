@@ -207,8 +207,10 @@ class DispatchStop(BaseModel):
     # whose unloading area takes small trucks only; the web sends the day's trucks with at most the
     # company's "small truck" bays). None (the default, and every older web): any truck. [] = no truck:
     # the stop is left out with NO_ALLOWED_TRUCK. A hard rule in every engine - the route search
-    # (VehicleVar), the load re-check (load_repack.fits_truck), the second search (skipped while a stop
-    # has it) - and in the independent check (feasibility: TRUCK_NOT_ALLOWED). Optional and additive.
+    # (VehicleVar), the load re-check (load_repack.fits_truck), the second search (skipped while a list
+    # leaves out a truck that can still load, unless SOLVER_PYVRP_ALLOWED lets it model the lists:
+    # pyvrp_candidate.build_model) - and in the independent check (feasibility: TRUCK_NOT_ALLOWED).
+    # Optional and additive.
     allowed_truck_ids: list[str] | None = Field(default=None, max_length=1000)
     # The words the reasons use for those trucks ("a small truck (at most 6 bays)"); None: "one of the
     # trucks allowed for this customer". Text only.
@@ -757,6 +759,13 @@ class SearchReport(BaseModel):
     # The second route search (PyVRP), when this solver has it (pyvrp_candidate.py). None from a
     # solver before it.
     pyvrp: "PyvrpReport | None" = None
+    # The OR-Tools version that made this plan (requirements.txt pins it: 9.15.6755 since 16 Oct 2026),
+    # so every stored response records its engine. None from a solver before it, or when unreadable.
+    ortools_version: str | None = None
+    # Best-of-N route search (SOLVER_BEST_OF / SOLVER_BEST_OF_QUICK, best_of.py): every route search of
+    # RECOMMENDED and what came of it. None when one search ran (the default), and from a solver before it.
+    # The fields above stay the main search's (or, when it failed, those of the search that replaced it).
+    best_of: "BestOfReport | None" = None
 
 
 class PyvrpReport(BaseModel):
@@ -766,8 +775,10 @@ class PyvrpReport(BaseModel):
     status: CHOSEN = its plan (re-checked) is used by the options in ``chosen_for``; NOT_CHOSEN = it
     ran, and the engine's own plans were as good or better (or its plan was unusable: ``reason``);
     SKIPPED = not run (OFF, CPU_GATE, NOTHING_TO_PLAN, NO_PROCESS, MODEL_TOO_LARGE, ALLOWED_TRUCKS: a stop's
-    allowed_truck_ids leaves out a truck that can still take a load, which PyVRP cannot model; FULL_TRUCK: a
-    stop fills a truck alone under config.single_customer_fill_pct, which it does not model); FAILED = it
+    allowed_truck_ids leaves out a truck that can still take a load and SOLVER_PYVRP_ALLOWED does not let the
+    second search model it - skip, the default, or thorough on a Quick solve - or the profiles it needs pass
+    64 MB; FULL_TRUCK: a stop fills a truck alone under config.single_customer_fill_pct, which it does not
+    model); FAILED = it
     failed (IMPORT_FAILED, FAILED, LOST, TIMEOUT). The plans are then the engine's alone.
     best_over_time: at most 12 [seconds, PyVRP's score] points - a score, not money (it holds the
     prize of every stop not planned yet)."""
@@ -789,6 +800,85 @@ class PyvrpReport(BaseModel):
     missing: int | None = None
     chosen_for: list[str] = Field(default_factory=list)
     best_over_time: list[tuple[float, float]] = Field(default_factory=list)
+
+
+class SearchRunReport(BaseModel):
+    """One route search of RECOMMENDED in a best-of-N solve (best_of.py). Search 0 is the main search, exactly
+    as with one search; searches 1.. start from another order of the stops (``order_seed``) and optionally
+    another first-solution strategy, and only add candidates. Ranked on the engine's own goal for
+    RECOMMENDED (service by priority first, then cost with the customer time preferences).
+
+    status: OPTIMIZED, NO_SOLUTION, NOTHING_TO_PLAN (the search's own outcome), NOT_RUN (not started: the main
+    search had already ended), FAILED (an error), LOST (its worker process died, or the pool broke), TIMEOUT
+    (no answer in time) - best_of.RUN_STATUSES. stop_reason: TIME_LIMIT, CONVERGED, CAP, STOPPED, or JOINED
+    (ended when the main search ended, with its best plan so far). Both are plain strings on purpose: a value
+    this list does not know must never fail a finished solve (best_of.run_status maps every outcome)."""
+
+    index: int
+    order_seed: int = 0
+    first_solution: str = "PARALLEL_CHEAPEST_INSERTION"
+    status: str
+    stop_reason: str | None = None
+    search_sec: float | None = None
+    last_improvement_sec: float | None = None
+    # Plans the search found (THOROUGH: counted by its watch; None in QUICK). Search 0's count per second,
+    # compared with a one-search solve of the same day, shows whether the other searches slowed it down.
+    solutions: int | None = None
+    # Seconds spent ranking its plan (exact timing, or the trimmed part when it cannot be timed exactly).
+    rank_sec: float | None = None
+    # Ranked on its exactly timed plan (False: on the part of it that could be timed; None: not ranked).
+    exact: bool | None = None
+    # Its ranked plan: LR.Score's cost (money plus the customer time preferences, OMR), the operating cost
+    # (OMR), km, trucks, loads, and the stops it leaves out per priority (P1..P5).
+    cost_omr: float | None = None
+    operating_omr: float | None = None
+    km: float | None = None
+    trucks: int | None = None
+    loads: int | None = None
+    unserved_by_priority: list[int] = Field(default_factory=list)
+    # Sent to the load re-check as a candidate source ("RECOMMENDED~<index>"); the alternatives
+    # (MIN_TRUCKS, MIN_DISTANCE) started from its loads.
+    rechecked: bool = False
+    warm_start: bool = False
+
+
+class BestOfGain(BaseModel):
+    """For one option: the best candidate built from another route search against the best one built
+    without any (the two sides of the shown-gain rule). Differences are "without minus with": positive =
+    the other search's candidate is cheaper (or shorter, or uses fewer trucks); served_delta = stops it serves
+    more. ``used``: it passed the rule (a gain the dispatcher can see) and the option's plan came from it."""
+
+    option: str
+    source: str | None = None
+    gain_omr: float | None = None  # LR.Score cost: money plus the customer time preferences
+    gain_operating_omr: float | None = None
+    gain_km: float | None = None
+    gain_trucks: int | None = None
+    served_delta: int | None = None
+    used: bool = False
+
+
+class BestOfReport(BaseModel):
+    """Best-of-N route search (SOLVER_BEST_OF for THOROUGH, SOLVER_BEST_OF_QUICK for QUICK; best_of.py).
+
+    requested: searches the setting asked for; used: searches run (fewer under ``gate``: CPU_GATE = not
+    enough CPUs for that many at MAX_CONCURRENT_DISPATCH solves, IN_PROCESS = no worker processes, NO_WORKERS =
+    the other searches' own pool could not start).
+    join_sec: THOROUGH, how long the other searches could go on after the main one ended. primary_status:
+    the main search's outcome when it gave no plan (FAILED, LOST, TIMEOUT, NO_SOLUTION) and search
+    ``promoted`` replaced it. chosen_for: the options whose plan came from another search. gains: per
+    option, what the other searches' best candidate gained (BestOfGain). searches: every search (index 0
+    first)."""
+
+    requested: int
+    used: int
+    gate: str | None = None
+    join_sec: float | None = None
+    primary_status: str | None = None
+    promoted: int | None = None
+    chosen_for: list[str] = Field(default_factory=list)
+    gains: list[BestOfGain] = Field(default_factory=list)
+    searches: list[SearchRunReport] = Field(default_factory=list)
 
 
 SearchReport.model_rebuild()
