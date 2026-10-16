@@ -115,7 +115,10 @@ PATHS = {
     "best_of": ({**BEST_OF_3}, dict(scenarios=ALL3), None, None),
     "best_of_join": ({"SOLVER_BEST_OF": "3", "MAX_CONCURRENT_DISPATCH": "1", "THOROUGH_STALL_SEC": "0.5",
                       "SOLVER_PYVRP_STALL_SEC": "1", "ROUTEIQ_TEST_NO_STALL_VARIANT": "1", "SOLVER_BEST_OF_JOIN_SEC": "1"},
-                     dict(scenarios=["RECOMMENDED"], search_mode="THOROUGH", max_search_sec=60), None, None),
+                     # A 90 s cap: the main search's limit is then above QUICK's 2 s, so its stall rule ends it and
+                     # search 1 (no stall rule) is joined; at 60 s every search ended on its 2 s limit, unjoined
+                     # (review of 16 Oct 2026).
+                     dict(scenarios=["RECOMMENDED"], search_mode="THOROUGH", max_search_sec=90), None, None),
     "best_of_other_searches_lost": ({**BEST_OF_3, "ROUTEIQ_TEST_KILL_VARIANT": "1", "ROUTEIQ_TEST_HANG_VARIANT": "2"},
                                     dict(scenarios=ALL3), None, None),
     "best_of_main_search_killed": ({**BEST_OF_3, "ROUTEIQ_TEST_KILL_SCENARIO": "RECOMMENDED"}, dict(scenarios=ALL3), None, None),
@@ -150,6 +153,13 @@ def test_a_solve_releases_every_process_pipe_and_lock_itself(path, monkeypatch):
         assert not isinstance(out, BaseException), repr(out)
     else:
         assert isinstance(out, raises), repr(out)
+    if path.startswith("best_of") and raises is None:
+        # Best-of really ran its three searches (review of 16 Oct 2026: a CPU gate of one would have made these the
+        # one-search paths, unnoticed), and the join path joined.
+        b = out.search.best_of  # type: ignore[union-attr]
+        assert b is not None and b.used == 3, b
+        if path == "best_of_join":
+            assert b.searches[1].stop_reason == "JOINED", b.searches
     assert _names(left) == [], f"left alive after the solve (only the garbage collector could free them): {_names(left)}"
     assert _names(garbage) == [], f"freed only by the garbage collector: {_names(garbage)}"
     assert mp.active_children() == []

@@ -254,8 +254,9 @@ never worse than the engine alone would have chosen from the same search. See `d
     with the lists modelled (a routing profile per truck class, the stops a class may not carry forbidden); `model`: on
     every solve, Quick solves and hire checks included. Its plans are judged like any day's (the mapping back, the exact
     timing and the independent check refuse a stop on a truck it may not use). It changes the plans of such days: set it
-    only with the owner's OK after a replay of saved real requests, `thorough` first, never during the evening's planning
-    (a variable change restarts the solver).
+    only with the owner's OK after a replay of saved real requests (not before the replay tool exists: see "Best-of-N
+    route search and the priority repair" below), `thorough` first, never during the evening's planning (a variable
+    change restarts the solver).
 - **CPU and memory per solve.** One more busy process while the searches run (Quick: the whole search, about 1.5 x the day's
   search time; Thorough: while the engine searches, then until its last better plan is max(30 s, 10% of its search time)
   old, at most until the load re-check's reserve), and its own load re-check job
@@ -312,16 +313,35 @@ reason and warning texts changed, where they were untrue).
 - `SOLVER_BEST_OF` (THOROUGH) / `SOLVER_BEST_OF_QUICK` (QUICK): RECOMMENDED's route search runs K times at once (1-8,
   default 1). `SOLVER_PRIORITY_REPAIR=on`: after the load re-check, a P1-P3 stop left out while a lower priority rides is
   put back in its place where it fits. See `docs/PROJECT_HANDBOOK.md` 2.9 and 4.11.
-- **Turn one on** only after a replay of saved real requests shows a gain, with the owner's OK, and never during the
-  evening's planning: a variable change restarts the solver and cuts any running solve.
+- **Not yet: turn neither on (nor `SOLVER_PYVRP_ALLOWED`, above) until the replay tool exists.** Each needs a replay of
+  saved real requests with it on and off, judged by a rule written down before the replay runs (served by priority first,
+  then cost, every option VERIFIED, `search.used_sec` inside the cap). That tool, `scripts/bench_search.py`, is a follow-up
+  PR and does not exist yet: an ad-hoc replay is not enough. Then turn one on with the owner's OK, one at a time, and
+  never during the evening's planning: a variable change restarts the solver and cuts any running solve.
+- **What each one changes.** `SOLVER_BEST_OF_QUICK` changes every Quick solve: the evening's plan when it is a Quick
+  one, every re-plan of the day and the hire check's main solve (its trials always search once). `SOLVER_BEST_OF` changes
+  Thorough solves only; `SOLVER_PRIORITY_REPAIR` every solve but the hire check's trials. Each other search is one more
+  busy worker process for the whole search and holds its own copy of the day's matrices, and the CPU gate counts CPUs
+  only: before choosing K, measure the solver's peak memory with K searches on a 600-stop day with plan continuity on.
 - **Verify after the deploy or a change** (`railway logs --service solver`): the startup lines
   `Best-of route search: off (one route search per solve; SOLVER_BEST_OF=1, SOLVER_BEST_OF_QUICK=1)` (or
   `THOROUGH K searches, ...` with `of N asked (CPU_GATE)` when the CPUs allow fewer) and
   `Priority repair: off (the default; ...)` (or `on (...)`). `GET /ready` (with the solver token) has `best_of`
   (`effective_thorough`, `effective_quick`) and `priority_repair`. With best-of on, the next optimization's stored response
   (`RunJob.responseJson`) has `search.best_of.searches` (one entry per search) and the log `best-of run=<id> search i of K ...`
-  lines; with it off, `search.best_of` is null.
-- **Rollback:** unset the variable (or set `SOLVER_BEST_OF=1`, `SOLVER_PRIORITY_REPAIR=off`); no code change.
+  lines; with it off, `search.best_of` is null. A value the solver cannot read counts as its default (off for the switches) and
+  is named in the startup line (`...; SOLVER_BEST_OF='10' not read (a whole number from 1 to 8): its default is used)`,
+  `Priority repair: off (SOLVER_PRIORITY_REPAIR='enable' not read: on, 1, true or yes switch it on)`).
+- **The first nights after turning one on:** read each night's `search.best_of` (or the priority repair's note and log
+  lines) the next morning, and after the first week check Railway → solver → Usage (CPU and memory against the week
+  before).
+- **Roll back at once** (no code change) on any of: an optimization answering 503 or 504; a Thorough solve whose
+  `search.used_sec` is above its cap minus 60 s; an other search `TIMEOUT` or `LOST` (`search.best_of.searches`) on two
+  nights; RECOMMENDED's cost above the median of the 7 nights before at the same service by priority.
+- **If a Thorough solve fails during the evening's planning** (whatever is switched on): run a Quick solve of the day,
+  dispatch from it, and tell the engineer the run id.
+- **Rollback:** unset the variables (or set `SOLVER_BEST_OF=1`, `SOLVER_BEST_OF_QUICK=1` and `SOLVER_PRIORITY_REPAIR=off`);
+  no code change.
 
 ## Private networking notes
 

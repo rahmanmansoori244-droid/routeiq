@@ -78,6 +78,10 @@ def test_setting_parses_and_clamps(monkeypatch, raw, want):
     monkeypatch.setenv("SOLVER_BEST_OF", raw)
     assert best_of.setting("THOROUGH") == want
     assert best_of.setting("QUICK") == 1
+    # One it could not read (or out of range) is named in the startup line, not shown as the default it falls back
+    # to (review of 16 Oct 2026).
+    named = f"SOLVER_BEST_OF={raw.strip()!r} not read (a whole number from 1 to 8)" in best_of.startup_line()
+    assert named is (want == 1 and raw.strip() not in ("", "1")), best_of.startup_line()
     monkeypatch.delenv("SOLVER_BEST_OF")
     monkeypatch.setenv("SOLVER_BEST_OF_QUICK", raw)
     assert (best_of.setting("QUICK"), best_of.setting("THOROUGH")) == (want, 1)
@@ -105,6 +109,19 @@ def test_the_other_settings_parse_and_fall_back_to_their_defaults(monkeypatch):
             monkeypatch.setenv(name, raw)
             assert read() == want, (name, raw)
         monkeypatch.delenv(name)
+    # Unread ones are named in the startup line (review of 16 Oct 2026); a value read, or none, is not.
+    monkeypatch.setenv("SOLVER_BEST_OF_SOURCES", "x")
+    monkeypatch.setenv("SOLVER_BEST_OF_JOIN_SEC", "inf")
+    monkeypatch.setenv("SOLVER_BEST_OF_QUICK", "1")
+    assert best_of.unread() == [("SOLVER_BEST_OF_SOURCES", "x", "a whole number from 0 to 2"),
+                                ("SOLVER_BEST_OF_JOIN_SEC", "inf", "seconds from 0 to 300")]
+    assert best_of.startup_line() == (
+        "Best-of route search: off (one route search per solve; SOLVER_BEST_OF=1, SOLVER_BEST_OF_QUICK=1; "
+        "SOLVER_BEST_OF_SOURCES='x' not read (a whole number from 0 to 2): its default is used; "
+        "SOLVER_BEST_OF_JOIN_SEC='inf' not read (seconds from 0 to 300): its default is used)")
+    monkeypatch.setenv("SOLVER_BEST_OF_JOIN_SEC", "1.5")
+    monkeypatch.delenv("SOLVER_BEST_OF_SOURCES")
+    assert best_of.unread() == []
     # Every allowed strategy is one OR-Tools 9.15 knows.
     for name in best_of.STRATEGY_WHITELIST:
         assert isinstance(getattr(routing_enums_pb2.FirstSolutionStrategy, name), int)
@@ -469,6 +486,18 @@ def test_quick_best_of_runs_k_searches_and_reports_each(parallel, monkeypatch):
     from tests.test_repack import assert_plan_rules
 
     monkeypatch.setenv("SOLVER_BEST_OF_QUICK", "3")
+    # A loaded CI runner may still be starting an other search's process: wait for each (they end on their 2 s
+    # limit), not the production 5 s (review of 16 Oct 2026). The wait runs in this process.
+    monkeypatch.setattr(best_of, "QUICK_WAIT_SEC", 60.0)
+    # A small day often makes every search find the same plan (none then goes to the load re-check): re-check
+    # one anyway, so that the wiring below is always exercised (review of 16 Oct 2026). The choice runs here.
+    real_choice = ds._best_of_choice
+
+    def choice(runs, m):
+        main, warm, picked = real_choice(runs, m)
+        return main, warm, picked or [r for r in runs if r["index"] and r["ok"] and r["rank"] is not None][:1]
+
+    monkeypatch.setattr(ds, "_best_of_choice", choice)
     pools, names = _spy_pools(monkeypatch)
     r = req(*nmwc_day(30), scenarios=ALL3, time_limit_sec=2)
     resp = ds.optimize_dispatch(r)
@@ -481,21 +510,17 @@ def test_quick_best_of_runs_k_searches_and_reports_each(parallel, monkeypatch):
         assert (s.status, s.stop_reason, s.solutions, s.last_improvement_sec, s.exact) == ("OPTIMIZED", "TIME_LIMIT", None, None, True)
         assert s.trucks and s.cost_omr and len(s.unserved_by_priority) == 5 and s.rank_sec is not None
     assert sum(s.warm_start for s in b.searches) == 1
-    assert sum(s.rechecked for s in b.searches) <= best_of.sources(3)
+    assert sum(s.rechecked for s in b.searches) == best_of.sources(3) == 1
     assert resp.search.stop_reason == "TIME_LIMIT" and {sc.name for sc in resp.scenarios} == set(ALL3)
     for sc in resp.scenarios:
         assert_plan_rules(r, sc)
     # Integration (the search side and the load re-check side): a re-checked search reaches _post_solve as an
     # extra source - one gain per option, against the best plan without it - and an option is in chosen_for
-    # exactly when its plan came from it (its note says so). None re-checked (its plan equal to the main one's):
-    # no gains, nothing chosen.
+    # exactly when its plan came from it (its note says so).
     noted = {sc.name for sc in resp.scenarios if any("(started from another order of the stops)" in w for w in sc.warnings)}
-    if any(s.rechecked for s in b.searches):
-        assert sorted(g.option for g in b.gains) == sorted(ALL3)
-        assert all(g.source is None or best_of.from_extra(g.source) for g in b.gains)
-        assert set(b.chosen_for) == {g.option for g in b.gains if g.used} and noted <= set(b.chosen_for)
-    else:
-        assert (b.gains, b.chosen_for, noted) == ([], [], set())
+    assert sorted(g.option for g in b.gains) == sorted(ALL3)
+    assert all(g.source is None or best_of.from_extra(g.source) for g in b.gains)
+    assert set(b.chosen_for) == {g.option for g in b.gains if g.used} and noted <= set(b.chosen_for)
 
 
 def test_failed_lost_and_hung_other_searches_cost_nothing(parallel, monkeypatch):
@@ -558,7 +583,8 @@ def test_thorough_other_searches_join_when_the_main_one_ends(parallel, monkeypat
     assert s.stop_reason == "CONVERGED" and s.used_sec <= cap + 5
     assert [(x.index, x.status, x.stop_reason) for x in b.searches] == [
         (0, "OPTIMIZED", "CONVERGED"), (1, "OPTIMIZED", "JOINED"), (2, "TIMEOUT", None)]
-    assert b.join_sec is not None and b.join_sec <= 1.0
+    # The window is counted from the main search's end, so it holds the ranking of its plan too (review of 16 Oct 2026).
+    assert b.join_sec is not None and b.join_sec <= 1.0 + (b.searches[0].rank_sec or 0.0) + 0.1, b
     assert b.searches[0].solutions and b.searches[0].solutions == s.solutions and b.searches[0].last_improvement_sec is not None
     assert b.searches[1].solutions and b.searches[1].search_sec < s.limit_sec
     assert [sc.name for sc in resp.scenarios] == ["RECOMMENDED", "MIN_TRUCKS"]
@@ -575,12 +601,26 @@ def test_a_stop_request_ends_every_search(parallel, monkeypatch):
     monkeypatch.setenv("SOLVER_BEST_OF", "3")
     control = ds.SolveControl()
     r = req(*nmwc_day(30), scenarios=ALL3, search_mode="THOROUGH", max_search_sec=120, time_limit_sec=3)
-    timer = threading.Timer(12.0, control.request_stop)  # their stall rule (300 s) never ends them first
+    # The stop comes 8 s after the other searches were submitted (review of 16 Oct 2026: a fixed delay from the
+    # solve's start assumed they had started by then); their stall rule (300 s) never ends them first.
+    submitted = threading.Event()
+    submit = ds._Workers.submit
+
+    def spy_submit(self, fn, arg, name):
+        out = submit(self, fn, arg, name)
+        if name == "RECOMMENDED~2":
+            submitted.set()
+        return out
+
+    monkeypatch.setattr(ds._Workers, "submit", spy_submit)
+    done = threading.Event()
+    timer = threading.Thread(target=lambda: submitted.wait(120) and not done.wait(8.0) and control.request_stop(), daemon=True)
     timer.start()
     try:
         resp = ds.optimize_dispatch(r, control=control)
     finally:
-        timer.cancel()
+        done.set()
+        timer.join(10)
     b = resp.search.best_of
     assert [(x.index, x.stop_reason) for x in b.searches] == [(0, "STOPPED"), (1, "STOPPED"), (2, "STOPPED")]
     assert [sc.name for sc in resp.scenarios] == ["RECOMMENDED"] and resp.search.stop_reason == "STOPPED"
@@ -645,3 +685,111 @@ def test_best_of_leaves_no_process_or_handle(parallel, monkeypatch):
     assert len(_mp_objects()) == base_objects
     if base_handles is not None:
         assert _open_handles() - base_handles <= 8
+
+
+# ---------------------------------------------------------------------------------------------
+# Review of 16 Oct 2026 (best-of on only; every default unchanged)
+# ---------------------------------------------------------------------------------------------
+
+def test_a_failed_search_is_logged_with_its_error(caplog):
+    """A search that raised is logged with its error and the traceback - the main one's at ERROR: with one search
+    it fails the solve (a 500 with its traceback), with best-of another search may replace it without a trace."""
+    def run(i, kind, err=None):
+        return {"variant": best_of.SearchVariant(i, i, PCI), "index": i, "kind": kind, "status": best_of.run_status(kind),
+                "scenario": None, "watch": None, "error": err}
+
+    try:
+        raise ValueError("engine bug in the main search")
+    except ValueError as exc:
+        boom = exc
+    runs = [run(0, "error", boom), run(1, "error", RuntimeError("another search failed")),
+            run(2, "broken", "the worker pool was closed"), run(3, "timeout")]
+    with caplog.at_level("INFO", logger="routeiq.dispatch"):
+        ds._log_best_of("r1", runs, None, None, [], 4)
+    by = {i: [rec for rec in caplog.records if f"search {i} of 4" in rec.getMessage()] for i in range(4)}
+    assert [len(by[i]) for i in range(4)] == [1, 1, 1, 1], caplog.text
+    assert by[0][0].levelname == "ERROR" and "FAILED ValueError: engine bug in the main search" in by[0][0].getMessage()
+    assert by[0][0].exc_info and by[0][0].exc_info[1] is boom
+    assert by[1][0].levelname == "WARNING" and "RuntimeError: another search failed" in by[1][0].getMessage()
+    assert by[2][0].levelname == "WARNING" and "the worker pool was closed" in by[2][0].getMessage() and not by[2][0].exc_info
+    assert by[3][0].levelname == "INFO" and by[3][0].getMessage().endswith("TIMEOUT")
+    assert "Traceback" in caplog.text and "its log lines failed" not in caplog.text
+
+
+def test_a_hung_main_search_gets_fresh_workers_only_with_time_left(monkeypatch):
+    """Another search replaced a main search that did not answer by its backstop - THOROUGH's is the cap itself.
+    With no time left for the load re-check after the slowest worker start, no fresh workers start (they only
+    added their start past the cap): the alternatives are skipped and the plans kept, re-timed exactly ("out of
+    time"). With time left they start as before (here none can: "short of resources")."""
+    from tests.test_dispatch import nmwc_day, req
+    from tests.test_pyvrp_candidate import _prepared
+
+    r = req(*nmwc_day(10), scenarios=ALL3, time_limit_sec=1)
+    tds, solvable, drops, mx = _prepared(r)
+    raw, _ = ds._searched(("RECOMMENDED", r, solvable, tds, mx, 1, drops))
+    assert raw.status == "OPTIMIZED"
+    started: list = []
+    monkeypatch.setattr(ds, "_start_workers", lambda *a, **kw: started.append(a[3]) or None)
+
+    class _Pool:
+        def close(self):
+            return True
+
+        def broken(self, settle=0.0):
+            return None
+
+    for left, want, why in ((10.0, [], "(out of time)"), (600.0, ["search"], f"({ds.NO_WORKERS_NOTE})")):
+        bo = ds._BestOf(scenario=raw.model_copy(deep=True), watch=None, limit=1, warm=raw.loads or None, extra_sources=[],
+                        main_stuck=True, report=None)
+        monkeypatch.setattr(ds, "_recommended_best_of", lambda *a, bo=bo, **kw: bo)
+        started.clear()
+        out = ds._run_scenarios(list(ALL3), r, solvable, tds, mx, 1, drops, time.monotonic() + left,
+                                workers=_Pool(), best_of=3, extras=_Pool())
+        assert started == want, (left, started)
+        assert [sc.name for sc in out] == ["RECOMMENDED"]
+        rec = out[0]
+        assert rec.status == "OPTIMIZED" and rec.feasibility.status == "VERIFIED", rec.feasibility
+        assert any(f"Loads were not re-checked for fewer trucks {why}" in w for w in rec.warnings), rec.warnings
+        assert any("Alternative plan(s) MIN_TRUCKS, MIN_DISTANCE were skipped" in w for w in rec.warnings), rec.warnings
+
+
+def test_an_other_searches_pool_that_does_not_close_is_only_a_warning(monkeypatch, caplog):
+    """The other searches' pool is optional: one whose Pool.terminate() does not return within POOL_CLOSE_SEC is a
+    WARNING, never the administrator's WORKERS_UNAVAILABLE alert nor /ready failed (the solve's own pool still
+    alerts: test_worker_start)."""
+    import logging
+    import multiprocessing as mp
+    import threading
+
+    monkeypatch.setattr(ds, "POOL_CLOSE_SEC", 1.0)
+    caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
+    w = ds._Workers(1, None, run_id="r", what="other route searches", join=True)
+    real_terminate = w.pool.terminate
+    release = threading.Event()
+    w.pool.terminate = lambda: release.wait(60) and real_terminate()
+    try:
+        assert w.close() is False
+    finally:
+        release.set()
+    for t in threading.enumerate():
+        if t.name == "routeiq-pool-close":
+            t.join(10)
+    assert not [m.getMessage() for m in caplog.records if m.levelno >= logging.ERROR]
+    assert any(m.levelno == logging.WARNING and "pool for the other route searches did not stop within 1 s" in m.getMessage()
+               for m in caplog.records), caplog.text
+    assert ds.WORKER_HEALTH.status() == {"status": "ok"}
+    assert mp.active_children() == []
+
+
+def test_best_of_is_null_where_it_does_not_apply(monkeypatch):
+    """SOLVER_BEST_OF_QUICK=3 on a request without RECOMMENDED has no best-of report (it said "3 asked, 1 run" with no
+    reason); with RECOMMENDED the one search says why (IN_PROCESS here)."""
+    from tests.test_dispatch import nmwc_day, req
+
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    monkeypatch.setenv("SOLVER_BEST_OF_QUICK", "3")
+    stops, trucks = nmwc_day(6)
+    assert ds.optimize_dispatch(req(stops, trucks, scenarios=["MIN_TRUCKS"], time_limit_sec=1)).search.best_of is None
+    b = ds.optimize_dispatch(req(stops, trucks, scenarios=["RECOMMENDED"], time_limit_sec=1)).search.best_of
+    assert (b.requested, b.used, b.gate) == (3, 1, "IN_PROCESS")
+

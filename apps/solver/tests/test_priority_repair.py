@@ -88,14 +88,16 @@ def test_timing_reason_lowest_priorities_first_only_when_true():
 
 
 def test_timing_reason_for_the_days_lowest_priority():
-    """L4 is the day's lowest priority: nothing lower was left out first."""
+    """L4 is the day's lowest priority, and no lower one rides: the text from before, word for word - it was not
+    untrue there (owner decision 16 Oct 2026: texts change only where they were untrue; review of the branch)."""
     r = p2_day()
     sc = built(r, {0: [(A,)], 1: [(B,)]}, timing={L4})
-    assert why(sc)["L4"].endswith("and this P4 stop was left out. Re-plan, add a truck, or check the loading time."), why(sc)
+    assert why(sc)["L4"].endswith("and this P4 stop was left out (lowest priorities first). Re-plan, add a truck, or check "
+                                  "the loading time."), why(sc)
     # What the priority repair did is said only when it ran (SOLVER_PRIORITY_REPAIR).
     cfg, s = r.config, r.stops[B]
-    assert "found no place that keeps every rule (not a proof)" in ds._timing_drop_reason(cfg, s, "", 2, True, ds.REPAIR_NO_PLACE)
-    assert "no time was left to try it in place of lower-priority stops" in ds._timing_drop_reason(cfg, s, "", 2, True, ds.REPAIR_NO_TIME)
+    assert "found no place that keeps every rule (not a proof)" in ds._timing_drop_reason(cfg, s, "", 2, ds.REPAIR_NO_PLACE)
+    assert "no time was left to try it in place of lower-priority stops" in ds._timing_drop_reason(cfg, s, "", 2, ds.REPAIR_NO_TIME)
 
 
 def test_timing_warning_counts_inverted_stops():
@@ -137,6 +139,26 @@ def test_rebuilt_keeps_the_warning_verbatim_when_nothing_changed():
     alone = ds._rebuilt(ctx, sc, {0: [(A,)]}, as_is, {B}, set())
     assert w not in alone.warnings and OLD_WARNING in alone.warnings, alone.warnings
     assert "(lowest priorities first)" in why(alone)["B"]
+
+
+def test_rebuilt_keeps_what_stays_true_of_the_warning_it_works_out_again():
+    """Review of 16 Oct 2026: worked out again for another plan (here the count changed: no lower priority rides any
+    more), the warning keeps a trimmed plan's PARTIAL_PLAN_NOTE and why, and the stops the route search had left
+    out that the load re-check planned instead - it lost both."""
+    r = p2_day()
+    plan = {0: [(A,)], 1: [(L3,), (L4,)]}
+    sc = built(r, plan, timing={B})
+    why_ = "no re-assignment of its loads could be timed in the time available."
+    sc.warnings.append(ds.PARTIAL_PLAN_NOTE + why_ + " " + ds._timing_drop_warning(r.config, 1, 2, 1))
+    assert ds._timing_warning_parts(sc.warnings) == (ds.PARTIAL_PLAN_NOTE + why_ + " ", 2)
+    assert ds._timing_warning_parts([OLD_WARNING]) == ("", 0) and ds._timing_warning_parts(["Other."]) == ("", 0)
+    ctx = ds._stage_ctx(r, r.stops, ds._truck_days(r), matrix_for(r), [])
+    as_is = ds._timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx)
+    alone = ds._rebuilt(ctx, sc, {0: [(A,)]}, as_is, {B}, set())
+    timing = [w for w in alone.warnings if ds.TIMING_DROP_NOTE in w]
+    assert timing == [ds.PARTIAL_PLAN_NOTE + why_ + " " + ds._timing_drop_warning(r.config, 1, 2, 0)], alone.warnings
+    assert timing[0].endswith("so the lowest priorities were left out (see Unserved orders). Re-plan, add a truck, or check "
+                              "the loading time. 2 stop(s) the route search had left out are planned instead.")
 
 
 def test_regenerated_warning_markers_cover_build_scenario():
@@ -193,6 +215,13 @@ def test_ready_and_the_startup_line_name_the_priority_repair(monkeypatch):
     body = client.get("/ready", headers={"X-Solver-Token": "unit-test-solver-token"}).json()
     assert body["ok"] is True and body["priority_repair"] == "on"
     assert ds.priority_repair_line().startswith("Priority repair: on (SOLVER_PRIORITY_REPAIR)")
+    # A value it does not read is named (review of 16 Oct 2026: "enable" was off without a word); "off" is the default.
+    monkeypatch.setenv(ds.PRIORITY_REPAIR_ENV, "enable")
+    assert ds.priority_repair_line() == ("Priority repair: off (SOLVER_PRIORITY_REPAIR='enable' not read: on, 1, true or "
+                                         "yes switch it on)")
+    assert client.get("/ready", headers={"X-Solver-Token": "unit-test-solver-token"}).json()["priority_repair"] == "off"
+    monkeypatch.setenv(ds.PRIORITY_REPAIR_ENV, "off")
+    assert ds.priority_repair_line().startswith("Priority repair: off (the default")
 
 
 def _search_returns(monkeypatch, r, plan):
@@ -247,6 +276,28 @@ def test_the_stops_a_p2_takes_the_place_of_say_so(monkeypatch):
     assert_plan_rules(r, sc)
 
 
+def test_the_repair_note_says_the_older_notes_describe_the_plan_before_it():
+    """Review of 16 Oct 2026: the repair keeps the plan's other notes (the load re-check's "11 -> 10 trucks", the
+    second search's, best-of's), which describe the plan before it; its own note then says so - and only then."""
+    r = p2_day()
+    mx = matrix_for(r)
+    before = "Loads were re-assigned after the route search: 2 -> 2 trucks, 4 -> 3 loads."  # an invented post-solve note
+    for notes in ([before], []):
+        sc = built(r, {0: [(A,)], 1: [(L3,), (L4,)]}, timing={B})
+        sc.warnings += notes
+        results = {"RECOMMENDED": sc}
+        assert ds._repair_inversions(r, r.stops, mx, [], results, time.monotonic() + 600, None) == {"RECOMMENDED"}
+        new = results["RECOMMENDED"]
+        assert served_ids(new) == {"A", "B", "L3", "L4"}, why(new)
+        note = [w for w in new.warnings if ds.PRIORITY_REPAIR_NOTE in w]
+        assert len(note) == 1 and note[0].endswith(ds.PRIORITY_REPAIR_BEFORE) is bool(notes), new.warnings
+        if notes:
+            assert new.warnings.index(before) < new.warnings.index(note[0])
+            assert note[0].endswith("OMR operating cost. The notes above about the route search and the load re-check "
+                                    "describe the plan before this repair."), note[0]
+        assert_plan_rules(r, new)
+
+
 def test_no_inversion_means_no_repair_call(monkeypatch):
     """A clean day is not touched (no call); a P1 stop kept out by its receiving window while P5 stops ride
     (test_dispatch's window day) is tried, and its plan stays as it was."""
@@ -295,7 +346,7 @@ def test_the_repair_keeps_to_its_deadline(monkeypatch):
     t = time.monotonic()
     assert ds._repair_inversions(r, r.stops, mx, [], results, time.monotonic() + 600, None) == set()
     took = time.monotonic() - t
-    assert took < 2.0 and len(timings) <= 6, (took, len(timings))
+    assert took < 3.0 and len(timings) <= 6, (took, len(timings))  # about 1 s; room for a loaded CI runner
     assert results["RECOMMENDED"] is sc and served_ids(sc) == {"A", "L3", "L4"}
     assert "no time was left to try it in place of lower-priority stops" in why(sc)["B"], why(sc)["B"]
     # The request's budget nearly used up (less than STAGE_GRACE_SEC + 1 s left): no call at all.

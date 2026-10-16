@@ -272,10 +272,33 @@ def status() -> dict:
     return out
 
 
+def unread() -> list[tuple[str, str, str]]:
+    """The settings that are set but could not be read, or are out of range - each then counts as its default:
+    (name, its value as set, what it takes). The startup line names them (review of 16 Oct 2026:
+    SOLVER_BEST_OF=10 read as "SOLVER_BEST_OF=1" there, as if it had not been set)."""
+    out: list[tuple[str, str, str]] = []
+    for name, lo, hi, num in ((ENV_THOROUGH, 1, MAX_K, int), (ENV_QUICK, 1, MAX_K, int),
+                              (ENV_SOURCES, 0, MAX_SOURCES, int), (ENV_JOIN_SEC, 0, int(MAX_JOIN_SEC), float)):
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            continue
+        try:
+            ok = lo <= num(raw) <= hi  # NaN fails it
+        except ValueError:
+            ok = False
+        if not ok:
+            out.append((name, raw[:20], f"{'a whole number' if num is int else 'seconds'} from {lo} to {hi}"))
+    return out
+
+
+def _unread_clause() -> str:
+    return "".join(f"; {name}={raw!r} not read ({what}): its default is used" for name, raw, what in unread())
+
+
 def startup_line() -> str:
     st = status()
     if st["thorough"] == 1 and st["quick"] == 1:
-        return f"Best-of route search: off (one route search per solve; {ENV_THOROUGH}=1, {ENV_QUICK}=1)"
+        return f"Best-of route search: off (one route search per solve; {ENV_THOROUGH}=1, {ENV_QUICK}=1{_unread_clause()})"
 
     def part(mode: str, key: str) -> str:
         asked, used, why = st[key], st[f"effective_{key}"], st[f"why_{key}"]
@@ -284,4 +307,4 @@ def startup_line() -> str:
 
     return (f"Best-of route search: {part('THOROUGH', 'thorough')}, {part('QUICK', 'quick')} "
             f"(effective CPUs {st['cpus']}, {st['max_concurrent']} solves at once, {st['sources']} extra source(s) "
-            f"re-checked, join {st['join_sec']:g} s)")
+            f"re-checked, join {st['join_sec']:g} s{_unread_clause()})")
