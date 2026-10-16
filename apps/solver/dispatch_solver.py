@@ -87,6 +87,7 @@ from fractions import Fraction
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
+import best_of as best_of_mod
 import costing
 import feasibility as FZ
 import load_repack as LR
@@ -608,58 +609,66 @@ class ThoroughTail:
 
     alt_sec: int  # each alternative's search limit (0 without alternatives)
     repack_cap: float  # each CP-SAT solve of the load re-check
-    stage_sec: int  # kept free for the load re-check (post-solve stage): three sources in one round, and its grace
+    # Kept free for the load re-check (post-solve stage): its sources in one round (three, the options'
+    # searches; one more per other route search best-of-N sends to it), and its grace.
+    stage_sec: int
     total: int  # alternatives + their grace (when asked for) + the re-check
 
     @staticmethod
-    def of(alt_sec: int, repack_cap: float, n_alternatives: int) -> "ThoroughTail":
-        stage = int(math.ceil(round(repack_cap * 3, 6) + STAGE_GRACE_SEC + 5))
+    def of(alt_sec: int, repack_cap: float, n_alternatives: int, n_sources: int = 3) -> "ThoroughTail":
+        stage = int(math.ceil(round(repack_cap * n_sources, 6) + STAGE_GRACE_SEC + 5))
         alt = alt_sec if n_alternatives else 0
         return ThoroughTail(alt, repack_cap, stage, (alt + ALT_GRACE_SEC if n_alternatives else 0) + stage)
 
 
-def thorough_tail(time_limit: int, n_alternatives: int, cap: float | None = None) -> ThoroughTail:
+def thorough_tail(time_limit: int, n_alternatives: int, cap: float | None = None, n_sources: int = 3) -> ThoroughTail:
     """THOROUGH's tail: the alternatives (in parallel, warm-started) with their grace, then the load
     re-check with its grace - at least 60 s per alternative and 30 s per CP-SAT solve. A ``cap`` below
     20 min where that is more than 30% of the cap shrinks the alternatives' and the re-check's times
     in proportion to fit 30%, never below QUICK's own (half the limit; min(15, max(3, limit / 2))).
     Review of the long-search PR: only the total used to be cut, while the alternatives were still
     charged the full re-check reserve, so under ~7 min they were always skipped and up to a third
-    of the cap went unused."""
+    of the cap went unused.
+
+    ``n_sources``: the load re-check's sources - three, the options' own searches (also without
+    alternatives, as before); best-of-N adds one per other route search it sends there (3 + m,
+    best_of.sources). Each keeps one more CP-SAT solve free, taken from RECOMMENDED's own limit - which
+    matters only to a search that would run to the cap. The default 3 gives exactly the values from before."""
     alt_full = _thorough_alt_sec(time_limit)
     repack_full = _repack_cap_sec(time_limit, True)
-    full = ThoroughTail.of(alt_full, repack_full, n_alternatives)
+    full = ThoroughTail.of(alt_full, repack_full, n_alternatives, n_sources)
     budget = int(0.3 * cap) if cap is not None else full.total
     if full.total <= budget:
         return full
     quick_alt, quick_repack = max(2, time_limit // 2), _repack_cap_sec(time_limit, False)
     grace = ALT_GRACE_SEC if n_alternatives else 0
-    # The alternatives' share of what the graces leave; the re-check gets the rest (three solves);
-    # neither below QUICK's. When the re-check is at QUICK's, the alternatives give back the excess.
-    share = max(0, budget - grace - STAGE_GRACE_SEC - 5) / ((alt_full if n_alternatives else 0) + 3 * repack_full)
+    # The alternatives' share of what the graces leave; the re-check gets the rest (one solve per
+    # source); neither below QUICK's. When the re-check is at QUICK's, the alternatives give back the excess.
+    share = max(0, budget - grace - STAGE_GRACE_SEC - 5) / ((alt_full if n_alternatives else 0) + n_sources * repack_full)
     alt = max(quick_alt, int(alt_full * share)) if n_alternatives else 0
-    rest = max(0.0, (budget - alt - grace - STAGE_GRACE_SEC - 5) / 3)
+    rest = max(0.0, (budget - alt - grace - STAGE_GRACE_SEC - 5) / n_sources)
     repack = min(repack_full, max(quick_repack, math.floor(rest * 10) / 10))
-    stage = ThoroughTail.of(0, repack, 0).stage_sec
+    stage = ThoroughTail.of(0, repack, 0, n_sources).stage_sec
     if n_alternatives:
         alt = max(quick_alt, min(alt, budget - grace - stage))
-    return ThoroughTail.of(alt, repack, n_alternatives)
+    return ThoroughTail.of(alt, repack, n_alternatives, n_sources)
 
 
-def thorough_tail_sec(time_limit: int, n_alternatives: int, cap: float | None = None) -> int:
+def thorough_tail_sec(time_limit: int, n_alternatives: int, cap: float | None = None, n_sources: int = 3) -> int:
     """THOROUGH: what RECOMMENDED's search leaves free at the end of the cap (thorough_tail)."""
-    return thorough_tail(time_limit, n_alternatives, cap).total
+    return thorough_tail(time_limit, n_alternatives, cap, n_sources).total
 
 
-def rec_limit_sec(mode: str, time_limit: int, left: float, n_alternatives: int, cap: float | None = None) -> int:
+def rec_limit_sec(mode: str, time_limit: int, left: float, n_alternatives: int, cap: float | None = None,
+                  n_sources: int = 3) -> int:
     """RECOMMENDED's search limit with ``left`` seconds of the request budget left. QUICK: exactly as
     before - the automatic limit, shortened only when a slow road matrix ate the budget. THOROUGH:
-    everything up to the tail (thorough_tail: the alternatives and the load re-check, in proportion
-    to a ``cap`` set below 20 min), never less than QUICK."""
+    everything up to the tail (thorough_tail: the alternatives and the load re-check of ``n_sources``
+    sources, in proportion to a ``cap`` set below 20 min), never less than QUICK."""
     quick = max(1, min(time_limit, int(left) - REC_OVERHEAD_SEC))
     if mode != "THOROUGH":
         return quick
-    return max(quick, int(left) - REC_OVERHEAD_SEC - thorough_tail_sec(time_limit, n_alternatives, cap))
+    return max(quick, int(left) - REC_OVERHEAD_SEC - thorough_tail_sec(time_limit, n_alternatives, cap, n_sources))
 
 
 class SolveControl:
@@ -2285,14 +2294,57 @@ TIMING_DROP_HEAD = "Not planned: once every load was timed with the loading time
 TIMING_DROP_NOTE = " stop(s) the route search had planned are left out: with the loading time between loads"
 
 
-def _timing_drop_warning(cfg: DispatchConfig, n: int, added: int) -> str:
+def _timing_drop_warning(cfg: DispatchConfig, n: int, added: int, inverted: int = 0) -> str:
     """The plan's warning about the ``n`` stops the load re-check left out for the loading time between
-    loads (``added``: the stops the route search had left out that it plans instead)."""
+    loads (``added``: the stops the route search had left out that it plans instead). ``inverted``: how
+    many of them are left out while a stop of a lower priority is planned (_inverted_drops) - then the
+    warning says so instead of "so the lowest priorities were left out", which was untrue (a P2 stop out
+    while P3 and P4 stops rode, solver search upgrade of 16 Oct 2026); 0: the text from before, word for word."""
+    left = ("so the lowest priorities were left out" if not inverted else
+            f"so they were left out, {inverted} of them although lower-priority stops are planned")
     return (
         f"{n}{TIMING_DROP_NOTE} ({cfg.reload_min} min + {cfg.loading_min_per_case:g} min per case) its loads did not fit "
-        "the truck days, so the lowest priorities were left out (see Unserved orders). Re-plan, add a truck, or check "
+        f"the truck days, {left} (see Unserved orders). Re-plan, add a truck, or check "
         "the loading time." + (f" {added} stop(s) the route search had left out are planned instead." if added else "")
     )
+
+
+# What the priority repair (_repair_inversions) did for a P1-P3 stop left out for the loading time while a lower
+# priority rides (_timing_drop_reason): it tried every place it tries and found none that keeps every rule, or
+# it had no time left to try. A stop it was not run for (SOLVER_PRIORITY_REPAIR off, the default) claims neither.
+REPAIR_NO_PLACE = "NO_PLACE"
+REPAIR_NO_TIME = "NO_TIME"
+
+
+def _timing_drop_reason(cfg: DispatchConfig, s: DispatchStop, brk_words: str, lower_served: int, lower_on_day: bool,
+                        repair: str | None = None) -> str:
+    """The unserved reason of a stop the load re-check left out for the loading time between loads
+    (TIMING_DROP_HEAD first: _timing_drops_of finds them by it). "(lowest priorities first)" only when it is
+    true, as _shortage_reason and _no_room_reason say it: the day has stops of a lower priority
+    (``lower_on_day``) and none of them is planned (``lower_served``: how many are). Solver search upgrade
+    (16 Oct 2026): a P2 stop read "(lowest priorities first)" while P3 and P4 stops rode. With lower
+    priorities planned it says so, and claims nothing it did not check: no check proves it cannot go in
+    their place - unless the priority repair tried (``repair``: REPAIR_NO_PLACE, REPAIR_NO_TIME)."""
+    head = (f"{TIMING_DROP_HEAD} ({cfg.reload_min} min + {cfg.loading_min_per_case:g} min per case){brk_words}, the route "
+            f"search's loads no longer fitted the truck days and this P{s.priority} stop was left out")
+    if lower_served:
+        n = lower_served
+        why = {REPAIR_NO_PLACE: "the planner then tried to put it in place of lower-priority stops and found no place that "
+                                "keeps every rule (not a proof)",
+               REPAIR_NO_TIME: "no time was left to try it in place of lower-priority stops"}.get(
+            repair or "", "no check proves it cannot go in their place")
+        return (f"{head} although {n} lower-priority stop{'' if n == 1 else 's'} {'is' if n == 1 else 'are'} planned: "
+                f"{why}. Re-plan, add a truck, or add it by hand in place of a lower-priority stop.")
+    if lower_on_day:
+        return f"{head} (lowest priorities first). Re-plan, add a truck, or check the loading time."
+    return f"{head}. Re-plan, add a truck, or check the loading time."
+
+
+def _inverted_drops(stops: list[DispatchStop], left: set[int] | list[int], served: set[int]) -> int:
+    """How many of the stops ``left`` (indices of ``stops``, left out) are left out while a stop of a lower
+    priority is planned (``served``)."""
+    lowest = max((stops[k].priority for k in served), default=0)
+    return sum(1 for k in left if stops[k].priority < lowest)
 
 
 def _timing_drops_of(sc: DispatchScenario, stop_idx: dict[str, int]) -> set[int]:
@@ -2328,20 +2380,46 @@ def _hire_drops_of(sc: DispatchScenario, stop_idx: dict[str, int]) -> set[int]:
             if u.stop_id in stop_idx and u.reason_message.startswith(HIRE_DROP_HEAD)}
 
 
+# The start of the reason of a stop the priority repair (_repair_inversions, SOLVER_PRIORITY_REPAIR) took off its
+# load to put a higher-priority stop in its place, and found no other place for (_build_scenario's displaced):
+# not "the optimizer found no truck ... Re-plan to search again" (a higher priority took its place), and never
+# counted among the stops the search could not place.
+PRIORITY_DISPLACED_HEAD = "Not planned: a higher-priority stop was put in its place after the load re-check"
+# The plan's note when the priority repair changed it (after the count of the stops it put back).
+PRIORITY_REPAIR_NOTE = " P1-P3 stop(s) left out while lower-priority stops rode were put back in their place after the load re-check"
+
+
+def _displaced_reason(priority: int) -> str:
+    """The unserved reason of a stop the priority repair took off and found no other place for."""
+    return (f"{PRIORITY_DISPLACED_HEAD} (higher priorities go first), and no other place was found for this P{priority} "
+            "stop. Add a truck or add it by hand.")
+
+
+def _displaced_of(sc: DispatchScenario, stop_idx: dict[str, int]) -> set[int]:
+    """The stops of ``sc`` the priority repair took off (by their reason)."""
+    return {stop_idx[u.stop_id] for u in sc.unserved
+            if u.stop_id in stop_idx and u.reason_message.startswith(PRIORITY_DISPLACED_HEAD)}
+
+
 def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                     timed: LR.TimedPlan, values: list[int], use_margin: bool, pre_drops: list[UnservedStop], *,
                     solver_status: str, elapsed: float, time_limit: int, objective_value: int,
                     extra_warnings: list[str] | None = None, timing_drops: set[int] | None = None,
-                    exact_timing: bool = True, hire_drops: set[int] | None = None) -> DispatchScenario:
+                    exact_timing: bool = True, hire_drops: set[int] | None = None,
+                    displaced: set[int] | None = None, timing_repair: dict[int, str] | None = None) -> DispatchScenario:
     """Loads, stop times, costs, unserved reasons and totals of a timed plan. The ONE place a
     plan becomes a scenario: the search's plans and the post-solve plans are reported alike, and
     every scenario gets its independent feasibility report here (feasibility.check_scenario).
 
     timing_drops: stops the route search planned that this plan leaves out because the search's
-    loads did not fit the day once timed with the exact loading time (see _post_solve).
+    loads did not fit the day once timed with the exact loading time (see _post_solve); their reason is
+    _timing_drop_reason, with what the priority repair did for each (``timing_repair``, by index).
     hire_drops: P4/P5 stops a give-back of the hire reduction leaves out (_without_low_hires: a truck is
     not rented for P4/P5 orders alone); those this plan does not serve get that reason and one warning,
     never counted among the stops the optimizer could not place (twelfth review of the hire branch).
+    displaced: stops the priority repair (_repair_inversions) took off for a higher priority and found no
+    other place for; those this plan does not serve say so (PRIORITY_DISPLACED_HEAD), never counted among
+    the stops the optimizer could not place.
     exact_timing: the times come from load_repack.time_plan (the exact loading time between loads);
     False for the route search's own times (80% of a full truck per turnaround).
 
@@ -2351,6 +2429,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     cfg = req.config
     timing_drops = timing_drops or set()
     hire_drops = hire_drops or set()
+    displaced = displaced or set()
+    timing_repair = timing_repair or {}
     loads: list[PlannedLoad] = []
     served: set[int] = set()
     comp = dict(fixed=0.0, trip=0.0, distance=0.0, fuel=0.0, time=0.0, overtime=0.0, window=0.0, early=0.0, continuity=0.0)
@@ -2508,15 +2588,16 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                                       f"Late order (P{s.priority}): no unlocked truck/load had capacity or time left. "
                                       "Locked and dispatched loads were not changed."))
         elif k in timing_drops:
+            # "Lowest priorities first" only when it is true (as the shortage reason below says it).
+            lower_served = sum(1 for ld in loads for st in ld.stops if priority_of[st.stop_id] > s.priority)
+            lower_on_day = any(p > s.priority for p in priority_of.values())
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY",
-                                      f"{TIMING_DROP_HEAD} "
-                                      f"({cfg.reload_min} min + {cfg.loading_min_per_case:g} min per case)"
-                                      f"{brk_words}, the route search's "
-                                      f"loads no longer fitted the truck days and this P{s.priority} stop was left out "
-                                      "(lowest priorities first). Re-plan, add a truck, or check the loading time."))
+                                      _timing_drop_reason(cfg, s, brk_words, lower_served, lower_on_day, timing_repair.get(k))))
         elif k in hire_drops:
             hire_left += 1
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY", _hire_drop_reason(s.priority)))
+        elif k in displaced:
+            unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY", _displaced_reason(s.priority)))
         elif _limited(s, usable_tds):
             # Owner request 13 Oct 2026: a "small truck only" stop left out says so (its trucks were full or
             # out of time), before the fleet-wide reasons - a big truck with room cannot take it.
@@ -3022,7 +3103,7 @@ HIRE_SWAP_TIMINGS_PER = 2
 
 def _swap_riders(ctx: _StageCtx, plan: LR.Plan, dropped: list[int],
                  untimed: set[int] | frozenset[int] = frozenset(),
-                 min_pool: int | None = None) -> tuple[LR.Plan, list[int], list[int]]:
+                 min_pool: int | None = None, deadline: float | None = None) -> tuple[LR.Plan, list[int], list[int]]:
     """A give-back's plan (``plan``: the loads of the trucks kept) with the stops it left out (``dropped``:
     the stops of the trucks given back, P4/P5 orders) put back on those trucks, with NO solve (tenth review
     of the hire branch: the give-back left a P4 order out while the 10-ton kept carried two P5 orders it had
@@ -3046,7 +3127,9 @@ def _swap_riders(ctx: _StageCtx, plan: LR.Plan, dropped: list[int],
     spare counted too), then draws on a pool shared by all (HIRE_SWAP_MIN_TIMINGS at least), so a stop that
     fits nowhere never cuts another (twelfth review); ``min_pool`` lowers that floor (the repair's chain of
     moves, _in_chain, tries many places, each a swap of a few stops). The new plan, the stops of ``dropped``
-    it puts back, and the stops it had no timing left to try (a place for them may have been missed)."""
+    it puts back, and the stops it had no timing left to try (a place for them may have been missed).
+    ``deadline`` (the priority repair's, solver search upgrade of 16 Oct 2026; None for the hire check, as
+    before): past it no more place is timed, and every stop still to place is among those not tried."""
     day, cfg, stops = ctx.day, ctx.req.config, ctx.solvable
     plan = {i: list(loads) for i, loads in plan.items()}
     for td in day.trucks:  # an idle own truck: a load of its own (a truck to rent not kept: never)
@@ -3156,9 +3239,12 @@ def _swap_riders(ctx: _StageCtx, plan: LR.Plan, dropped: list[int],
     given = set(dropped)
     while todo:
         _, _, d = heapq.heappop(todo)
+        if deadline is not None and time.monotonic() >= deadline:
+            cut += [d] + [k for _, _, k in todo]
+            break
         mine = per  # this stop's own timings; then the shared pool
         for idx, new, off in places(d):
-            if mine <= 0 and pool <= 0:
+            if (mine <= 0 and pool <= 0) or (deadline is not None and time.monotonic() >= deadline):
                 cut.append(d)
                 break
             if mine > 0:
@@ -3177,14 +3263,24 @@ def _swap_riders(ctx: _StageCtx, plan: LR.Plan, dropped: list[int],
 
 
 def _rebuilt(ctx: _StageCtx, sc: DispatchScenario, plan: LR.Plan, as_is: LR.TimedPlan | None,
-             timing: set[int], hire: set[int]) -> DispatchScenario | None:
+             timing: set[int], hire: set[int], *, carry_warnings: bool = False, displaced: set[int] | None = None,
+             timing_repair: dict[int, str] | None = None) -> DispatchScenario | None:
     """The scenario of ``plan`` in place of ``sc`` (its name, status and times), checked as every plan is
     (_build_scenario). ``as_is``: a truck whose loads in ``plan`` are exactly its loads there keeps those
     times (its day as it was: exact when ``sc``'s timing was), any other truck is timed exactly; None: the
     whole plan is timed exactly (load_repack.time_plan). ``timing``: the stops the load re-check of ``sc``
     left out for the loading time between loads (that reason and its warning kept, eighth review of the
     hire branch); ``hire``: the P4/P5 stops a give-back leaves out (_without_low_hires). None when a day
-    cannot be timed."""
+    cannot be timed.
+
+    The timing warning is kept word for word only while it is still true: the same timing drops still out,
+    as many of them with a lower priority planned. When ``plan`` serves some of them it is worked out again
+    for those still out, and when it serves them all there is none (solver search upgrade, 16 Oct 2026: a
+    repaired plan that served its one timing drop still said "1 stop(s) the route search had planned are
+    left out"). ``carry_warnings`` (the priority repair): every other warning of ``sc`` that _build_scenario
+    does not make again (REGENERATED_WARNING_MARKERS, or one it made) is kept - the post-solve notes, the
+    second search's, the safety net's. ``displaced``: the stops the priority repair took off for a higher
+    priority (their own reason); ``timing_repair``: what it did for each timing drop still out."""
     timed: LR.TimedPlan | None
     exact = True
     if as_is is None:
@@ -3204,15 +3300,43 @@ def _rebuilt(ctx: _StageCtx, sc: DispatchScenario, plan: LR.Plan, as_is: LR.Time
             timed.update(one)
     if timed is None:
         return None
+    stops = ctx.solvable
+    served_old = {ctx.stop_idx[st.stop_id] for ld in sc.loads for st in ld.stops if st.stop_id in ctx.stop_idx}
+    served_new = {k for loads in plan.values() for ld in loads for k in ld}
+    still = set(timing) - served_new
     out = _build_scenario(
         sc.name, ctx.req, ctx.solvable, ctx.tds, ctx.mx, timed, ctx.values, ctx.use_margin, ctx.drops,
         solver_status=sc.solver_status, elapsed=sc.solver_time_sec, time_limit=sc.time_limit_sec,
         objective_value=LR.score(ctx.day, ctx.rec_pricing, timed).objective, extra_warnings=ctx.value_warnings,
-        timing_drops=timing, exact_timing=exact, hire_drops=hire,
+        timing_drops=still, exact_timing=exact, hire_drops=hire,
+        displaced=set(displaced or ()) | _displaced_of(sc, ctx.stop_idx), timing_repair=timing_repair,
     )
-    if timing:
-        out.warnings += [w for w in sc.warnings if TIMING_DROP_NOTE in w and w not in out.warnings]
+    if still:
+        inverted = _inverted_drops(stops, still, served_new)
+        if still == set(timing) and inverted == _inverted_drops(stops, timing, served_old):
+            out.warnings += [w for w in sc.warnings if TIMING_DROP_NOTE in w and w not in out.warnings]
+        else:
+            out.warnings.append(_timing_drop_warning(ctx.req.config, len(still), 0, inverted))
+    if carry_warnings:
+        for w in sc.warnings:
+            if not any(m in w for m in REGENERATED_WARNING_MARKERS) and w not in out.warnings:
+                out.warnings.append(w)
     return out
+
+
+# The warnings _build_scenario makes (from the plan it builds), or _rebuilt works out again, found by these
+# words: a plan built again with carry_warnings drops the old ones and keeps every other (the post-solve notes,
+# the second search's, the safety net's). Warnings equal to one the new plan has (the road matrix's, the
+# priority caps', the break notes) are not kept twice either. test_regenerated_warning_markers_cover_build_scenario
+# guards this list against a new warning of _build_scenario.
+REGENERATED_WARNING_MARKERS = (
+    "could not be placed by the optimizer within its time limit",  # open drops
+    HIRE_DROP_NOTE,
+    "more than the shortage alone explains",
+    "Cost check:",
+    TIMING_DROP_NOTE,
+    PRIORITY_REPAIR_NOTE,
+)
 
 
 # Seconds the repair of one plan (_repair_lost) may spend on its places with every lower priority off a
@@ -3221,7 +3345,7 @@ HIRE_REPAIR_SEC = 10.0
 
 
 def _in_place_of_riders(ctx: _StageCtx, plan: LR.Plan, d: int, untimed: set[int],
-                        deadline: float) -> tuple[LR.Plan | None, bool]:
+                        deadline: float, hard: bool = False) -> tuple[LR.Plan | None, bool]:
     """Stop ``d`` (a P1-P3 stop ``plan`` leaves out) on a truck of ``plan`` with EVERY stop of that truck's
     day it outranks taken off - as _outranks ranks them together, the lowest priority first, the biggest
     first - not only those of the load it goes on, as the swap takes off (_swap_riders): a load can be
@@ -3231,12 +3355,15 @@ def _in_place_of_riders(ctx: _StageCtx, plan: LR.Plan, d: int, untimed: set[int]
     (load_repack.time_plan); never on a truck of ``untimed`` (its day as the plan has it cannot be timed).
     The first that can be timed is taken, and the stops taken off are put back where they fit
     (_swap_riders). (the new plan, True) then; (None, True) when no place can be timed; (None, False) when
-    ``deadline`` came first."""
+    ``deadline`` came first. ``hard`` (the priority repair): the swap that puts the stops taken off back
+    stops at ``deadline`` too, and a move whose stops it had no time to put back is not made."""
     day, cfg, stops = ctx.day, ctx.req.config, ctx.solvable
     sd, D = stops[d], ctx.day.D
     alone = LR.facts(day, (d,))
     places: list[tuple[int, int, int, int, list[tuple[int, ...]], set[int]]] = []
     for idx in sorted(plan):
+        if hard and time.monotonic() >= deadline:
+            return None, False
         td = day.by_idx.get(idx)
         if td is None or idx in untimed:
             continue
@@ -3265,13 +3392,16 @@ def _in_place_of_riders(ctx: _StageCtx, plan: LR.Plan, d: int, untimed: set[int]
             continue  # it can never be timed
         loads = bare[:j] + [new] + bare[j + 1:]
         if LR.time_plan(day, {idx: loads}, ctx.rec_pricing) is not None:
-            back, _, _ = _swap_riders(ctx, {**plan, idx: loads}, sorted(off, key=lambda k: stops[k].stop_id), untimed)
+            back, _, short = _swap_riders(ctx, {**plan, idx: loads}, sorted(off, key=lambda k: stops[k].stop_id), untimed,
+                                          deadline=deadline if hard else None)
+            if hard and short and time.monotonic() >= deadline:
+                return None, False  # half a move: the stops it took off were not tried again
             return back, True
     return None, True
 
 
 def _in_chain(ctx: _StageCtx, plan: LR.Plan, d: int, untimed: set[int],
-              deadline: float) -> tuple[LR.Plan | None, bool]:
+              deadline: float, hard: bool = False) -> tuple[LR.Plan | None, bool]:
     """Stop ``d`` (a P1-P3 stop ``plan`` leaves out) into a load of ``plan`` in place of ONE other stop of
     that load, of any priority, and the stops of that load it outranks (as _outranks ranks them together) -
     the stop taken out going on another place where it fits (_swap_riders): a chain of two moves (thirteenth
@@ -3282,11 +3412,13 @@ def _in_chain(ctx: _StageCtx, plan: LR.Plan, d: int, untimed: set[int],
     truck's whole day (load_repack.time_plan), never on a truck of ``untimed``, then the stop taken out
     placed with a few timings of its own - the first where it can be is taken, and the stops ``d`` took the
     place of are put back where they fit too. (the new plan, True) then; (None, True) when none can be;
-    (None, False) when ``deadline`` came first."""
+    (None, False) when ``deadline`` came first. ``hard``: as for _in_place_of_riders."""
     day, cfg, stops = ctx.day, ctx.req.config, ctx.solvable
     sd, D = stops[d], ctx.day.D
     places: list[tuple[int, int, int, int, int, tuple[int, ...], int, tuple[int, ...]]] = []
     for idx in sorted(plan):
+        if hard and time.monotonic() >= deadline:
+            return None, False
         td = day.by_idx.get(idx)
         if td is None or idx in untimed:
             continue
@@ -3316,14 +3448,19 @@ def _in_chain(ctx: _StageCtx, plan: LR.Plan, d: int, untimed: set[int],
         loads = plan[idx][:j] + [new] + plan[idx][j + 1:]
         if LR.time_plan(day, {idx: loads}, ctx.rec_pricing) is None:
             continue
-        back, put, _ = _swap_riders(ctx, {**plan, idx: loads}, [x, *off], untimed, min_pool=0)
+        back, put, short = _swap_riders(ctx, {**plan, idx: loads}, [x, *off], untimed, min_pool=0,
+                                        deadline=deadline if hard else None)
+        if hard and short and time.monotonic() >= deadline:
+            return None, False  # half a move: the stops it took off were not tried again
         if x in put:
             return back, True
     return None, True
 
 
 def _repair_lost(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixResult, drops: list[UnservedStop],
-                 sc: DispatchScenario, lost: set[str], deadline: float, hired_idle: bool) -> tuple[DispatchScenario, set[str]]:
+                 sc: DispatchScenario, lost: set[str], deadline: float, hired_idle: bool, *, what: str = "hire check",
+                 max_priority: int = HIRE_MAX_PRIORITY, carry_warnings: bool = False, hard_deadline: bool = False,
+                 outcome: dict[str, str] | None = None) -> tuple[DispatchScenario, set[str]]:
     """``sc`` (a plan of ``req``) with its P1-P3 stops ``lost`` (left out) put back where they fit, in place
     of lower priorities where need be, with NO solve (thirteenth review of the hire branch: on the real
     Muscat day the reduction's solve of 1 x 10-ton came back with a P3 order left out while it carried a
@@ -3344,13 +3481,30 @@ def _repair_lost(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
     even when no single move puts them back (thirteenth review: in a replay of the real day the solve of
     1 x 10-ton left another P3 order out while a P4/P5 order more rode along, and no truck's day took it
     even with every lower priority off - it needed a P3 order of one truck moved to another; the next
-    solve delivered every P1-P3 order)."""
+    solve delivered every P1-P3 order).
+
+    The priority repair (_repair_inversions, solver search upgrade of 16 Oct 2026) uses it outside the hire
+    check: ``what`` names it in the log lines; ``max_priority`` is the lowest priority it puts back (P3, as
+    the hire check); ``carry_warnings`` keeps the plan's other warnings (_rebuilt) and gives a stop it took
+    off for a higher priority and found no other place for its own reason (_displaced_reason);
+    ``hard_deadline`` makes ``deadline`` bound every step - the swaps' timings too, which the hire check
+    bounds by their count only - and a move half done at it is not made; ``outcome`` receives, for each of
+    ``lost`` it leaves out, REPAIR_NO_PLACE (every place it tries was tried) or REPAIR_NO_TIME. The hire
+    check's call (the defaults) runs exactly as before."""
     cfg = req.config
     stop_of = {s.stop_id: s for s in req.stops}
 
     def kept_out(left, riding) -> set[str]:
         """The stops of ``left`` that a stop of ``riding`` (stop ids) they outrank rides along with."""
         return {sid for sid in left if any(_outranks(cfg, stop_of[sid], [stop_of[o]]) for o in riding if o in stop_of)}
+
+    def settle(no_place: set[str], no_time: set[str]) -> None:
+        if outcome is not None:
+            outcome.update({sid: REPAIR_NO_TIME for sid in no_time})
+            outcome.update({sid: REPAIR_NO_PLACE for sid in no_place - no_time})
+
+    def late() -> bool:
+        return hard_deadline and time.monotonic() >= deadline
 
     try:
         tds = _truck_days(req)
@@ -3364,40 +3518,177 @@ def _repair_lost(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
                     start[td.idx] = []
         untimed = {i for i, loads in start.items() if loads and LR.time_plan(ctx.day, {i: loads}, ctx.rec_pricing) is None}
         out = sorted((ctx.stop_idx[sid] for sid in lost if sid in ctx.stop_idx), key=lambda k: (stops[k].priority, stops[k].stop_id))
-        plan, put, _ = _swap_riders(ctx, start, out, untimed)
+        if late():
+            settle(set(), set(lost))
+            return sc, kept_out(lost, _served_of(sc))
+        plan, put, short = _swap_riders(ctx, start, out, untimed, deadline=deadline if hard_deadline else None)
+        if short and late():
+            plan, put = start, []  # half done at the deadline: not made (the stops it took off were not tried again)
         changed = bool(put)
         # The P1-P3 stops to place: those of ``lost``, and any of ``sc`` a higher priority took the place of.
-        targets = set(out) | {k for loads in start.values() for ld in loads for k in ld if stops[k].priority <= HIRE_MAX_PRIORITY}
+        targets = set(out) | {k for loads in start.values() for ld in loads for k in ld if stops[k].priority <= max_priority}
 
         def missing() -> list[int]:
             on = {k for loads in plan.values() for ld in loads for k in ld}
             return sorted((k for k in targets if k not in on), key=lambda k: (stops[k].priority, stops[k].stop_id))
 
         tried: set[int] = set()
+        cut_short: set[int] = set()  # tried, but the deadline came first
         while (todo := [k for k in missing() if k not in tried]) and time.monotonic() < deadline:
             d = todo[0]
             tried.add(d)
             still = {i for i in untimed if plan.get(i) == start.get(i)}
-            new, done = _in_place_of_riders(ctx, plan, d, still, deadline)
+            new, done = _in_place_of_riders(ctx, plan, d, still, deadline, hard_deadline)
             if new is None and done:
-                new, done = _in_chain(ctx, plan, d, still, deadline)
+                new, done = _in_chain(ctx, plan, d, still, deadline, hard_deadline)
             if new is not None:
                 plan, changed = new, True
             elif not done:
+                cut_short.add(d)
                 break
+        left = missing()
         riding = {stops[k].stop_id for loads in plan.values() for ld in loads for k in ld}
-        open_ = kept_out([stops[d].stop_id for d in missing()], riding)
+        open_ = kept_out([stops[d].stop_id for d in left], riding)
+        settle({stops[d].stop_id for d in left}, {stops[d].stop_id for d in left if d not in tried or d in cut_short})
         if not changed:
             return sc, open_
-        rep = _rebuilt(ctx, sc, plan, as_is, _timing_drops_of(sc, ctx.stop_idx), _hire_drops_of(sc, ctx.stop_idx))
+        on_now = {k for loads in plan.values() for ld in loads for k in ld}
+        displaced = ({k for loads in start.values() for ld in loads for k in ld} - on_now) if carry_warnings else None
+        repair = ({ctx.stop_idx[sid]: why for sid, why in outcome.items() if sid in ctx.stop_idx}
+                  if carry_warnings and outcome is not None else None)
+        rep = _rebuilt(ctx, sc, plan, as_is, _timing_drops_of(sc, ctx.stop_idx), _hire_drops_of(sc, ctx.stop_idx),
+                       carry_warnings=carry_warnings, displaced=displaced, timing_repair=repair)
     except Exception as exc:  # noqa: BLE001 - the plan stays as it is, its stops not settled
-        log.warning("run=%s hire check: putting %s back failed: %s", req.run_id, sorted(lost), exc)
+        log.warning("run=%s %s: putting %s back failed: %s", req.run_id, what, sorted(lost), exc)
+        if outcome is not None:
+            for sid in lost:
+                outcome.pop(sid, None)  # nothing is claimed about them
         return sc, kept_out(lost, _served_of(sc))
     if not _passes_checks(rep) or _service_rank(rep, stop_of, cfg) <= _service_rank(sc, stop_of, cfg):  # type: ignore[arg-type]
-        log.warning("run=%s hire check: the plan with %s put back does not pass the checks; kept as it was",
-                    req.run_id, sorted(lost & _served_of(rep)) if rep is not None else sorted(lost))
+        log.warning("run=%s %s: the plan with %s put back does not pass the checks; kept as it was",
+                    req.run_id, what, sorted(lost & _served_of(rep)) if rep is not None else sorted(lost))
+        if outcome is not None:  # the places it found break a rule: none that keeps every rule
+            outcome.update({sid: REPAIR_NO_PLACE for sid in lost if outcome.get(sid) != REPAIR_NO_TIME})
         return sc, kept_out(lost, _served_of(sc))
     return rep, open_  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------------------------
+# The priority repair (solver search upgrade, 16 Oct 2026): a P1-P3 stop left out while a lower priority rides
+# ---------------------------------------------------------------------------------------------
+
+# The lowest priority the repair puts back in place of lower ones: P3, as the hire check (P4 out while a P5
+# rides stays as it is, as there). One deadline for every option: at most this long, from when it starts.
+PRIORITY_REPAIR_MAX = HIRE_MAX_PRIORITY
+PRIORITY_REPAIR_SEC = HIRE_REPAIR_SEC
+PRIORITY_REPAIR_ENV = "SOLVER_PRIORITY_REPAIR"
+
+
+def priority_repair_on() -> bool:
+    """SOLVER_PRIORITY_REPAIR: "on" (or 1 / true / yes) switches the priority repair on; unset, "off" or anything
+    else: off - the default (owner decision 16 Oct 2026: no plan changes before a replay of saved real requests
+    shows what it does). Read on every solve, like SOLVER_PYVRP."""
+    return os.environ.get(PRIORITY_REPAIR_ENV, "").strip().lower() in ("on", "1", "true", "yes")
+
+
+def _inversions(cfg: DispatchConfig, solvable: list[DispatchStop], sc: DispatchScenario) -> set[str]:
+    """The P1-P3 stops ``sc`` leaves out while a stop they outrank (_outranks) rides on its trucks."""
+    stop_of = {s.stop_id: s for s in solvable}
+    on = _served_of(sc)
+    riding = [stop_of[o] for o in on if o in stop_of]
+    return {s.stop_id for s in solvable if s.priority <= PRIORITY_REPAIR_MAX and s.stop_id not in on
+            and any(_outranks(cfg, s, [o]) for o in riding)}
+
+
+def _note_repair_outcome(sc: DispatchScenario, solvable: list[DispatchStop], cfg: DispatchConfig, outcome: dict[str, str]) -> None:
+    """The plan ``sc`` the repair kept as it was: each of its stops left out for the loading time between loads
+    that the repair tried (``outcome``) says what it did - found no place, or had no time (_timing_drop_reason).
+    Only those reasons change (a copy of each), nothing else."""
+    if not outcome:
+        return
+    stop_of = {s.stop_id: s for s in solvable}
+    prio = [stop_of[o].priority for o in _served_of(sc) if o in stop_of]
+    brk_words = " and the drivers' midday break" if break_rule(cfg) else ""
+    for i, u in enumerate(sc.unserved):
+        s = stop_of.get(u.stop_id)
+        if s is None or u.stop_id not in outcome or not u.reason_message.startswith(TIMING_DROP_HEAD):
+            continue
+        lower_served = sum(1 for p in prio if p > s.priority)
+        lower_on_day = any(o.priority > s.priority for o in solvable)
+        sc.unserved[i] = u.model_copy(update={"reason_message": _timing_drop_reason(
+            cfg, s, brk_words, lower_served, lower_on_day, outcome[u.stop_id])})
+
+
+def _repair_inversions(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixResult, drops: list[UnservedStop],
+                       results: dict[str, DispatchScenario], budget_end: float,
+                       control: SolveControl | None) -> set[str]:
+    """SOLVER_PRIORITY_REPAIR (off by default): after the load re-check, each option's plan that leaves a P1-P3
+    stop out while a stop it outranks rides on its trucks (_inversions) gets the hire check's repair with no
+    solve (_repair_lost; solver search upgrade of 16 Oct 2026, the reproduction of a P2 stop left out at the
+    exact timing while P3 and P4 stops rode, its reason saying "lowest priorities first"). The repaired plan
+    replaces the option's only when it passes the independent check and serves the day better by priority
+    (_service_rank); it keeps the option's name and its other warnings, says what changed (PRIORITY_REPAIR_NOTE),
+    and a stop it took off and found no other place for says so (_displaced_reason). A plan with no such stop -
+    every clean day - is not touched: no call, the same objects.
+
+    Bounded: one deadline for every option, PRIORITY_REPAIR_SEC from its start and never later than
+    STAGE_GRACE_SEC before the request's budget ends (as the hire check's; _reduce_hire may still run after
+    it), enforced in every step (hard_deadline). Not run after a stop request; a cancel raises SolveAborted.
+    RECOMMENDED is left to the hire check when it uses a truck to rent (_reduce_hire's step 0 repairs it then).
+    An option it runs out of time for keeps its plan, and its stops left out for the loading time say there
+    was no time to try. Each option is repaired on its own, so an option repaired may serve the day better by
+    priority than one that was not (the _run_scenarios rule "MIN_DISTANCE never drives more km ... unless it
+    serves more" compares plans of the load re-check, before this). Returns the options whose plan changed."""
+    cfg = req.config
+    changed: set[str] = set()
+    if control is not None and control.stop_requested.is_set():
+        log.info("run=%s priority repair: skipped (stop requested)", req.run_id)
+        return changed
+    hire_ids = {t.id for t in req.trucks if t.hire_candidate}
+    t0 = time.monotonic()
+    end = min(t0 + PRIORITY_REPAIR_SEC, budget_end - STAGE_GRACE_SEC)
+    for name in ("RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"):
+        sc = results.get(name)
+        if not _passes_checks(sc) or (name == "RECOMMENDED" and _rented_of(sc, hire_ids)):  # type: ignore[arg-type]
+            continue
+        lost = _inversions(cfg, solvable, sc)  # type: ignore[arg-type]
+        if not lost:
+            continue
+        if control is not None and control.cancelled.is_set():
+            raise SolveAborted(f"The optimization was cancelled ({control.why or 'the caller is gone'}).")
+        t = time.monotonic()
+        if end - t < 1:
+            log.warning("run=%s priority repair %s: no time left to put %s back (%.1fs to the deadline)",
+                        req.run_id, name, sorted(lost), end - t)
+            _note_repair_outcome(sc, solvable, cfg, {sid: REPAIR_NO_TIME for sid in lost})  # type: ignore[arg-type]
+            continue
+        outcome: dict[str, str] = {}
+        new, open_ = _repair_lost(req, solvable, mx, drops, sc, lost, end, False,  # type: ignore[arg-type]
+                                  what=f"priority repair {name}", max_priority=PRIORITY_REPAIR_MAX,
+                                  carry_warnings=True, hard_deadline=True, outcome=outcome)
+        took = time.monotonic() - t
+        if new is sc:
+            _note_repair_outcome(sc, solvable, cfg, outcome)  # type: ignore[arg-type]
+            log.info("run=%s priority repair %s: %s left out while lower priorities ride; kept as it was in %.1fs (%s)",
+                     req.run_id, name, sorted(lost), took, ", ".join(f"{k} {v}" for k, v in sorted(outcome.items())) or "-")
+            continue
+        back = sorted(_served_of(new) - _served_of(sc))  # type: ignore[arg-type]
+        off = sorted(_served_of(sc) - _served_of(new))  # type: ignore[arg-type]
+        new.warnings.append(
+            f"{len(back)}{PRIORITY_REPAIR_NOTE}"
+            + (f"; {len(off)} lower-priority stop(s) are left out for them (see Unserved orders)" if off else "")
+            + f": {sc.trucks_used} -> {new.trucks_used} trucks, {sc.trips} -> {new.trips} loads, "  # type: ignore[union-attr]
+              f"{sc.operating_cost:.0f} -> {new.operating_cost:.0f} OMR operating cost."  # type: ignore[union-attr]
+        )
+        results[name] = new  # keeps its name: state["rechecked"] still holds it
+        changed.add(name)
+        log.info("run=%s priority repair %s: %s put back, %s taken off, %s still out (%s) in %.1fs; %s -> %s trucks, "
+                 "%.1f -> %.1f OMR", req.run_id, name, back, off, sorted(open_),
+                 ", ".join(f"{k} {v}" for k, v in sorted(outcome.items())) or "-", took,
+                 sc.trucks_used, new.trucks_used, sc.operating_cost, new.operating_cost)  # type: ignore[union-attr]
+    log.info("run=%s priority repair: %s in %.1fs", req.run_id,
+             f"changed {', '.join(sorted(changed))}" if changed else "no plan changed", time.monotonic() - t0)
+    return changed
 
 
 def _without_low_hires(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixResult, drops: list[UnservedStop],
@@ -3513,7 +3804,7 @@ def _hire_trial(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixRe
         pv = _pv_start(req, solvable, control, workers is not None)
         state: dict = {}
         scs = _run_scenarios(["RECOMMENDED"], req, solvable, tds, mx, time_limit, list(drops), budget_end,
-                             control=control, state=state, workers=workers, pv=pv)
+                             control=control, state=state, workers=workers, pv=pv, repair_inversions=False)
         sc = scs[0] if scs else None
         return sc, sc is not None and "RECOMMENDED" in state.get("rechecked", ())
     except SolveAborted:
@@ -4930,18 +5221,20 @@ def _pv_start(req: DispatchRequest, solvable: list[DispatchStop], control: Solve
     return pv
 
 
-def _quick_stage_need(time_limit: int) -> float:
-    """QUICK: what the engine's load re-check may need at most (three sources), kept free after the
-    second search's answer so that its budget is never cut by the wait (critique C3)."""
-    return min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2)) * 3 + STAGE_GRACE_SEC + 5
+def _quick_stage_need(time_limit: int, n_sources: int = 3) -> float:
+    """QUICK: what the engine's load re-check may need at most (``n_sources`` sources: the three options'
+    searches, plus one per other route search best-of-N sends to it), kept free after the second
+    search's answer so that its budget is never cut by the wait (critique C3)."""
+    return min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2)) * n_sources + STAGE_GRACE_SEC + 5
 
 
 def _pv_submit(pv: _PvRun, req, solvable, tds, mx, time_limit: int, rec_limit: int, n_alt: int,
-               tail: ThoroughTail | None, budget_end: float) -> None:
+               tail: ThoroughTail | None, budget_end: float, n_sources: int = 3) -> None:
     """Start the second search (after RECOMMENDED was submitted: the engine never queues behind it,
     critique C4). QUICK: until the engine's searches end (search_over), backstop the planned search
     time + ALT_GRACE_SEC; THOROUGH (D3): until the load re-check's reserve, a stop, a cancel or - once
-    the engine's searches ended - its timed stall (pyvrp_candidate.STALL_FLOOR_SEC)."""
+    the engine's searches ended - its timed stall (pyvrp_candidate.STALL_FLOOR_SEC). ``n_sources``: the
+    load re-check's sources, for QUICK's reserve (_quick_stage_need; THOROUGH's tail holds its own)."""
     if not pv.active or pv.args is not None:
         return
     if not solvable:
@@ -4954,7 +5247,7 @@ def _pv_submit(pv: _PvRun, req, solvable, tds, mx, time_limit: int, rec_limit: i
         runtime = budget_end - tail.stage_sec - PV_MARGIN_SEC - now
     else:
         planned = rec_limit + (max(2, time_limit // 2) + ALT_GRACE_SEC if n_alt else 0)
-        runtime = min(planned + ALT_GRACE_SEC, budget_end - _quick_stage_need(time_limit) - now)
+        runtime = min(planned + ALT_GRACE_SEC, budget_end - _quick_stage_need(time_limit, n_sources) - now)
     settings = PV.PvSettings(mode="THOROUGH" if tail is not None else "QUICK", seed=PV.seed(), max_runtime=max(1.0, runtime),
                              min_sec=float(time_limit), stall_floor_sec=PV.stall_floor_sec(), stall_share=PV.stall_share(),
                              max_iters=PV.max_iters())
@@ -5014,7 +5307,8 @@ def _pv_collect(pv: _PvRun, *, thorough: bool, stopped: bool, stage_need: float,
 
 def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end: float | None = None, *,
                    control: SolveControl | None = None, state: dict | None = None,
-                   workers: _Workers | None = None, pv: _PvRun | None = None) -> list[DispatchScenario]:
+                   workers: _Workers | None = None, pv: _PvRun | None = None,
+                   repair_inversions: bool = True) -> list[DispatchScenario]:
     """RECOMMENDED is solved first with the full time budget. Alternatives are then warm-started
     from it with half the budget. Finally the post-solve stage (_post_solve) re-assigns the
     searches' loads and picks each scenario's plan from all of them, so unless it serves more,
@@ -5050,6 +5344,11 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     ``pv``: the second route search (PyVRP; _pv_start). It is submitted right after RECOMMENDED, in
     its own process, and collected once the alternatives are in (_pv_collect); its plan is one more
     source of the load re-check (_post_solve). ``state["pyvrp"]`` receives its report.
+
+    ``repair_inversions``: with SOLVER_PRIORITY_REPAIR on (off by default), the plans the load re-check
+    chose then get the priority repair (_repair_inversions): a P1-P3 stop left out while a lower priority
+    rides goes back in its place where it fits. False for the hire check's solves (_hire_trial), whose
+    plans the hire check repairs itself.
     """
     global _STOP_FLAG
     if budget_end is None:
@@ -5187,6 +5486,15 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     if state.get("status") == "NO_SOLUTION" and results.get("RECOMMENDED") and results["RECOMMENDED"].status == "OPTIMIZED":
         # Rescued by the second search: the search report must not say "found no plan" (critique C8).
         state["status"] = "OPTIMIZED"
+    # The priority repair (SOLVER_PRIORITY_REPAIR, off by default): never at the cost of the plans found.
+    repaired: set[str] = set()
+    if repair_inversions and results and solvable and priority_repair_on():
+        try:
+            repaired = _repair_inversions(req, solvable, mx, drops, results, budget_end, control)
+        except SolveAborted:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the plans the load re-check chose stay
+            log.exception("run=%s priority repair failed: %s; the plans found are kept", req.run_id, exc)
     rec = results.get("RECOMMENDED")
     if skipped and rec:
         rec.warnings.append(
@@ -5199,10 +5507,15 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
         # alternative serves, say so - the dispatcher decides; nothing switches automatically.
         # Only alternatives whose timetable passed the independent check are offered: a plan that
         # breaks the loading time between loads (or any other hard rule) serves more only on paper.
+        # After the priority repair changed a plan, also only one that serves the day no worse by
+        # priority (_service_rank): the repaired plan may serve fewer stops, a P2 in place of a P3 and a P4.
+        stop_of = {s.stop_id: s for s in req.stops}
         for alt in results.values():
             if alt is rec or alt.status != "OPTIMIZED" or alt.feasibility is None or alt.feasibility.status != "VERIFIED":
                 continue
             gained = len(rec.unserved) - len(alt.unserved)
+            if gained > 0 and repaired and _service_rank(alt, stop_of, req.config) < _service_rank(rec, stop_of, req.config):
+                continue
             if gained > 0:
                 rec.warnings.append(
                     f"The {alt.name.replace('_', ' ')} option serves {gained} more stop(s) than this plan. "
@@ -5366,7 +5679,8 @@ def _trimmed(ctx: _StageCtx, name: str, sc: DispatchScenario, why: str) -> Dispa
         timing_drops=drops, exact_timing=True,
     )
     if drops:
-        new.warnings.append(PARTIAL_PLAN_NOTE + why + " " + _timing_drop_warning(ctx.req.config, len(drops), 0))
+        new.warnings.append(PARTIAL_PLAN_NOTE + why + " " + _timing_drop_warning(
+            ctx.req.config, len(drops), 0, _inverted_drops(ctx.solvable, drops, LR.served_of(timed))))
     return new
 
 
@@ -5416,7 +5730,8 @@ def _retime_fallback(req: DispatchRequest, solvable: list[DispatchStop], tds: li
 def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                 time_limit: int, drops: list[UnservedStop], results: dict[str, DispatchScenario], pool,
                 budget_end: float, done: set[str] | None = None, repack_cap: float | None = None,
-                pv: "_PvRun | None" = None, rechecked: set[str] | None = None) -> None:
+                pv: "_PvRun | None" = None, rechecked: set[str] | None = None,
+                extra_sources: list[tuple[str, DispatchScenario]] | tuple = (), best_of: dict | None = None) -> None:
     """Replace each OPTIMIZED scenario in ``results`` by the best candidate for its goal.
 
     Candidates = every raw scenario plan (re-timed exactly) + its repacks: whole loads
@@ -5448,7 +5763,18 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     An option rescued from no plan gets the status SECOND_SEARCH. So each option is never worse on its
     own goal than the engine alone would have chosen from the same search. A plan from it that fails
     the independent check is replaced by the engine's (a WARNING line). An option whose own search
-    found no plan (NO_SOLUTION) takes the second search's best plan for its goal."""
+    found no plan (NO_SOLUTION) takes the second search's best plan for its goal.
+
+    ``extra_sources``: best-of-N's other route searches of RECOMMENDED ("RECOMMENDED~<i>", best_of.py), each
+    one more engine source of the load re-check (its stops left out become optional as any source's; the
+    F07 extension is still granted by the options' own plans only). They only add candidates: a tie keeps
+    the option's own source, then any other engine source, then theirs, then the second search's; and a
+    candidate built from one is used only when it beats the best candidate built without any by a gain the
+    dispatcher can see (the second search's rule, _goal_gain) - then the plan's note says so
+    (_best_of_note) and the option is added to ``best_of["chosen_for"]``. ``best_of`` (the solve's
+    best-of report, SearchReport.best_of) also receives, per option, the best candidate of the other
+    searches against the best one without them (``gains``, BestOfGain: paired evidence of what they add,
+    on the re-check's own scores). Without them (one search, the default) nothing here changes."""
     done = done if done is not None else set()
     raw = {n: sc for n, sc in results.items() if sc.status == "OPTIMIZED"}
     pv_plan = pv.plan if pv is not None else None
@@ -5461,6 +5787,15 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     values, value_warnings, use_margin = ctx.values, ctx.value_warnings, ctx.use_margin
     n_stops = len(solvable)
     sources = [LR.Source(n, _timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx)) for n, sc in raw.items()]
+    # Best-of-N's other searches, after the options' own (only plans with stops planned, under their own names).
+    extras: dict[str, DispatchScenario] = {}
+    for n, sc in (extra_sources if raw else ()):
+        if not _from_extra(n) or n in extras or sc is None or sc.status != "OPTIMIZED":
+            if not _from_extra(n):
+                log.warning("post-solve run=%s: extra source %r is not another route search of RECOMMENDED; ignored", req.run_id, n)
+            continue
+        extras[n] = sc
+    sources += [LR.Source(n, _timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx), extra=True) for n, sc in extras.items()]
     carried = {src.name: {k for loads in src.plan.values() for tl in loads for k in tl.stops} for src in sources}
     left_out = set(range(n_stops)) - set.intersection(*carried.values()) if carried else set()
     optional = _repair_weights(solvable, left_out, cfg, req.trucks, req.depot) if left_out else None
@@ -5577,7 +5912,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
 
     def pick(name: str, pool_c: list[LR.Candidate], own: int) -> tuple[LR.Candidate | None, bool]:
         """The option's best candidate for its goal among ``pool_c``: service first; a tie keeps the
-        option's own source, then any engine source before the second search's (critique C7)."""
+        option's own source, then any engine source before the second search's (critique C7) - best-of-N's
+        other searches after the engine's own sources, before the second search's."""
         fits = [c for c in pool_c if c.score.service <= own]
         lost = not fits and bool(pool_c)
         if lost:
@@ -5588,7 +5924,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         if not fits:
             return None, False
         goal = _GOALS[name]
-        return min(fits, key=lambda c: (goal(c.score), c.source.split("+")[0] != name, c.source.startswith("PYVRP"))), lost
+        return min(fits, key=lambda c: (goal(c.score), c.source.split("+")[0] != name, c.source.startswith("PYVRP"),
+                                        _from_extra(c.source))), lost
 
     def served(c: LR.Candidate) -> set[int]:
         return {k for loads in c.plan.values() for tl in loads for k in tl.stops}
@@ -5596,8 +5933,9 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     # The chosen plans' rented or day-paid trucks get their day routed again (_shorter_orders, fifth and
     # sixth reviews): after the pick, so it never changes which truck carries what; each candidate once,
     # each with up to HIRE_ORDER_SEC, all of them together with up to three times that (the second
-    # search's plan and the engine's own are compared after it, so neither may starve the other).
-    orders_end = min(time.monotonic() + 3 * HIRE_ORDER_SEC, budget_end - 2)
+    # search's plan and the engine's own are compared after it, so neither may starve the other) - four
+    # times with best-of-N's other searches (the best plan without them is compared too).
+    orders_end = min(time.monotonic() + (3 + bool(extras)) * HIRE_ORDER_SEC, budget_end - 2)
     in_order: dict[int, LR.Candidate] = {}
 
     def ordered(c: LR.Candidate | None) -> LR.Candidate | None:
@@ -5616,6 +5954,23 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         # other options' plans are not offered to it, as without the second search).
         best, lost = pick(name, cands if name in raw else pvc, own)
         ref, ref_lost = pick(name, eng, own) if name in raw else (None, False)
+        ref0, gain = None, None
+        if extras and name in raw:
+            # Best-of-N: the engine's own choice (``ref``) built from another route search must beat the best
+            # candidate built without any (``ref0``) by a gain the dispatcher can see - as the second search's
+            # must - or ``ref0`` is the engine's choice. The second search is then compared with that choice,
+            # and replaced by it (critique-1 L2: never by an extra's plan that skipped this rule).
+            ref0, ref0_lost = pick(name, [c for c in eng if not _from_extra(c.source)], own)
+            ext, _ = pick(name, [c for c in eng if _from_extra(c.source)], own)
+            gain = _best_of_gain(name, ext, ref0, served)
+            if best_of is not None:
+                best_of.setdefault("gains", []).append(gain)
+            if ref is not None and ref0 is not None and _from_extra(ref.source):
+                o_ref, o_ref0 = ordered(ref), ordered(ref0)
+                if _goal_gain(name, o_ref0.score, o_ref.score, len(served(o_ref)) - len(served(o_ref0))) is None:  # type: ignore[union-attr]
+                    if best is not None and _from_extra(best.source):
+                        best, lost = ref0, ref0_lost
+                    ref, ref_lost = ref0, ref0_lost
         best, ref = ordered(best), ordered(ref)
         if (best is not None and ref is not None and best.source.startswith("PYVRP")
                 and _goal_gain(name, ref.score, best.score, len(served(best)) - len(served(ref))) is None):
@@ -5673,12 +6028,22 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         timing_drops = own_carried - served_now if lost else set()
         changed = (new.trucks_used, new.trips) != (sc.trucks_used, sc.trips) or abs(new.operating_cost - sc.operating_cost) >= 0.5
         if timing_drops:
-            new.warnings.append(_timing_drop_warning(cfg, len(timing_drops), len(added)))
+            new.warnings.append(_timing_drop_warning(cfg, len(timing_drops), len(added),
+                                                     _inverted_drops(solvable, timing_drops, served_now)))
+        if _from_extra(best.source):
+            if best_of is not None:
+                best_of["chosen_for"] = [*best_of.get("chosen_for", []), name]
+            if gain is not None:
+                gain["used"] = True
         if best.source.startswith("PYVRP"):
             new.warnings.append(_second_search_note(name, name in rescue, ref, best, served(ref) if ref else set(), served_now))
             pv.report["chosen_for"] = [*pv.report.get("chosen_for", []), name]  # type: ignore[union-attr]
         elif timing_drops:
             pass
+        elif _from_extra(best.source):
+            # Not "Loads were re-assigned after the route search": that compares with the main search's plan.
+            o_ref0 = ordered(ref0)
+            new.warnings.append(_best_of_note(name, best, o_ref0, served(o_ref0) if o_ref0 else set(), served_now, best_of))
         elif "+repack" in best.source and changed:
             new.warnings.append(
                 f"Loads were re-assigned after the route search: {sc.trucks_used} -> {new.trucks_used} trucks, "
@@ -5766,6 +6131,52 @@ def _second_search_note(name: str, rescued: bool, ref: LR.Candidate | None, best
                 f"{r.operating / COST_SCALE:,.0f}" != f"{b.operating / COST_SCALE:,.0f}")]
     also = [text for key, text, changed in figures if changed and key != m[1]]
     return (f"A second route search found a better plan for this option than the main search: {m[0]}."
+            + (f" Also changed: {', '.join(also)}." if also else "") + f" {checked}")
+
+
+def _from_extra(source: str) -> bool:
+    """A load re-check candidate built from one of best-of-N's other route searches ("RECOMMENDED~2",
+    "RECOMMENDED~2+repack:RECOMMENDED"), not from the main search, an alternative or the second search."""
+    return best_of_mod.from_extra(source)
+
+
+def _best_of_gain(name: str, ext: LR.Candidate | None, ref0: LR.Candidate | None, served) -> dict:
+    """BestOfGain for option ``name``: the best candidate built from the other route searches (``ext``) against
+    the best one built without any (``ref0``), on the load re-check's own scores (before a rented truck's day
+    is routed again). Differences are "without minus with": positive = the other search's is cheaper, shorter
+    or uses fewer trucks; served_delta = stops it serves more. ``used`` is set once the option's plan is it."""
+    out: dict = {"option": name, "source": ext.source if ext is not None else None, "used": False}
+    if ext is not None and ref0 is not None:
+        r, b = ref0.score, ext.score
+        out.update(gain_omr=round((r.cost - b.cost) / COST_SCALE, 3), gain_operating_omr=round((r.operating - b.operating) / COST_SCALE, 3),
+                   gain_km=round((r.metres - b.metres) / 1000.0, 3), gain_trucks=r.trucks - b.trucks,
+                   served_delta=len(served(ext)) - len(served(ref0)))
+    return out
+
+
+def _best_of_note(name: str, best: LR.Candidate, ref0: LR.Candidate | None, ref_served: set[int], served_now: set[int],
+                  best_of: dict | None) -> str:
+    """The dispatcher's note on an option whose plan was built from one of best-of-N's other route searches, in
+    plain words, as the second search's (_second_search_note): compared with the best plan built without them
+    (``ref0``, after the same load re-check) - never with the main search's raw plan."""
+    checked = "It passed the planner's own checks, timing and costs."
+    index = best.source.split("+", 1)[0][len(best_of_mod.EXTRA_PREFIX):]
+    used = (best_of or {}).get("used")
+    which = (f"Route search {int(index) + 1} of {used}" if used and index.isdigit() else "Another route search") + \
+        " (started from another order of the stops)"
+    if ref0 is None:
+        return f"{which} found this plan: no plan of the main search could be timed exactly. {checked}"
+    m = _goal_measure(name, ref0.score, best.score, len(served_now) - len(ref_served))
+    if m is None:  # not reached: such a plan is not chosen (_post_solve)
+        return f"This plan comes from {which[0].lower()}{which[1:]}. {checked}"
+    r, b = ref0.score, best.score
+    figures = [("trucks", f"trucks {r.trucks} -> {b.trucks}", r.trucks != b.trucks),
+               ("loads", f"loads {r.loads} -> {b.loads}", r.loads != b.loads),
+               ("km", f"km {r.metres / 1000:,.1f} -> {b.metres / 1000:,.1f}", f"{r.metres / 1000:,.1f}" != f"{b.metres / 1000:,.1f}"),
+               ("operating", f"operating cost {r.operating / COST_SCALE:,.0f} -> {b.operating / COST_SCALE:,.0f} OMR",
+                f"{r.operating / COST_SCALE:,.0f}" != f"{b.operating / COST_SCALE:,.0f}")]
+    also = [text for key, text, changed in figures if changed and key != m[1]]
+    return (f"{which} found a better plan for this option than the main search: {m[0]}."
             + (f" Also changed: {', '.join(also)}." if also else "") + f" {checked}")
 
 
