@@ -30,7 +30,6 @@ import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 const TZ = 'Asia/Muscat';
 const today = todayIso(TZ);
 const day = new Date(`${today}T00:00:00.000Z`);
-const ENV = { RESEND_API_KEY: 're_test_key', RESEND_FROM: 'RouteIQ <alerts@routeiq.example>', AUTH_URL: 'https://app.routeiq.example', NODE_ENV: 'test' } as unknown as NodeJS.ProcessEnv;
 
 interface Company {
   slug: string;
@@ -40,6 +39,8 @@ interface Company {
 }
 const A: Company = { slug: `oaa-${uniqueSuffix()}`.toLowerCase().slice(0, 32), tenantId: '', plannerId: '', depotId: '' };
 const B: Company = { slug: `oab-${uniqueSuffix()}`.toLowerCase().slice(0, 32), tenantId: '', plannerId: '', depotId: '' };
+// Both companies on the server's list of the companies that may send alert e-mail (review H1).
+const ENV = { RESEND_API_KEY: 're_test_key', RESEND_FROM: 'RouteIQ <alerts@routeiq.example>', AUTH_URL: 'https://app.routeiq.example', NODE_ENV: 'test', ALERT_EMAIL_TENANTS: `${A.slug},${B.slug}` } as unknown as NodeJS.ProcessEnv;
 
 const as = (c: Company, role = 'PLANNER') => {
   session.user = { id: c.plannerId, tenantId: c.tenantId, role, name: 'Dispatcher Example', email: `planner@${c.slug}.test` };

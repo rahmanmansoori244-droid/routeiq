@@ -10,8 +10,8 @@ import { Label } from '@/components/ui/label';
 import { acknowledgeAlerts } from '@/components/alerts-api';
 import { api } from '@/app/t/[slug]/dispatch/client-api';
 import { ALERT_POLL_MS, ALERT_RULE_LIST } from '@/lib/alerts/catalog';
-import type { OpsAlertRow } from '@/lib/alerts/types';
-import { alertStateText, alertTime, alertWhere, ruleLabel, SEVERITY_BADGE } from '@/lib/alerts/view';
+import type { OpsAlertRow, SweepCheck } from '@/lib/alerts/types';
+import { alertStateText, alertTime, alertWhere, ruleLabel, SEVERITY_BADGE, sweepCheckText } from '@/lib/alerts/view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 
 interface Filters {
@@ -22,7 +22,7 @@ interface Filters {
   rule: string;
 }
 
-interface ListAnswer {
+interface ListAnswer extends Partial<SweepCheck> {
   enabled: boolean;
   rows: OpsAlertRow[];
   truncated: boolean;
@@ -46,7 +46,7 @@ export function alertsQuery(f: Filters): string {
 /**
  * The Alerts page (operations alerts, owner request 16 Oct 2026): the filters, then every alert of the
  * range, open ones first and HIGH before warnings, with who acknowledged what. Reads again every 60 s
- * while the tab is visible and the range reaches today.
+ * while the tab is visible, alerts are on and the range reaches today (switched off: one read, no polling).
  */
 export function AlertsClient({
   enabled,
@@ -85,12 +85,12 @@ export function AlertsClient({
   const live = f.from <= today && today <= f.to;
   useEffect(() => {
     void read();
-    if (!live) return;
+    if (!live || !enabled) return;
     const t = setInterval(() => {
       if (typeof document === 'undefined' || document.visibilityState === 'visible') void read();
     }, ALERT_POLL_MS);
     return () => clearInterval(t);
-  }, [read, live]);
+  }, [read, live, enabled]);
 
   async function ack(rows: OpsAlertRow[]) {
     setBusy(true);
@@ -104,6 +104,7 @@ export function AlertsClient({
 
   const rows = answer?.rows ?? [];
   const open = rows.filter((r) => r.state === 'OPEN');
+  const check = enabled && answer ? sweepCheckText({ checkedAt: answer.checkedAt ?? null, checkStale: !!answer.checkStale, checkFailed: !!answer.checkFailed }, timezone) : null;
   const depotCode = (id: string) => depots.find((d) => d.id === id)?.code ?? '';
   return (
     <div className="space-y-4">
@@ -118,6 +119,11 @@ export function AlertsClient({
             'Settings > Operations alerts'
           )}
           . Alerts raised before stay listed here.
+        </p>
+      ) : null}
+      {check ? (
+        <p className={`text-xs ${check.warn ? 'rounded-md border border-red-300 bg-red-50 p-2 text-red-800' : 'text-muted-foreground'}`} data-testid="alerts-checked">
+          {check.text}
         </p>
       ) : null}
       <div className="flex flex-wrap items-end gap-3" data-testid="alerts-filters">

@@ -126,7 +126,7 @@ describe('Settings > Operations alerts (owner request 16 Oct 2026)', () => {
   });
 
   it('says when the server cannot send e-mail, and offers the test e-mail only with saved recipients', () => {
-    expect(renderAlerts('ADMIN', true, false)).toContain('Email is not set up on the server (RESEND_API_KEY and RESEND_FROM): alerts show in RouteIQ only.');
+    expect(renderAlerts('ADMIN', true, false)).toContain('Email is not set up on the server for this company (RESEND_API_KEY, RESEND_FROM and the company on ALERT_EMAIL_TENANTS): alerts show in RouteIQ only.');
     const ready = renderAlerts('ADMIN', true, true);
     expect(ready).not.toContain('data-testid="alert-email-not-configured"');
     expect(ready).toMatch(/<button[^>]*disabled=""[^>]*data-testid="alert-test-email"/);

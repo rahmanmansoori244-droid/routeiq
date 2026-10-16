@@ -59,7 +59,8 @@ import { AlertBell } from '@/components/alert-bell';
 import { AlertsCard, alertDayIsLive } from '@/app/t/[slug]/dispatch/alerts-card';
 import { PlanView } from '@/app/t/[slug]/dispatch/plan-view';
 import { alertSettingsProblem, ruleMeaning } from '@/app/t/[slug]/settings/alert-settings-card';
-import { ackBody, alertStateText, alertWhere, bellTone, canMarkLoaded, groupByTruck, loadedActionOn, newAlertToasts } from '@/lib/alerts/view';
+import { ackBody, alertStateText, alertWhere, bellTone, canMarkLoaded, groupByTruck, loadedActionOn, newAlertToasts, sweepCheckText } from '@/lib/alerts/view';
+import { visibleNavItems } from '@/lib/nav';
 import { ALERT_POLL_MS, ALERT_RULE_SPECS, ALERT_TOAST_MAX } from '@/lib/alerts/catalog';
 import { fixture } from './plan-detail-fixture';
 
@@ -99,6 +100,9 @@ const summary = (latest: OpsAlertRow[], extra: Partial<AlertSummary> = {}): Aler
   high: latest.filter((r) => r.severity === 'HIGH').length,
   latest,
   emailCapReached: false,
+  checkedAt: null,
+  checkStale: false,
+  checkFailed: false,
   ...extra,
 });
 
@@ -195,7 +199,7 @@ describe('the bell', () => {
   });
 
   it('switched off by an admin meanwhile: the bell hides at the next read', async () => {
-    net.summaries = [summary([high()]), { enabled: false, open: 0, high: 0, latest: [], emailCapReached: false }];
+    net.summaries = [summary([high()]), { enabled: false, open: 0, high: 0, latest: [], emailCapReached: false, checkedAt: null, checkStale: false, checkFailed: false }];
     const host = await mountBell();
     expect(host.tree).not.toBeNull();
     await poll(host);
@@ -205,6 +209,27 @@ describe('the bell', () => {
   it('says when the e-mails of today reached their daily limit', async () => {
     net.summaries = [summary([high()], { emailCapReached: true })];
     expect(byTestId((await mountBell()).tree, 'alert-bell-email-cap')).toHaveLength(1);
+  });
+
+  it('review M2: says when the alerts were last checked, and warns when the check is overdue or failed', async () => {
+    net.summaries = [summary([high()], { checkedAt: '2026-10-16T05:58:00.000Z' })];
+    const ok = byTestId((await mountBell()).tree, 'alert-bell-checked');
+    expect(textOf(ok[0])).toBe('Checked 09:58');
+    net.summaries = [summary([], { checkedAt: '2026-10-16T05:30:00.000Z', checkStale: true })];
+    expect(textOf(byTestId((await mountBell()).tree, 'alert-bell-checked')[0])).toContain('Alerts last checked 09:30: new alerts may be missing.');
+    expect(sweepCheckText({ checkedAt: null, checkStale: true, checkFailed: true }, 'Asia/Muscat')).toMatchObject({ warn: true, text: expect.stringContaining('not checked yet since the server started') });
+    expect(sweepCheckText({ checkedAt: '2026-10-16T05:58:00.000Z', checkStale: false, checkFailed: true }, 'Asia/Muscat')).toEqual({ warn: true, text: 'Checked 09:58; the last check failed: some alerts may be missing.' });
+    expect(sweepCheckText({ checkedAt: null, checkStale: false, checkFailed: false }, 'Asia/Muscat')).toBeNull();
+  });
+});
+
+describe('the Alerts menu item (review M1: merging changes nothing on screen)', () => {
+  it('shows only while the company has alerts on, for every role', () => {
+    for (const role of ['VIEWER', 'PLANNER', 'TENANT_ADMIN'] as const) {
+      expect(visibleNavItems(role).map((i) => i.label)).not.toContain('Alerts');
+      expect(visibleNavItems(role, { alerts: false }).map((i) => i.label)).not.toContain('Alerts');
+      expect(visibleNavItems(role, { alerts: true }).map((i) => i.label)).toContain('Alerts');
+    }
   });
 });
 

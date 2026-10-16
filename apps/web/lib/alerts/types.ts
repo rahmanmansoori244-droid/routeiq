@@ -48,7 +48,7 @@ export interface Candidate {
 export interface Ended {
   rule: AlertRule;
   subjectKey: string;
-  reason: Extract<ResolvedReason, 'ENDED' | 'CORRECTED'>;
+  reason: Extract<ResolvedReason, 'ENDED' | 'CORRECTED' | 'NOT_FOLLOWED'>;
   /** The final words ("Loading took 52 min, 02:10-03:02"; "corrected to Delivered 15:10"). */
   text: string;
 }
@@ -72,9 +72,16 @@ export interface Evaluation {
   /**
    * Subjects checked this sweep whose open row stays exactly as it is: ETA_LATE and the projected
    * AFTER_CLOSING while DRIVER_SILENT is open for the load (the delay cannot be worked out then; closing
-   * and reopening them would page again). Never closed as NOT_IN_PLAN.
+   * and reopening them would page again), ETA_LATE and the projected AFTER_CLOSING while UNLOAD_OVER is
+   * raised for the stop being unloaded, and every open row of a rule that failed on a load (`failures`).
+   * Never closed as NOT_IN_PLAN.
    */
   held?: { rule: AlertRule; subjectKey: string }[];
+  /**
+   * A rule that threw on a load: its open rows of that load are held, the other rules and loads still
+   * answer (the sweep logs the rule and the error's message, never a text of the facts).
+   */
+  failures?: { rule: AlertRule; message: string }[];
 }
 
 /**
@@ -140,7 +147,14 @@ export interface AlertSummary {
   latest: OpsAlertRow[];
   /** Today's e-mails reached ALERT_EMAILS_PER_DAY: alerts show in RouteIQ only until tomorrow. */
   emailCapReached: boolean;
+  /** The company's last good sweep (ISO; null: none since the server started), and whether the check is overdue or failed (lib/alerts/sweep.ts alertSweepStatus). */
+  checkedAt: string | null;
+  checkStale: boolean;
+  checkFailed: boolean;
 }
+
+/** The "Checked" part of a summary or a list answer. */
+export type SweepCheck = Pick<AlertSummary, 'checkedAt' | 'checkStale' | 'checkFailed'>;
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
 

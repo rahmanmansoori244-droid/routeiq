@@ -11,7 +11,10 @@
  *
  * How alerts behave (design PR-2 with the adversarial review's fixes):
  * - Everything is OFF until a company admin switches `TenantConfig.alertsEnabled` on; nothing that began or
- *   happened before that moment (`alertsEnabledAt`) raises an alert (no backlog on switch-on).
+ *   happened before that moment (`alertsEnabledAt`) raises an alert (no backlog on switch-on). The same holds
+ *   per rule: a rule switched on later, or set to catch more, raises nothing that began before that save
+ *   (`alertRuleOnAtJson`, switchOnOf), and a row closed because its rule was switched off reopens only for a
+ *   new episode (something that began after it closed).
  * - A sweep every ALERT_SWEEP_EVERY_MS reads what is in the database (no hook in the driver, office or
  *   load paths) and raises, escalates and closes rows of OpsAlert, one per rule and physical subject
  *   (subjectKeyOf: never a PlanLoad id, so a re-plan's copies keep their rows).
@@ -44,8 +47,12 @@ export type AlertSeverity = (typeof ALERT_SEVERITIES)[number];
 export const ALERT_MAX_TIER = 3;
 export type AlertTier = 1 | 2 | 3;
 
-/** Why a row closed (OpsAlert.resolvedReason). */
-export const RESOLVED_REASONS = ['ENDED', 'CORRECTED', 'NOT_IN_PLAN', 'EXPIRED', 'RULE_OFF'] as const;
+/**
+ * Why a row closed (OpsAlert.resolvedReason; text, no CHECK). NOT_FOLLOWED: the rule stopped following
+ * the subject while it was still true (past the planned return + 60 min, a Loading press 12 h old, a load
+ * not dispatched 4 h after its time): not "over", so never listed as over in an e-mail.
+ */
+export const RESOLVED_REASONS = ['ENDED', 'CORRECTED', 'NOT_IN_PLAN', 'EXPIRED', 'RULE_OFF', 'NOT_FOLLOWED'] as const;
 export type ResolvedReason = (typeof RESOLVED_REASONS)[number];
 export const RESOLVED_REASON_TEXT: Record<ResolvedReason, string> = {
   ENDED: 'Over',
@@ -53,6 +60,7 @@ export const RESOLVED_REASON_TEXT: Record<ResolvedReason, string> = {
   NOT_IN_PLAN: 'No longer in the plan',
   EXPIRED: 'Date passed',
   RULE_OFF: 'Rule switched off',
+  NOT_FOLLOWED: 'No longer followed',
 };
 
 /** The rule codes stored in OpsAlert.rule (checked here, not by the database: a new rule needs no migration). */
@@ -135,7 +143,7 @@ export const ALERT_RULE_SPECS: Record<AlertRule, AlertRuleSpec> = {
     no: 1,
     owner: true,
     label: 'Unloading longer than planned',
-    meaning: 'No result or departure tapped more than N min after the planned unloading time (counted from arrival, or from the window start when early). Tier 1 shows in RouteIQ only.',
+    meaning: 'No result or departure tapped more than N min after the planned unloading time (counted from arrival, or from the window start when early). Not followed any more once the truck is back at the depot, out on its next load, or past its planned return + 60 min. Tier 1 shows in RouteIQ only.',
     kind: 'CONDITION',
     subject: 'STOP',
     unit: 'min',
@@ -215,7 +223,7 @@ export const ALERT_RULE_SPECS: Record<AlertRule, AlertRuleSpec> = {
     no: 6,
     owner: false,
     label: 'After the delivery window',
-    meaning: 'A truck arrived, or the next stop is expected, more than N min after the stop\'s delivery window ends.',
+    meaning: 'A truck arrived, or the next stop is expected, more than N min after the stop\'s delivery window ends. An arrival is high beyond 2N min (a warning up to it); the expected one is a warning.',
     kind: 'CONDITION',
     subject: 'STOP',
     unit: 'min',
@@ -263,7 +271,7 @@ export const ALERT_RULE_SPECS: Record<AlertRule, AlertRuleSpec> = {
     no: 9,
     owner: false,
     label: 'Proof far from the pin',
-    meaning: 'A delivery photo or result was recorded more than N m from the customer\'s verified pin: the pin or the place of the photo is wrong.',
+    meaning: 'The driver\'s delivery photos (or, without them, the result) were recorded more than N m from the customer\'s verified pin: the pin or the place of the photo is wrong. Read like "Pin may be wrong": the phone\'s position first, the photo\'s own location only without a good one; old photos, photos the office added and visits planned at an older pin are left out.',
     kind: 'EVENT',
     subject: 'STOP',
     unit: 'm',
@@ -279,7 +287,7 @@ export const ALERT_RULE_SPECS: Record<AlertRule, AlertRuleSpec> = {
     no: 10,
     owner: false,
     label: 'Load not closed',
-    meaning: 'A dispatched load is still not Completed N min after its planned return (no Back at depot, or stops without a result).',
+    meaning: 'A dispatched load is still not Completed N min after its planned return (no Back at depot, or stops without a result). A warning only when every stop has its result; the truck out on its next load counts as back.',
     kind: 'CONDITION',
     subject: 'LOAD',
     unit: 'min',
@@ -384,6 +392,53 @@ export function beforeSwitchOn(occurredAt: Date, alertsEnabledAt: Date | null | 
   return alertsEnabledAt != null && occurredAt.getTime() < alertsEnabledAt.getTime();
 }
 
+/** Each rule's own switch-on time (TenantConfig.alertRuleOnAtJson); unknown rules and bad times are left out. */
+export type RuleOnAt = Partial<Record<AlertRule, Date>>;
+
+export function readRuleOnAt(json: unknown): RuleOnAt {
+  const out: RuleOnAt = {};
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return out;
+  for (const [k, v] of Object.entries(json as Record<string, unknown>)) {
+    if (!isAlertRule(k) || typeof v !== 'string') continue;
+    const d = new Date(v);
+    if (Number.isFinite(d.getTime())) out[k] = d;
+  }
+  return out;
+}
+
+/** The switch-on time a rule's new rows are compared with: the later of the master switch's and the rule's own. */
+export function switchOnOf(rule: AlertRule, alertsEnabledAt: Date | null | undefined, ruleOnAt: RuleOnAt | null | undefined): Date | null {
+  const own = ruleOnAt?.[rule] ?? null;
+  const master = alertsEnabledAt ?? null;
+  if (!own) return master;
+  if (!master) return own;
+  return own.getTime() > master.getTime() ? own : master;
+}
+
+/**
+ * A settings save: the rules it switched on or set to catch more (a lower limit; for R7 a higher priority
+ * number) get `now` as their own switch-on time (H2 of the 16 Oct review: switching R2 on, or lowering a
+ * threshold while tuning, must not raise what began before). Returns the whole new stamp list, or null
+ * when no stamp changes. The master switch is left aside (alertsEnabledAt covers it).
+ */
+export function ruleOnAtAfterSave(before: Partial<AlertConfig>, after: Partial<AlertConfig>, previous: unknown, now: Date): Record<string, string> | null {
+  const was = thresholdsOf({ ...before, alertsEnabled: true });
+  const is = thresholdsOf({ ...after, alertsEnabled: true });
+  const stamped: Record<string, string> = {};
+  for (const [k, d] of Object.entries(readRuleOnAt(previous))) stamped[k] = d.toISOString();
+  let changed = false;
+  for (const s of ALERT_RULE_LIST) {
+    const a = was[s.rule];
+    const b = is[s.rule];
+    if (b === null) continue;
+    const wider = a === null || (s.unit === 'priority' ? b > a : b < a);
+    if (!wider) continue;
+    stamped[s.rule] = now.toISOString();
+    changed = true;
+  }
+  return changed ? stamped : null;
+}
+
 /**
  * The physical subject of a row: depot|date|truck for a truck-day, + |loadNo for a load, + |sequence for a
  * stop. Frozen loads keep their truck, load number and stop order across re-plans; a load re-solved under
@@ -406,6 +461,10 @@ export function subjectKeyOf(s: { depotId: string; date: string; truckId: string
 export const ALERT_SWEEP_EVERY_MS = 120_000;
 /** A sweep slower than this is logged (counts only). */
 export const ALERT_SWEEP_SLOW_MS = 2_000;
+/** A row closed as NOT_IN_PLAN this recently that comes back (a re-plan's copy) keeps its acknowledgement and e-mail state. */
+export const ALERT_REOPEN_KEEP_MS = 12 * 3_600_000;
+/** The bell and the Alerts page warn when the company's last good sweep is older than this. */
+export const ALERT_SWEEP_STALE_MS = 10 * 60_000;
 /** Hysteresis: ETA_LATE and the projected AFTER_CLOSING close only when back under the threshold by this much. */
 export const ALERT_HYSTERESIS_MIN = 10;
 /** A value or text change of the same tier is written only when the value moved this much (or the text changed). */
@@ -465,6 +524,27 @@ export const ALERT_EMAILS_MAX = 5;
 export const ALERT_EMAILS_MAX_LENGTH = 500;
 /** E-mails per company per local day (a check against the e-mail provider's free plan). */
 export const ALERT_EMAILS_PER_DAY = 40;
+/**
+ * Alert e-mails of all companies together in any 24 h (the provider's free plan allows about 100 a day,
+ * and the password reset uses the same sender): above it no company gets an alert e-mail until the count
+ * falls (the alerts still show in RouteIQ).
+ */
+export const ALERT_EMAILS_ALL_PER_DAY = 80;
+/**
+ * The server's list of the companies (their slugs, separated by commas or spaces) that may send alert
+ * e-mail at all. Unset: none. Signup is open, so without it anyone could save any address and send
+ * through our verified sender (review of 16 Oct 2026, H1).
+ */
+export const ALERT_EMAIL_TENANTS_ENV = 'ALERT_EMAIL_TENANTS';
+
+/** Whether the company (its slug) is on the server's list of the companies that may send alert e-mail. */
+export function alertEmailAllowed(slug: string | null | undefined, env: Record<string, string | undefined> = process.env): boolean {
+  const list = (env[ALERT_EMAIL_TENANTS_ENV] ?? '')
+    .split(/[\s,;]+/)
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+  return !!slug && list.includes(slug.trim().toLowerCase());
+}
 /** A row whose e-mail failed this many times is not tried again. */
 export const ALERT_EMAIL_MAX_ATTEMPTS = 3;
 /** Only rows seen within this many hours are e-mailed (lastSeenAt, so a reopened or escalated row counts). */

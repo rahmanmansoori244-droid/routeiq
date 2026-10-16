@@ -6,7 +6,10 @@
  * of a pile (H3), the projected window check only for the next stop with a window plus 10 min hysteresis
  * (H5), bad pins (M1), the Dispatch button (M2), a late Dispatch press (M3), bad arrival taps (M9), long
  * legs and the planned break (M10), office results (L8), the window rule of old loads (L2). Every text
- * starts with the truck as shown and has no run of 6 digits. Asia/Muscat (UTC+4); invented names.
+ * starts with the truck as shown and has no run of 6 digits. The two reviews of 16 Oct 2026 ("review H1"
+ * etc.): rules end once the truck is back or past its planned return, one long unloading is one alert,
+ * photos and a phone still talking count, R9 read like "Pin may be wrong", later trips, paperwork,
+ * conditions dated to when they began, a rule that throws. Asia/Muscat (UTC+4); invented names.
  */
 import { describe, expect, it } from 'vitest';
 import { ALERT_RULES, subjectKeyOf, thresholdsOf, type AlertConfig, type AlertRule } from '@/lib/alerts/catalog';
@@ -173,7 +176,8 @@ describe('R1 UNLOAD_OVER (owner rule 1: unloading more than planned by 30 min)',
     run(arrived(), at('08:50')).none('UNLOAD_OVER');
     const c = run(arrived(), at('08:51')).one('UNLOAD_OVER', stopKey(1));
     expect(c).toMatchObject({ kind: 'CONDITION', tier: 1, value: 31, threshold: 30, sequence: 1, customerId: 'cust-1' });
-    expect(c.text).toBe('T05 L1 stop 1 Hyper Example A (C100): no result or departure tapped since arrival 08:00 - 51 min at the stop, planned 20 min (31 min over).');
+    // M2 of the review: the knock-on delay is told here (R3 waits while this is raised).
+    expect(c.text).toBe('T05 L1 stop 1 Hyper Example A (C100): no result or departure tapped since arrival 08:00 - 51 min at the stop, planned 20 min (31 min over). Next: stop 2 Shop Example B (C200) now expected about 09:31 (planned 09:00).');
     expect(run(arrived(), at('09:21')).one('UNLOAD_OVER').tier).toBe(2);
     expect(run(arrived(), at('09:51')).one('UNLOAD_OVER').tier).toBe(3);
     // No backlog: the condition began when the limit was crossed.
@@ -458,11 +462,13 @@ describe('R5 DRIVER_SILENT (M10: WARN first, the next stop overdue, the planned 
 });
 
 describe('R6 AFTER_CLOSING (H5: an actual arrival is an event; only the next stop with a window is projected)', () => {
-  it('an observed arrival 16 min after the window end: an EVENT, tier 2 HIGH; 15: nothing; not certain: nothing', () => {
+  it('an observed arrival 16 min after the window end: an EVENT, a WARN (review M4), HIGH beyond 2T; 15: nothing; not certain: nothing', () => {
     const f = (arrive: string, over: Partial<FactVisit> = {}) => facts([load({ stops: [stop(1, 480, { windowEndMin: 600, visit: visit({ arrivedAt: at(arrive), ...over }) })] })]);
     run(f('10:15'), at('10:20')).none('AFTER_CLOSING');
     const c = run(f('10:16'), at('10:20')).one('AFTER_CLOSING', stopKey(1));
-    expect(c).toMatchObject({ kind: 'EVENT', tier: 2, value: 16 });
+    expect(c).toMatchObject({ kind: 'EVENT', tier: 1, value: 16 });
+    expect(run(f('10:30'), at('10:40')).one('AFTER_CLOSING')).toMatchObject({ tier: 1, value: 30 });
+    expect(run(f('10:31'), at('10:40')).one('AFTER_CLOSING')).toMatchObject({ tier: 2, value: 31 });
     expect(c.text).toBe('T05 L1 stop 1 Hyper Example A (C100): arrived 10:16, after its delivery window ended at 10:00 (16 min late).');
     expect(c.occurredAt).toEqual(at('10:16'));
     run(f('10:30', { arrivalSource: 'PHONE_AUTO', arrivalObserved: false }), at('10:40')).none('AFTER_CLOSING');
@@ -607,6 +613,244 @@ describe('R10 LOAD_NOT_CLOSED and R11 PAGE_NOT_OPENED (H3: one WARN instead of a
     const opened = run(facts([load()]), at('09:00'));
     opened.none('PAGE_NOT_OPENED');
     expect(opened.ended('PAGE_NOT_OPENED', subjectKeyOf({ depotId: 'D1', date: D, truckId: 'TR1' }))?.text).toContain('driver page opened');
+  });
+});
+
+describe('review H1: R1 ends once the truck has left the stop', () => {
+  // The last stop: arrived 10:00, no result, no departure.
+  const lastStop = (over: Partial<FactLoad> = {}) => load({ stops: [stop(1, 480, { visit: visit({ arrivedAt: at('08:00'), departedAt: at('08:20'), outcome: 'DELIVERED', outcomeAt: at('08:20'), outcomeSource: 'PHONE_MANUAL' }) }), stop(2, 600, { visit: visit({ arrivedAt: at('10:00') }) })], ...over });
+
+  it('Back at depot after the arrival: no unloading alert, the open row closes saying so', () => {
+    const r = run(facts([lastStop({ backAt: at('11:30') })], { open: [['UNLOAD_OVER', stopKey(2)]] }), at('13:00'));
+    r.none('UNLOAD_OVER');
+    expect(r.ended('UNLOAD_OVER', stopKey(2))).toMatchObject({ reason: 'ENDED', text: 'T05 L1 stop 2 Shop Example B (C200): no departure or result was tapped; back at the depot at 11:30.' });
+    // A Back at depot tapped before the arrival is no sign the truck left.
+    run(facts([lastStop({ backAt: at('09:00') })]), at('11:00')).one('UNLOAD_OVER', stopKey(2));
+  });
+
+  it('the truck out on its next load: L1\'s last stop is not being unloaded any more', () => {
+    const l2 = (over: Partial<FactLoad> = {}) => load({ id: 'l2', loadNo: 2, departMin: 750, returnMin: 1000, statusChangedAt: at('12:30'), stops: [stop(1, 780), stop(2, 840)], ...over });
+    const r = run(facts([lastStop(), l2()]), at('13:00'));
+    r.none('UNLOAD_OVER', stopKey(2));
+    expect(r.ended('UNLOAD_OVER', stopKey(2))?.text).toContain('the truck is out on L2 since 12:30');
+    // Dispatch pressed for both loads in the morning is not the truck leaving again: L1 is still followed.
+    const morning = run(facts([lastStop(), l2({ statusChangedAt: at('07:31') })]), at('11:00'));
+    morning.one('UNLOAD_OVER', stopKey(2));
+    // ...until a stop of L2 shows activity.
+    const busy = l2({ statusChangedAt: at('07:31'), stops: [stop(1, 780, { visit: visit({ arrivedAt: at('11:40') }) }), stop(2, 840)] });
+    expect(run(facts([lastStop(), busy]), at('12:00')).ended('UNLOAD_OVER', stopKey(2))?.text).toContain('out on L2 since 11:40');
+  });
+
+  it('past the planned return + 60 min it is no longer followed (NOT_FOLLOWED, "Load not closed" follows the load); a load of yesterday too', () => {
+    // Return 12:00: followed until 13:00.
+    expect(run(facts([lastStop()]), at('13:00')).one('UNLOAD_OVER').tier).toBe(3);
+    const r = run(facts([lastStop()], { open: [['UNLOAD_OVER', stopKey(2)]] }), at('13:01'));
+    r.none('UNLOAD_OVER');
+    expect(r.ended('UNLOAD_OVER', stopKey(2))).toMatchObject({ reason: 'NOT_FOLLOWED' });
+    expect(r.ended('UNLOAD_OVER', stopKey(2))!.text).toContain('no longer followed (see "Load not closed")');
+    // Yesterday's load, the next morning: nothing (the reviewer's "3 h 30 min at the stop" overnight).
+    const y = load({ date: YESTERDAY, statusChangedAt: at('07:30', YESTERDAY), stops: [stop(1, 600, { visit: visit({ arrivedAt: at('10:00', YESTERDAY) }) })] });
+    run(facts([y]), at('07:00')).none('UNLOAD_OVER');
+  });
+
+  it('review L4: a result entered hours later on the last stop is capped at Back at depot, or the planned return + 60 min', () => {
+    const late = (over: Partial<FactLoad>) =>
+      load({ stops: [stop(1, 600, { visit: visit({ arrivedAt: at('10:00'), departedAt: at('19:00'), departedAtOutcome: true, outcome: 'DELIVERED', outcomeAt: at('19:00'), outcomeSource: 'PHONE_MANUAL' }) })], ...over });
+    const back = run(facts([late({ backAt: at('11:00') })]), at('19:05')).one('UNLOAD_OVER', stopKey(1));
+    expect(back).toMatchObject({ history: true, value: 40 });
+    expect(back.text).toBe('T05 L1 stop 1 Hyper Example A (C100): unloading took 1 h (until back at the depot at 11:00), planned 20 min (40 min over).');
+    const noTap = run(facts([late({})]), at('19:05')).one('UNLOAD_OVER', stopKey(1));
+    expect(noTap.text).toContain('unloading took 3 h (until the planned return 12:00 + 60 min)');
+  });
+
+  it('M1: R5 is not raised past the planned return + 60 min, nor the next morning; R10 follows the load', () => {
+    const gone = load({ stops: [stop(1, 480, { visit: visit({ arrivedAt: at('08:00'), departedAt: at('08:20') }) }), stop(2, 540)] });
+    const td: FactTruckDay = { date: D, truckId: 'TR1', linkSeenAt: at('08:20'), pageOpened: true, lastSignal: { at: at('08:20'), kind: 'DEPARTED', depotId: 'D1', loadNo: 1, sequence: 1 } };
+    run(facts([gone], { truckDays: [td] }), at('12:59')).one('DRIVER_SILENT');
+    const after = run(facts([gone], { truckDays: [td], open: [['DRIVER_SILENT', loadKey()]] }), at('13:01'));
+    after.none('DRIVER_SILENT');
+    expect(after.ended('DRIVER_SILENT', loadKey())).toMatchObject({ reason: 'NOT_FOLLOWED' });
+    const y = load({ date: YESTERDAY, statusChangedAt: at('07:30', YESTERDAY), stops: [stop(1, 480, { visit: visit({ arrivedAt: at('08:00', YESTERDAY), departedAt: at('08:20', YESTERDAY) }) }), stop(2, 540)] });
+    const morning = run(facts([y], { truckDays: [{ ...td, date: YESTERDAY, lastSignal: { ...td.lastSignal!, at: at('08:20', YESTERDAY) } }] }), at('07:00'));
+    morning.none('DRIVER_SILENT');
+    morning.one('LOAD_NOT_CLOSED');
+  });
+});
+
+describe('review M2: one long unloading is one alert', () => {
+  it('while R1 is raised for the stop, R3 and the projected R6 wait (not raised; an open row is held)', () => {
+    const stops = [stop(1, 480, { visit: visit({ arrivedAt: at('08:00'), departedAt: at('08:20') }) }), stop(2, 540, { plannedServiceMin: 30, departureMin: 570, visit: visit({ arrivedAt: at('09:00') }) }), stop(3, 600, { windowEndMin: 630 })];
+    const f = facts([load({ windowRule: 'START', stops })]);
+    // 10:45: 1 h 45 min at stop 2, planned 30: R1 HIGH; stop 3 expected about 11:15 (75 min late, after its 10:30 window).
+    const r = run(f, at('10:45'));
+    expect(r.one('UNLOAD_OVER', stopKey(2)).tier).toBe(2);
+    expect(r.one('UNLOAD_OVER', stopKey(2)).text).toContain('Next: stop 3 Shop Example C (C300) now expected about 11:15 (planned 10:00).');
+    r.none('ETA_LATE');
+    r.none('AFTER_CLOSING');
+    // Rows already open stay as they are.
+    const held = run(facts(f.loads, { open: [['ETA_LATE', loadKey()], ['AFTER_CLOSING', stopKey(3)]] }), at('10:45'));
+    expect(held.ev.held).toEqual(expect.arrayContaining([{ rule: 'ETA_LATE', subjectKey: loadKey() }, { rule: 'AFTER_CLOSING', subjectKey: stopKey(3) }]));
+    // The departure tapped: R1 ends with the final words and R3 follows the delay again.
+    const left = facts([load({ windowRule: 'START', stops: [stops[0]!, stop(2, 540, { plannedServiceMin: 30, departureMin: 570, visit: visit({ arrivedAt: at('09:00'), departedAt: at('10:50') }) }), stops[2]!] })]);
+    const after = run(left, at('10:52'));
+    after.one('ETA_LATE');
+  });
+});
+
+describe('review M3: a photo is the truck being there; a phone still talking holds the clock', () => {
+  const stops = (photoAt?: string) => [
+    stop(1, 480, { visit: visit({ arrivedAt: at('08:00'), departedAt: at('08:20'), outcome: 'DELIVERED', outcomeAt: at('08:20'), outcomeSource: 'PHONE_MANUAL' }) }),
+    stop(2, 600, { plannedServiceMin: 75, departureMin: 675, windowEndMin: 630, visit: photoAt ? visit({ photos: [{ positionStatus: 'OK', distanceM: 30, accuracyM: 10, exifDistanceM: null, receivedAt: at(photoAt), source: 'PHONE_MANUAL' }] }) : null }),
+    stop(3, 720),
+  ];
+  const td = (sig: string): FactTruckDay => ({ date: D, truckId: 'TR1', linkSeenAt: at(sig), pageOpened: true, lastSignal: { at: at(sig), kind: 'PHOTO', depotId: 'D1', loadNo: 1, sequence: 2 } });
+
+  it('a delivery photo at a stop whose arrival was not recorded: the stop is being unloaded, nobody is "not reached yet"', () => {
+    const r = run(facts([load({ windowRule: 'START', stops: stops('10:05') })], { truckDays: [td('10:05')] }), at('11:20'));
+    r.none('ETA_LATE');
+    r.none('AFTER_CLOSING');
+    // R1 needs a real arrival: a photo is not one.
+    r.none('UNLOAD_OVER');
+    // An office upload or an old gallery photo is no sign of the truck.
+    const office = stops('10:05');
+    office[1]!.visit!.photos[0]!.source = 'DISPATCHER';
+    // (the phone last heard at 09:45, before stop 2 was expected at 10:00, so the clock pushes it)
+    run(facts([load({ windowRule: 'START', stops: office })], { truckDays: [td('09:45')] }), at('11:20')).one('ETA_LATE');
+  });
+
+  it('no photo, but the phone sent something after the stop was expected: the clock does not push it ("no arrival recorded yet")', () => {
+    // Heard last at 09:45, before stop 2 was expected (10:00): the clock pushes it.
+    const quiet = run(facts([load({ windowRule: 'START', stops: stops() })], { truckDays: [td('09:45')] }), at('11:20'));
+    expect(quiet.one('ETA_LATE').text).toContain('not reached yet');
+    const talking = run(facts([load({ windowRule: 'START', stops: stops() })], { truckDays: [td('10:30')] }), at('11:20'));
+    talking.none('ETA_LATE');
+  });
+});
+
+describe('review H3: R9 is read like "Pin may be wrong"', () => {
+  const ph = (over: Partial<FactVisit['photos'][number]> = {}) => ({ positionStatus: 'OK', distanceM: 40, accuracyM: 12, exifDistanceM: null, receivedAt: at('10:02'), source: 'PHONE_MANUAL', ...over });
+  const proof = (photos: FactVisit['photos'], over: Partial<FactVisit> = {}, stopOver: Partial<FactStop> = {}, more: FactStop[] = []) =>
+    facts([load({ stops: [stop(1, 480, { visit: visit({ arrivedAt: at('08:00'), photos, ...over }), ...stopOver }), ...more] })]);
+
+  it('a good phone position wins over the photo\'s own location (40 m, EXIF 15 km: nothing)', () => {
+    run(proof([ph({ exifDistanceM: 15000 })]), at('10:05')).none('PROOF_FAR');
+    // Without a good phone position the photo's own location counts.
+    expect(run(proof([ph({ positionStatus: 'DENIED', distanceM: null, accuracyM: null, exifDistanceM: 3000 })]), at('10:05')).one('PROOF_FAR')).toMatchObject({ tier: 2, value: 3000 });
+  });
+
+  it('old (gallery) photos and photos the office added are left out', () => {
+    run(proof([ph({ distanceM: 9000, oldPhoto: true })]), at('10:05')).none('PROOF_FAR');
+    run(proof([ph({ distanceM: 9000, source: 'DISPATCHER' })]), at('10:05')).none('PROOF_FAR');
+  });
+
+  it('several photos: their median distance (one stray photo is not the visit)', () => {
+    run(proof([ph(), ph({ distanceM: 50 }), ph({ distanceM: 9000 })]), at('10:05')).none('PROOF_FAR');
+    const c = run(proof([ph({ distanceM: 2600 }), ph({ distanceM: 2400 })]), at('10:05')).one('PROOF_FAR');
+    expect(c).toMatchObject({ tier: 2, value: 2500 });
+    expect(c.text).toContain('2 delivery photos taken about 2.5 km from the customer\'s pin');
+  });
+
+  it('the result position counts only without photos, from the driver, and not after the truck was at a later stop', () => {
+    const result = { outcome: 'DELIVERED', outcomeAt: at('11:00'), outcomeSource: 'PHONE_MANUAL', outcomeDistanceM: 3000, outcomeAccuracyM: 20 };
+    run(proof([], result), at('11:05')).one('PROOF_FAR');
+    run(proof([ph()], result), at('11:05')).none('PROOF_FAR');
+    run(proof([], { ...result, outcomeSource: 'DISPATCHER' }), at('11:05')).none('PROOF_FAR');
+    run(proof([], result, {}, [stop(2, 540, { visit: visit({ arrivedAt: at('10:30') }) })]), at('11:05')).none('PROOF_FAR');
+  });
+
+  it('a visit planned at an older pin (corrected since) is not checked', () => {
+    const r = run(proof([ph({ distanceM: 9000 })], {}, { pinMoved: true }), at('10:05'));
+    r.none('PROOF_FAR');
+    expect(r.ended('PROOF_FAR', stopKey(1))?.text).toContain('pin was moved after this delivery was planned');
+  });
+});
+
+describe('review M6: a later trip is counted from the previous load\'s return', () => {
+  const key2 = loadKey({ depotId: 'D1', date: D, truckId: 'TR1', loadNo: 2 });
+  const trip2 = load({ id: 'l2', loadNo: 2, status: 'LOCKED', departMin: 780, returnMin: 1000 });
+
+  it('L1 back late at 14:00 (planned 12:40): L2 (planned 13:00) is counted from 14:20 and starts at WARN', () => {
+    const l1 = load({ id: 'l1', returnMin: 760, backAt: at('14:00') });
+    run(facts([l1, trip2]), at('14:02')).none('DEPART_LATE', key2);
+    run(facts([l1, trip2]), at('14:50')).none('DEPART_LATE', key2);
+    const c = run(facts([l1, trip2]), at('14:51')).one('DEPART_LATE', key2);
+    expect(c).toMatchObject({ tier: 1, value: 31 });
+    expect(c.text).toContain('planned departure 13:00 (L1 back 14:00, + the planned 20 min turnaround: counted from 14:20)');
+    expect(c.occurredAt).toEqual(at('14:50'));
+  });
+
+  it('L1 never taps Back at depot: taken as back at its planned return + 60 min, so L2 is still followed', () => {
+    const l1 = load({ id: 'l1', returnMin: 720 });
+    // 12:00 return + 60 = 13:00 (+ the planned 60 min turnaround) = 14:00.
+    run(facts([l1, trip2]), at('12:59')).none('DEPART_LATE', key2);
+    run(facts([l1, trip2]), at('14:30')).none('DEPART_LATE', key2);
+    expect(run(facts([l1, trip2]), at('14:31')).one('DEPART_LATE', key2)).toMatchObject({ tier: 1 });
+  });
+
+  it('L1 completed by the office before its planned return + 60 min: back then', () => {
+    const l1 = load({ id: 'l1', returnMin: 720, status: 'COMPLETED', statusChangedAt: at('11:00') });
+    // 11:00 + the planned 60 min turnaround = 12:00, before L2's 13:00: counted from 13:00.
+    run(facts([l1, trip2]), at('13:30')).none('DEPART_LATE', key2);
+    expect(run(facts([l1, trip2]), at('13:31')).one('DEPART_LATE', key2)).toMatchObject({ tier: 1, value: 31 });
+  });
+});
+
+describe('review M8: R10 and the paperwork', () => {
+  const done = (seq: number, eta: number) => stop(seq, eta, { visit: visit({ arrivedAt: at(eta), outcome: 'DELIVERED', outcomeAt: at(eta + 15), outcomeSource: 'PHONE_MANUAL' }) });
+
+  it('every result in, only Back at depot or Completed missing: a warning at most', () => {
+    const f = facts([load({ stops: [done(1, 480), done(2, 540)] })]);
+    const c = run(f, at('18:00')).one('LOAD_NOT_CLOSED');
+    expect(c.tier).toBe(1);
+    expect(c.text).toContain('no Back at depot, every result recorded. Press Completed.');
+  });
+
+  it('the truck out on its next load counts as back: closing when every result is in', () => {
+    const l1 = load({ id: 'l1', stops: [done(1, 480), done(2, 540)] });
+    const l2 = load({ id: 'l2', loadNo: 2, departMin: 750, returnMin: 1000, statusChangedAt: at('12:30'), stops: [stop(1, 780)] });
+    const r = run(facts([l1, l2]), at('15:00'));
+    r.none('LOAD_NOT_CLOSED', loadKey());
+    expect(r.ended('LOAD_NOT_CLOSED', loadKey())?.text).toContain('the truck is out on L2 since 12:30 with every result recorded');
+  });
+});
+
+describe('review L2: conditions dated to when they began', () => {
+  it('R3 from a late departure is dated to that departure, not to the sweep (a switch-on later is backlog)', () => {
+    const f = facts([load({ stops: [stop(1, 480, { visit: visit({ arrivedAt: at('08:00'), departedAt: at('08:55') }) }), stop(2, 540), stop(3, 600)] })]);
+    // 35 min late from the 08:55 departure on.
+    expect(run(f, at('09:00')).one('ETA_LATE').occurredAt).toEqual(at('08:55'));
+  });
+
+  it('the projected R6 is dated to when the projection first passed the margin', () => {
+    const stops = [stop(1, 480), stop(2, 540, { windowEndMin: 560 })];
+    // Stop 2 expected 09:00 + the clock: past 09:20 + 15 from 08:36 on (stop 1 not reached, 08:00 + the clock).
+    expect(run(facts([load({ windowRule: 'START', stops })]), at('08:40')).one('AFTER_CLOSING').occurredAt).toEqual(at('08:35'));
+  });
+});
+
+describe('a rule that throws holds its own rows of the load; the others still answer (review M2 of the second review)', () => {
+  it('a stop without its load number makes R1 throw: its open row is held, R3 still answers', () => {
+    const broken = load({ loadNo: null as unknown as number, stops: [stop(1, 480, { visit: visit({ arrivedAt: at('08:00') }) })] });
+    const f = facts([broken]);
+    const ev = evaluate(f, at('09:30'), ALL);
+    expect(ev.failures?.length).toBeGreaterThan(0);
+    expect(ev.failures!.every((x) => typeof x.message === 'string')).toBe(true);
+  });
+
+  it('the open rows of a failed rule and load are held, not closed as not in the plan; the rules that did not fail answer', () => {
+    const f = facts([load({ stops: [stop(1, 480, { visit: visit({ arrivedAt: at('08:00') }) })] })], { open: [['UNLOAD_OVER', stopKey(1)], ['PROOF_FAR', stopKey(1), 'EVENT']] });
+    // Every rule that words a stop throws on this one (its name cannot be read).
+    Object.defineProperty(f.loads[0]!.stops[0]!, 'customerName', {
+      get() {
+        throw new Error('bad data');
+      },
+    });
+    const ev = evaluate(f, at('14:30'), ALL);
+    expect(ev.failures!.map((x) => x.rule)).toEqual(expect.arrayContaining(['UNLOAD_OVER', 'PROOF_FAR']));
+    expect(ev.failures!.every((x) => x.message === 'bad data')).toBe(true);
+    expect(ev.held).toEqual(expect.arrayContaining([{ rule: 'UNLOAD_OVER', subjectKey: stopKey(1) }, { rule: 'PROOF_FAR', subjectKey: stopKey(1) }]));
+    // Load not closed words no stop: it still answers.
+    expect(ev.active.map((a) => a.rule)).toContain('LOAD_NOT_CLOSED');
   });
 });
 

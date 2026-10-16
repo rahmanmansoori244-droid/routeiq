@@ -3,8 +3,9 @@
  * stubbed: only companies that switched alerts on, each in its own transaction under its alert lock (a
  * busy lock skips the company: M4), one company's failure never stops the others, the e-mail step after
  * each, the 2-minute throttle (the cron route forces it), no second sweep while one runs, the kill switch
- * ROUTEIQ_DISABLE_ALERTS=1, no backlog before the switch-on time. And the hooks: the janitor loop and the
- * cron route run it. Synthetic data; invented names.
+ * ROUTEIQ_DISABLE_ALERTS=1, no backlog before the switch-on time (also when it was never stamped: review
+ * L1), per rule too (review H2), and the "Checked" health each company's sweep leaves (review M2). And the
+ * hooks: the janitor loop and the cron route run it. Synthetic data; invented names.
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -27,7 +28,7 @@ vi.mock('@/lib/alerts/facts', () => ({
 }));
 vi.mock('@/lib/alerts/locks', () => ({ tryLockTenantAlerts: vi.fn(async (_tx: unknown, tenantId: string) => !state.busy.has(tenantId)) }));
 
-import { resetAlertSweepClock, runAlertSweep } from '@/lib/alerts/sweep';
+import { alertSweepHealth, alertSweepStatus, resetAlertSweepClock, runAlertSweep } from '@/lib/alerts/sweep';
 import { zonedDayStart } from '@/lib/dispatch/time';
 
 const TZ = 'Asia/Muscat';
@@ -53,8 +54,10 @@ const cfg = (tenantId: string, over: Record<string, unknown> = {}) => ({
 function stubDb(configs: Record<string, unknown>[]) {
   const created: Record<string, any>[] = [];
   const queries: Record<string, any>[] = [];
+  const stamped: Record<string, any>[] = [];
   const tx = {
     $executeRawUnsafe: async () => 0,
+    tenantConfig: { updateMany: async (a: Record<string, any>) => (stamped.push(a), { count: 1 }) },
     opsAlert: {
       createMany: async (a: Record<string, any>) => (created.push(...a.data), { count: a.data.length }),
       updateMany: async () => ({ count: 1 }),
@@ -64,7 +67,7 @@ function stubDb(configs: Record<string, unknown>[]) {
     tenantConfig: { findMany: async (a: Record<string, any>) => (queries.push(a), configs) },
     $transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
   };
-  return { db: db as never, created, queries };
+  return { db: db as never, created, queries, stamped };
 }
 
 beforeEach(() => {
@@ -110,6 +113,39 @@ describe('runAlertSweep', () => {
     const { db, created } = stubDb([cfg('tA', { alertsEnabledAt: at(8 * 60 + 10) })]);
     expect(await runAlertSweep(NOW, { db })).toMatchObject({ raised: 0, backlog: 1 });
     expect(created).toEqual([]);
+  });
+
+  it('review L1: alerts on without a switch-on time (a support UPDATE) get it now: nothing that began before raises', async () => {
+    state.facts.set('tA', lateFacts());
+    const { db, created, stamped } = stubDb([cfg('tA', { alertsEnabledAt: null })]);
+    expect(await runAlertSweep(NOW, { db })).toMatchObject({ raised: 0, backlog: 1 });
+    expect(created).toEqual([]);
+    expect(stamped).toEqual([{ where: { tenantId: 'tA', alertsEnabledAt: null }, data: { alertsEnabledAt: NOW } }]);
+  });
+
+  it('review H2: a rule switched on after the master switch raises nothing that began before its own switch-on', async () => {
+    state.facts.set('tA', lateFacts());
+    const { db, created } = stubDb([cfg('tA', { alertRuleOnAtJson: { DEPART_LATE: at(8 * 60 + 10).toISOString() } })]);
+    expect(await runAlertSweep(NOW, { db })).toMatchObject({ raised: 0, backlog: 1 });
+    expect(created).toEqual([]);
+  });
+
+  it('review M2: each company\'s last good sweep is kept ("Checked"); a failure or 10 min without one says so; /api/health gets counts only', async () => {
+    state.facts.set('tA', lateFacts());
+    state.fail.add('tB');
+    const { db } = stubDb([cfg('tA'), cfg('tB')]);
+    await runAlertSweep(NOW, { db });
+    expect(alertSweepStatus('tA', NOW)).toEqual({ checkedAt: NOW.toISOString(), failed: false, stale: false });
+    expect(alertSweepStatus('tB', NOW)).toMatchObject({ checkedAt: null, failed: true });
+    expect(alertSweepStatus('tA', new Date(NOW.getTime() + 10 * 60_000 + 1))).toMatchObject({ stale: true });
+    // A company never swept yet: stale only 10 min after its switch-on (or this process's start).
+    const later = new Date(Date.now() + 5 * 60_000);
+    expect(alertSweepStatus('tC', later, later).stale).toBe(false);
+    expect(alertSweepStatus('tC', new Date(Date.now() + 11 * 60_000), null).stale).toBe(true);
+    const h = alertSweepHealth(NOW);
+    // tB never had a good sweep and this process started more than 10 min before NOW: failing and overdue.
+    expect(h).toEqual({ lastRunAt: NOW.toISOString(), companies: 2, failing: 1, stale: 1 });
+    expect(JSON.stringify(h)).not.toMatch(/tA|tB/);
   });
 
   it('at most every 2 min (the cron route forces it); never twice at once; off with ROUTEIQ_DISABLE_ALERTS=1', async () => {

@@ -5,7 +5,8 @@
 --
 -- Additive only, and nothing changes until a company admin switches alerts on:
 -- - TenantConfig: the master switch "alertsEnabled" (NOT NULL DEFAULT false: every company stays off),
---   "alertsEnabledAt" (set by the save that switches alerts on: nothing older raises an alert), one
+--   "alertsEnabledAt" (set by the save that switches alerts on: nothing older raises an alert),
+--   "alertRuleOnAtJson" (the same stamp per rule, when a rule is switched on or set to catch more), one
 --   nullable threshold per rule (NULL = the rule is off; "alertLoadingOverMin" is NULL, off, until the
 --   warehouse records loading start and end per truck), "alertDeliveredNote" (on/off), the e-mail
 --   settings (recipients NULL = in the app only; HIGH alerts only; quiet hours 22:00-06:00). Constant
@@ -27,7 +28,10 @@
 -- for each lock: if a lock is not free, the deploy fails, nothing is applied (Prisma runs this file as
 -- one transaction: see 20260930120000_orders_always_have_depot) and the old version keeps serving.
 -- Deploy again later. SET LOCAL ends with this migration's transaction, so later migrations are not
--- affected.
+-- affected. "PlanLoad" is altered first: a re-plan can hold it for seconds, and while the migration
+-- waits for it, it holds nothing else; "TenantConfig" (read by every page, in short reads) comes second,
+-- so it is held only for that short second wait. Deploy outside the busy hours anyway (not 06:00-07:30
+-- Dispatch, not the evening planning, not the 21:00 loading).
 --
 -- Rollback: DROP TABLE "OpsAlertDigest"; DROP TABLE "OpsAlert";
 --           ALTER TABLE "PlanLoad" DROP COLUMN "loadedAt", DROP COLUMN "loadedById";
@@ -37,10 +41,14 @@
 --             DROP COLUMN "alertAfterClosingMin", DROP COLUMN "alertPriorityMax", DROP COLUMN "alertDeliveredNote",
 --             DROP COLUMN "alertProofFarM", DROP COLUMN "alertNotClosedMin", DROP COLUMN "alertEmails",
 --             DROP COLUMN "alertEmailEveryMin", DROP COLUMN "alertEmailMinSeverity", DROP COLUMN "alertQuietFromMin",
---             DROP COLUMN "alertQuietToMin";
+--             DROP COLUMN "alertQuietToMin", DROP COLUMN "alertRuleOnAtJson";
 --           (each CHECK below goes with its columns or table).
 
 SET LOCAL lock_timeout = '5s';
+
+-- AlterTable
+ALTER TABLE "PlanLoad" ADD COLUMN     "loadedAt" TIMESTAMP(3),
+ADD COLUMN     "loadedById" TEXT;
 
 -- AlterTable
 ALTER TABLE "TenantConfig" ADD COLUMN     "alertAfterClosingMin" INTEGER DEFAULT 15,
@@ -57,14 +65,11 @@ ADD COLUMN     "alertPriorityMax" INTEGER DEFAULT 2,
 ADD COLUMN     "alertProofFarM" INTEGER DEFAULT 500,
 ADD COLUMN     "alertQuietFromMin" INTEGER DEFAULT 1320,
 ADD COLUMN     "alertQuietToMin" INTEGER DEFAULT 360,
+ADD COLUMN     "alertRuleOnAtJson" JSONB,
 ADD COLUMN     "alertSilentMin" INTEGER DEFAULT 120,
 ADD COLUMN     "alertUnloadOverMin" INTEGER DEFAULT 30,
 ADD COLUMN     "alertsEnabled" BOOLEAN NOT NULL DEFAULT false,
 ADD COLUMN     "alertsEnabledAt" TIMESTAMP(3);
-
--- AlterTable
-ALTER TABLE "PlanLoad" ADD COLUMN     "loadedAt" TIMESTAMP(3),
-ADD COLUMN     "loadedById" TEXT;
 
 -- CreateTable
 CREATE TABLE "OpsAlert" (

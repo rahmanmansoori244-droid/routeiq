@@ -46,6 +46,9 @@ export interface ExportPhoto {
   accuracyM: number | null;
   exifDistanceM: number | null;
   receivedAt: string;
+  /** When it was taken (ISO) and whether it is an old (gallery) photo; absent in an older export. */
+  takenAt?: string;
+  oldPhoto?: boolean;
 }
 
 export interface ExportVisit {
@@ -136,7 +139,18 @@ function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: {
   const events: VisitEvent[] = v.events
     .filter((e) => ms(e.receivedAt) <= t)
     .map((e) => ({ kind: e.kind as VisitEvent['kind'], source: e.source as EventSource, at: new Date(e.at), receivedAt: new Date(e.receivedAt), distanceM: e.distanceM, accuracyM: e.accuracyM, payload: e.payload }));
-  const photos: FactPhoto[] = v.photos.filter((p) => ms(p.receivedAt) <= t).map((p) => ({ positionStatus: p.positionStatus, distanceM: p.distanceM, accuracyM: p.accuracyM, exifDistanceM: p.exifDistanceM, receivedAt: new Date(p.receivedAt) }));
+  const photos: FactPhoto[] = v.photos
+    .filter((p) => ms(p.receivedAt) <= t)
+    .map((p) => ({
+      positionStatus: p.positionStatus,
+      distanceM: p.distanceM,
+      accuracyM: p.accuracyM,
+      exifDistanceM: p.exifDistanceM,
+      receivedAt: new Date(p.receivedAt),
+      source: p.source,
+      oldPhoto: p.oldPhoto ?? false,
+      ...(p.takenAt ? { takenAt: new Date(p.takenAt) } : {}),
+    }));
   if (!events.length && !photos.length) return null;
   const s = deriveVisit(events, { dayStart: ctx.dayStart, windowStartMin: v.windowStartMin, breakMin: ctx.breakMin, lines: [], pin: null, radiusM: ctx.radiusM });
   return {

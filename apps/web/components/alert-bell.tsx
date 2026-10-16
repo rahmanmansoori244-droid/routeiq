@@ -11,7 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSepar
 import { api } from '@/app/t/[slug]/dispatch/client-api';
 import { ALERT_POLL_MS } from '@/lib/alerts/catalog';
 import type { AlertSummary, OpsAlertRow } from '@/lib/alerts/types';
-import { alertTime, alertWhere, bellTone, newAlertToasts, ruleLabel, SEVERITY_BADGE } from '@/lib/alerts/view';
+import { alertTime, alertWhere, bellTone, newAlertToasts, ruleLabel, SEVERITY_BADGE, sweepCheckText } from '@/lib/alerts/view';
 import { acknowledgeAlerts } from './alerts-api';
 
 /** A focus right after a poll does not read again (focus and visibilitychange often fire together). */
@@ -83,6 +83,7 @@ export function AlertBell({ slug, enabled, canAck, timezone }: { slug: string; e
   if (!enabled || (summary && !summary.enabled)) return null;
   const tone = summary ? bellTone(summary) : 'none';
   const rows = summary?.latest ?? [];
+  const check = sweepCheckText(summary, timezone);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -112,6 +113,11 @@ export function AlertBell({ slug, enabled, canAck, timezone }: { slug: string; e
             All alerts
           </Link>
         </DropdownMenuLabel>
+        {check ? (
+          <p className={`px-2 pb-1 text-xs ${check.warn ? 'text-red-700' : 'text-muted-foreground'}`} data-testid="alert-bell-checked">
+            {check.text}
+          </p>
+        ) : null}
         {summary?.emailCapReached ? (
           <p className="px-2 pb-1 text-xs text-amber-700" data-testid="alert-bell-email-cap">
             Today&apos;s alert e-mails reached their daily limit: the rest show here only until tomorrow.

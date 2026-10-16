@@ -31,6 +31,16 @@ const base = (over: Partial<ProjectionIn> = {}): ProjectionIn => ({
   ...over,
 });
 
+describe('projectLoad: the phone still talking holds the clock (review M3 of 16 Oct 2026)', () => {
+  it('a stop not reached is pushed by the clock only while the phone has been silent since before it was expected', () => {
+    // Stop 1 expected 08:00; now 09:00, nothing recorded at it.
+    expect(projectLoad(base({ nowMin: 540 })).next).toMatchObject({ sequence: 1, arrMin: 540, delayMin: 60, clockBound: true, phoneHeld: false });
+    expect(projectLoad(base({ nowMin: 540, phoneSeenMin: 470 })).next).toMatchObject({ arrMin: 540, clockBound: true });
+    // The phone sent something at 08:10, after stop 1 was expected: the truck may be there, the arrival not tapped.
+    expect(projectLoad(base({ nowMin: 540, phoneSeenMin: 490 })).next).toMatchObject({ sequence: 1, arrMin: 480, delayMin: 0, clockBound: false, phoneHeld: true });
+  });
+});
+
 describe('projectLoad', () => {
   it('on time: the next stop is stop 1, expected at its plan, nothing late, back as planned', () => {
     const p = projectLoad(base());

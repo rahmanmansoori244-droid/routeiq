@@ -119,6 +119,8 @@ describe('noteOnlyConfirms: a driver note that only confirms the delivery (R8 sk
     'Delivered',
     'delivered OK!',
     'All delivered at 9:40 am',
+    'delivered 9 am',
+    'received 16/10/2026',
     'done',
   ])('%s', (note) => {
     expect(noteOnlyConfirms(note)).toBe(true);
@@ -133,6 +135,13 @@ describe('noteOnlyConfirms: a driver note that only confirms the delivery (R8 sk
     'delivered, 2 cases short',
     'delivered to the guard',
     '14',
+    // Review M5 of 16 Oct 2026: a number that is not a clock time or a date is a quantity - news.
+    'delivered 18/20',
+    'received 45 / 50',
+    'delivered 50%',
+    'تم التسليم 14',
+    'received ٣ only',
+    'ok 2 short',
     '',
     null,
   ])('%s: kept', (note) => {

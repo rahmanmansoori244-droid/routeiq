@@ -203,7 +203,7 @@ export function AlertSettingsCard({
               <p className="text-sm font-medium">E-mail</p>
               {!emailConfigured ? (
                 <p className="text-sm text-amber-700" data-testid="alert-email-not-configured">
-                  Email is not set up on the server (RESEND_API_KEY and RESEND_FROM): alerts show in RouteIQ only.
+                  Email is not set up on the server for this company (RESEND_API_KEY, RESEND_FROM and the company on ALERT_EMAIL_TENANTS): alerts show in RouteIQ only.
                 </p>
               ) : null}
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">

@@ -246,8 +246,13 @@ export async function runDeliveryJanitor(now: Date = new Date(), opts: { force?:
   if (opts.force || g.__routeiqCasualSweepDay !== dayKey) {
     g.__routeiqCasualSweepDay = dayKey;
     casual = await clearIdleCasualDrivers(now);
-    // Operations alerts older than 90 days: once a day too.
-    alerts = await purgeOldAlerts(now);
+    // Operations alerts older than 90 days: once a day too. In its own try (review L3): its failure is
+    // logged under its own name and never stops the steps after it (the cron route's hire step and sweep).
+    try {
+      alerts = await purgeOldAlerts(now);
+    } catch (err) {
+      console.error('[janitor] alert retention not run', { error: (err as Error)?.message ?? String(err) });
+    }
   }
   return { photos, locations, casual, alerts };
 }

@@ -20,7 +20,9 @@ import {
   buildDigestEmail,
   claimSql,
   digestGate,
+  digestIdempotencyKey,
   emailCapReached,
+  lastQuietEnd,
   prismaDigestStore,
   scrubNumbers,
   sendAlertDigest,
@@ -28,9 +30,9 @@ import {
   type DigestRow,
   type DigestStore,
 } from '@/lib/alerts/notify';
-import { ALERT_EMAILS_PER_DAY } from '@/lib/alerts/catalog';
+import { ALERT_EMAILS_ALL_PER_DAY, ALERT_EMAILS_PER_DAY } from '@/lib/alerts/catalog';
 
-const ENV = { RESEND_API_KEY: 're_test_key', RESEND_FROM: 'RouteIQ <alerts@routeiq.example>', AUTH_URL: 'https://app.routeiq.example', NODE_ENV: 'test' } as unknown as NodeJS.ProcessEnv;
+const ENV = { RESEND_API_KEY: 're_test_key', RESEND_FROM: 'RouteIQ <alerts@routeiq.example>', AUTH_URL: 'https://app.routeiq.example', NODE_ENV: 'test', ALERT_EMAIL_TENANTS: 'other, example' } as unknown as NodeJS.ProcessEnv;
 const TZ = 'Asia/Muscat';
 /** 10:00 in Muscat on 16 Oct 2026. */
 const NOW = new Date('2026-10-16T06:00:00.000Z');
@@ -44,6 +46,7 @@ const cfg = (extra: Partial<DigestConfig> = {}): DigestConfig => ({
   alertQuietFromMin: 22 * 60,
   alertQuietToMin: 6 * 60,
   timezone: TZ,
+  slug: 'example',
   ...extra,
 });
 
@@ -121,6 +124,13 @@ describe('digestGate: when a company may get an e-mail', () => {
     expect(digestGate(cfg(), NOW, ENV)).toEqual({ ok: true, recipients: ['owner@company.example', 'dispatch@company.example'] });
   });
 
+  it('review H1: only a company on the server\'s ALERT_EMAIL_TENANTS list (signup is open: no list, no alert e-mail)', () => {
+    expect(digestGate(cfg({ slug: 'someone-else' }), NOW, ENV)).toEqual({ ok: false, skip: 'NOT_ALLOWED' });
+    expect(digestGate(cfg(), NOW, { ...ENV, ALERT_EMAIL_TENANTS: '' } as never)).toEqual({ ok: false, skip: 'NOT_ALLOWED' });
+    expect(digestGate(cfg({ slug: undefined }), NOW, ENV)).toEqual({ ok: false, skip: 'NOT_ALLOWED' });
+    expect(digestGate(cfg({ slug: 'Example' }), NOW, { ...ENV, ALERT_EMAIL_TENANTS: ' example ;other' } as never).ok).toBe(true);
+  });
+
   it('quiet hours 22:00-06:00 in the company time zone, across midnight (L9); none when not set', () => {
     for (const [t, quiet] of [
       ['21:59', false],
@@ -144,8 +154,17 @@ describe('the digest e-mail', () => {
   const build = (rows: DigestRow[], extra: Partial<Parameters<typeof buildDigestEmail>[0]> = {}) =>
     buildDigestEmail({ companyName: 'Example Water Co', slug: 'example', timezone: TZ, now: NOW, rows, depotLabels: labels, baseUrl: 'https://app.routeiq.example', minSeverity: 'HIGH', full: true, ...extra });
 
-  it('subject: the count, the high count, the company and the day', () => {
-    expect(build([row(), row({ id: 'a2', severity: 'WARN', tier: 1 })]).subject).toBe('RouteIQ alerts: 2 new (1 high) - Example Water Co 16 Oct');
+  it('subject: the count, the high count and the day - no name a user typed (review H1)', () => {
+    expect(build([row(), row({ id: 'a2', severity: 'WARN', tier: 1 })]).subject).toBe('RouteIQ alerts: 2 new (1 high) - 16 Oct');
+    expect(build([row()], { companyName: 'Call 5550 1234 now' }).subject).not.toContain('Call');
+  });
+
+  it('review L4: the truck and the depot lose long digit runs too, in any script', () => {
+    const { text } = build([row({ truckCode: 'HIRE ٥٥٥٠١٢٣٤', text: 'T05 L1 ring ٥٥٥٠ ١٢٣٤ now' })], { depotLabels: new Map([['dep1', 'MCT call 5550 9876']]) });
+    expect(text).not.toMatch(/5550|9876|٥٥٥٠|١٢٣٤/);
+    expect(text).toContain('MCT call [number] - 16 Oct');
+    expect(text).toContain('  HIRE [number]');
+    expect(text).toContain('T05 L1 ring [number] now');
   });
 
   it('grouped by depot and date with the link to that day, the worst truck first, HIGH first within a truck', () => {
@@ -215,10 +234,17 @@ describe('sendAlertDigest', () => {
     const f = vi.fn(async () => new Response('{}', { status: 200 }));
     const out = await sendAlertDigest('tA', NOW, { store, env: ENV, fetchImpl: f as never });
     expect(out).toEqual({ sent: true, alerts: 2, high: 1, digestId: 'dg1' });
-    expect(calls.claim[0]).toEqual(['tA', NOW, { everyMin: 15, minSeverity: 'HIGH', dayStart: new Date('2026-10-15T20:00:00.000Z'), recipients: 2 }]);
-    const body = JSON.parse((f.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    // The quiet hours ended at 06:00 today: the claim leaves out what ended before then (review L5).
+    expect(calls.claim[0]).toEqual(['tA', NOW, { everyMin: 15, minSeverity: 'HIGH', dayStart: new Date('2026-10-15T20:00:00.000Z'), recipients: 2, quietEndedAt: at('06:00') }]);
+    const init = (f.mock.calls[0] as unknown as [string, RequestInit])[1];
+    const body = JSON.parse(init.body as string);
     expect(body.to).toEqual(['owner@company.example', 'dispatch@company.example']);
-    expect(body.subject).toBe('RouteIQ alerts: 2 new (1 high) - Example Water Co 16 Oct');
+    expect(body.subject).toBe('RouteIQ alerts: 2 new (1 high) - 16 Oct');
+    // Review L2: an Idempotency-Key over the content (the same e-mail sent again within 24 h goes once).
+    const key = (init.headers as Record<string, string>)['Idempotency-Key'];
+    expect(key).toBe(digestIdempotencyKey('tA', body.to, body.subject, body.text));
+    expect(key).toMatch(/^routeiq-alerts-[0-9a-f]{48}$/);
+    expect(digestIdempotencyKey('tA', body.to, body.subject, `${body.text} `)).not.toBe(key);
     expect(calls.finish[0]![4]).toEqual({ ok: true });
     expect(logged()).not.toMatch(/@company\.example|running about|Example Water Co/);
     expect(logged()).toContain('"recipients":2');
@@ -240,7 +266,7 @@ describe('sendAlertDigest', () => {
     const quiet = fakeStore();
     expect(await sendAlertDigest('tA', at('23:00'), { store: quiet.store, env: ENV, fetchImpl: f as never })).toMatchObject({ sent: false, skip: 'QUIET_HOURS' });
     expect(quiet.calls.claim).toEqual([]);
-    for (const skip of ['BUSY', 'TOO_SOON', 'DAILY_CAP', 'NOTHING_NEW'] as const) {
+    for (const skip of ['BUSY', 'TOO_SOON', 'DAILY_CAP', 'ALL_COMPANIES_CAP', 'NOTHING_NEW'] as const) {
       const s = fakeStore({ claim: async () => ({ ok: false, skip }) });
       expect(await sendAlertDigest('tA', NOW, { store: s.store, env: ENV, fetchImpl: f as never })).toEqual({ sent: false, skip, alerts: 0, high: 0 });
     }
@@ -283,7 +309,7 @@ describe('the claim SQL (review L5)', () => {
 });
 
 /** A fake Prisma client for prismaDigestStore: the transaction runs on the same fake. */
-function fakeDb(state: { locked?: boolean; lastAt?: Date | null; today?: number; found?: Record<string, unknown>[]; stale?: string[] }) {
+function fakeDb(state: { locked?: boolean; lastAt?: Date | null; today?: number; all?: number; found?: Record<string, unknown>[]; stale?: string[] }) {
   const seen = { sql: [] as string[], values: [] as unknown[][], creates: [] as unknown[], updates: [] as unknown[], updateMany: [] as unknown[], digestUpdates: [] as unknown[] };
   const tx = {
     $queryRaw: async (q: Prisma.Sql | TemplateStringsArray, ...values: unknown[]) => {
@@ -302,7 +328,8 @@ function fakeDb(state: { locked?: boolean; lastAt?: Date | null; today?: number;
     opsAlertDigest: {
       findMany: async () => (state.stale ?? []).map((id) => ({ id })),
       findFirst: async () => (state.lastAt ? { createdAt: state.lastAt } : null),
-      count: async () => state.today ?? 0,
+      // The company's own count names it; the count of every company together does not.
+      count: async (a: { where: { tenantId?: string } }) => (a.where.tenantId ? (state.today ?? 0) : (state.all ?? state.today ?? 0)),
       create: async (a: unknown) => {
         seen.creates.push(a);
         return { id: 'dgNew' };
@@ -332,6 +359,27 @@ describe('prismaDigestStore: the claim in one transaction under the company e-ma
     expect(await prismaDigestStore(fakeDb({ lastAt: new Date(NOW.getTime() - 14 * 60_000) }).db).claim('tA', NOW, claimOpts)).toEqual({ ok: false, skip: 'TOO_SOON' });
     expect(await prismaDigestStore(fakeDb({ lastAt: new Date(NOW.getTime() - 15 * 60_000), today: ALERT_EMAILS_PER_DAY }).db).claim('tA', NOW, claimOpts)).toEqual({ ok: false, skip: 'DAILY_CAP' });
     expect(await prismaDigestStore(fakeDb({ today: ALERT_EMAILS_PER_DAY - 1 }).db).claim('tA', NOW, claimOpts)).toEqual({ ok: false, skip: 'NOTHING_NEW' });
+  });
+
+  it('review H1: every company together has a cap in any 24 h (the provider\'s free plan, the password reset)', async () => {
+    expect(await prismaDigestStore(fakeDb({ today: 1, all: ALERT_EMAILS_ALL_PER_DAY }).db).claim('tA', NOW, claimOpts)).toEqual({ ok: false, skip: 'ALL_COMPANIES_CAP' });
+    expect(await prismaDigestStore(fakeDb({ today: 1, all: ALERT_EMAILS_ALL_PER_DAY - 1 }).db).claim('tA', NOW, claimOpts)).toEqual({ ok: false, skip: 'NOTHING_NEW' });
+  });
+
+  it('review L5: the first e-mail after the quiet hours leaves out what ended during them', async () => {
+    const night = fakeDb({ lastAt: at('21:45', '2026-10-15'), found: [] });
+    await prismaDigestStore(night.db).claim('tA', at('06:02'), { ...claimOpts, quietEndedAt: at('06:00') });
+    expect(night.seen.values.find((v) => v.includes('tA') && v.some((x) => x instanceof Date && x.getTime() === at('06:00').getTime()))).toBeTruthy();
+    // Later in the day the last e-mail is the limit, as before.
+    const day = fakeDb({ lastAt: at('09:30'), found: [] });
+    await prismaDigestStore(day.db).claim('tA', NOW, { ...claimOpts, quietEndedAt: at('06:00') });
+    expect(day.seen.values.find((v) => v.includes('tA') && v.some((x) => x instanceof Date && x.getTime() === at('09:30').getTime()))).toBeTruthy();
+  });
+
+  it('lastQuietEnd: today\'s end once passed, else yesterday\'s; none without quiet hours', () => {
+    expect(lastQuietEnd(at('06:02'), TZ, 22 * 60, 6 * 60)).toEqual(at('06:00'));
+    expect(lastQuietEnd(at('05:00'), TZ, 22 * 60, 6 * 60)).toEqual(at('06:00', '2026-10-15'));
+    expect(lastQuietEnd(NOW, TZ, null, null)).toBeNull();
   });
 
   it('claims: one digest row with counts only, and the rows marked e-mailed at their tier with its id', async () => {

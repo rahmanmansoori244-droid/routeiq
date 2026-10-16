@@ -39,7 +39,7 @@ vi.mock('@/lib/audit', () => ({ audit: vi.fn(async (input: Record<string, any>) 
 vi.mock('@/lib/tenant', () => ({
   tenantDb: () => ({
     tenantConfig: { findFirst: async () => state.config },
-    tenant: { findFirst: async () => ({ name: 'Example Water Co' }) },
+    tenant: { findFirst: async () => ({ name: 'Example Water Co', slug: 'example' }) },
     opsAlert: {
       findMany: async (args: Record<string, any>) => {
         state.finds.push(args);
@@ -204,7 +204,7 @@ describe('GET /api/alerts/summary (the bell)', () => {
   it('alerts off: zeros, and no alert is read', async () => {
     state.config = cfg({ alertsEnabled: false });
     state.rows = [alert()];
-    expect((await get(SUMMARY, '/api/alerts/summary')).body.data).toEqual({ enabled: false, open: 0, high: 0, latest: [], emailCapReached: false });
+    expect((await get(SUMMARY, '/api/alerts/summary')).body.data).toEqual({ enabled: false, open: 0, high: 0, latest: [], emailCapReached: false, checkedAt: null, checkStale: false, checkFailed: false });
     expect(state.finds).toEqual([]);
     expect(state.counts).toEqual([]);
   });
@@ -287,12 +287,13 @@ describe('POST /api/alerts/ack', () => {
     state.acked = [{ id: 'a9', rule: 'PAGE_NOT_OPENED', deliveryDate: new Date('2026-10-16T00:00:00Z') }];
     const { body } = await post(ACK, '/api/alerts/ack', { all: { date: '2026-10-16', depotId: 'dep1' } });
     expect(body.data).toEqual({ acked: 1, ids: ['a9'] });
-    expect(state.sql[0]!.text).toMatch(/WHERE "tenantId" = \? AND "ackedAt" IS NULL AND "resolvedAt" IS NULL/);
+    expect(state.sql[0]!.text).toMatch(/WHERE "tenantId" = \? AND "ackedAt" IS NULL AND "resolvedAt" IS NULL AND "deliveryDate" = \?::date/);
     expect(state.audits[0]!.afterJson).toMatchObject({ count: 1, all: { date: '2026-10-16', depotId: 'dep1' } });
   });
 
   it('refuses a malformed body (400): no ids, over 200, a tier of 4, an unreal date, extra fields', async () => {
-    for (const body of [{ ids: [] }, { ids: Array.from({ length: 201 }, (_, i) => `a${i}`) }, { ids: ['a1'], seen: { a1: 4 } }, { all: { date: '2026-13-01' } }, { ids: ['a1'], userId: 'u2' }, {}]) {
+    // { all } needs a date (review L10: never every open row of the company at once).
+    for (const body of [{ ids: [] }, { ids: Array.from({ length: 201 }, (_, i) => `a${i}`) }, { ids: ['a1'], seen: { a1: 4 } }, { all: { date: '2026-13-01' } }, { all: {} }, { all: { depotId: 'dep1' } }, { ids: ['a1'], userId: 'u2' }, {}]) {
       expect((await post(ACK, '/api/alerts/ack', body)).status, JSON.stringify(body).slice(0, 60)).toBe(400);
     }
     expect(state.sql).toEqual([]);
@@ -300,6 +301,11 @@ describe('POST /api/alerts/ack', () => {
 });
 
 describe('POST /api/alerts/test-email', () => {
+  beforeEach(() => {
+    vi.stubEnv('ALERT_EMAIL_TENANTS', 'example');
+    return () => vi.unstubAllEnvs();
+  });
+
   it('company admin only (a dispatcher gets 403)', async () => {
     state.role = 'PLANNER';
     expect((await post(TEST_EMAIL, '/api/alerts/test-email')).status).toBe(403);
@@ -319,6 +325,16 @@ describe('POST /api/alerts/test-email', () => {
     expect(state.sends).toEqual([]);
   });
 
+  it('review H1: 409 when the company is not on the server\'s ALERT_EMAIL_TENANTS list (open signup cannot send through our sender)', async () => {
+    state.role = 'TENANT_ADMIN';
+    vi.stubEnv('ALERT_EMAIL_TENANTS', 'someone-else');
+    const res = await post(TEST_EMAIL, '/api/alerts/test-email');
+    expect([res.status, res.body.error.code]).toEqual([409, 'EMAIL_NOT_ALLOWED']);
+    vi.stubEnv('ALERT_EMAIL_TENANTS', '');
+    expect((await post(TEST_EMAIL, '/api/alerts/test-email')).status).toBe(409);
+    expect(state.sends).toEqual([]);
+  });
+
   it('sends to the saved recipients only (an address in the request is ignored), whether alerts are on or not', async () => {
     state.role = 'TENANT_ADMIN';
     state.config = cfg({ alertsEnabled: false, alertEmails: 'owner@company.example, ops@company.example' });
@@ -326,7 +342,9 @@ describe('POST /api/alerts/test-email', () => {
     expect(status).toBe(200);
     expect(body.data).toEqual({ sent: true, recipients: 2 });
     expect(state.sends[0]!.to).toEqual(['owner@company.example', 'ops@company.example']);
-    expect(state.sends[0]!.subject).toBe('RouteIQ alerts: test e-mail - Example Water Co');
+    // No name a user typed (the company, the user): review H1.
+    expect(state.sends[0]!.subject).toBe('RouteIQ alerts: test e-mail');
+    expect(state.sends[0]!.text).not.toMatch(/Example Water Co|Sam Example/);
     expect(state.sends[0]!.text).toContain('Operations alerts are OFF.');
     expect(state.sends[0]!.text).toContain('high alerts only, at most one every 15 min, none from 22:00 to 06:00.');
   });

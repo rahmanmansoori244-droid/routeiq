@@ -172,7 +172,9 @@ describe('replayDay', () => {
     const lenient = replayDay(day(), { overrides: { alertEtaLateMin: 120, alertSilentMin: 600, alertPriorityMax: null } });
     const by = Object.fromEntries(lenient.rules.map((s) => [s.rule, s]));
     expect(by.ETA_LATE!.first! > base.ETA_LATE!.first!).toBe(true);
-    expect(by.DRIVER_SILENT!.first! > base.DRIVER_SILENT!.first!).toBe(true);
+    expect(base.DRIVER_SILENT!.raised).toBe(1);
+    // 600 min of silence is never reached before the planned return + 60 min (12:00 + 60): "Load not closed" follows then (review M1).
+    expect(by.DRIVER_SILENT).toMatchObject({ raised: 0 });
     expect(by.PRIORITY_NOT_DELIVERED).toMatchObject({ threshold: null, raised: 0 });
   });
 

@@ -21,13 +21,18 @@ import {
   RETURN_GRACE_MIN,
   SEVERITY_ORDER_SQL,
   SEVERITY_RANK,
+  RESOLVED_REASON_TEXT,
+  alertEmailAllowed,
   beforeSwitchOn,
   deliveryOf,
   emailSeverityPasses,
   inQuietHours,
   isAlertRule,
   readAlertEmails,
+  readRuleOnAt,
+  ruleOnAtAfterSave,
   rulesOn,
+  switchOnOf,
   severityOf,
   subjectKeyOf,
   thresholdsOf,
@@ -266,6 +271,11 @@ describe('migration 20261016180000_ops_alerts and the schema repeat the catalog'
     expect(MIGRATION).not.toMatch(/CHECK \("rule"/);
     // The warehouse's Loaded action (A3): nullable, no default.
     expect(MIGRATION).toContain(`ALTER TABLE "PlanLoad" ADD COLUMN     "loadedAt" TIMESTAMP(3),\nADD COLUMN     "loadedById" TEXT;`);
+    // PlanLoad first (a re-plan may hold it for seconds; TenantConfig, read by every page, is then held only briefly: review M3).
+    expect(MIGRATION.indexOf('ALTER TABLE "PlanLoad" ADD COLUMN')).toBeLessThan(MIGRATION.indexOf('ALTER TABLE "TenantConfig" ADD COLUMN'));
+    // Each rule's own switch-on time (review H2): nullable JSON, no default, not a Settings field.
+    expect(MIGRATION).toContain(`ADD COLUMN     "alertRuleOnAtJson" JSONB,`);
+    expect(block('TenantConfig')).toMatch(/alertRuleOnAtJson\s+Json\?/);
     expect(block('PlanLoad')).toMatch(/loadedBy\s+User\?\s+@relation\("PlanLoadLoadedBy", fields: \[loadedById\], references: \[id\], onDelete: SetNull\)/);
   });
 });
@@ -308,5 +318,53 @@ describe('the shared modules stay browser-safe', () => {
         else expect(['./catalog', '../dispatch/time'], `${f}: ${i.from}`).toContain(i.from);
       }
     }
+  });
+});
+
+describe('no backlog per rule (review H2 of 16 Oct 2026)', () => {
+  const ON = { alertsEnabled: true, alertUnloadOverMin: 30, alertLoadingOverMin: null, alertEtaLateMin: 30, alertPriorityMax: 2, alertDeliveredNote: false, alertProofFarM: 500 } as Partial<AlertConfig>;
+  const NOW = new Date('2026-10-20T08:00:00Z');
+
+  it('a save stamps the rules it switched on or set to catch more, and keeps the earlier stamps', () => {
+    expect(ruleOnAtAfterSave(ON, { ...ON, alertLoadingOverMin: 40 }, null, NOW)).toEqual({ LOADING_OVER: NOW.toISOString() });
+    // A lower limit catches more; a higher one does not; R7: a higher priority number catches more.
+    expect(ruleOnAtAfterSave(ON, { ...ON, alertEtaLateMin: 20 }, null, NOW)).toEqual({ ETA_LATE: NOW.toISOString() });
+    expect(ruleOnAtAfterSave(ON, { ...ON, alertEtaLateMin: 45 }, null, NOW)).toBeNull();
+    expect(ruleOnAtAfterSave(ON, { ...ON, alertPriorityMax: 3 }, null, NOW)).toEqual({ PRIORITY_NOT_DELIVERED: NOW.toISOString() });
+    expect(ruleOnAtAfterSave(ON, { ...ON, alertPriorityMax: 1 }, null, NOW)).toBeNull();
+    // The on/off rule; switching a rule off stamps nothing; a save of other settings neither.
+    expect(ruleOnAtAfterSave(ON, { ...ON, alertDeliveredNote: true }, null, NOW)).toEqual({ DELIVERED_WITH_NOTE: NOW.toISOString() });
+    expect(ruleOnAtAfterSave(ON, { ...ON, alertProofFarM: null }, null, NOW)).toBeNull();
+    expect(ruleOnAtAfterSave(ON, ON, { PROOF_FAR: '2026-10-19T08:00:00.000Z' }, NOW)).toBeNull();
+    expect(ruleOnAtAfterSave(ON, { ...ON, alertEtaLateMin: 20 }, { PROOF_FAR: '2026-10-19T08:00:00.000Z', NOPE: 'x' }, NOW)).toEqual({ PROOF_FAR: '2026-10-19T08:00:00.000Z', ETA_LATE: NOW.toISOString() });
+    // The master switch aside (alertsEnabledAt covers it): thresholds prepared while alerts are off still stamp.
+    expect(ruleOnAtAfterSave({ ...ON, alertsEnabled: false }, { ...ON, alertsEnabled: false, alertLoadingOverMin: 40 }, null, NOW)).toEqual({ LOADING_OVER: NOW.toISOString() });
+  });
+
+  it('read back: unknown rules and bad times dropped; the later of the master switch and the rule\'s own counts', () => {
+    expect(readRuleOnAt({ PROOF_FAR: '2026-10-19T08:00:00.000Z', NOPE: '2026-10-19T08:00:00.000Z', ETA_LATE: 'soon', UNLOAD_OVER: 5 })).toEqual({ PROOF_FAR: new Date('2026-10-19T08:00:00.000Z') });
+    expect(readRuleOnAt(null)).toEqual({});
+    expect(readRuleOnAt([1])).toEqual({});
+    const master = new Date('2026-10-18T05:00:00Z');
+    const own = new Date('2026-10-19T08:00:00Z');
+    expect(switchOnOf('PROOF_FAR', master, { PROOF_FAR: own })).toEqual(own);
+    expect(switchOnOf('ETA_LATE', master, { PROOF_FAR: own })).toEqual(master);
+    expect(switchOnOf('PROOF_FAR', new Date('2026-10-20T00:00:00Z'), { PROOF_FAR: own })).toEqual(new Date('2026-10-20T00:00:00Z'));
+    expect(switchOnOf('PROOF_FAR', null, { PROOF_FAR: own })).toEqual(own);
+    expect(switchOnOf('PROOF_FAR', null, null)).toBeNull();
+  });
+});
+
+describe('alert e-mail only for the companies the server lists (review H1 of 16 Oct 2026)', () => {
+  it('ALERT_EMAIL_TENANTS names the slugs (commas, semicolons or spaces; any case); unset: none', () => {
+    expect(alertEmailAllowed('example', { ALERT_EMAIL_TENANTS: 'other, Example' })).toBe(true);
+    expect(alertEmailAllowed('example', { ALERT_EMAIL_TENANTS: 'other;example2' })).toBe(false);
+    expect(alertEmailAllowed('example', {})).toBe(false);
+    expect(alertEmailAllowed(null, { ALERT_EMAIL_TENANTS: 'example' })).toBe(false);
+    expect(alertEmailAllowed('', { ALERT_EMAIL_TENANTS: ' , ' })).toBe(false);
+  });
+
+  it('a row the rule stopped following is "No longer followed", never "Over"', () => {
+    expect(RESOLVED_REASON_TEXT.NOT_FOLLOWED).toBe('No longer followed');
   });
 });

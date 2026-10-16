@@ -23,7 +23,7 @@ import {
   isAlertRule,
   type AlertRule,
 } from './catalog';
-import { toOpsAlertRow, type AlertState, type AlertSummary, type OpsAlertRow } from './types';
+import { toOpsAlertRow, type AlertState, type AlertSummary, type OpsAlertRow, type SweepCheck } from './types';
 import { capWhere, emailCapReached } from './notify';
 
 /** The Alerts page lists at most this many rows (open ones first). */
@@ -102,7 +102,7 @@ export function bellWindow(today: string): { from: Date; to: Date } {
   return { from: dateOnly(addDaysIso(today, -ALERT_DAYS_BACK)), to: dateOnly(addDaysIso(today, ALERT_DAYS_AHEAD)) };
 }
 
-export const DISABLED_SUMMARY: AlertSummary = { enabled: false, open: 0, high: 0, latest: [], emailCapReached: false };
+export const DISABLED_SUMMARY: AlertSummary = { enabled: false, open: 0, high: 0, latest: [], emailCapReached: false, checkedAt: null, checkStale: false, checkFailed: false };
 
 /** The bell: how many rows need attention, how many of them are HIGH, the newest ones (HIGH first). */
 export async function alertSummary(
@@ -110,6 +110,7 @@ export async function alertSummary(
   tenantId: string,
   cfg: { alertsEnabled: boolean; timezone: string; alertEmails: string | null; alertEmailEveryMin: number },
   now: Date,
+  check: SweepCheck = { checkedAt: null, checkStale: false, checkFailed: false },
 ): Promise<AlertSummary> {
   if (!cfg.alertsEnabled) return DISABLED_SUMMARY;
   const w = bellWindow(todayIso(cfg.timezone, now));
@@ -122,11 +123,18 @@ export async function alertSummary(
   ]);
   const latest = [...(highRows as RowWithUser[]), ...(warnRows as RowWithUser[])].map(toOpsAlertRow).sort(compareAlertRows).slice(0, ALERT_LATEST_COUNT);
   const mails = !!cfg.alertEmails && cfg.alertEmailEveryMin > 0;
-  return { enabled: true, open: count, high, latest, emailCapReached: mails ? await emailCapReached((since) => db.opsAlertDigest.count({ where: capWhere(tenantId, since) }), now, cfg.timezone) : false };
+  return {
+    enabled: true,
+    open: count,
+    high,
+    latest,
+    emailCapReached: mails ? await emailCapReached((since) => db.opsAlertDigest.count({ where: capWhere(tenantId, since) }), now, cfg.timezone) : false,
+    ...check,
+  };
 }
 
-/** POST /api/alerts/ack: the ids shown (with the tier each was shown at), or every open row of a date / depot. */
-export type AckRequest = { ids: string[]; seen?: Record<string, number> } | { all: { date?: string; depotId?: string } };
+/** POST /api/alerts/ack: the ids shown (with the tier each was shown at), or every open row of one date (and depot). */
+export type AckRequest = { ids: string[]; seen?: Record<string, number> } | { all: { date: string; depotId?: string } };
 
 export interface AckedRow {
   id: string;
@@ -165,8 +173,7 @@ export async function ackAlerts(tenantId: string, userId: string, req: AckReques
       const { date, depotId } = req.all;
       acked = await tx.$queryRaw<AckedRow[]>`
         UPDATE "OpsAlert" SET "ackedAt" = ${now}, "ackedById" = ${userId}
-        WHERE "tenantId" = ${tenantId} AND "ackedAt" IS NULL AND "resolvedAt" IS NULL
-          ${date ? Prisma.sql`AND "deliveryDate" = ${date}::date` : Prisma.empty}
+        WHERE "tenantId" = ${tenantId} AND "ackedAt" IS NULL AND "resolvedAt" IS NULL AND "deliveryDate" = ${date}::date
           ${depotId ? Prisma.sql`AND "depotId" = ${depotId}` : Prisma.empty}
         RETURNING "id", "rule", "deliveryDate"`;
     }

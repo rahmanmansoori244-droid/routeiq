@@ -4,6 +4,7 @@ import { alertQuietSaveProblem, breakSaveProblem, overtimeSaveProblem, retention
 import { adminOnlyFields, DISPATCHER_SETTINGS_FIELDS } from '@/lib/settings-fields';
 import { audit } from '@/lib/audit';
 import { prisma } from '@/lib/db';
+import { ruleOnAtAfterSave } from '@/lib/alerts/catalog';
 
 // TENANT_ADMIN, like the Settings page (review F15): cost rates and the internal routing URL are
 // admin data. No lower-role screen reads this.
@@ -100,7 +101,15 @@ export const PATCH = withTenantApi(
       // Switching alerts on stamps the moment: nothing that began or happened before it raises an alert
       // (no backlog of the day so far, of yesterday's open loads or of old results: lib/alerts/catalog.ts).
       const switchedOn = configPatch.alertsEnabled === true && !before.config.alertsEnabled;
-      const configData = switchedOn ? { ...configPatch, alertsEnabledAt: new Date() } : configPatch;
+      const now = new Date();
+      // The same per rule (review of 16 Oct 2026, H2): a rule switched on, or set to catch more, raises
+      // nothing that began before this save - switching R2 on or lowering a threshold is not a backlog.
+      const ruleOnAt = ruleOnAtAfterSave(before.config, { ...before.config, ...configPatch }, before.config.alertRuleOnAtJson, now);
+      const configData = {
+        ...configPatch,
+        ...(switchedOn ? { alertsEnabledAt: now } : {}),
+        ...(ruleOnAt ? { alertRuleOnAtJson: ruleOnAt } : {}),
+      };
       if (Object.keys(configPatch).length) await tx.tenantConfig.update({ where: { tenantId: user.tenantId }, data: configData });
       const after = await tx.tenant.findUnique({ where: { id: user.tenantId }, include: { config: true } });
       return { status: 200 as const, before, after };

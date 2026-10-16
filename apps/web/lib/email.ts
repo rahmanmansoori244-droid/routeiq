@@ -25,6 +25,11 @@ export interface PlainEmail {
   to: string[];
   subject: string;
   text: string;
+  /**
+   * Resend's Idempotency-Key: the same key within 24 h sends once. A message the provider accepted but
+   * answered too late is sent again by the next try with the same key, and Resend does not send it twice.
+   */
+  idempotencyKey?: string;
 }
 
 export type SendResult =
@@ -49,7 +54,7 @@ export async function sendPlainEmail(msg: PlainEmail, env: NodeJS.ProcessEnv = p
   try {
     const res = await fetchImpl(RESEND_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, ...(msg.idempotencyKey ? { 'Idempotency-Key': msg.idempotencyKey } : {}) },
       body: JSON.stringify({ from, to, subject: msg.subject, text: msg.text }),
       signal: AbortSignal.timeout(EMAIL_TIMEOUT_MS),
     });

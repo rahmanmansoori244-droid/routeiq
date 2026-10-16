@@ -319,6 +319,10 @@ model TenantConfig {
   // Set by the settings save that switches alerts on (app/api/tenant/config): nothing that began or
   // happened before it raises an alert (no backlog on switch-on). Not a Settings field.
   alertsEnabledAt          DateTime?
+  // Per rule, when it was last switched on or set to catch more (a lower limit; for R7 a higher priority
+  // number): { "PROOF_FAR": ISO time }, set by the same save. A rule switched on after the master switch
+  // raises nothing that began before its own switch-on either (review of 16 Oct 2026). Not a Settings field.
+  alertRuleOnAtJson        Json?
   // R1 unloading longer than planned by more than N min (owner rule 1: 30).
   alertUnloadOverMin       Int?     @default(30)
   // R2 loading in the warehouse longer than N min (owner rule 2: 40 when switched on). OFF (NULL) by

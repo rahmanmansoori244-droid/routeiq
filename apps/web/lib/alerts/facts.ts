@@ -7,7 +7,8 @@
  *  2. per load: the receiving-hours rule it was planned with (its truck snapshot's echo; none = START,
  *     the earlier rule: critique L2), the Loaded press, the planned stops and their times;
  *  3. for the loads that left (DISPATCHED / COMPLETED): the planned stops (stopsOfLoads), their orders'
- *     priority, whether each customer's pin is verified, the visits, their photos;
+ *     priority, whether each customer's pin is verified and whether it moved since the visit was planned
+ *     (PIN_MOVED_M), the visits, their photos (source, old photo and time too: R9 and the projection);
  *  4. Back at depot per load (backAtDepot);
  *  5. per truck-day (one driver link): the link's lastSeenAt and the last thing the phone sent (driver
  *     events PHONE_AUTO / PHONE_MANUAL and photos, by the server's receipt time: the phone holds its
@@ -25,6 +26,7 @@ import { echoedWindowRule } from '../dispatch/window-rule';
 import { parseLoadBreak, readTruckSnapshot } from '../dispatch/snapshots';
 import { backAtDepot, backKey, keyOfVisit, liveRunsInRange, loadsOfRuns, stopsOfLoads, visitKey, visitsInRange } from '../delivery/day-results';
 import { PIN_FAR_M } from '../delivery/pin-check';
+import { distanceM, PIN_MOVED_M } from '../dispatch/snapshots';
 import { pinCheckList } from '../delivery/customer-stats';
 import { ALERT_DAYS_AHEAD, ALERT_DAYS_BACK, type AlertRule } from './catalog';
 import { openKey, truckDayOf, type AlertFacts, type FactLoad, type FactPhoto, type FactSignal, type FactStop, type FactTruckDay, type FactVisit, type OpenRowInfo } from './rules';
@@ -86,20 +88,33 @@ export async function readAlertFacts(
   const customerIds = [...new Set([...planned.values()].flat().map((s) => s.customerId))];
   const [orders, customers] = await Promise.all([
     findInParts(orderIds, (part) => db.order.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, priority: true } })),
-    findInParts(customerIds, (part) => db.customer.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, locationVerified: true } })),
+    findInParts(customerIds, (part) => db.customer.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, locationVerified: true, lat: true, lng: true } })),
   ]);
   const priorityOf = new Map(orders.map((o) => [o.id, o.priority]));
   const verified = new Set(customers.filter((c) => c.locationVerified).map((c) => c.id));
+  const pinOf = new Map(customers.map((c) => [c.id, c]));
 
   // Photos of the window's visits, and each visit's own row by its natural key.
   const visitIds = visits.map((v) => v.id);
   const photos = await findInParts(visitIds, (part) =>
-    db.deliveryPhoto.findMany({ where: { tenantId, visitId: { in: part } }, select: { visitId: true, source: true, positionStatus: true, distanceM: true, accuracyM: true, exifDistanceM: true, receivedAt: true } }),
+    db.deliveryPhoto.findMany({
+      where: { tenantId, visitId: { in: part } },
+      select: { visitId: true, source: true, positionStatus: true, distanceM: true, accuracyM: true, exifDistanceM: true, receivedAt: true, takenAt: true, oldPhoto: true },
+    }),
   );
   const photosOf = new Map<string, FactPhoto[]>();
   for (const p of photos) {
     const list = photosOf.get(p.visitId);
-    const f: FactPhoto = { positionStatus: p.positionStatus, distanceM: p.distanceM, accuracyM: p.accuracyM, exifDistanceM: p.exifDistanceM, receivedAt: p.receivedAt };
+    const f: FactPhoto = {
+      positionStatus: p.positionStatus,
+      distanceM: p.distanceM,
+      accuracyM: p.accuracyM,
+      exifDistanceM: p.exifDistanceM,
+      receivedAt: p.receivedAt,
+      source: p.source,
+      oldPhoto: p.oldPhoto,
+      takenAt: p.takenAt,
+    };
     if (list) list.push(f);
     else photosOf.set(p.visitId, [f]);
   }
@@ -153,6 +168,7 @@ export async function readAlertFacts(
             windowEndMin: s.windowEndMin,
             priority: prios.length ? Math.min(...prios) : null,
             pinVerified: verified.has(s.customerId) && !flagged.has(s.customerId),
+            pinMoved: pinMovedSince(v ?? null, pinOf.get(s.customerId) ?? null),
             visit: v ? factVisit(v, photosOf.get(v.id) ?? []) : null,
           };
         })
@@ -191,6 +207,16 @@ export async function readAlertFacts(
   for (const r of stored) if (!r.resolvedAt) open.set(openKey(r.rule, r.subjectKey), { kind: r.kind as AlertKind, tier: r.tier, depotId: r.depotId, deliveryDate: r.deliveryDate });
 
   return { facts: { tz, today: todayIso(tz, now), dates, loads: factLoads, truckDays, open }, rows: stored };
+}
+
+/**
+ * The visit was planned at a pin more than PIN_MOVED_M from the customer's pin now (it was corrected
+ * since): its photo and result distances were measured to the old pin (lib/delivery/pin-check.ts leaves
+ * such a visit out too). False when either pin is unknown.
+ */
+export function pinMovedSince(v: { plannedLat: number | null; plannedLng: number | null } | null, now: { lat: number | null; lng: number | null } | null): boolean {
+  if (!v || !now || v.plannedLat === null || v.plannedLng === null || now.lat === null || now.lng === null) return false;
+  return distanceM({ lat: v.plannedLat, lng: v.plannedLng }, { lat: now.lat, lng: now.lng }) > PIN_MOVED_M;
 }
 
 function factVisit(v: StopVisit, photos: FactPhoto[]): FactVisit {

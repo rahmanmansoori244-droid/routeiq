@@ -3,8 +3,11 @@
  * lock (lib/alerts/locks.ts). planApply is pure: an idempotent raise, escalation only upward (clearing the
  * acknowledgement), fewer writes for small changes, reopening (acknowledgement and e-mail state cleared),
  * no backlog before the switch-on, history rows, event rows open until acknowledged or corrected (H4),
- * and closing only what the sweep read in full: NOT_IN_PLAN, EXPIRED, RULE_OFF (H2). applyPlan guards
- * every write in SQL and names the company in each. Synthetic rows; invented names.
+ * and closing only what the sweep read in full: NOT_IN_PLAN, EXPIRED, RULE_OFF (H2). The reviews of
+ * 16 Oct 2026: no backlog per rule either (a rule switched on later or set to catch more; a RULE_OFF row
+ * reopens only for a new episode: H2), events expire with their date (M7), a re-plan's copy keeps its acknowledgement and
+ * e-mail state (L3), "no longer followed" is not "over". applyPlan guards every write in SQL and names the
+ * company in each. Synthetic rows; invented names.
  */
 import { describe, expect, it } from 'vitest';
 import { alertsLockKey, lockTenantAlerts, tryLockTenantAlerts } from '@/lib/alerts/locks';
@@ -125,6 +128,52 @@ describe('planApply: escalation, updates and reopening', () => {
     expect(p.counts.reopened).toBe(1);
   });
 
+  it('review H2: a row closed because its rule was switched off does not reopen for what was already true; a new episode does', () => {
+    const off = row({ resolvedAt: new Date('2026-10-20T05:30:00Z'), resolvedReason: 'RULE_OFF' });
+    const p = planApply([off], ev({ active: [cand({ occurredAt: new Date('2026-10-20T05:00:00Z') })] }), CTX);
+    expect(p.reopens).toEqual([]);
+    expect(p.counts.backlog).toBe(1);
+    // Began after the rule was switched off (and after its switch-on again): news.
+    expect(planApply([off], ev({ active: [cand({ occurredAt: new Date('2026-10-20T05:50:00Z') })] }), CTX).reopens).toHaveLength(1);
+    // ...unless it began before the rule's own switch-on time.
+    expect(planApply([off], ev({ active: [cand({ occurredAt: new Date('2026-10-20T05:50:00Z') })] }), { ...CTX, ruleOnAt: { ETA_LATE: new Date('2026-10-20T05:55:00Z') } }).reopens).toEqual([]);
+  });
+
+  it('review H2: no backlog per rule - a rule switched on (or set to catch more) after the master switch raises nothing that began before', () => {
+    const ruleOn = new Date('2026-10-20T05:30:00Z');
+    const before = cand({ rule: 'PROOF_FAR', kind: 'EVENT', subjectKey: STOP, occurredAt: new Date('2026-10-20T04:00:00Z') });
+    const after = cand({ rule: 'PROOF_FAR', kind: 'EVENT', subjectKey: STOP, occurredAt: new Date('2026-10-20T05:31:00Z') });
+    const ctx = { ...CTX, ruleOnAt: { PROOF_FAR: ruleOn } };
+    expect(planApply([], ev({ active: [before] }), ctx)).toMatchObject({ creates: [], counts: { backlog: 1 } });
+    expect(planApply([], ev({ active: [after] }), ctx).creates).toHaveLength(1);
+    // Another rule keeps the master switch's time.
+    expect(planApply([], ev({ active: [cand({ occurredAt: new Date('2026-10-20T04:00:00Z') })] }), ctx).creates).toHaveLength(1);
+    // A closed row of that rule does not reopen with something older either.
+    expect(planApply([row({ rule: 'PROOF_FAR', kind: 'EVENT', subjectKey: STOP, resolvedAt: NOW, resolvedReason: 'CORRECTED' })], ev({ active: [before] }), ctx).reopens).toEqual([]);
+  });
+
+  it('review L3: a re-plan\'s copy (closed NOT_IN_PLAN a moment ago) comes back with its acknowledgement and e-mail state, unless it is worse', () => {
+    const replanned = row({ tier: 2, resolvedAt: new Date('2026-10-20T05:50:00Z'), resolvedReason: 'NOT_IN_PLAN' });
+    const same = planApply([replanned], ev({ active: [cand({ tier: 2, value: 65 })] }), CTX).reopens[0]!.data;
+    expect(same).toMatchObject({ resolvedAt: null, resolvedReason: null, tier: 2 });
+    for (const k of ['ackedAt', 'ackedById', 'emailedTier', 'emailAttempts', 'emailError']) expect(same, k).not.toHaveProperty(k);
+    const worse = planApply([replanned], ev({ active: [cand({ tier: 3, value: 95 })] }), CTX).reopens[0]!.data;
+    expect(worse).toMatchObject({ ackedAt: null, ackedById: null });
+    expect(worse).not.toHaveProperty('emailedTier');
+    // Closed NOT_IN_PLAN long ago (more than 12 h): a fresh alert again.
+    const long = planApply([row({ resolvedAt: new Date('2026-10-19T12:00:00Z'), resolvedReason: 'NOT_IN_PLAN' })], ev({ active: [cand()] }), CTX).reopens[0]!.data;
+    expect(long).toMatchObject({ ackedAt: null, emailedTier: 0 });
+    // In memory (the replay): the acknowledgement stays.
+    const mem: MemAlert[] = [];
+    applyPlanInMemory(mem, planApply([], ev({ active: [cand({ tier: 2 })] }), CTX), NOW);
+    mem[0]!.ackedAt = NOW;
+    mem[0]!.emailedTier = 2;
+    applyPlanInMemory(mem, planApply(mem.map(storedOf), ev(), CTX), NOW);
+    expect(mem[0]).toMatchObject({ resolvedReason: 'NOT_IN_PLAN' });
+    applyPlanInMemory(mem, planApply(mem.map(storedOf), ev({ active: [cand({ tier: 2 })] }), CTX), NOW);
+    expect(mem[0]).toMatchObject({ resolvedAt: null, ackedAt: NOW, emailedTier: 2, occurrences: 2 });
+  });
+
   it('H4: an event that happens again after a correction reopens its row too', () => {
     const corrected = row({ rule: 'PRIORITY_NOT_DELIVERED', subjectKey: STOP, kind: 'EVENT', tier: 2, resolvedAt: NOW });
     const p = planApply([corrected], ev({ active: [cand({ rule: 'PRIORITY_NOT_DELIVERED', kind: 'EVENT', subjectKey: STOP, tier: 2 })] }), CTX);
@@ -156,11 +205,25 @@ describe('planApply: closing (H2, H4)', () => {
     expect(p.resolves).toEqual([]);
   });
 
-  it('H2: an open condition row of a date before the window closes as EXPIRED; an event row stays (until acknowledged)', () => {
+  it('H2, M7: an open row of a date before the window closes as EXPIRED, a condition or an event (acknowledged or not)', () => {
     const old = row({ id: 'x1', deliveryDate: '2026-10-17', subjectKey: subjectKeyOf({ depotId: 'D1', date: '2026-10-17', truckId: 'TR1', loadNo: 1 }), rule: 'LOAD_NOT_CLOSED' });
     const oldEvent = row({ id: 'x2', deliveryDate: '2026-10-17', kind: 'EVENT', rule: 'PROOF_FAR', subjectKey: subjectKeyOf({ depotId: 'D1', date: '2026-10-17', truckId: 'TR1', loadNo: 1, sequence: 1 }) });
     const p = planApply([old, oldEvent], ev({ scopes: [] }), CTX);
-    expect(p.resolves).toEqual([{ id: 'x1', reason: 'EXPIRED', text: `${old.text} (date passed)` }]);
+    expect(p.resolves).toEqual([
+      { id: 'x1', reason: 'EXPIRED', text: `${old.text} (date passed)` },
+      { id: 'x2', reason: 'EXPIRED', text: `${oldEvent.text} (date passed)` },
+    ]);
+    // The acknowledgement is not touched by the close (applyPlan writes resolvedAt, the reason and the words only).
+    const mem: MemAlert[] = [];
+    applyPlanInMemory(mem, planApply([], ev({ active: [cand({ rule: 'PROOF_FAR', kind: 'EVENT', subjectKey: oldEvent.subjectKey, deliveryDate: '2026-10-17' })] }), { ...CTX, windowFrom: '2026-10-16' }), NOW);
+    mem[0]!.ackedAt = NOW;
+    applyPlanInMemory(mem, planApply(mem.map(storedOf), ev({ scopes: [] }), CTX), NOW);
+    expect(mem[0]).toMatchObject({ resolvedReason: 'EXPIRED', ackedAt: NOW });
+  });
+
+  it('a rule that stopped following a subject still true closes its row as NOT_FOLLOWED (never "over" in an e-mail)', () => {
+    const p = planApply([row()], ev({ ended: [{ rule: 'ETA_LATE', subjectKey: KEY, reason: 'NOT_FOLLOWED', text: 'past the planned return' }] }), CTX);
+    expect(p.resolves).toEqual([{ id: 'a1', reason: 'NOT_FOLLOWED', text: 'past the planned return' }]);
   });
 
   it('a rule switched off closes its open rows (condition or event) as RULE_OFF', () => {

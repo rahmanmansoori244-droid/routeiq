@@ -8,38 +8,49 @@
  * - the company switched alerts on and has recipients (Settings > Operations alerts);
  * - "e-mail at most every N min" is not 0;
  * - the server has Resend set up (RESEND_API_KEY and RESEND_FROM: lib/email.ts plainEmailConfigured);
+ * - the company is on the server's list ALERT_EMAIL_TENANTS (catalog.ts alertEmailAllowed; review of 16 Oct
+ *   2026, H1: signup is open, so without it anyone could send to any address through our sender);
  * - it is not the company's quiet hours (22:00-06:00 by default; the alerts still show in RouteIQ, and
- *   what is still worth sending goes in the first e-mail after them).
+ *   what is still worth sending goes in the first e-mail after them - not what ended overnight).
  *
  * Then, in ONE transaction that holds the company's e-mail lock (pg_try_advisory_xact_lock: a second
  * sweep during a deploy overlap skips the company instead of sending twice): the throttle (no e-mail
  * within N min of the last), the daily cap (ALERT_EMAILS_PER_DAY, counted on OpsAlertDigest rows, not on
- * the alert rows a later e-mail overwrites: M5), and the claim of the rows (FOR UPDATE SKIP LOCKED):
+ * the alert rows a later e-mail overwrites: M5), the cap of all companies together (ALERT_EMAILS_ALL_PER_DAY
+ * in any 24 h), and the claim of the rows (FOR UPDATE SKIP LOCKED):
  * - not acknowledged, allowed in an e-mail at their tier (mayEmail: never a history row, never unloading
  *   tier 1), of the company's minimum severity or above (HIGH by default), worse than what was last
  *   e-mailed (emailedTier < tier), seen in the last ALERT_EMAIL_LOOKBACK_H hours (lastSeenAt, so a row
- *   reopened or escalated counts: L5), fewer than ALERT_EMAIL_MAX_ATTEMPTS failed tries;
- * - still open, or over by itself since the last e-mail ("(over at 10:50)"); a row closed because its
- *   load left the plan, its date passed, its rule was switched off or its result was corrected is not news;
+ *   reopened or escalated counts: L5), fewer than ALERT_EMAIL_MAX_ATTEMPTS failed tries. lastSeenAt moves
+ *   only when a row's tier, value or words change (fewer writes): a row that stayed the same for more
+ *   than 12 h before an e-mail could go (the quiet hours, the daily cap) is not e-mailed any more; it
+ *   still shows in RouteIQ (review L6 of 16 Oct 2026: documented, not changed);
+ * - still open, or over by itself since the last e-mail ("(over at 10:50)"), not what ended during the
+ *   quiet hours; a row closed because its load left the plan, its date passed, its rule was switched off,
+ *   it is no longer followed or its result was corrected is not news;
  * - HIGH first by rank, never by the alphabet (L5), at most ALERT_DIGEST_MAX_ROWS.
  * The claimed rows get emailedTier = tier and the digest's id; then the transaction commits and the
  * e-mail goes out. A failure puts each row's emailedTier back, counts the attempt and keeps a short reason;
  * a digest left SENDING by a stopped process is failed the same way by the next run.
  *
  * Logs carry counts only, never an address or an alert text. The e-mail text removes any long digit run
- * once more (the alert texts already have none: lib/alerts/text.ts).
+ * once more, in every free text (the alert, the truck, the depot; lib/alerts/text.ts redactNumbers, any
+ * script's digits). The subject carries no name a user typed (the counts and the day only). The send has an
+ * Idempotency-Key over its content, so a message Resend accepted but answered too late is not sent twice.
  */
+import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { prisma as defaultPrisma } from '../db';
-import { fmtDayMonth, fmtHhmm, isoOf, localMinutes, todayIso, zonedDayStart } from '../dispatch/time';
+import { addDaysIso, fmtDayMonth, fmtHhmm, isoOf, localMinutes, todayIso, zonedDayStart } from '../dispatch/time';
 import { plainEmailConfigured, sendPlainEmail, type SendResult } from '../email';
 import { resetBaseUrl } from '../password-reset';
 import {
   ALERT_EMAIL_LOOKBACK_H,
   ALERT_EMAIL_MAX_ATTEMPTS,
+  ALERT_EMAILS_ALL_PER_DAY,
   ALERT_EMAILS_PER_DAY,
-  ALERT_REDACT_DIGITS_MIN,
   ALERT_RULE_SPECS,
+  alertEmailAllowed,
   SEVERITY_ORDER_SQL,
   SEVERITY_RANK,
   emailSeverityPasses,
@@ -48,6 +59,7 @@ import {
   readAlertEmails,
   type AlertSeverity,
 } from './catalog';
+import { redactNumbers } from './text';
 
 /** At most this many alerts in one e-mail (HIGH first); the rest go in the next one. */
 export const ALERT_DIGEST_MAX_ROWS = 50;
@@ -63,6 +75,8 @@ export interface DigestConfig {
   alertQuietFromMin: number | null;
   alertQuietToMin: number | null;
   timezone: string;
+  /** The company's slug: the server's ALERT_EMAIL_TENANTS list names it. */
+  slug?: string;
 }
 
 export type DigestSkip =
@@ -70,10 +84,12 @@ export type DigestSkip =
   | 'NO_RECIPIENTS'
   | 'EMAIL_OFF'
   | 'NOT_CONFIGURED'
+  | 'NOT_ALLOWED'
   | 'QUIET_HOURS'
   | 'BUSY'
   | 'TOO_SOON'
   | 'DAILY_CAP'
+  | 'ALL_COMPANIES_CAP'
   | 'NOTHING_NEW';
 
 /** Whether the company may get a digest now, and to whom (no database read). */
@@ -83,6 +99,7 @@ export function digestGate(cfg: DigestConfig | null | undefined, now: Date, env:
   if (!parsed.ok || !parsed.emails.length) return { ok: false, skip: 'NO_RECIPIENTS' };
   if (!(cfg.alertEmailEveryMin > 0)) return { ok: false, skip: 'EMAIL_OFF' };
   if (!plainEmailConfigured(env)) return { ok: false, skip: 'NOT_CONFIGURED' };
+  if (!alertEmailAllowed(cfg.slug, env)) return { ok: false, skip: 'NOT_ALLOWED' };
   if (inQuietHours(localMinutes(now, cfg.timezone), cfg.alertQuietFromMin, cfg.alertQuietToMin)) return { ok: false, skip: 'QUIET_HOURS' };
   return { ok: true, recipients: parsed.emails };
 }
@@ -105,12 +122,12 @@ export interface DigestRow {
 
 export type ClaimResult =
   | { ok: true; digestId: string; rows: DigestRow[] }
-  | { ok: false; skip: Extract<DigestSkip, 'BUSY' | 'TOO_SOON' | 'DAILY_CAP' | 'NOTHING_NEW'> };
+  | { ok: false; skip: Extract<DigestSkip, 'BUSY' | 'TOO_SOON' | 'DAILY_CAP' | 'ALL_COMPANIES_CAP' | 'NOTHING_NEW'> };
 
 /** The database side of the digest (prismaDigestStore; a fake in the unit tests). */
 export interface DigestStore {
   readConfig(tenantId: string): Promise<(DigestConfig & { name: string; slug: string }) | null>;
-  claim(tenantId: string, now: Date, opts: { everyMin: number; minSeverity: string; dayStart: Date; recipients: number }): Promise<ClaimResult>;
+  claim(tenantId: string, now: Date, opts: { everyMin: number; minSeverity: string; dayStart: Date; recipients: number; quietEndedAt?: Date | null }): Promise<ClaimResult>;
   depotLabels(tenantId: string, depotIds: string[]): Promise<Map<string, string>>;
   finish(tenantId: string, digestId: string, rows: DigestRow[], now: Date, result: SendResult): Promise<void>;
 }
@@ -125,12 +142,30 @@ export interface DigestOutcome {
   digestId?: string;
 }
 
-/** A run of ALERT_REDACT_DIGITS_MIN or more digits (spaces, + - / inside) is a number to hide. */
+/** A run of ALERT_REDACT_DIGITS_MIN or more digits of any script (spaces, + - / . ( ) inside) is a number to hide (text.ts redactNumbers). */
 export function scrubNumbers(text: string): string {
-  return text.replace(/\+?\d[\d \-/]*\d/g, (run) => ((run.match(/\d/g)?.length ?? 0) >= ALERT_REDACT_DIGITS_MIN ? '[number]' : run));
+  return redactNumbers(text);
 }
 
 const ONE_LINE = (s: string) => s.replace(/\s+/g, ' ').trim();
+/** Every free text of the e-mail: one line, long digit runs removed (review L4: the truck and the depot too). */
+const SAFE = (s: string) => scrubNumbers(ONE_LINE(s));
+
+/**
+ * When the company's last quiet hours ended, at or before `now` (null: no quiet hours). The first e-mail
+ * after them leaves out what ended overnight (review L5: "over at 23:10" at 06:00 is not news).
+ */
+export function lastQuietEnd(now: Date, tz: string, fromMin: number | null | undefined, toMin: number | null | undefined): Date | null {
+  if (fromMin == null || toMin == null || fromMin === toMin) return null;
+  const today = todayIso(tz, now);
+  const end = new Date(zonedDayStart(today, tz).getTime() + toMin * 60_000);
+  return end.getTime() <= now.getTime() ? end : new Date(zonedDayStart(addDaysIso(today, -1), tz).getTime() + toMin * 60_000);
+}
+
+/** The Idempotency-Key of one e-mail: its company, recipients and content (the same e-mail again within 24 h is sent once). */
+export function digestIdempotencyKey(tenantId: string, to: readonly string[], subject: string, text: string): string {
+  return `routeiq-alerts-${createHash('sha256').update(JSON.stringify([tenantId, [...to].sort(), subject, text])).digest('hex').slice(0, 48)}`;
+}
 
 /**
  * The digest e-mail: grouped by depot and date (with a link to that day's screen), then by truck (the
@@ -149,8 +184,8 @@ export function buildDigestEmail(input: {
 }): { subject: string; text: string } {
   const { rows, timezone: tz } = input;
   const high = rows.filter((r) => r.severity === 'HIGH').length;
-  const company = ONE_LINE(input.companyName);
-  const subject = `RouteIQ alerts: ${rows.length} new (${high} high) - ${company} ${fmtDayMonth(todayIso(tz, input.now))}`;
+  // No name a user typed in the subject (review H1: an open signup must not choose what our sender says).
+  const subject = `RouteIQ alerts: ${rows.length} new (${high} high) - ${fmtDayMonth(todayIso(tz, input.now))}`;
   const hhmm = (d: Date) => fmtHhmm(localMinutes(d, tz));
   const groups = new Map<string, { depotId: string; date: string; trucks: Map<string, DigestRow[]> }>();
   for (const r of rows) {
@@ -168,15 +203,15 @@ export function buildDigestEmail(input: {
   lines.push(`${rows.length} ${rows.length === 1 ? 'alert' : 'alerts'} since the last e-mail (${high} high).`);
   for (const g of [...groups.values()].sort((a, b) => a.date.localeCompare(b.date) || (input.depotLabels.get(a.depotId) ?? '').localeCompare(input.depotLabels.get(b.depotId) ?? ''))) {
     lines.push('');
-    lines.push(`${input.depotLabels.get(g.depotId) ?? 'Depot'} - ${fmtDayMonth(g.date)}`);
+    lines.push(`${SAFE(input.depotLabels.get(g.depotId) ?? 'Depot')} - ${fmtDayMonth(g.date)}`);
     if (input.baseUrl) lines.push(`Open the day in RouteIQ: ${input.baseUrl}/t/${encodeURIComponent(input.slug)}/dispatch?date=${g.date}&depot=${encodeURIComponent(g.depotId)}`);
     const trucks = [...g.trucks.entries()].sort((a, b) => worst(a[1]) - worst(b[1]) || a[0].localeCompare(b[0]));
     for (const [truck, list] of trucks) {
-      lines.push(`  ${ONE_LINE(truck)}`);
+      lines.push(`  ${SAFE(truck)}`);
       for (const r of [...list].sort(byRow)) {
         const label = isAlertRule(r.rule) ? ALERT_RULE_SPECS[r.rule].label : r.rule;
         const notes = [r.emailedTier > 0 ? 'worse since the last e-mail' : null, r.resolvedAt ? `over at ${hhmm(r.resolvedAt)}` : null].filter(Boolean);
-        lines.push(`    [${r.severity}] ${hhmm(r.occurredAt)} ${label}: ${scrubNumbers(ONE_LINE(r.text))}${notes.length ? ` (${notes.join('; ')})` : ''}`);
+        lines.push(`    [${r.severity}] ${hhmm(r.occurredAt)} ${label}: ${SAFE(r.text)}${notes.length ? ` (${notes.join('; ')})` : ''}`);
       }
     }
   }
@@ -208,7 +243,13 @@ export async function sendAlertDigest(
     if (!gate.ok) return { sent: false, skip: gate.skip, alerts: 0, high: 0 };
     if (!cfg) return { sent: false, skip: 'ALERTS_OFF', alerts: 0, high: 0 };
     const dayStart = zonedDayStart(todayIso(cfg.timezone, now), cfg.timezone);
-    const claim = await store.claim(tenantId, now, { everyMin: cfg.alertEmailEveryMin, minSeverity: cfg.alertEmailMinSeverity, dayStart, recipients: gate.recipients.length });
+    const claim = await store.claim(tenantId, now, {
+      everyMin: cfg.alertEmailEveryMin,
+      minSeverity: cfg.alertEmailMinSeverity,
+      dayStart,
+      recipients: gate.recipients.length,
+      quietEndedAt: lastQuietEnd(now, cfg.timezone, cfg.alertQuietFromMin, cfg.alertQuietToMin),
+    });
     if (!claim.ok) return { sent: false, skip: claim.skip, alerts: 0, high: 0 };
     const { rows, digestId } = claim;
     const high = rows.filter((r) => r.severity === 'HIGH').length;
@@ -223,7 +264,7 @@ export async function sendAlertDigest(
       minSeverity: cfg.alertEmailMinSeverity,
       full: rows.length < ALERT_DIGEST_MAX_ROWS,
     });
-    const result = await sendPlainEmail({ to: gate.recipients, ...mail }, env, deps.fetchImpl);
+    const result = await sendPlainEmail({ to: gate.recipients, ...mail, idempotencyKey: digestIdempotencyKey(tenantId, gate.recipients, mail.subject, mail.text) }, env, deps.fetchImpl);
     await store.finish(tenantId, digestId, rows, now, result);
     if (result.ok) {
       console.info('[alerts] e-mail sent', { tenantId, digestId, alerts: rows.length, high, recipients: gate.recipients.length });
@@ -330,7 +371,13 @@ export function prismaDigestStore(db: PrismaClient): DigestStore {
         if (last && now.getTime() - last.createdAt.getTime() < opts.everyMin * 60_000) return { ok: false as const, skip: 'TOO_SOON' as const };
         const today = await tx.opsAlertDigest.count({ where: capWhere(tenantId, opts.dayStart) });
         if (today >= ALERT_EMAILS_PER_DAY) return { ok: false as const, skip: 'DAILY_CAP' as const };
-        const endedSince = last?.createdAt ?? new Date(now.getTime() - opts.everyMin * 60_000);
+        // Every company together (the provider's free plan and the password reset share the sender): a
+        // platform-wide count of digest rows (counts only, no company's data is read).
+        const all = await tx.opsAlertDigest.count({ where: { createdAt: { gt: new Date(now.getTime() - 24 * 3_600_000) }, status: { not: 'FAILED' } } });
+        if (all >= ALERT_EMAILS_ALL_PER_DAY) return { ok: false as const, skip: 'ALL_COMPANIES_CAP' as const };
+        const sinceLast = last?.createdAt ?? new Date(now.getTime() - opts.everyMin * 60_000);
+        // The first e-mail after the quiet hours leaves out what ended during them (L5).
+        const endedSince = opts.quietEndedAt && opts.quietEndedAt > sinceLast ? opts.quietEndedAt : sinceLast;
         const found = await tx.$queryRaw<ClaimSqlRow[]>(claimSql(tenantId, now, opts.minSeverity, endedSince));
         const rows: DigestRow[] = found
           .filter((r) => emailSeverityPasses(r.severity as AlertSeverity, opts.minSeverity))

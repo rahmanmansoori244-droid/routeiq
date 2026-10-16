@@ -169,4 +169,17 @@ describe('operations alerts retention (owner request 16 Oct 2026)', () => {
     const r = await runDeliveryJanitor(new Date(NOW.getTime() + 60 * 60_000), { force: true });
     expect(r).toMatchObject({ alerts: { alerts: 0, digests: 0 } });
   });
+
+  it('review L3: a failing alert purge is logged under its own name and stops nothing after it', async () => {
+    const spy = vi.spyOn(fakePrisma.opsAlert, 'deleteMany').mockRejectedValue(new Error('db down'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const r = await runDeliveryJanitor(new Date(NOW.getTime() + 2 * 60 * 60_000), { force: true });
+      expect(r).toMatchObject({ alerts: null, casual: expect.any(Object) });
+      expect(err).toHaveBeenCalledWith('[janitor] alert retention not run', { error: 'db down' });
+    } finally {
+      spy.mockRestore();
+      err.mockRestore();
+    }
+  });
 });

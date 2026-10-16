@@ -12,23 +12,43 @@
  *   switched off (RULE_OFF) (critique H2). One that closed before anyone looked is history: it needs no
  *   acknowledgement.
  * - EVENT rows (a fact: priority stop not delivered, delivered with a note, proof far from the pin, an
- *   arrival after closing) stay open until someone acknowledges them, or until the fact is corrected
- *   (CORRECTED). An event that happens again after a correction reopens its row.
+ *   arrival after closing) stay open until the fact is corrected (CORRECTED), their date leaves the
+ *   sweep's window (EXPIRED, keeping who acknowledged them: review of 16 Oct 2026, M7) or their rule is
+ *   switched off; acknowledged, they stay open but no longer count on the bell. An event that happens
+ *   again after a correction reopens its row.
  * - History rows (Candidate.history) are written already closed, never toast or e-mail, and never reopen.
  *
  * The rules of a raise:
  * 1. New subject: one insert (createMany skipDuplicates = ON CONFLICT DO NOTHING on tenantId, rule,
- *    subjectKey), unless it began before alerts were switched on (alertsEnabledAt: no backlog).
+ *    subjectKey), unless it began before alerts were switched on (alertsEnabledAt), or before its own rule
+ *    was switched on or set to catch more (alertRuleOnAtJson; catalog.ts switchOnOf): no backlog.
  * 2. Higher tier: escalate (tier, severity, words, delivery) and clear the acknowledgement: a higher
  *    tier is new information. Only `tier < new tier` rows are touched. Tiers never go down while open.
  * 3. Same or lower tier: the value and words are written only when the value moved by ALERT_VALUE_STEP
  *    or the words changed other than in their numbers (fewer writes).
  * 4. A closed row whose subject is true again: reopened (occurrences + 1, acknowledgement and e-mail
- *    state cleared), unless it began before the switch-on.
+ *    state cleared), unless it began before the switch-on. One closed because its rule was switched off
+ *    (RULE_OFF) only for something that began after it closed: switching the rule on again is not news
+ *    (the rule's own switch-on time stops the rest). One closed as NOT_IN_PLAN less than
+ *    ALERT_REOPEN_KEEP_MS ago (a re-plan's copy of the same load) keeps its acknowledgement and e-mail
+ *    state, unless it comes back at a higher tier (review L3).
  */
 import type { Prisma } from '@prisma/client';
 import { dateOnly, isoOf } from '../dispatch/time';
-import { ALERT_VALUE_STEP, RESOLVED_REASON_TEXT, beforeSwitchOn, deliveryOf, severityOf, type AlertKind, type AlertRule, type AlertSeverity, type ResolvedReason } from './catalog';
+import {
+  ALERT_REOPEN_KEEP_MS,
+  ALERT_VALUE_STEP,
+  RESOLVED_REASON_TEXT,
+  beforeSwitchOn,
+  deliveryOf,
+  severityOf,
+  switchOnOf,
+  type AlertKind,
+  type AlertRule,
+  type AlertSeverity,
+  type ResolvedReason,
+  type RuleOnAt,
+} from './catalog';
 import type { Candidate, Evaluation } from './types';
 
 type Tx = Prisma.TransactionClient;
@@ -47,6 +67,8 @@ export interface StoredAlert {
   /** YYYY-MM-DD */
   deliveryDate: string;
   resolvedAt: Date | null;
+  /** Why it closed (null while open). */
+  resolvedReason?: string | null;
 }
 
 /** The columns the store writes on a raise, an escalation, an update or a reopen. */
@@ -109,7 +131,7 @@ export interface StoreCounts {
   reopened: number;
   /** Closed, by why. */
   resolved: Partial<Record<ResolvedReason, number>>;
-  /** Candidates not raised because they began before alerts were switched on. */
+  /** Candidates not raised because they began before alerts (or their rule) were switched on, or whose row closed as RULE_OFF. */
   backlog: number;
 }
 
@@ -130,6 +152,8 @@ export interface PlanContext {
   now: Date;
   /** TenantConfig.alertsEnabledAt: nothing that began before it raises (or reopens) a row. */
   alertsEnabledAt: Date | null;
+  /** TenantConfig.alertRuleOnAtJson read back: the same per rule (the later of the two counts). */
+  ruleOnAt?: RuleOnAt | null;
   /** The first date of the sweep's window (yesterday): open CONDITION rows of older dates close as EXPIRED. */
   windowFrom: string;
   /** The rules that are on: open rows of the others close as RULE_OFF. */
@@ -171,6 +195,7 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
     plan.counts.resolved[reason] = (plan.counts.resolved[reason] ?? 0) + 1;
   };
   const created = new Set<string>();
+  const backlog = (c: { rule: AlertRule; occurredAt: Date }) => beforeSwitchOn(c.occurredAt, switchOnOf(c.rule, ctx.alertsEnabledAt, ctx.ruleOnAt));
 
   for (const c of ev.active) {
     const k = keyOf(c.rule, c.subjectKey);
@@ -178,7 +203,7 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
     const row = byKey.get(k);
     if (!row) {
       if (created.has(k)) continue;
-      if (beforeSwitchOn(c.occurredAt, ctx.alertsEnabledAt)) {
+      if (backlog(c)) {
         plan.counts.backlog++;
         continue;
       }
@@ -215,14 +240,21 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
     }
     if (row.resolvedAt) {
       if (c.history) continue; // a history row never reopens, and a closed row is never rewritten as history
-      if (beforeSwitchOn(c.occurredAt, ctx.alertsEnabledAt)) {
+      // Switching a rule off and on again is not news (review H2): a row closed as RULE_OFF reopens only
+      // for something that began after it closed (a new episode), never for what was already true then.
+      if ((row.resolvedReason === 'RULE_OFF' && c.occurredAt.getTime() <= row.resolvedAt.getTime()) || backlog(c)) {
         plan.counts.backlog++;
         continue;
       }
-      plan.reopens.push({
-        id: row.id,
-        data: { ...fieldsOf(c, now), occurredAt: c.occurredAt, resolvedAt: null, resolvedReason: null, ackedAt: null, ackedById: null, emailedTier: 0, emailAttempts: 0, emailError: null },
-      });
+      // A re-plan's copy of the same load (NOT_IN_PLAN a moment ago): the same alert, already seen and
+      // e-mailed - unless it comes back worse (review L3).
+      const replanned = row.resolvedReason === 'NOT_IN_PLAN' && now.getTime() - row.resolvedAt.getTime() < ALERT_REOPEN_KEEP_MS;
+      const fresh: AlertFields = replanned
+        ? c.tier > row.tier
+          ? { ackedAt: null, ackedById: null }
+          : {}
+        : { ackedAt: null, ackedById: null, emailedTier: 0, emailAttempts: 0, emailError: null };
+      plan.reopens.push({ id: row.id, data: { ...fieldsOf(c, now), occurredAt: c.occurredAt, resolvedAt: null, resolvedReason: null, ...fresh } });
       plan.counts.reopened++;
       continue;
     }
@@ -255,7 +287,7 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
     touched.add(k);
     const row = byKey.get(k);
     if (!row || row.resolvedAt) continue;
-    resolve(row, row.kind === 'EVENT' ? 'CORRECTED' : 'ENDED', e.text);
+    resolve(row, e.reason === 'NOT_FOLLOWED' ? 'NOT_FOLLOWED' : row.kind === 'EVENT' ? 'CORRECTED' : 'ENDED', e.text);
   }
   for (const h of ev.held ?? []) touched.add(keyOf(h.rule, h.subjectKey));
 
@@ -266,7 +298,8 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
   for (const row of rows) {
     if (row.resolvedAt || touched.has(keyOf(row.rule, row.subjectKey))) continue;
     if (!on.has(row.rule)) closed(row, 'RULE_OFF');
-    else if (row.kind === 'CONDITION' && row.deliveryDate < ctx.windowFrom) closed(row, 'EXPIRED');
+    // Events too (M7): an event of a date the sweep no longer reads is history, acknowledged or not.
+    else if (row.deliveryDate < ctx.windowFrom) closed(row, 'EXPIRED');
     else if (row.kind === 'CONDITION' && scopes.has(`${row.depotId}|${row.deliveryDate}`)) closed(row, 'NOT_IN_PLAN');
   }
   return plan;
@@ -378,10 +411,10 @@ export function applyPlanInMemory(rows: MemAlert[], plan: StorePlan, now: Date):
   for (const o of plan.reopens) {
     const r = byId.get(o.id);
     if (r && r.resolvedAt) {
+      // The acknowledgement and the e-mail state go only where the plan says so (a re-plan's copy keeps them).
       assign(r, o.data);
       r.resolvedAt = null;
       r.resolvedReason = null;
-      r.ackedAt = null;
       r.occurrences += 1;
     }
   }
@@ -397,7 +430,20 @@ export function applyPlanInMemory(rows: MemAlert[], plan: StorePlan, now: Date):
 }
 
 /** A row as the store reads it (from the database or from memory). */
-export function storedOf(r: { id: string; rule: string; subjectKey: string; kind: string; tier: number; value: number; text: string; truckCode: string; depotId: string; deliveryDate: Date | string; resolvedAt: Date | null }): StoredAlert {
+export function storedOf(r: {
+  id: string;
+  rule: string;
+  subjectKey: string;
+  kind: string;
+  tier: number;
+  value: number;
+  text: string;
+  truckCode: string;
+  depotId: string;
+  deliveryDate: Date | string;
+  resolvedAt: Date | null;
+  resolvedReason?: string | null;
+}): StoredAlert {
   return {
     id: r.id,
     rule: r.rule,
@@ -410,11 +456,12 @@ export function storedOf(r: { id: string; rule: string; subjectKey: string; kind
     depotId: r.depotId,
     deliveryDate: typeof r.deliveryDate === 'string' ? r.deliveryDate : isoOf(r.deliveryDate),
     resolvedAt: r.resolvedAt,
+    resolvedReason: r.resolvedReason ?? null,
   };
 }
 
 /** The columns facts.ts reads of the rows already there. */
-export const STORED_SELECT = { id: true, rule: true, subjectKey: true, kind: true, tier: true, value: true, text: true, truckCode: true, depotId: true, deliveryDate: true, resolvedAt: true } as const;
+export const STORED_SELECT = { id: true, rule: true, subjectKey: true, kind: true, tier: true, value: true, text: true, truckCode: true, depotId: true, deliveryDate: true, resolvedAt: true, resolvedReason: true } as const;
 
 // ---------------------------------------------------------------------------------------------
 // Retention

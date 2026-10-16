@@ -24,6 +24,7 @@ import { keyOfVisit, liveRunsInRange, loadsOfRuns, stopsOfLoads, visitKey } from
 import { pinCheckList } from '../delivery/customer-stats';
 import { LOAD_STATUS_NAMES } from '../audit-catalog';
 import { ALERT_THRESHOLD_COLUMNS, type AlertConfig } from './catalog';
+import { pinMovedSince } from './facts';
 import { ALERT_EXPORT_KIND, type AlertDayExport, type ExportEvent, type ExportLoad, type ExportPhoto, type ExportStop } from './replay';
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -109,17 +110,22 @@ export async function exportAlertDay(db: Db, tenantId: string, date: string, opt
   ]);
   const photos = await findInParts(
     visits.map((v) => v.id),
-    (part) => db.deliveryPhoto.findMany({ where: { tenantId, visitId: { in: part } }, select: { visitId: true, source: true, positionStatus: true, distanceM: true, accuracyM: true, exifDistanceM: true, receivedAt: true } }),
+    (part) =>
+      db.deliveryPhoto.findMany({
+        where: { tenantId, visitId: { in: part } },
+        select: { visitId: true, source: true, positionStatus: true, distanceM: true, accuracyM: true, exifDistanceM: true, receivedAt: true, takenAt: true, oldPhoto: true },
+      }),
   );
   const orderIds = [...new Set(rowsOfPlan.map((r) => r.orderId))];
   const customerIds = [...new Set([...planned.values()].flat().map((s) => s.customerId))];
   const [orders, customers, flagged] = await Promise.all([
     findInParts(orderIds, (part) => db.order.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, priority: true } })),
-    findInParts(customerIds, (part) => db.customer.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, locationVerified: true } })),
+    findInParts(customerIds, (part) => db.customer.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, locationVerified: true, lat: true, lng: true } })),
     pinCheckList(tenantId, { db, now, customerIds }),
   ]);
   const prio = new Map(orders.map((o) => [o.id, o.priority]));
   const verified = new Set(customers.filter((c) => c.locationVerified).map((c) => c.id));
+  const pinNow = new Map(customers.map((c) => [c.id, c]));
   const pinWrong = new Set(flagged.map((f) => f.customerId));
   const extraOf = new Map(extra.map((x) => [x.id, x]));
   const visitOf = new Map(visits.map((v) => [keyOfVisit(v), v]));
@@ -134,7 +140,16 @@ export async function exportAlertDay(db: Db, tenantId: string, date: string, opt
   }
   const photosOf = new Map<string, ExportPhoto[]>();
   for (const p of photos) {
-    const ph: ExportPhoto = { source: p.source, positionStatus: p.positionStatus, distanceM: p.distanceM, accuracyM: p.accuracyM, exifDistanceM: p.exifDistanceM, receivedAt: p.receivedAt.toISOString() };
+    const ph: ExportPhoto = {
+      source: p.source,
+      positionStatus: p.positionStatus,
+      distanceM: p.distanceM,
+      accuracyM: p.accuracyM,
+      exifDistanceM: p.exifDistanceM,
+      receivedAt: p.receivedAt.toISOString(),
+      takenAt: p.takenAt.toISOString(),
+      oldPhoto: p.oldPhoto,
+    };
     photosOf.set(p.visitId, [...(photosOf.get(p.visitId) ?? []), ph]);
   }
 
@@ -160,6 +175,7 @@ export async function exportAlertDay(db: Db, tenantId: string, date: string, opt
         windowEndMin: s.windowEndMin,
         priority: ps.length ? Math.min(...ps) : null,
         pinVerified: verified.has(s.customerId) && !pinWrong.has(s.customerId),
+        pinMoved: pinMovedSince(v ?? null, pinNow.get(s.customerId) ?? null),
         visit: v
           ? { plannedServiceMin: v.plannedServiceMin, windowStartMin: v.windowStartMin, windowEndMin: v.windowEndMin, casesPlanned: v.casesPlanned, events: eventsOf.get(v.id) ?? [], photos: photosOf.get(v.id) ?? [] }
           : null,

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { emailDeliveryConfigured } from '@/lib/password-reset';
 import { checkDispatchReadiness, overallReadiness, solverField } from '@/lib/health';
+import { alertSweepHealth } from '@/lib/alerts/sweep';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -28,10 +29,12 @@ async function checkDb(): Promise<'up' | 'down'> {
  *   load re-check was skipped) - alert, but do not
  *   block the deploy;
  * - 200 `ready` (`ok: true`).
- * It never starts an optimization. `routing` and `email` are informational and never change the
- * answer: without OSRM plans still work (distances labelled estimated) - alert on
+ * It never starts an optimization. `routing`, `email` and `alerts` are informational and never change
+ * the answer: without OSRM plans still work (distances labelled estimated) - alert on
  * routing.status !== 'up' instead; without email, tenant admins reset passwords on the Users
- * screen ("Reset password", POST /api/users/:id/reset-password).
+ * screen ("Reset password", POST /api/users/:id/reset-password); `alerts` says when the
+ * operations-alert sweep last ran in this process and how many companies' last sweep failed or is
+ * overdue (counts only, never a company; review of 16 Oct 2026, M2).
  */
 export async function GET() {
   const [db, dispatch] = await Promise.all([checkDb(), checkDispatchReadiness()]);
@@ -46,6 +49,7 @@ export async function GET() {
       dispatch: { status: dispatch.status, reason: dispatch.reason, message: dispatch.message },
       routing: dispatch.routing,
       email,
+      alerts: alertSweepHealth(),
     },
     { status: httpStatus, headers: { 'Cache-Control': 'no-store' } },
   );

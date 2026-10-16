@@ -25,6 +25,8 @@ export interface NavItem {
   icon: LucideIcon;
   rolesAllowed: Role[];
   exact?: boolean;
+  /** Shown only while the company has this switched on (Alerts: TenantConfig.alertsEnabled). */
+  needs?: 'alerts';
 }
 
 const ALL_ROLES: Role[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'PLANNER', 'SUPERVISOR', 'VIEWER'];
@@ -35,7 +37,8 @@ const DISPATCHER_UP: Role[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'PLA
 export const NAV_ITEMS: NavItem[] = [
   { href: (s) => `/t/${s}/dispatch`, label: 'Daily dispatch', icon: Route, rolesAllowed: ALL_ROLES },
   // Operations alerts (owner request 16 Oct 2026): every role reads them; the dispatcher and up acknowledge.
-  { href: (s) => `/t/${s}/alerts`, label: 'Alerts', icon: Bell, rolesAllowed: ALL_ROLES },
+  // Only while the company has them on (review of 16 Oct 2026: merging must change nothing on screen).
+  { href: (s) => `/t/${s}/alerts`, label: 'Alerts', icon: Bell, rolesAllowed: ALL_ROLES, needs: 'alerts' },
   { href: (s) => `/t/${s}`, label: 'Dashboard', icon: LayoutDashboard, rolesAllowed: ALL_ROLES, exact: true },
   { href: (s) => `/t/${s}/depots`, label: 'Depots', icon: Warehouse, rolesAllowed: ALL_ROLES },
   { href: (s) => `/t/${s}/trucks`, label: 'Trucks', icon: Truck, rolesAllowed: ALL_ROLES },
@@ -53,6 +56,6 @@ export const NAV_ITEMS: NavItem[] = [
   { href: (s) => `/t/${s}/help`, label: 'Help', icon: LifeBuoy, rolesAllowed: ALL_ROLES },
 ];
 
-export function visibleNavItems(role: Role): NavItem[] {
-  return NAV_ITEMS.filter((item) => item.rolesAllowed.includes(role));
+export function visibleNavItems(role: Role, on: { alerts?: boolean } = {}): NavItem[] {
+  return NAV_ITEMS.filter((item) => item.rolesAllowed.includes(role) && (!item.needs || !!on[item.needs]));
 }

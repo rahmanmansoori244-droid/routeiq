@@ -194,11 +194,20 @@ function noteWords(note: string): string[] {
 }
 
 /**
- * The note only confirms the delivery: it has at least one word and every word is one of
- * CONFIRMING_WORDS (digits, times and punctuation ignored). Any other word ("missing", "not", "باقي",
- * "لم", a name) keeps the note: a note that says something is never dropped.
+ * A clock time ("11:25", "9.40 am", "9 am", "١١:٢٥") or a full date with its year ("16/10/2026",
+ * "2026-10-16"): the only numbers a note that just confirms the delivery may hold.
+ */
+const NOTE_TIME_OR_DATE = /(?<!\p{Nd})(?:\p{Nd}{1,2}[:.]\p{Nd}{2}(?:\s?[aApP]\.?[mM]\.?)?|\p{Nd}{1,2}\s?[aApP]\.?[mM]\.?|\p{Nd}{1,2}[/.-]\p{Nd}{1,2}[/.-]\p{Nd}{2,4}|\p{Nd}{4}-\p{Nd}{2}-\p{Nd}{2})(?!\p{Nd})/gu;
+
+/**
+ * The note only confirms the delivery: it has at least one word, every word is one of CONFIRMING_WORDS,
+ * and its only numbers are clock times and dates (punctuation ignored). Any other word ("missing",
+ * "not", "باقي", "لم", a name) or any other number ("18/20", "45 / 50", "50%", "3 short": a quantity)
+ * keeps the note: a note that says something is never dropped (review of 16 Oct 2026, M5).
  */
 export function noteOnlyConfirms(note: string | null | undefined): boolean {
-  const words = noteWords(oneLine(note));
+  const text = oneLine(note).normalize('NFKC').replace(NOTE_TIME_OR_DATE, ' ');
+  if (/\p{Nd}/u.test(text)) return false;
+  const words = noteWords(text);
   return words.length > 0 && words.every((w) => CONFIRMING_WORDS.has(w));
 }

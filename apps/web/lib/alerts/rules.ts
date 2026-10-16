@@ -8,39 +8,61 @@
  * Every rule checks every subject of its kind it finds in the facts and answers for each one, so a row
  * whose subject is still in the plan is closed with its own words; a row whose subject is gone closes as
  * NOT_IN_PLAN (store.ts). A rule that is off (threshold null) is not checked: its rows close as RULE_OFF.
+ * A rule that throws on a load holds its open rows of that load (Evaluation.failures); the others answer.
  *
- * The rules with the adversarial review's fixes (critique of 16 Oct 2026):
+ * "Back" (LoadCtx.back): Back at depot was tapped, or the truck is out on a later load of the day (a stop
+ * of it has activity, or its Dispatch press came no earlier than an hour before this load's planned
+ * return: a press of every load in the morning is not the truck leaving again). "Past the return": the
+ * planned return + RETURN_GRACE_MIN has passed, or the load is of an earlier day. Every condition is
+ * dated to when it began (occurredAt), so a switch-on never raises what was already true (no backlog).
+ * A rule that stops following a subject still true (past the planned return, too old) closes its row as
+ * NOT_FOLLOWED (Out.unfollow), never as "over".
+ *
+ * The rules with the adversarial review's fixes (critique of 16 Oct 2026) and the two reviews of the
+ * branch (16 Oct 2026, "H"/"M"/"L" below are theirs):
  * - R1 UNLOAD_OVER: a stop being unloaded (arrived; no departure, no result, no later stop with
  *   activity) longer than its planned unloading + T, counted from the arrival or the window start when
  *   early. An arrival tapped far from the pin (UNLOAD_ARRIVAL_FAR_M with good accuracy) is not counted
- *   (M9). A stop that ended over the limit without a row becomes a history row (no toast, no e-mail); its
- *   unloading ends at the latest at the first tap of a later stop (a result recorded hours later is not
- *   the end). Not on a load the office completed (the 15 Oct 2026 replay).
+ *   (M9). It ends when the truck is back (H1); past the planned return + 60 min it is no longer followed
+ *   (NOT_FOLLOWED: "Load not closed" follows the load). A stop that ended over the limit without a row becomes
+ *   a history row (no toast, no e-mail); its unloading ends at the latest at the first tap of a later
+ *   stop, the truck being back or the planned return + 60 min (a result recorded hours later is not the
+ *   end). Not on a load the office completed. While it is raised, R3 and the projected R6 of the load
+ *   are held (M2: one long unloading is one alert; its text names the next stop's new time).
  * - R2 LOADING_OVER: a LOADING load not marked Loaded, whose Loading press (statusChangedAt) is more than
  *   T ago and less than 12 h ago (H1: off by default; it means something only when the warehouse presses
  *   Loading as it starts each truck and Loaded when done).
  * - R3 ETA_LATE: the projected arrival at the next stop (projection.ts) more than T after its plan;
- *   closes 10 min under T (hysteresis). Not while DRIVER_SILENT is open for the load (held), nor after
- *   the planned return + 60 min (H3). Stops further on that may miss their window are named in its text
- *   (H5).
+ *   closes 10 min under T (hysteresis). A delivery photo counts as being at its stop, and the clock pushes
+ *   a stop not reached only while the phone has been silent since before it was expected (M3). Not while
+ *   DRIVER_SILENT is open for the load or R1 is raised (held), not once the truck is back, nor after the
+ *   planned return + 60 min (H3). Stops further on that may miss their window are named in its text (H5).
  * - R4 DEPART_LATE: today's Locked or Loading load (a Planned one only as a later trip of a truck whose
  *   earlier load is locked or further) not dispatched T after its planned departure; only the truck's
- *   first load not yet out, not while an earlier load of the truck is out and not back; no longer
- *   followed 4 h after the planned departure (M2). Found only after the Dispatch press: one history row.
+ *   first load not yet out. A later trip waits for the previous load to be back (a tap, Completed, or
+ *   its planned return + 60 min without a tap) and is counted from the later of its planned departure and
+ *   that return + the planned turnaround (M6: a late return is not this load's lateness). No longer
+ *   followed 4 h after that (M2). Found only after the Dispatch press: one history row.
  * - R5 DRIVER_SILENT: nothing from the driver's phone for T (a planned break inside the gap does not
- *   count), stops left, none being unloaded, and the next stop overdue by 30 min (M10). Tier 1 WARN.
- * - R6 AFTER_CLOSING: an observed arrival more than T after the stop's window end: an EVENT, HIGH. The
- *   next pending stop with a window projected more than T after it (the arrival under START, the end of
- *   unloading under FINISH): WARN, closes 10 min under T (H5).
+ *   count), stops left, none being unloaded, and the next stop overdue by 30 min (M10). Tier 1 WARN. Not
+ *   once the truck is back, nor past the planned return (M1: "Load not closed" follows it then).
+ * - R6 AFTER_CLOSING: an observed arrival more than T after the stop's window end: an EVENT, WARN, HIGH
+ *   beyond 2T (M4). The next pending stop with a window projected more than T after it (the arrival under
+ *   START, the end of unloading under FINISH): WARN, closes 10 min under T (H5).
  * - R7 PRIORITY_NOT_DELIVERED: the driver's Not delivered (HIGH) or Partly delivered (WARN) at a stop of
  *   priority T or better; a result the office recorded itself does not count (L8).
  * - R8 DELIVERED_WITH_NOTE: the driver's Delivered with a note (WARN, never a toast); a note that only
  *   confirms the delivery ("delivered", "received", "delivered at 11:25"; text.ts noteOnlyConfirms) is
- *   not news.
- * - R9 PROOF_FAR: a photo or result more than T from the customer's pin, only when the pin is verified and
- *   not on the "Pin may be wrong" list (M1); HIGH beyond 4T.
+ *   not news; a note with any other number ("18/20", "50%") is (M5).
+ * - R9 PROOF_FAR: read like "Pin may be wrong" (lib/delivery/pin-check.ts, H3): the median distance of the
+ *   driver's delivery photos (each by the phone's position when it is good, else the photo's own
+ *   location; old photos and photos the office added left out), else the driver's own result position
+ *   when no later stop had activity before it; more than T from the customer's pin, only when the pin is
+ *   verified, not on the "Pin may be wrong" list (M1) and not moved since the visit was planned. HIGH
+ *   beyond 4T.
  * - R10 LOAD_NOT_CLOSED: a DISPATCHED load T after its planned return with no Back at depot or a stop
- *   without a result.
+ *   without a result; the truck out on its next load counts as back; a WARN only when every result is in
+ *   (M8: paperwork).
  * - R11 PAGE_NOT_OPENED: a dispatched truck-day whose driver page was not opened T after its first planned
  *   departure. R1, R3, R5, R6 (projected) and R10 follow the phone and are checked only on truck-days
  *   whose page was opened (H3): a truck without it raises this one WARN instead of a pile.
@@ -66,7 +88,7 @@ import {
   type AlertRule,
   type AlertTier,
 } from './catalog';
-import { projectLoad, type ProjectedStop, type Projection } from './projection';
+import { projectLoad, type ProjectedStop, type Projection, type ProjectionIn } from './projection';
 import {
   clockText,
   fmtDistance,
@@ -95,6 +117,12 @@ export interface FactPhoto {
   accuracyM: number | null;
   exifDistanceM: number | null;
   receivedAt: Date;
+  /** PHONE_AUTO / PHONE_MANUAL (the driver's phone) or DISPATCHER (added in the office); absent (an older export): the phone. */
+  source?: string;
+  /** Its own time is more than 15 min before the arrival or the Dispatch (DeliveryPhoto.oldPhoto): a gallery photo. */
+  oldPhoto?: boolean;
+  /** When it was taken (skew-corrected; absent in an older export: receivedAt is used). */
+  takenAt?: Date;
 }
 
 /** A stop's StopVisit (only the fields the rules read). */
@@ -142,6 +170,8 @@ export interface FactStop {
   priority: number | null;
   /** The customer's pin is verified and not on the "Pin may be wrong" list (R9). */
   pinVerified: boolean;
+  /** The visit was planned at a pin more than PIN_MOVED_M from the customer's pin now (corrected since: R9 leaves it out). */
+  pinMoved?: boolean;
   visit: FactVisit | null;
 }
 
@@ -231,6 +261,7 @@ class Out {
   readonly active: Candidate[] = [];
   readonly ended: Ended[] = [];
   readonly held: { rule: AlertRule; subjectKey: string }[] = [];
+  readonly failures: { rule: AlertRule; message: string }[] = [];
   constructor(
     readonly facts: AlertFacts,
     readonly now: Date,
@@ -260,6 +291,32 @@ class Out {
   hold(rule: AlertRule, subjectKey: string): void {
     this.held.push({ rule, subjectKey });
   }
+
+  /** No longer followed while still true (past the planned return, too old): the row closes as NOT_FOLLOWED, never "over". */
+  unfollow(rule: AlertRule, subjectKey: string, text: string): void {
+    this.ended.push({ rule, subjectKey, reason: 'NOT_FOLLOWED', text });
+  }
+
+  /** The open row stays as it is when there is one; else nothing is raised (the words say why). */
+  holdOrEnd(rule: AlertRule, subjectKey: string, text: string): void {
+    if (this.isOpen(rule, subjectKey)) this.hold(rule, subjectKey);
+    else this.end(rule, subjectKey, text);
+  }
+
+  /** A rule threw on a load: every open row of the rule for that load (or a stop of it) stays as it is. */
+  failed(rule: AlertRule, loadKey: string, err: unknown): void {
+    this.failures.push({ rule, message: ((err as Error)?.message ?? String(err)).slice(0, 200) });
+    const prefix = openKey(rule, loadKey);
+    for (const k of this.facts.open.keys()) {
+      if (k === prefix || k.startsWith(`${prefix}|`)) this.hold(rule, k.slice(rule.length + 1));
+    }
+  }
+}
+
+/** When the truck left: the time and the words ("back at the depot at 16:00", "out on L2 since 13:10"). */
+interface Left {
+  at: Date;
+  text: string;
 }
 
 /** What every rule of one load reads. */
@@ -271,17 +328,26 @@ interface LoadCtx {
   nowMin: number;
   td: FactTruckDay | null;
   pageOpened: boolean;
-  /** DISPATCHED loads only. */
+  /** DISPATCHED loads only, and the input it was worked out from (the occurredAt search re-runs it). */
   proj: Projection | null;
+  projIn: ProjectionIn | null;
   /** DRIVER_SILENT is raised (or held open) for this load in this sweep. */
   silent: boolean;
+  /** UNLOAD_OVER is raised for this stop of the load in this sweep (M2: R3 and the projected R6 wait). */
+  unloadingSeq: number | null;
   /** The stops of the load, in sequence, by index: a later stop has activity. */
   laterActivity: boolean[];
+  /** The truck is back: Back at depot, or out on a later load of the day (null: not known to be back). */
+  back: Left | null;
+  /** Past the planned return + RETURN_GRACE_MIN, or a load of an earlier day. */
+  pastReturn: boolean;
 }
 
 const has = (v: number | null | undefined): v is number => v !== null && v !== undefined && Number.isFinite(v);
 const minutesBetween = (a: Date, b: Date) => (b.getTime() - a.getTime()) / 60_000;
 const dateAt = (dayStart: Date, min: number) => new Date(dayStart.getTime() + min * 60_000);
+const earliest = <T extends { at: Date }>(list: readonly (T | null | undefined)[]): T | null =>
+  list.reduce<T | null>((a, b) => (b && (!a || b.at < a.at) ? b : a), null);
 
 function base(c: LoadCtx): Pick<Candidate, 'depotId' | 'deliveryDate' | 'truckId' | 'truckCode' | 'loadNo' | 'sequence' | 'customerId'> {
   return { depotId: c.load.depotId, deliveryDate: c.load.date, truckId: c.load.truckId, truckCode: c.load.truckCode, loadNo: c.load.loadNo, sequence: null, customerId: null };
@@ -305,27 +371,105 @@ const windowStartOf = (s: FactStop) => (s.visit?.windowStartMin ?? null) ?? s.wi
 const plannedServiceOf = (s: FactStop) => (s.visit?.plannedServiceMin ?? null) ?? s.plannedServiceMin;
 const stopsWithoutResult = (l: FactLoad) => l.stops.filter((s) => !s.visit?.outcome).length;
 
-/** The first arrival, departure or result at a stop after index `i` that came after `since` (null: none). */
+/** A photo of the driver's phone taken there and then (an office upload or an old gallery photo is no sign of the truck). */
+const phonePhoto = (p: FactPhoto) => (p.source === undefined || PHONE_SOURCES.has(p.source)) && !p.oldPhoto;
+/** The first delivery photo the driver's phone took at the stop (null: none). */
+function firstPhotoAt(v: FactVisit | null | undefined): Date | null {
+  let first: Date | null = null;
+  for (const p of v?.photos ?? []) {
+    if (!phonePhoto(p)) continue;
+    const t = p.takenAt ?? p.receivedAt;
+    if (!first || t < first) first = t;
+  }
+  return first;
+}
+
+/** The times a stop shows activity: arrival, departure, result, the first phone photo. */
+const activityTimes = (s: FactStop): Date[] => [s.visit?.arrivedAt, s.visit?.departedAt, s.visit?.outcomeAt, firstPhotoAt(s.visit)].filter((t): t is Date => !!t);
+
+/** The first activity at a stop after index `i` that came after `since` (null: none). */
 function laterActivityAfter(stops: readonly FactStop[], i: number, since: Date): Date | null {
   let first: Date | null = null;
   for (const s of stops.slice(i + 1)) {
-    for (const t of [s.visit?.arrivedAt, s.visit?.departedAt, s.visit?.outcomeAt]) {
-      if (t && t > since && (!first || t < first)) first = t;
-    }
+    for (const t of activityTimes(s)) if (t > since && (!first || t < first)) first = t;
   }
   return first;
+}
+
+/** A stop after index `i` had activity before `t`. */
+const laterActivityBefore = (stops: readonly FactStop[], i: number, t: Date) => stops.slice(i + 1).some((s) => activityTimes(s).some((x) => x < t));
+
+/**
+ * The truck is back from this load (null: not known): Back at depot, or out on a later load of the
+ * day - a stop of it has activity, or its Dispatch press came no earlier than RETURN_GRACE_MIN before
+ * this load's planned return (Dispatch may be pressed for every load in the morning). Never after now.
+ */
+function backOf(l: FactLoad, truckDayLoads: readonly FactLoad[], now: Date, tz: string): Left | null {
+  const found: Left[] = [];
+  if (l.backAt && l.backAt <= now) found.push({ at: l.backAt, text: `back at the depot at ${clockText(l.backAt, l.date, tz)}` });
+  for (const x of truckDayLoads) {
+    if (x.loadNo <= l.loadNo || !ON_ROAD.has(x.status)) continue;
+    const times = x.stops.flatMap(activityTimes);
+    if (x.status === 'DISPATCHED' && x.statusChangedAt && minutesOnDate(x.statusChangedAt, l.date, tz) >= l.returnMin - RETURN_GRACE_MIN) times.push(x.statusChangedAt);
+    const at = times.filter((t) => t <= now).reduce<Date | null>((a, b) => (!a || b < a ? b : a), null);
+    if (at) found.push({ at, text: `the truck is out on L${x.loadNo} since ${clockText(at, l.date, tz)}` });
+  }
+  return earliest(found);
+}
+
+/**
+ * The first minute from `fromMin` to `toMin` at which `value(m)` reaches `threshold` (null: never): every
+ * condition is dated to when it began, also when the projection made it so (L2 of the review: a truck
+ * already late at a switch-on is backlog, whatever made it late). `value` only grows with the minute.
+ */
+function firstMinuteAt(value: (m: number) => number | null, threshold: number, fromMin: number, toMin: number): number | null {
+  const reached = (m: number) => {
+    const v = value(m);
+    return v !== null && v >= threshold;
+  };
+  if (toMin < fromMin || !reached(toMin)) return null;
+  if (reached(fromMin)) return fromMin;
+  let lo = fromMin;
+  let hi = toMin;
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (reached(mid)) hi = mid;
+    else lo = mid;
+  }
+  return hi;
+}
+
+/** The last minute any fact the projection read happened (the occurredAt search starts there). */
+function lastFactMin(p: ProjectionIn): number {
+  const all = [p.dispatchMin, p.phoneSeenMin, ...p.stops.flatMap((s) => [s.arrivedMin, s.endMin])].filter(has);
+  return Math.min(p.nowMin, all.length ? Math.max(...all) : p.departMin);
+}
+
+/** When a projected value (R3's delay, R6's margin) of the load reached `threshold`: its instant, else now. */
+function projectedSince(c: LoadCtx, now: Date, threshold: number, value: (p: Projection) => number | null): Date {
+  const pin = c.projIn;
+  if (!pin) return now;
+  const m = firstMinuteAt((nowMin) => value(projectLoad({ ...pin, nowMin })), threshold, lastFactMin(pin), pin.nowMin);
+  return m === null ? now : dateAt(c.dayStart, m);
 }
 
 // ---------------------------------------------------------------------------------------------
 // R1 UNLOAD_OVER
 // ---------------------------------------------------------------------------------------------
 
+/** The first time after `since` the truck had certainly left stop `i`: a later stop's first tap, the truck back. */
+function stopLeftBy(c: LoadCtx, i: number, since: Date, tz: string): Left | null {
+  const moved = laterActivityAfter(c.load.stops, i, since);
+  return earliest<Left>([moved ? { at: moved, text: `the truck reached a later stop at ${clockText(moved, c.load.date, tz)}` } : null, c.back && c.back.at > since ? c.back : null]);
+}
+
 function unloadOver(out: Out, c: LoadCtx): void {
   const rule: AlertRule = 'UNLOAD_OVER';
   const T = out.on(rule);
   if (T === null) return;
   const tz = out.facts.tz;
-  c.load.stops.forEach((s, i) => {
+  const l = c.load;
+  l.stops.forEach((s, i) => {
     const key = stopKey(c, s);
     const label = `${c.label} ${stopLabel(s)}`;
     const v = s.visit;
@@ -340,17 +484,31 @@ function unloadOver(out: Out, c: LoadCtx): void {
     const fromWindow = start !== v.arrivedAt;
     const later = c.laterActivity[i] ?? false;
     const noEnd = !v.departedAt && !v.outcomeAt;
-    // A load the office completed is not being unloaded any more (15 Oct 2026 replay: a stop of a load
-    // completed at 12:18 stayed "unloading" for 12 h).
-    if (noEnd && !later && c.load.status === 'COMPLETED') return out.end(rule, key, `${label}: no result or departure tapped; the load was completed.`);
-    const live = noEnd && !later;
     const occurredAt = new Date(start.getTime() + (planned + T) * 60_000);
-    if (live) {
+    if (noEnd) {
+      // A load the office completed is not being unloaded any more (15 Oct 2026 replay: a stop of a load
+      // completed at 12:18 stayed "unloading" for 12 h).
+      if (!later && l.status === 'COMPLETED') return out.end(rule, key, `${label}: no result or departure tapped; the load was completed.`);
+      if (later) {
+        const next = l.stops.slice(i + 1).find((x) => activityTimes(x).length);
+        const at = next ? activityTimes(next).reduce((a, b) => (b < a ? b : a)) : null;
+        return out.end(rule, key, `${label}: no departure or result was tapped; the truck moved on to stop ${next?.sequence ?? '?'}${at ? ` at ${clockText(at, l.date, tz)}` : ''}.`);
+      }
+      // H1: the truck is back (Back at depot, or out on its next load) - it is not unloading here any more.
+      const left = c.back && c.back.at > v.arrivedAt ? c.back : null;
+      if (left) return out.end(rule, key, `${label}: no departure or result was tapped; ${left.text}.`);
+      // Past the planned return + 60 min: no longer followed ("Load not closed" follows the load).
+      if (c.pastReturn) return out.unfollow(rule, key, `${label}: no departure or result tapped; past the planned return ${planTime(l.returnMin)} + ${RETURN_GRACE_MIN} min it is no longer followed (see "Load not closed").`);
       const elapsed = Math.max(0, minutesBetween(start, out.now));
       const over = elapsed - planned;
       const tier = tierAt(over, T);
       if (!tier) return out.end(rule, key, `${label}: unloading within the planned time + ${T} min.`);
-      const since = `since arrival ${clockText(v.arrivedAt, c.load.date, tz)}${v.arrivalObserved ? '' : ' (arrival time not certain)'}${fromWindow ? `, counted from the window start ${planTime(winStart)}` : ''}`;
+      c.unloadingSeq = s.sequence;
+      const since = `since arrival ${clockText(v.arrivedAt, l.date, tz)}${v.arrivalObserved ? '' : ' (arrival time not certain)'}${fromWindow ? `, counted from the window start ${planTime(winStart)}` : ''}`;
+      // M2: the knock-on delay is told here (R3 and the projected R6 wait while this is raised).
+      const nx = c.proj?.next ?? null;
+      const nextStop = nx ? l.stops.find((x) => x.sequence === nx.sequence) : null;
+      const knock = nx && nextStop && has(nx.delayMin) && nx.delayMin > 0 && has(nx.arrMin) ? ` Next: ${stopLabel(nextStop)} now expected about ${planTime(nx.arrMin)} (planned ${planTime(nextStop.etaMin)}).` : '';
       return out.raise({
         ...stopBase(c, s),
         rule,
@@ -359,30 +517,31 @@ function unloadOver(out: Out, c: LoadCtx): void {
         tier,
         value: over,
         threshold: T,
-        text: `${label}: no result or departure tapped ${since} - ${fmtDuration(elapsed)} at the stop, planned ${fmtDuration(planned)} (${fmtDuration(over)} over).`,
+        text: `${label}: no result or departure tapped ${since} - ${fmtDuration(elapsed)} at the stop, planned ${fmtDuration(planned)} (${fmtDuration(over)} over).${knock}`,
         occurredAt,
         facts: { elapsedMin: Math.round(elapsed), plannedMin: planned, observed: v.arrivalObserved },
       });
     }
-    if (later && !v.departedAt && !v.outcomeAt) {
-      const next = c.load.stops.slice(i + 1).find((x) => x.visit?.arrivedAt || x.visit?.outcomeAt);
-      const at = next?.visit?.arrivedAt ?? next?.visit?.outcomeAt ?? null;
-      return out.end(rule, key, `${label}: no departure or result was tapped; the truck moved on to stop ${next?.sequence ?? '?'}${at ? ` at ${clockText(at, c.load.date, tz)}` : ''}.`);
-    }
     const actual = actualMinutes(v);
     let took = actual.min;
-    // The unloading ended at the latest when the truck showed up at a later stop: a result tapped hours
-    // later (results recorded in a batch, a customer who sent the driver away and called him back) is not
-    // the end of the unloading (15 Oct 2026 replay: "2 h 40 min" at a stop the truck had left after 52 min).
-    const moved = !actual.auto && took !== null ? laterActivityAfter(c.load.stops, i, v.arrivedAt) : null;
-    const capped = moved !== null && took !== null && minutesBetween(v.arrivedAt, moved) < took;
-    if (capped) took = minutesBetween(v.arrivedAt, moved!);
+    // The unloading ended at the latest when the truck showed up at a later stop, was back, or at the
+    // planned return + 60 min: a result tapped hours later (results recorded in a batch, a customer who
+    // sent the driver away and called him back) is not the end of the unloading (15 Oct 2026 replay:
+    // "2 h 40 min" at a stop the truck had left after 52 min; review L4: the last stop).
+    let until = '';
+    if (!actual.auto && took !== null) {
+      const retAt = dateAt(c.dayStart, l.returnMin + RETURN_GRACE_MIN);
+      const cap = earliest<Left>([stopLeftBy(c, i, v.arrivedAt, tz), retAt > v.arrivedAt ? { at: retAt, text: `the planned return ${planTime(l.returnMin)} + ${RETURN_GRACE_MIN} min` } : null]);
+      if (cap && minutesBetween(v.arrivedAt, cap.at) < took) {
+        took = minutesBetween(v.arrivedAt, cap.at);
+        until = ` (until ${cap.text})`;
+      }
+    }
     if (took === null) {
       const who = v.outcomeSource === 'DISPATCHER' ? 'the result was recorded by the office' : 'the unloading time is not known';
       return out.end(rule, key, `${label}: ${who}.`);
     }
     const over = took - planned;
-    const until = capped ? ` (until the truck reached a later stop at ${clockText(moved!, c.load.date, tz)})` : '';
     const final = `${label}: unloading took ${fmtDuration(took)}${until}, planned ${fmtDuration(planned)}${over > 0 ? ` (${fmtDuration(over)} over)` : ''}.`;
     const tier = tierAt(over, T);
     // A stop that ended over the limit before any sweep saw it live: kept as history (no toast, no e-mail).
@@ -407,7 +566,7 @@ function loadingOver(out: Out, c: LoadCtx): void {
   const when = (at: Date) => clockText(at, out.facts.today, tz);
   if (l.status === 'LOADING' && start && !l.loadedAt) {
     const elapsed = minutesBetween(start, out.now);
-    if (elapsed > LOADING_START_MAX_AGE_MIN) return out.end(rule, c.key, `${c.label}: no Loaded press ${fmtDuration(LOADING_START_MAX_AGE_MIN)} after Loading at ${when(start)}: no longer followed.`);
+    if (elapsed > LOADING_START_MAX_AGE_MIN) return out.unfollow(rule, c.key, `${c.label}: no Loaded press ${fmtDuration(LOADING_START_MAX_AGE_MIN)} after Loading at ${when(start)}: no longer followed.`);
     const tier = tierAt(elapsed, T);
     if (!tier) return out.end(rule, c.key, `${c.label}: loading within ${T} min.`);
     const dep = l.date === out.facts.today ? planTime(l.departMin) : `${fmtDayMonth(l.date)} ${planTime(l.departMin)}`;
@@ -443,8 +602,8 @@ function windowJudgedMin(c: LoadCtx, p: { arrMin: number | null; depMin: number 
 }
 
 /** The first pending stop with a delivery window (the one AFTER_CLOSING projects: H5). */
-function nextWithWindowOf(c: LoadCtx): ProjectedStop | null {
-  return c.proj?.stops.find((p) => p.state === 'PENDING' && has(windowEndOf(c.load.stops.find((s) => s.sequence === p.sequence)!))) ?? null;
+function nextWithWindowOf(c: LoadCtx, proj: Projection | null = c.proj): ProjectedStop | null {
+  return proj?.stops.find((p) => p.state === 'PENDING' && has(windowEndOf(c.load.stops.find((s) => s.sequence === p.sequence)!))) ?? null;
 }
 
 function etaLate(out: Out, c: LoadCtx): void {
@@ -452,18 +611,17 @@ function etaLate(out: Out, c: LoadCtx): void {
   const T = out.on(rule);
   if (T === null) return;
   const l = c.load;
-  const tz = out.facts.tz;
   if (l.status !== 'DISPATCHED') return out.end(rule, c.key, `${c.label}: ${STATUS_WORD[l.status] ?? l.status}.`);
-  if (l.backAt) return out.end(rule, c.key, `${c.label}: back at the depot at ${clockText(l.backAt, l.date, tz)}.`);
+  if (c.back) return out.end(rule, c.key, `${c.label}: ${c.back.text}.`);
   if (!c.pageOpened) return out.end(rule, c.key, `${c.label}: the driver page was not opened, so the delay cannot be worked out.`);
   const proj = c.proj!;
   const next = proj.next;
   if (!next) return out.end(rule, c.key, `${c.label}: no stop left to reach.`);
-  if (c.nowMin > l.returnMin + RETURN_GRACE_MIN) return out.end(rule, c.key, `${c.label}: past the planned return (${planTime(l.returnMin)}): see "Load not closed".`);
-  if (c.silent) {
-    if (out.isOpen(rule, c.key)) out.hold(rule, c.key);
-    else out.end(rule, c.key, `${c.label}: the driver is silent, so the delay cannot be worked out.`);
-    return;
+  if (c.pastReturn) return out.unfollow(rule, c.key, `${c.label}: past the planned return (${planTime(l.returnMin)}): no longer followed, see "Load not closed".`);
+  if (c.silent) return out.holdOrEnd(rule, c.key, `${c.label}: the driver is silent, so the delay cannot be worked out.`);
+  if (c.unloadingSeq !== null) {
+    const at = l.stops.find((s) => s.sequence === c.unloadingSeq)!;
+    return out.holdOrEnd(rule, c.key, `${c.label}: unloading at ${stopLabel(at)} takes longer than planned (see "Unloading longer than planned").`);
   }
   const delay = next.delayMin;
   if (!has(delay)) return out.end(rule, c.key, `${c.label}: the next stop has no planned time.`);
@@ -475,7 +633,9 @@ function etaLate(out: Out, c: LoadCtx): void {
   const about = proj.approximate ? 'roughly' : 'about';
   const nextText = next.clockBound
     ? `next ${stopLabel(stop)} not reached yet (planned ${planTime(stop.etaMin)})`
-    : `next ${stopLabel(stop)} expected ${about} ${planTime(next.arrMin)} (planned ${planTime(stop.etaMin)})`;
+    : next.phoneHeld
+      ? `no arrival recorded yet at the next ${stopLabel(stop)} (expected ${about} ${planTime(next.arrMin)}, planned ${planTime(stop.etaMin)})`
+      : `next ${stopLabel(stop)} expected ${about} ${planTime(next.arrMin)} (planned ${planTime(stop.etaMin)})`;
   // The stops left that may miss their window (H5: folded in here, one alert per truck), except the one
   // AFTER_CLOSING follows itself when it is on (the next pending stop with a window).
   const t6 = out.on('AFTER_CLOSING');
@@ -490,7 +650,8 @@ function etaLate(out: Out, c: LoadCtx): void {
     })
     .map((p) => p.sequence);
   const risk = atRisk.length ? ` ${sequencesText(atRisk).replace(/^s/, 'S')} may miss ${atRisk.length === 1 ? 'its' : 'their'} delivery window.` : '';
-  const occurredAt = next.clockBound && has(stop.etaMin) ? dateAt(c.dayStart, stop.etaMin + T) : out.now;
+  // Dated to when the delay reached T (L2: a truck already late at the switch-on is backlog either way).
+  const occurredAt = projectedSince(c, out.now, T, (p) => (p.next?.sequence === next.sequence ? p.next.delayMin : null));
   return out.raise({
     ...base(c),
     rule,
@@ -509,35 +670,69 @@ function etaLate(out: Out, c: LoadCtx): void {
 // R4 DEPART_LATE
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * When a later trip is counted from (M6): the later of its planned departure and the previous load's
+ * return + the planned turnaround (this trip's planned departure - that load's planned return). The
+ * return: Back at depot; else the Completed press when it came before the planned return +
+ * RETURN_GRACE_MIN; else, once that has passed (or the load was completed later), the planned return +
+ * RETURN_GRACE_MIN (lib/delivery/day-results.ts loadIsBack). `out`: the previous load is still out.
+ */
+function departRef(c: LoadCtx, prev: FactLoad | undefined, tz: string): { ref: number; text: string } | { out: FactLoad } {
+  const l = c.load;
+  if (!prev) return { ref: l.departMin, text: '' };
+  const turnaround = Math.max(0, l.departMin - prev.returnMin);
+  let backMin: number;
+  let how: string;
+  if (prev.backAt) {
+    backMin = minutesOnDate(prev.backAt, l.date, tz);
+    how = `L${prev.loadNo} back ${clockText(prev.backAt, l.date, tz)}`;
+  } else if (prev.status === 'COMPLETED' && prev.statusChangedAt && minutesOnDate(prev.statusChangedAt, l.date, tz) < prev.returnMin + RETURN_GRACE_MIN) {
+    // Completed by the office before its planned return + 60 min: the truck was back by then.
+    backMin = minutesOnDate(prev.statusChangedAt, l.date, tz);
+    how = `L${prev.loadNo} completed ${clockText(prev.statusChangedAt, l.date, tz)}`;
+  } else if (prev.status === 'COMPLETED' || c.nowMin >= prev.returnMin + RETURN_GRACE_MIN) {
+    backMin = prev.returnMin + RETURN_GRACE_MIN;
+    how = `L${prev.loadNo} taken as back at ${planTime(backMin)} (no Back at depot)`;
+  } else return { out: prev };
+  const from = backMin + turnaround;
+  if (from <= l.departMin) return { ref: l.departMin, text: '' };
+  return { ref: from, text: ` (${how}, + the planned ${fmtDuration(turnaround)} turnaround: counted from ${planTime(from)})` };
+}
+
 function departLate(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): void {
   const rule: AlertRule = 'DEPART_LATE';
   const T = out.on(rule);
   if (T === null) return;
   const l = c.load;
   const tz = out.facts.tz;
+  const earlier = truckDayLoads.filter((x) => x.loadNo < l.loadNo).sort((a, b) => a.loadNo - b.loadNo);
+  const prev = earlier[earlier.length - 1];
   if (ON_ROAD.has(l.status)) {
     if (l.status !== 'DISPATCHED' || !l.statusChangedAt) return out.end(rule, c.key, `${c.label}: ${STATUS_WORD[l.status] ?? l.status}.`);
     const dispatchMin = minutesOnDate(l.statusChangedAt, l.date, tz);
-    const lateBy = dispatchMin - l.departMin;
-    const final = `${c.label} dispatched ${clockText(l.statusChangedAt, l.date, tz)}${lateBy > 0 ? `, ${fmtDuration(lateBy)} after the planned ${planTime(l.departMin)}` : ` (planned ${planTime(l.departMin)})`}.`;
+    // After the press only a tapped return of the previous load moves the reference (the truck left again, so it was back).
+    const ref = prev?.backAt ? Math.max(l.departMin, minutesOnDate(prev.backAt, l.date, tz) + Math.max(0, l.departMin - prev.returnMin)) : l.departMin;
+    const lateBy = dispatchMin - ref;
+    const behind = dispatchMin - l.departMin;
+    const counted = ref > l.departMin ? ` (counted from ${planTime(ref)}: L${prev!.loadNo} came back late)` : '';
+    const final = `${c.label} dispatched ${clockText(l.statusChangedAt, l.date, tz)}${behind > 0 ? `, ${fmtDuration(behind)} after the planned ${planTime(l.departMin)}${counted}` : ` (planned ${planTime(l.departMin)})`}.`;
     const tier = tierAt(lateBy, T);
     const recent = minutesBetween(l.statusChangedAt, out.now) <= DEPART_LATE_HISTORY_MIN;
     // Found only after the Dispatch press (pressed between two sweeps, or the sweep was not running): history.
     if (!out.isOpen(rule, c.key) && tier && recent && l.date === out.facts.today) {
-      return out.raise({ ...base(c), rule, kind: 'CONDITION', subjectKey: c.key, tier, value: lateBy, threshold: T, text: final, occurredAt: l.statusChangedAt, history: true, facts: { dispatchMin } });
+      return out.raise({ ...base(c), rule, kind: 'CONDITION', subjectKey: c.key, tier, value: lateBy, threshold: T, text: final, occurredAt: l.statusChangedAt, history: true, facts: { dispatchMin, refMin: ref } });
     }
     return out.end(rule, c.key, final);
   }
   if (l.date !== out.facts.today) return out.end(rule, c.key, `${c.label}: still ${STATUS_WORD[l.status] ?? l.status}, the day is over.`);
   if (!l.stopCount) return out.end(rule, c.key, `${c.label}: no stops.`);
-  const earlier = truckDayLoads.filter((x) => x.loadNo < l.loadNo).sort((a, b) => a.loadNo - b.loadNo);
   if (l.status === 'PLANNED' && !earlier.some((x) => x.status !== 'PLANNED')) return out.end(rule, c.key, `${c.label}: Planned (not locked).`);
   const notOut = earlier.find((x) => !ON_ROAD.has(x.status));
   if (notOut) return out.end(rule, c.key, `${c.label}: Load ${notOut.loadNo} of this truck is not dispatched yet.`);
-  const stillOut = earlier.find((x) => x.status === 'DISPATCHED' && !x.backAt);
-  if (stillOut) return out.end(rule, c.key, `${c.label}: Load ${stillOut.loadNo} of this truck is still out.`);
-  const late = c.nowMin - l.departMin;
-  if (late > DEPART_LATE_EXPIRE_MIN) return out.end(rule, c.key, `${c.label}: still not dispatched ${fmtDuration(DEPART_LATE_EXPIRE_MIN)} after the planned departure ${planTime(l.departMin)}: no longer followed.`);
+  const r = departRef(c, prev, tz);
+  if ('out' in r) return out.end(rule, c.key, `${c.label}: Load ${r.out.loadNo} of this truck is still out.`);
+  const late = c.nowMin - r.ref;
+  if (late > DEPART_LATE_EXPIRE_MIN) return out.unfollow(rule, c.key, `${c.label}: still not dispatched ${fmtDuration(DEPART_LATE_EXPIRE_MIN)} after ${planTime(r.ref)}: no longer followed.`);
   const tier = tierAt(late, T);
   if (!tier) return out.end(rule, c.key, `${c.label}: not late.`);
   const seen = c.td?.linkSeenAt ? ` Driver page last open ${clockText(c.td.linkSeenAt, l.date, tz)}.` : '';
@@ -549,9 +744,9 @@ function departLate(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): v
     tier,
     value: late,
     threshold: T,
-    text: `${c.label} not dispatched: planned departure ${planTime(l.departMin)}, now ${clockText(out.now, l.date, tz)} (${fmtDuration(late)} late), load is ${STATUS_WORD[l.status] ?? l.status}.${seen} Dispatch it if it has left.`,
-    occurredAt: dateAt(c.dayStart, l.departMin + T),
-    facts: { departMin: l.departMin, status: l.status },
+    text: `${c.label} not dispatched: planned departure ${planTime(l.departMin)}${r.text}, now ${clockText(out.now, l.date, tz)} (${fmtDuration(late)} late), load is ${STATUS_WORD[l.status] ?? l.status}.${seen} Dispatch it if it has left.`,
+    occurredAt: dateAt(c.dayStart, r.ref + T),
+    facts: { departMin: l.departMin, refMin: r.ref, status: l.status },
   });
 }
 
@@ -586,8 +781,10 @@ function driverSilent(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]):
   const l = c.load;
   const tz = out.facts.tz;
   if (l.status !== 'DISPATCHED') return out.end(rule, c.key, `${c.label}: ${STATUS_WORD[l.status] ?? l.status}.`);
-  if (l.backAt) return out.end(rule, c.key, `${c.label}: back at the depot at ${clockText(l.backAt, l.date, tz)}.`);
+  if (c.back) return out.end(rule, c.key, `${c.label}: ${c.back.text}.`);
   if (!c.pageOpened) return out.end(rule, c.key, `${c.label}: the driver page was not opened.`);
+  // M1: past the planned return + 60 min (or a load of an earlier day) "Load not closed" follows it.
+  if (c.pastReturn) return out.unfollow(rule, c.key, `${c.label}: past the planned return (${planTime(l.returnMin)}): no longer followed, see "Load not closed".`);
   const proj = c.proj!;
   if (!proj.next) return out.end(rule, c.key, `${c.label}: no stop left to reach.`);
   const inProgress = proj.inProgress ? l.stops.find((s) => s.sequence === proj.inProgress!.sequence) : null;
@@ -663,7 +860,8 @@ function afterClosing(out: Out, c: LoadCtx): void {
           rule,
           kind: 'EVENT',
           subjectKey: key,
-          tier: 2,
+          // M4: a warning, high beyond 2T (16 min after a 15-min margin is not a page).
+          tier: tierAt(over, T, ALERT_RULE_SPECS[rule].maxTier) as AlertTier,
           value: over,
           threshold: T,
           text: `${label}: arrived ${clockText(v.arrivedAt, l.date, tz)}, after its delivery window ended at ${planTime(end)} (${fmtDuration(over)} late).`,
@@ -674,7 +872,7 @@ function afterClosing(out: Out, c: LoadCtx): void {
       continue;
     }
     const p = proj?.stops.find((x) => x.sequence === s.sequence) ?? null;
-    if (l.status !== 'DISPATCHED' || !p || p.state !== 'PENDING' || l.backAt) {
+    if (l.status !== 'DISPATCHED' || !p || p.state !== 'PENDING' || c.back) {
       out.end(rule, key, `${label}: not expected any more.`);
       continue;
     }
@@ -686,13 +884,16 @@ function afterClosing(out: Out, c: LoadCtx): void {
       out.end(rule, key, `${label}: another stop comes first.`);
       continue;
     }
-    if (c.nowMin > l.returnMin + RETURN_GRACE_MIN) {
-      out.end(rule, key, `${label}: past the planned return (${planTime(l.returnMin)}).`);
+    if (c.pastReturn) {
+      out.unfollow(rule, key, `${label}: past the planned return (${planTime(l.returnMin)}): no longer followed.`);
       continue;
     }
     if (c.silent) {
-      if (out.isOpen(rule, key)) out.hold(rule, key);
-      else out.end(rule, key, `${label}: the driver is silent.`);
+      out.holdOrEnd(rule, key, `${label}: the driver is silent.`);
+      continue;
+    }
+    if (c.unloadingSeq !== null) {
+      out.holdOrEnd(rule, key, `${label}: the unloading at stop ${c.unloadingSeq} takes longer than planned.`);
       continue;
     }
     const judged = windowJudgedMin(c, p);
@@ -718,7 +919,12 @@ function afterClosing(out: Out, c: LoadCtx): void {
       value: over,
       threshold: T,
       text: `${label}: ${what}, after its delivery window ends at ${planTime(end)} (${must}).`,
-      occurredAt: out.now,
+      // Dated to when the projection first put it past the margin (L2).
+      occurredAt: projectedSince(c, out.now, T, (pr) => {
+        const q = nextWithWindowOf(c, pr);
+        const j = q?.sequence === s.sequence ? windowJudgedMin(c, q) : null;
+        return has(j) ? j - end : null;
+      }),
       facts: { projectedMin: judged, windowEndMin: end, windowRule: l.windowRule },
     });
   }
@@ -798,50 +1004,74 @@ function deliveredWithNote(out: Out, c: LoadCtx): void {
   }
 }
 
+const median = (xs: readonly number[]) => {
+  const a = [...xs].sort((x, y) => x - y);
+  const mid = Math.floor(a.length / 2);
+  return a.length % 2 ? a[mid]! : (a[mid - 1]! + a[mid]!) / 2;
+};
+
 function proofFar(out: Out, c: LoadCtx): void {
   const rule: AlertRule = 'PROOF_FAR';
   const T = out.on(rule);
   if (T === null) return;
   const tz = out.facts.tz;
-  for (const s of c.load.stops) {
+  const l = c.load;
+  l.stops.forEach((s, i) => {
     const key = stopKey(c, s);
     const label = `${c.label} ${stopLabel(s)}`;
     const v = s.visit;
-    if (!s.pinVerified) {
-      out.end(rule, key, `${label}: the customer's pin is not verified, so it is not checked.`);
-      continue;
-    }
-    type Far = { m: number; at: Date; what: string };
-    const far: Far[] = [];
-    for (const ph of v?.photos ?? []) {
-      if (ph.positionStatus === 'OK' && has(ph.distanceM) && ph.distanceM > T) {
-        far.push({ m: ph.distanceM, at: ph.receivedAt, what: `delivery photo taken ${fmtDistance(ph.distanceM)} from the customer's pin (phone location${has(ph.accuracyM) ? `, accuracy ${Math.round(ph.accuracyM)} m` : ''}, ${clockText(ph.receivedAt, c.load.date, tz)})` });
+    if (!s.pinVerified) return out.end(rule, key, `${label}: the customer's pin is not verified, so it is not checked.`);
+    // Planned at an older pin: the distances were measured to it, and the pin was corrected since (pin-check PIN_MOVED_M).
+    if (s.pinMoved) return out.end(rule, key, `${label}: the customer's pin was moved after this delivery was planned, so it is not checked.`);
+    // H3, as "Pin may be wrong" reads a visit: the driver's own photos, each by the phone's position when
+    // it is good, else by the photo's own location; their median distance. Without them, the driver's
+    // result position, unless the truck was already at a later stop before it (a result entered later).
+    const points = (v?.photos ?? []).filter(phonePhoto).flatMap((ph) => {
+      if (ph.positionStatus === 'OK' && has(ph.distanceM) && has(ph.accuracyM) && ph.accuracyM <= ALERT_EVIDENCE_MAX_ACCURACY_M) {
+        return [{ m: ph.distanceM, at: ph.receivedAt, what: `phone location, accuracy ${Math.round(ph.accuracyM)} m` }];
       }
-      if (has(ph.exifDistanceM) && ph.exifDistanceM > T) {
-        far.push({ m: ph.exifDistanceM, at: ph.receivedAt, what: `delivery photo taken ${fmtDistance(ph.exifDistanceM)} from the customer's pin (the photo's own location, ${clockText(ph.receivedAt, c.load.date, tz)})` });
-      }
+      if (has(ph.exifDistanceM)) return [{ m: ph.exifDistanceM, at: ph.receivedAt, what: "the photo's own location" }];
+      return [];
+    });
+    let m: number | null = null;
+    let at: Date | null = null;
+    let what = '';
+    if (points.length) {
+      m = median(points.map((p) => p.m));
+      at = points.reduce((a, b) => (b.at > a ? b.at : a), points[0]!.at);
+      what =
+        points.length === 1
+          ? `delivery photo taken ${fmtDistance(m)} from the customer's pin (${points[0]!.what}, ${clockText(at, l.date, tz)})`
+          : `${points.length} delivery photos taken about ${fmtDistance(m)} from the customer's pin (the middle of their distances; the last at ${clockText(at, l.date, tz)})`;
+    } else if (
+      v &&
+      (v.outcome === 'DELIVERED' || v.outcome === 'PARTLY_DELIVERED') &&
+      v.outcomeAt &&
+      v.outcomeSource &&
+      PHONE_SOURCES.has(v.outcomeSource) &&
+      has(v.outcomeDistanceM) &&
+      has(v.outcomeAccuracyM) &&
+      v.outcomeAccuracyM <= ALERT_EVIDENCE_MAX_ACCURACY_M &&
+      !laterActivityBefore(l.stops, i, v.outcomeAt)
+    ) {
+      m = v.outcomeDistanceM;
+      at = v.outcomeAt;
+      what = `result recorded ${fmtDistance(m)} from the customer's pin (accuracy ${Math.round(v.outcomeAccuracyM)} m, ${clockText(at, l.date, tz)})`;
     }
-    if (v && (v.outcome === 'DELIVERED' || v.outcome === 'PARTLY_DELIVERED') && v.outcomeAt && has(v.outcomeDistanceM) && v.outcomeDistanceM > T && has(v.outcomeAccuracyM) && v.outcomeAccuracyM <= ALERT_EVIDENCE_MAX_ACCURACY_M) {
-      far.push({ m: v.outcomeDistanceM, at: v.outcomeAt, what: `result recorded ${fmtDistance(v.outcomeDistanceM)} from the customer's pin (accuracy ${Math.round(v.outcomeAccuracyM)} m, ${clockText(v.outcomeAt, c.load.date, tz)})` });
-    }
-    if (!far.length) {
-      out.end(rule, key, `${label}: no photo or result far from the pin.`);
-      continue;
-    }
-    const worst = far.reduce((a, b) => (b.m > a.m ? b : a));
+    if (m === null || at === null || !(m > T)) return out.end(rule, key, `${label}: no photo or result far from the pin.`);
     out.raise({
       ...stopBase(c, s),
       rule,
       kind: 'EVENT',
       subjectKey: key,
-      tier: worst.m > PROOF_FAR_HIGH_FACTOR * T ? 2 : 1,
-      value: worst.m,
+      tier: m > PROOF_FAR_HIGH_FACTOR * T ? 2 : 1,
+      value: m,
       threshold: T,
-      text: `${label}: ${worst.what}. The pin or the place of the photo is wrong.`,
-      occurredAt: worst.at,
-      facts: { metres: Math.round(worst.m), items: far.length },
+      text: `${label}: ${what}. The pin or the place of the photo is wrong.`,
+      occurredAt: at,
+      facts: { metres: Math.round(m), photos: points.length },
     });
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -860,12 +1090,13 @@ function loadNotClosed(out: Out, c: LoadCtx): void {
   }
   if (!c.pageOpened) return out.end(rule, c.key, `${c.label}: the driver page was not opened (see "Driver page not opened").`);
   const missing = stopsWithoutResult(l);
-  if (l.backAt && missing === 0) return out.end(rule, c.key, `${c.label}: back at the depot with every result recorded: closing.`);
+  if (c.back && missing === 0) return out.end(rule, c.key, `${c.label}: ${c.back.text} with every result recorded: closing.`);
   const overdue = c.nowMin - l.returnMin;
-  const tier = tierAt(overdue, T, ALERT_RULE_SPECS[rule].maxTier);
+  // M8: with every result in, only Back at depot or the Completed press is missing: paperwork, a warning.
+  const tier = tierAt(overdue, T, missing ? ALERT_RULE_SPECS[rule].maxTier : 1);
   if (!tier) return out.end(rule, c.key, `${c.label}: not overdue.`);
-  const back = l.backAt ? `back at the depot ${clockText(l.backAt, l.date, tz)}` : 'no Back at depot';
-  const results = missing ? `, ${missing} of ${stopsText(l.stops.length)} without a result` : '';
+  const back = c.back ? c.back.text : 'no Back at depot';
+  const results = missing ? `, ${missing} of ${stopsText(l.stops.length)} without a result` : ', every result recorded';
   return out.raise({
     ...base(c),
     rule,
@@ -874,9 +1105,9 @@ function loadNotClosed(out: Out, c: LoadCtx): void {
     tier,
     value: overdue,
     threshold: T,
-    text: `${c.label} still not closed at ${clockText(out.now, l.date, tz)}: planned back ${planTime(l.returnMin)}, ${back}${results}. Record the results, then Completed.`,
+    text: `${c.label} still not closed at ${clockText(out.now, l.date, tz)}: planned back ${planTime(l.returnMin)}, ${back}${results}. ${missing ? 'Record the results, then Completed.' : 'Press Completed.'}`,
     occurredAt: dateAt(c.dayStart, l.returnMin + T),
-    facts: { returnMin: l.returnMin, missing, back: !!l.backAt },
+    facts: { returnMin: l.returnMin, missing, back: !!c.back },
   });
 }
 
@@ -945,11 +1176,14 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
   const lateDispatch = out.on('ETA_LATE');
   for (const l of facts.loads) {
     const td = tdOf.get(truckDayOf(l.date, l.truckId)) ?? null;
+    const truckDayLoads = dayLoads.get(truckDayOf(l.date, l.truckId)) ?? [l];
     const dayStart = zonedDayStart(l.date, tz);
     const nowMin = minutesOnDate(now, l.date, tz);
     const stopsIn = l.stops.map((s) => {
       const v = s.visit;
       const endAt = v?.departedAt ?? (v?.outcomeAt && v.outcomeSource !== 'DISPATCHER' ? v.outcomeAt : null);
+      // M3: a delivery photo of the driver's phone is the truck being there, when no arrival was recorded.
+      const arrAt = v?.arrivedAt ?? firstPhotoAt(v);
       return {
         sequence: s.sequence,
         etaMin: s.etaMin,
@@ -957,13 +1191,25 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
         departureMin: s.departureMin,
         plannedServiceMin: plannedServiceOf(s),
         windowStartMin: windowStartOf(s),
-        arrivedMin: v?.arrivedAt ? minutesOnDate(v.arrivedAt, l.date, tz) : null,
+        arrivedMin: arrAt ? minutesOnDate(arrAt, l.date, tz) : null,
         endMin: endAt ? minutesOnDate(endAt, l.date, tz) : null,
         hasOutcome: !!v?.outcome,
       };
     });
     const activity = stopsIn.map((s) => s.arrivedMin !== null || s.endMin !== null || s.hasOutcome);
     const laterActivity = activity.map((_, i) => activity.slice(i + 1).some(Boolean));
+    const projIn: ProjectionIn | null =
+      l.status === 'DISPATCHED'
+        ? {
+            departMin: l.departMin,
+            returnMin: l.returnMin,
+            dispatchMin: l.statusChangedAt ? minutesOnDate(l.statusChangedAt, l.date, tz) : null,
+            nowMin,
+            lateDispatchMin: lateDispatch,
+            phoneSeenMin: td?.lastSignal ? minutesOnDate(td.lastSignal.at, l.date, tz) : null,
+            stops: stopsIn,
+          }
+        : null;
     const c: LoadCtx = {
       load: l,
       label: loadLabel(l.truckCode, l.loadNo),
@@ -972,33 +1218,34 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
       nowMin,
       td,
       pageOpened: !!td?.pageOpened,
-      proj:
-        l.status === 'DISPATCHED'
-          ? projectLoad({
-              departMin: l.departMin,
-              returnMin: l.returnMin,
-              dispatchMin: l.statusChangedAt ? minutesOnDate(l.statusChangedAt, l.date, tz) : null,
-              nowMin,
-              lateDispatchMin: lateDispatch,
-              stops: stopsIn,
-            })
-          : null,
+      proj: projIn ? projectLoad(projIn) : null,
+      projIn,
       silent: false,
+      unloadingSeq: null,
       laterActivity,
+      back: backOf(l, truckDayLoads, now, tz),
+      pastReturn: l.date < facts.today || nowMin > l.returnMin + RETURN_GRACE_MIN,
     };
-    const truckDayLoads = dayLoads.get(truckDayOf(l.date, l.truckId)) ?? [l];
-    loadingOver(out, c);
-    departLate(out, c, truckDayLoads);
-    // DRIVER_SILENT first: ETA_LATE and the projected AFTER_CLOSING are held while it is raised.
-    driverSilent(out, c, truckDayLoads);
-    etaLate(out, c);
-    loadNotClosed(out, c);
+    const run = (rule: AlertRule, fn: () => void) => {
+      if (out.on(rule) === null) return;
+      try {
+        fn();
+      } catch (err) {
+        out.failed(rule, c.key, err);
+      }
+    };
+    run('LOADING_OVER', () => loadingOver(out, c));
+    run('DEPART_LATE', () => departLate(out, c, truckDayLoads));
+    // DRIVER_SILENT and UNLOAD_OVER first: ETA_LATE and the projected AFTER_CLOSING are held while either is raised.
+    run('DRIVER_SILENT', () => driverSilent(out, c, truckDayLoads));
+    if (ON_ROAD.has(l.status)) run('UNLOAD_OVER', () => unloadOver(out, c));
+    run('ETA_LATE', () => etaLate(out, c));
+    run('LOAD_NOT_CLOSED', () => loadNotClosed(out, c));
     if (ON_ROAD.has(l.status)) {
-      unloadOver(out, c);
-      afterClosing(out, c);
-      priorityNotDelivered(out, c);
-      deliveredWithNote(out, c);
-      proofFar(out, c);
+      run('AFTER_CLOSING', () => afterClosing(out, c));
+      run('PRIORITY_NOT_DELIVERED', () => priorityNotDelivered(out, c));
+      run('DELIVERED_WITH_NOTE', () => deliveredWithNote(out, c));
+      run('PROOF_FAR', () => proofFar(out, c));
     }
   }
   // PAGE_NOT_OPENED per depot, date and truck.
@@ -1009,7 +1256,14 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
     if (list) list.push(l);
     else perDepotDay.set(k, [l]);
   }
-  for (const loads of perDepotDay.values()) pageNotOpened(out, loads, tdOf.get(truckDayOf(loads[0]!.date, loads[0]!.truckId)) ?? null);
+  for (const loads of perDepotDay.values()) {
+    const first = loads[0]!;
+    try {
+      pageNotOpened(out, loads, tdOf.get(truckDayOf(first.date, first.truckId)) ?? null);
+    } catch (err) {
+      out.failed('PAGE_NOT_OPENED', subjectKeyOf({ depotId: first.depotId, date: first.date, truckId: first.truckId }), err);
+    }
+  }
 
   // The depot-days read in full: every depot of the dates with a load or an open row.
   const rules = ALERT_RULES.filter((r) => out.on(r) !== null);
@@ -1024,5 +1278,5 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
   };
   for (const l of facts.loads) add(l.depotId, l.date);
   for (const r of facts.open.values()) add(r.depotId, r.deliveryDate);
-  return { active: out.active, ended: out.ended, scopes, held: out.held };
+  return { active: out.active, ended: out.ended, scopes, held: out.held, failures: out.failures };
 }

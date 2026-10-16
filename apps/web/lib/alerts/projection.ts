@@ -19,7 +19,12 @@
  * - A PENDING stop: the planned leg from the previous stop (etaMin - the previous planned departure; a
  *   road break planned on the way is inside it) added to the previous projected departure, never before
  *   now; it waits for its planned unloading start when the plan waited (serviceStartMin > etaMin: the
- *   receiving window); delay = projected arrival - planned arrival.
+ *   receiving window); delay = projected arrival - planned arrival. "Never before now" (the clock pushing
+ *   the arrival) only while the driver's phone has been silent since before that expected arrival: a
+ *   phone heard after it means the truck may well be there with the arrival not tapped, so the expected
+ *   arrival stands (review of 16 Oct 2026, M3; the silence rule follows a phone that stops).
+ * - What the phone sent counts as being at a stop: the caller gives a stop whose arrival was not recorded
+ *   the time of its first delivery photo as its arrival (rules.ts).
  * - The return: the last projected departure + the planned way back.
  */
 
@@ -48,6 +53,8 @@ export interface ProjectionIn {
   nowMin: number;
   /** A Dispatch press later than the planned departure by more than this, before any stop activity, starts from the planned departure (M3). */
   lateDispatchMin?: number | null;
+  /** When the driver's phone last sent anything (minutes of the delivery day; null: never): the clock pushes a pending stop only when it is before the stop's expected arrival. */
+  phoneSeenMin?: number | null;
   /** In sequence. */
   stops: readonly ProjectionStopIn[];
 }
@@ -68,6 +75,8 @@ export interface ProjectedStop {
   delayMin: number | null;
   /** PENDING: the clock holds the arrival back (the truck has not arrived although the plan says it should have). */
   clockBound: boolean;
+  /** PENDING: past its expected arrival, but the phone was heard since, so the clock did not push it (no arrival recorded). */
+  phoneHeld: boolean;
 }
 
 export interface Projection {
@@ -118,10 +127,10 @@ export function projectLoad(input: ProjectionIn): Projection {
       // The end: the departure or result; else (moved on without one) the arrival + the planned unloading;
       // else (an office result alone) as planned from the previous stop.
       const dep = has(s.endMin) ? s.endMin : arr !== null ? arr + service : prevProjDep + leg + service;
-      p = { sequence: s.sequence, state: 'DONE', expectedArrMin: null, arrMin: arr, startMin: arr, depMin: dep, delayMin: arr !== null && has(s.etaMin) ? arr - s.etaMin : null, clockBound: false };
+      p = { sequence: s.sequence, state: 'DONE', expectedArrMin: null, arrMin: arr, startMin: arr, depMin: dep, delayMin: arr !== null && has(s.etaMin) ? arr - s.etaMin : null, clockBound: false, phoneHeld: false };
     } else if (!activity[i] && laterActivity[i]) {
       approximate = true;
-      p = { sequence: s.sequence, state: 'SKIPPED', expectedArrMin: null, arrMin: null, startMin: null, depMin: prevProjDep, delayMin: null, clockBound: false };
+      p = { sequence: s.sequence, state: 'SKIPPED', expectedArrMin: null, arrMin: null, startMin: null, depMin: prevProjDep, delayMin: null, clockBound: false, phoneHeld: false };
     } else if (has(s.arrivedMin)) {
       const start = has(s.windowStartMin) ? Math.max(s.arrivedMin, s.windowStartMin) : s.arrivedMin;
       p = {
@@ -133,10 +142,13 @@ export function projectLoad(input: ProjectionIn): Projection {
         depMin: Math.max(nowMin, start + service),
         delayMin: has(s.etaMin) ? s.arrivedMin - s.etaMin : null,
         clockBound: false,
+        phoneHeld: false,
       };
     } else {
       const expected = prevProjDep + leg;
-      const arr = Math.max(expected, nowMin);
+      // The clock pushes the arrival only while the phone has been silent since before it was expected.
+      const heard = has(input.phoneSeenMin) && input.phoneSeenMin > expected;
+      const arr = heard ? expected : Math.max(expected, nowMin);
       const plannedWait = has(s.serviceStartMin) && has(s.etaMin) && s.serviceStartMin > s.etaMin ? s.serviceStartMin : null;
       const start = plannedWait !== null ? Math.max(arr, plannedWait) : arr;
       p = {
@@ -147,7 +159,8 @@ export function projectLoad(input: ProjectionIn): Projection {
         startMin: start,
         depMin: start + service,
         delayMin: has(s.etaMin) ? arr - s.etaMin : null,
-        clockBound: nowMin > expected,
+        clockBound: !heard && nowMin > expected,
+        phoneHeld: heard && nowMin > expected,
       };
     }
     out.push(p);

@@ -4,7 +4,7 @@
  */
 import { fmtHhmm, localMinutes } from '../dispatch/time';
 import { ALERT_RULE_SPECS, ALERT_TOAST_MAX, RESOLVED_REASON_TEXT, SEVERITY_RANK, isAlertRule, type AlertSeverity } from './catalog';
-import type { OpsAlertRow } from './types';
+import type { OpsAlertRow, SweepCheck } from './types';
 
 /** "T05 L1 stop 3", "T05 L1", "T05". */
 export function alertWhere(r: Pick<OpsAlertRow, 'truckCode' | 'loadNo' | 'sequence'>): string {
@@ -84,6 +84,21 @@ export function newAlertToasts(seen: ReadonlySet<string> | null, latest: OpsAler
   while (next.size > 500) next.delete(next.values().next().value as string);
   if (seen === null) return { toasts: [], seen: next };
   return { toasts: fresh.filter((r) => r.severity === 'HIGH' && r.mayToast && r.state === 'OPEN').slice(0, ALERT_TOAST_MAX), seen: next };
+}
+
+/**
+ * The "Checked" line of the bell and the Alerts page (review M2: nobody could tell when the sweep had
+ * stopped): the last good check, or a warning when it is overdue or failed. Null while there is nothing
+ * to say (no answer yet).
+ */
+export function sweepCheckText(s: SweepCheck | null | undefined, timezone: string): { text: string; warn: boolean } | null {
+  if (!s) return null;
+  const at = s.checkedAt ? alertTime(s.checkedAt, timezone) : null;
+  if (s.checkStale) {
+    return { text: `${at ? `Alerts last checked ${at}` : 'Alerts not checked yet since the server started'}: new alerts may be missing. Tell the administrator (the server log says why).`, warn: true };
+  }
+  if (s.checkFailed) return { text: `${at ? `Checked ${at}; ` : ''}the last check failed: some alerts may be missing.`, warn: true };
+  return at ? { text: `Checked ${at}`, warn: false } : null;
 }
 
 /** The bell's colour: red with a HIGH open, amber with any open, none without. */
