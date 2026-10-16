@@ -149,7 +149,7 @@ async function readCapped(res: Response, max: number): Promise<string | null> {
 /**
  * One call to Ayun. Refused before anything is sent (NOT_CONFIGURED, DISABLED, PROVIDER_ERROR for a
  * request outside the allow-list) or answered as above. Counting the call against the daily allowance is
- * the caller's job, BEFORE it calls (lib/ivms/state.ts): the provider counts failed calls too.
+ * the caller's job, BEFORE it calls (lib/ivms/store.ts claim / claimAdmin): the provider counts failed calls too.
  */
 export async function callAyun(env: IvmsEnv, req: AyunRequest, opts: AyunCallOptions = {}): Promise<AyunResult<unknown>> {
   if (env.disabled) return { ok: false, kind: 'DISABLED' };

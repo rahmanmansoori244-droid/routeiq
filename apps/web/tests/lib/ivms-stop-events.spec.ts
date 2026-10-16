@@ -142,6 +142,26 @@ describe('a dispatched load with a trail', () => {
     expect(tables.ivmsEvent).toHaveLength(2);
   });
 
+  it('points received late (a pull after a coverage gap) correct an unobserved GPS arrival in place; never a second event', async () => {
+    // The first pull had a hole of 8 minutes before shop A: its arrival is only an upper bound.
+    const hole = tables.truckTrailPoint!.filter((p) => p.fixAt >= T('06:57') && p.fixAt < T('07:05:30'));
+    tables.truckTrailPoint = tables.truckTrailPoint!.filter((p) => !hole.includes(p));
+    await processGpsTimes(TEN, 't5', DATE, NOW);
+    const first = events().find((e) => e.sequence === 1 && e.kind === 'ARRIVED')!;
+    expect([first.at, first.payloadJson.observed]).toEqual([T('07:05:30'), false]);
+    expect(visitOf(1)).toMatchObject({ arrivalSource: 'AYUN', arrivalObserved: false });
+    // The final pull brings the points of the hole: the same event, now observed at the real arrival.
+    tables.truckTrailPoint!.push(...hole);
+    const r = await processGpsTimes(TEN, 't5', DATE, NOW);
+    expect(r).toMatchObject({ written: 0, corrected: 1 });
+    expect(events().filter((e) => e.sequence === 1 && e.kind === 'ARRIVED')).toHaveLength(1);
+    expect(events().find((e) => e.id === first.id)).toMatchObject({ at: T('07:04:30'), payloadJson: { observed: true, correctedAt: NOW.toISOString() } });
+    expect(visitOf(1)).toMatchObject({ arrivalSource: 'AYUN', arrivalObserved: true });
+    expect(visitOf(1)!.arrivedAt).toEqual(T('07:04:30'));
+    // Observed now: a later rerun never moves it again.
+    expect(await processGpsTimes(TEN, 't5', DATE, NOW)).toMatchObject({ written: 0, corrected: 0 });
+  });
+
   it("the driver's tap stays the arrival; the GPS departure fills the gap the phone left", async () => {
     tables.stopVisit!.push({ id: 'v1', tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't5', loadNo: 1, sequence: 1, customerId: 'C-A', firstLoadId: 'L1', plannedLat: SHOP_A.lat, plannedLng: SHOP_A.lng, windowStartMin: null, windowEndMin: null, linesJson: [], casesPlanned: 30, arrivalSource: 'PHONE_MANUAL', locationPurgedAt: null });
     tables.stopEvent!.push({ id: 'tap', tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't5', loadNo: 1, sequence: 1, visitId: 'v1', kind: 'ARRIVED', source: 'PHONE_MANUAL', at: T('07:06'), receivedAt: T('07:06'), idempotencyKey: 'dl:tap', payloadJson: { mode: 'MANUAL' } });

@@ -12,14 +12,16 @@
  * 3. The kill switch (ROUTEIQ_DISABLE_IVMS=1), the company unknown or its ivmsMode OFF: 200, nothing read,
  *    nothing written - not even a counter.
  * 4. Per company at most LIMITS.ivmsWebhook a minute (Ayun sends up to 150 a run): over it 429 (the event
- *    is lost; the backstop may still find it).
+ *    is lost; the backstop may still find it). Below TIMES (MAP) a depot move is never read, so none is
+ *    stored: the call is only counted as ignored (data minimisation, integration review of 16 Oct 2026).
  * 5. The body: at most 16 KB (413). Only imei, type, desc, zone_name, lat, lng, dt_tracker and dt_server
  *    are read; the user name, object name, driver, SIM, VIN, plate, trailer, odometer and engine hours the
  *    provider adds are never read, stored or logged, and neither is the payload.
  * 6. Only zone_in / zone_out (Depot IN / OUT) are kept; anything else is counted as ignored. A time
  *    outside [now - 26 h, now + 2 min] (usually a wrong AYUN_WEBHOOK_TIME_OFFSET_MIN) is counted apart.
  * 7. The IMEI is looked up among the company's own active trucks only; an unknown IMEI is counted and
- *    nothing is stored (another vehicle's data never lands here).
+ *    nothing is stored (another vehicle's data never lands here). Neither is a move of a truck without a
+ *    load on yesterday's or today's plans (off duty: review M7, the same trucks as the backstop's).
  * 8. One IvmsEvent row (events.ts: depot or not; dedupe.ts: the same key as the backstop's), at most
  *    200 per truck per day (M6). The same event again is a 200 with no new row.
  * Never logged: the URL (it holds the secret), the parameters, the body.
@@ -151,6 +153,10 @@ export async function handleAyunWebhook(req: Request, secret: unknown, deps: Web
     if (!c || c.mode === 'OFF') return ok();
     const r = lim.consume(`ivms-wh:${c.tenantId}`, LIMITS.ivmsWebhook.limit, LIMITS.ivmsWebhook.windowMs);
     if (!r.ok) return tooMany(r.resetAt, now.getTime());
+    if (c.mode !== 'TIMES') {
+      await store.bumpWebhookCounter(c.tenantId, 'webhooksIgnored', now);
+      return ok();
+    }
     const fields = await webhookFields(req);
     if (fields === null) return answer('Too large', 413);
     const parsed = zoneEventOf(fields, now, env.webhookTimeOffsetMin);
@@ -159,7 +165,8 @@ export async function handleAyunWebhook(req: Request, secret: unknown, deps: Web
       return ok();
     }
     const truck = await store.truckByImei(c.tenantId, parsed.event.imei);
-    if (!truck) {
+    const onDuty = truck && (await store.fleet(c, now)).some((t) => t.truckId === truck.truckId && t.days.some((d) => d.loads.length > 0));
+    if (!truck || !onDuty) {
       await store.bumpWebhookCounter(c.tenantId, 'webhooksIgnored', now);
       return ok();
     }

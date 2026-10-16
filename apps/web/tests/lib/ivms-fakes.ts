@@ -9,6 +9,7 @@ import { utcDay } from '@/lib/ivms/budget';
 import { readIvmsEnv, type IvmsEnv } from '@/lib/ivms/env';
 import { MAX_EVENTS_PER_TRUCK_DAY, type DepotZone, type NewZoneEvent } from '@/lib/ivms/events';
 import type { ClaimLimits, FleetTruck, IvmsCompany, IvmsStateRow, IvmsStore, TruckDayRow, WebhookCounter } from '@/lib/ivms/store';
+import type { GpsTimesSummary } from '@/lib/ivms/stop-events';
 import { CALL_CLASS_COUNTER, MOVING_KMH, type AyunErrorKind, type IvmsCallClass, type LiveFix, type TrailPoint } from '@/lib/ivms/types';
 
 export const IMEI_A = '111111111111111';
@@ -72,6 +73,9 @@ export class MemoryIvmsStore implements IvmsStore {
   touched: string[] = [];
   /** The calls each class was allowed (claimed), with when. */
   claims: { cls: IvmsCallClass; at: Date }[] = [];
+  /** When the processing step (TIMES) ran, and what it answers (a test may run the real one). */
+  processed: Date[] = [];
+  processImpl: (tenantId: string, now: Date) => Promise<GpsTimesSummary> = async () => ({ truckDays: 0, written: 0, corrected: 0, busy: 0, failed: 0, skipped: null });
 
   constructor(c: IvmsCompany | null = company()) {
     this.companyRow = c;
@@ -253,6 +257,11 @@ export class MemoryIvmsStore implements IvmsStore {
       out.inserted++;
     }
     return out;
+  }
+  async processTimes(tenantId: string, now: Date) {
+    this.touched.push('processTimes');
+    this.processed.push(now);
+    return this.processImpl(tenantId, now);
   }
   async bumpWebhookCounter(_t: string, field: WebhookCounter, now: Date) {
     this.touched.push(`bump:${field}`);

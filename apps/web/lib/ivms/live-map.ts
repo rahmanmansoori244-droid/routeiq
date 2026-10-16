@@ -94,16 +94,22 @@ export function vehiclePopupText(v: DayVehicle, tz: string): string {
   return [...parts.filter((x): x is string => !!x), ...v.facts].join(' · ');
 }
 
-/** The line under the map: when the positions were last read, how many trucks, which are stale. */
-export function liveMapCaption(r: Pick<DayVehiclesResponse, 'mode' | 'updatedAt' | 'vehicles'>, now: Date, tz: string): { text: string; warn: boolean } | null {
+/**
+ * The line under the map: when the positions were last read, how many trucks, which are stale, and how
+ * often positions come when the provider's daily allowance stretches the interval (at 100 calls a day
+ * about every 20 min: then most trucks are grey between two reads, which is expected, not a delay).
+ */
+export function liveMapCaption(r: Pick<DayVehiclesResponse, 'mode' | 'updatedAt' | 'vehicles'> & { intervalSec?: number | null }, now: Date, tz: string): { text: string; warn: boolean } | null {
   if (r.mode === 'OFF') return null;
   const stale = r.vehicles.filter((v) => v.stale).length;
-  if (!r.updatedAt) return { text: 'Live trucks (GPS): no position received yet.', warn: r.vehicles.length > 0 };
+  const slow = r.intervalSec != null && r.intervalSec > 120 ? ` Positions about every ${Math.round(r.intervalSec / 60)} min (Ayun's daily allowance).` : '';
+  if (!r.updatedAt) return { text: `Live trucks (GPS): no position received yet.${slow}`, warn: r.vehicles.length > 0 };
   const age = (now.getTime() - Date.parse(r.updatedAt)) / 1000;
-  if (age > 2 * STALE_FIX_SEC) return { text: `Live trucks (GPS): positions delayed since ${hhmm(r.updatedAt, tz)}. Times on the screen come from the drivers' phones.`, warn: true };
+  // Late: more than two reads missed (never sooner than 10 min).
+  if (age > Math.max(2 * STALE_FIX_SEC, 2 * (r.intervalSec ?? 0) + 60)) return { text: `Live trucks (GPS): positions delayed since ${hhmm(r.updatedAt, tz)}. Times on the screen come from the drivers' phones.`, warn: true };
   const n = r.vehicles.length;
   const trucks = `${n} truck${n === 1 ? '' : 's'}`;
-  return { text: `Live trucks (GPS): positions of ${hhmm(r.updatedAt, tz)}, ${trucks}${stale ? `, ${stale} without a recent position (grey)` : ''}.`, warn: false };
+  return { text: `Live trucks (GPS): positions of ${hhmm(r.updatedAt, tz)}, ${trucks}${stale ? `, ${stale} without a recent position (grey)` : ''}.${slow}`, warn: false };
 }
 
 /** A GPS fact for the office in words (IvmsTruckDay.gpsFactsJson). Unknown shapes are left out. */

@@ -9,7 +9,7 @@
  * 1. Who is out. Only trucks with a tracker and a load out (LOCKED, LOADING or DISPATCHED on yesterday's
  *    or today's plan in use) are ever asked about (M7); after the operating hours only those with a
  *    DISPATCHED load. Nothing out: no call, and every live position of the company is deleted.
- * 2. The lease (lib/ivms/state in store.ts): one container at a time; a backoff refuses it.
+ * 2. The lease (IvmsState, lib/ivms/store.ts): one container at a time; a backoff refuses it.
  * 3. MAP (mode MAP and TIMES): one OBJECT_GET_LOCATIONS for those trucks' IMEIs, paced to the MAP share
  *    of the allowance (budget.ts). The fixes update the map's latest position per truck - and nothing
  *    else: live positions are never a source of times (H5). A stale fix stays what it is (the map shows
@@ -26,9 +26,13 @@
  * allowance used up (LIMIT) waits for the provider's midnight; a wrong key (AUTH) an hour. Only kind codes
  * are stored and logged, never a URL, a key or an answer.
  *
- * What happens to the trail and the depot moves afterwards (trips by depot OUT/IN, stop times, H3/H4) is
- * the processing step's (lib/ivms/process.ts): it works on the truck-days whose IvmsTruckDay.lastPullAt is
- * newer than their processedAt. This file never writes a stop event, a result or a load status.
+ * 7. TIMES: the processing step turns the pulled trail and the depot moves into GPS stop times (trips by
+ *    depot OUT/IN, stops, H3/H4: lib/ivms/stop-events.ts processGpsTimesForCompany, through the store's
+ *    processTimes). It runs after the lease is released, right after a tick that pulled history and
+ *    otherwise at most every PROCESS_EVERY_MS (a late Dispatch press or a completion changes which trip is
+ *    which load); it works only on the truck-days whose IvmsTruckDay.lastPullAt is newer than their
+ *    processedAt or whose loads changed status since. It never calls the provider. This file itself never
+ *    writes a stop event, a result or a load status.
  */
 import { randomUUID } from 'node:crypto';
 import { callAyun, ROUTE_MAX_WINDOW_MS, type AyunCallOptions } from './ayun-client';
@@ -64,6 +68,8 @@ export const ROUTE_OVERLAP_MS = 10 * 60_000;
 export const FINAL_PULL_DELAY_MS = 10 * 60_000;
 /** ... and covers the day until this long after that completion (the drive back is already in it). */
 export const FINAL_PULL_TAIL_MS = 30 * 60_000;
+/** TIMES: the GPS stop times are processed at least this often while truck-days are on the road (no pull needed). */
+export const PROCESS_EVERY_MS = 5 * 60_000;
 
 const OUT = new Set(['LOCKED', 'LOADING', 'DISPATCHED']);
 const LEFT = new Set(['DISPATCHED', 'COMPLETED']);
@@ -160,6 +166,8 @@ export interface IvmsTickResult {
   map?: { trucks: number; intervalSec: number | null; called: boolean; written?: number; notReturned?: number; error?: AyunErrorKind };
   route?: { due: number; pulls: number; points: number; everyMin: number | null; errors: AyunErrorKind[] };
   events?: { called: boolean; inserted?: number; duplicates?: number; error?: AyunErrorKind };
+  /** TIMES: the processing step's counts (only when it ran); `error` when it failed (its code only). */
+  times?: { truckDays: number; written: number; corrected: number; busy: number; failed: number; error?: string };
 }
 
 interface ProcState {
@@ -173,6 +181,8 @@ interface ProcState {
   /** The keep-set of the last position clean-up, and when (no DELETE every 15 s while nothing changes). */
   clearedKey?: string;
   clearedAt?: number;
+  /** When the GPS stop times were last processed, per company (PROCESS_EVERY_MS). */
+  processedAt?: Map<string, number>;
   lastLogged?: string;
   seq?: number;
   pid?: string;
@@ -233,6 +243,8 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
   const state = await store.acquireLease(c.tenantId, owner, now, IVMS_LEASE_MS);
   if (!state) {
     result.skipped = 'LEASE_OR_BACKOFF';
+    // Another container holds the lease, or the provider backs off: the trail already pulled still gets processed.
+    await processTimes(store, c, plan, result, now, false);
     return result;
   }
   const p = proc();
@@ -368,7 +380,30 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
     p.ctrls?.delete(ctrl);
     await store.releaseLease(c.tenantId, owner, now);
   }
+  await processTimes(store, c, plan, result, now, (result.route?.pulls ?? 0) > 0 || !!opts.force);
   return result;
+}
+
+/**
+ * TIMES: run the processing step (GPS stop times from the stored trail; never a provider call) right after
+ * a tick that pulled history (or a cron `force`), else at most every PROCESS_EVERY_MS while truck-days are
+ * on the road. Its own try: a processing failure never fails the tick (the next one retries); only its
+ * error code is logged and returned.
+ */
+async function processTimes(store: IvmsStore, c: IvmsCompany, plan: TickPlan, result: IvmsTickResult, now: Date, due: boolean): Promise<void> {
+  if (c.mode !== 'TIMES' || !plan.routeDays.length) return;
+  const p = proc();
+  const last = (p.processedAt ??= new Map()).get(c.tenantId);
+  if (!due && last !== undefined && now.getTime() - last < PROCESS_EVERY_MS && now.getTime() >= last) return;
+  p.processedAt.set(c.tenantId, now.getTime());
+  try {
+    const r = await store.processTimes(c.tenantId, now);
+    if (r.truckDays || r.failed) result.times = { truckDays: r.truckDays, written: r.written, corrected: r.corrected, busy: r.busy, failed: r.failed };
+  } catch (err) {
+    const code = (err as { code?: string; name?: string } | null)?.code ?? (err as Error)?.name ?? 'error';
+    console.error('ivms: GPS times not processed', code);
+    result.times = { truckDays: 0, written: 0, corrected: 0, busy: 0, failed: 0, error: String(code).slice(0, 40) };
+  }
 }
 
 /** The timer's tick: one at a time, never after a shutdown began, every error logged by kind only. */

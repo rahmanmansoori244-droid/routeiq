@@ -28,6 +28,7 @@ import type { LoadStatusName } from '../dispatch/load-state';
 import { utcDay } from './budget';
 import { MAX_EVENTS_PER_TRUCK_DAY, type DepotZone, type NewZoneEvent } from './events';
 import { ivmsModeOf } from './settings';
+import type { GpsTimesSummary } from './stop-events';
 import { CALL_CLASS_COUNTER, MOVING_KMH, type AyunErrorKind, type IvmsCallClass, type IvmsMode, type LiveFix, type TrailPoint } from './types';
 
 /** The company the Ayun account belongs to (AYUN_TENANT_SLUG) and its IVMS settings. */
@@ -127,6 +128,11 @@ export interface IvmsStore {
   markPulled(tenantId: string, truckId: string, date: string, p: { pulledTo: Date; final: boolean; now: Date }): Promise<void>;
   insertZoneEvents(tenantId: string, rows: readonly NewZoneEvent[], now: Date): Promise<{ inserted: number; duplicates: number; capped: number }>;
   bumpWebhookCounter(tenantId: string, field: WebhookCounter, now: Date): Promise<void>;
+  /**
+   * TIMES: the processing step over what was stored (lib/ivms/stop-events.ts processGpsTimesForCompany:
+   * trips by depot OUT/IN, GPS stop times, H3/H4). Never calls the provider.
+   */
+  processTimes(tenantId: string, now: Date): Promise<GpsTimesSummary>;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -366,6 +372,12 @@ export const prismaIvmsStore: IvmsStore = {
       }
     }
     return out;
+  },
+
+  async processTimes(tenantId, now) {
+    // Loaded on first use: the webhook route (which shares this store) never loads the delivery code.
+    const { processGpsTimesForCompany } = await import('./stop-events');
+    return processGpsTimesForCompany(tenantId, now);
   },
 
   async bumpWebhookCounter(tenantId, field, now) {

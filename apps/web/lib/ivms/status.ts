@@ -20,7 +20,7 @@ export interface IvmsHealth {
   lastError: string | null;
   /** Calls of the provider's day (UTC) per class, and the daily allowance. */
   calls: { map: number; route: number; events: number; admin: number; total: number; budget: number };
-  /** Webhooks of the provider's day: stored (or a repeat), ignored (unknown IMEI or type), refused for their time. */
+  /** Webhooks of the provider's day: stored (or a repeat), ignored (unknown IMEI or type, a truck off duty, mode below TIMES), refused for their time. */
   webhooks: { received: number; ignored: number; badTime: number };
   /** The provider's clock as RouteIQ sees it (seconds; about +-14400 = times not in UTC: set the offset). */
   skewSec: number | null;

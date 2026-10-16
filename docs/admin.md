@@ -202,29 +202,44 @@ ORDER BY s."createdAt";
 
 ## GPS tracking (Ayun), 16 Oct 2026
 
-The trucks' GPS trackers at **Ayun** (a GPS-Server.net platform) feed live truck positions to the day screen and, optionally, arrival and departure times. **Everything is OFF** until a company admin changes the GPS tracking setting (`ivmsMode` and the other `ivms*` settings of the company's settings, `PATCH /api/tenant/config`, company admin only; a dispatcher's save is refused); while OFF RouteIQ never contacts Ayun and nothing changes on any screen (only this section's tracker card and settings exist). Design and rules: `docs/PROJECT_HANDBOOK.md` 3.20.
+The trucks' GPS trackers at **Ayun** (a GPS-Server.net platform) feed live truck positions to the day screen and, optionally, arrival and departure times. **Everything is OFF** until a company admin switches it on the Settings card **GPS tracking (Ayun)** (`ivmsMode` and the other `ivms*` settings; company admin only, a dispatcher's save is refused, every change is in the audit log). While OFF RouteIQ never contacts Ayun, writes nothing and nothing changes on any screen (only the tracker card on the Trucks page and the settings card exist); `ROUTEIQ_DISABLE_IVMS=1` stops all of it whatever the setting (the webhook then answers 200 and stores nothing). The code is `apps/web/lib/ivms/`; design and rules: `docs/PROJECT_HANDBOOK.md` 3.20.
 
-**Railway variables** (web service; set them in Railway only - never in a file, a chat or an e-mail; names only here):
+**Railway variables** (web service; set them in Railway only - never in the repo, a file, a chat or an e-mail; names only here):
 - `AYUN_BASE_URL` - the provider's address, `https://` and the host only (no path: RouteIQ adds the fixed API path and never follows a redirect).
-- `AYUN_API_KEY` - the user API key Ayun issued for RouteIQ (ask them for a dedicated key). Server only; never logged.
+- `AYUN_API_KEY` - the user API key Ayun issued for RouteIQ (ask them for a dedicated key; copy it as plain text). Server only; never logged.
 - `AYUN_TENANT_SLUG` - the company slug the Ayun account belongs to: no other company is ever polled with that key.
-- `AYUN_WEBHOOK_SECRET` (and `AYUN_WEBHOOK_SECRET_PREVIOUS` during a rotation) - the secret in the webhook URL's path, 32-128 characters of A-Z, a-z, 0-9, `_` and `-`.
+- `AYUN_WEBHOOK_SECRET` (and `AYUN_WEBHOOK_SECRET_PREVIOUS` during a rotation) - the secret in the webhook URL's path, 32-128 characters of A-Z, a-z, 0-9, `_` and `-` (for example `openssl rand -base64 48 | tr '+/' '-_' | tr -d '='`).
 - `AYUN_API_TIME_OFFSET_MIN`, `AYUN_WEBHOOK_TIME_OFFSET_MIN` - only if Ayun's times are not UTC (Muscat local time would be `-240`).
-- `ROUTEIQ_DISABLE_IVMS=1` - the kill switch: stops every GPS call, write and screen at once, whatever the setting.
+- `ROUTEIQ_DISABLE_IVMS=1` - the kill switch: stops every GPS call, write and screen at once.
 
-The startup log names a variable that is missing or unusable (never its value).
+Redeploy after setting them; the startup log names a variable that is missing or unusable (never its value). Without the first three no call is ever made and the timer does not even start.
+
+**Give Ayun the webhook address** `https://<RouteIQ host>/api/ivms/ayun/<AYUN_WEBHOOK_SECRET>`, for the events **Depot IN** and **Depot OUT** only. A wrong or missing secret answers 404. The secret is visible in the platform's HTTP logs and Ayun's panel (the same accepted risk as the driver links); Sentry never sees it. Depot moves are stored only in TIMES and only for a truck with a load on yesterday's or today's plans; each one counts only when the truck's own history confirms it (a forged call never cuts a trip).
 
 **Rollout, one step at a time:**
 1. Set the variables, redeploy, check the startup log.
-2. **Map the trackers**: Trucks page, card **GPS trackers (Ayun)** (company admin): type each truck's tracker IMEI (digits only, from the Ayun portal). **Suggest from Ayun** (one call, only once GPS tracking is MAP or TIMES) lists, per truck without a tracker, the trackers with the same plate digits (*same plate*, *same plate digits*, or *one of several*): check before **Use** + **Save**. A one-day hired truck never gets a tracker; a tracker is on one truck at most. Each change is in the audit log (*UPDATE Truck*, with the tracker's last 4 digits).
-3. **GPS tracking MAP** (`ivmsMode` MAP) for a few days: dispatchers compare the live trucks with phone calls to the drivers; watch the provider allowance (`IvmsState`) and the startup warnings.
-4. **GPS tracking TIMES** (`ivmsMode` TIMES): GPS arrival and departure times start filling the gaps the phones leave. Check the next morning on a few trucks (day screen, Excel actuals).
+2. **Map the trackers**: Trucks page, card **GPS trackers (Ayun)** (company admin): type each truck's tracker IMEI (digits only, from the Ayun portal). **Suggest from Ayun** (one call from the admin's share of the allowance, only once GPS tracking is MAP or TIMES) lists, per truck without a tracker, the trackers with the same plate digits (*same plate*, *same plate digits*, or *one of several*): check before **Use** + **Save**. A one-day hired truck never gets a tracker; a tracker is on one truck at most. Each change is in the audit log (*UPDATE Truck*, with the tracker's last 4 digits).
+3. Tell the drivers that the trucks' trackers are read while a load is out.
+4. **GPS tracking: Live map** (`ivmsMode` MAP) for a few days: dispatchers compare the live trucks with phone calls to the drivers; watch the allowance at `/api/health` and the startup warnings.
+5. **GPS tracking: Live map and GPS times** (`ivmsMode` TIMES): GPS arrival and departure times start filling the gaps the phones leave. Check the next morning on a few trucks (day screen, Excel actuals).
+
+**How it runs.** Calls run on their own 15 s timer inside the web process and only for trucks with a tracker and a load LOCKED, LOADING or DISPATCHED on yesterday's or today's plan, between the GPS tracking hours (05:00-23:00 by default; after them only while a load is DISPATCHED). MAP asks for the live positions (the map only, never times). TIMES also pulls each truck's history while a load is out (every `ivmsRoutePullMin`) and once over the whole day 10 minutes after its last trip closed; right after a pull (and every 5 minutes for a late Dispatch press or a completion) the trail is split into trips at the depot and turned into GPS stop times. A time marked *not observed* (a gap in the tracker's points) is corrected the same day when the end-of-day pull brings the missing points; a time seen live never moves.
+
+**The daily allowance** (`ivmsDailyCallBudget`, today Ayun's 100 a day) is counted per UTC day (04:00 in Muscat) in the database, per class: the map, the history pulls (TIMES), the backstop for missed webhooks (only from 1,000 a day with the webhook set) and the admin's picker each have their own share, so none can starve another and RouteIQ never makes more calls than the allowance (failed calls count, as Ayun counts them). At 100 a day positions come about every 11 minutes (MAP) or 19 minutes (TIMES), so most trucks are grey on the map between two reads (the caption says so); ask Ayun for more (3,000 a day gives 60 s). The Settings card shows the pace for the allowance typed.
+
+**Read the status** at `/api/health` (field `ivms`, only while the link is in use): calls of the day per class and the allowance, webhooks received / ignored (unknown tracker, other events, a truck off duty, mode below TIMES) / refused for their time, `lastError` (a code), `status`. `LIMIT`: the allowance is used up - no calls until 04:01 Muscat; ask Ayun to raise it. `AUTH`: the key is wrong or revoked - calls pause an hour; set the key again. Other errors back off from a minute up to 15 minutes. `skewSec` near +14400: Ayun sends local time - set the offset (-240). `webhooks.badTime` growing: the webhook offset is wrong.
 
 **What GPS never does** (by design, review of 16 Oct 2026): record a result, close a trip (only the driver's or the office's Back at depot completes a load), press Dispatch, replace a driver's or the office's time, feed "Use measured time", show positions to a Viewer, store a provider object name, plate or driver name, or put a position in an export or a sheet.
 
 **A tracker moved to another truck**: clear it on the old truck, then set it on the new one. Changing or clearing a tracker after that day's history was pulled stops that day's GPS times for the truck (they could be the other truck's); the driver's phone still times it. When nobody told RouteIQ, the GPS times of a truck-day stop by themselves once the driver's phone and the tracker disagree by more than 1 km several times over 10 minutes (`IvmsTruckDay.suppressReason` = `MISMATCH`): check the mapping.
 
 **A bad day of GPS times** (wrong tracker, wrong clock): 1) set GPS tracking below TIMES (or `ROUTEIQ_DISABLE_IVMS=1`); 2) a developer runs the undo for that truck and day (`suppressGpsTimes` in `lib/ivms/stop-events.ts`; a dry run first, then with the owner's OK): it marks the truck-day suppressed, deletes its GPS stop events and rebuilds the stops from the phone's and the office's entries (no result changes, no load reopens); 3) only then, if needed, roll the app back. Rolling back the app alone is safe for the database (the new tables are ignored), but do the first two steps first.
+
+**Rotate the key**: Ayun issues a new key, set `AYUN_API_KEY`, redeploy, Ayun revokes the old one. **Rotate the webhook secret**: set `AYUN_WEBHOOK_SECRET_PREVIOUS` to the old value and a new `AYUN_WEBHOOK_SECRET`, redeploy, give Ayun the new address, then remove `..._PREVIOUS`.
+
+**Retention**: the trail is deleted after `ivmsTrailDays` (default 2), a live position as soon as its truck has no load out (all of them when the mode is OFF), the depot moves' positions after the trail days and the moves after the driver-position time; the GPS stop events' positions with the driver positions. Start fresh removes the GPS rows of the days it removes and keeps the day's call counter.
+
+**Turn it off**: mode OFF on the Settings card (immediate), or `ROUTEIQ_DISABLE_IVMS=1` and redeploy.
 
 **Useful query** (one company's GPS stop events of a day, read only):
 
@@ -251,21 +266,6 @@ SELECT d.name, l."fromDate", l."untilDate", c.name AS cover, l.note
  WHERE l."tenantId" = $1 AND l."fromDate" <= $2::date AND l."untilDate" >= $2::date
  ORDER BY d.name;
 ```
-
----
-
-## GPS tracking (Ayun, IVMS live link, 16 Oct 2026)
-
-OFF by default: while a company's **GPS tracking mode** (`ivmsMode`, Settings, company admin) is OFF, RouteIQ makes no call to Ayun, writes nothing and shows nothing new; `ROUTEIQ_DISABLE_IVMS=1` stops all of it whatever the setting (the webhook then answers 200 and stores nothing). The code is `apps/web/lib/ivms/`.
-
-- **Set the variables** in Railway (web service; never in the repo, a chat or an e-mail): `AYUN_BASE_URL` (`https://` and the provider's host only), `AYUN_API_KEY` (copied from the Ayun account as plain text), `AYUN_TENANT_SLUG` (the company the Ayun account belongs to), `AYUN_WEBHOOK_SECRET` (32-128 characters of `A-Z a-z 0-9 _ -`, for example `openssl rand -base64 48 | tr '+/' '-_' | tr -d '='`). Optional: `AYUN_API_TIME_OFFSET_MIN` / `AYUN_WEBHOOK_TIME_OFFSET_MIN` when Ayun does not send UTC (Muscat local time: `-240`). Redeploy; the startup log names any variable that is not usable (never its value). Without the first three no call is ever made and the timer does not even start.
-- **Give Ayun the webhook address** `https://<RouteIQ host>/api/ivms/ayun/<AYUN_WEBHOOK_SECRET>`, for the events **Depot IN** and **Depot OUT** only. A wrong or missing secret answers 404. The secret is visible in the platform's HTTP logs and Ayun's panel (the same accepted risk as the driver links); Sentry never sees it.
-- **Switch it on** in steps: MAP (live positions of the trucks with a load out, for the map), then TIMES (history pulls per truck for GPS times). Calls run on their own 15 s timer inside the web process and only for trucks with a tracker (IMEI) and a load LOCKED, LOADING or DISPATCHED on yesterday's or today's plan, between the operating hours (05:00-23:00 by default; after them only while a load is DISPATCHED).
-- **The daily allowance** (`ivmsDailyCallBudget`, today Ayun's 100 a day) is counted per UTC day (04:00 in Muscat) in the database, per class: the map, the history pulls (TIMES), the backstop for missed webhooks (only from 1,000 a day with the webhook set) and the admin's pickers each have their own share, so none can starve another and RouteIQ never makes more calls than the allowance (failed calls count, as Ayun counts them). At 100 a day the map moves about every 11 minutes (MAP) or 19 minutes (TIMES); ask Ayun for more (3,000 a day gives 60 s).
-- **Read the status** at `/api/health` (field `ivms`, only while the link is in use): calls of the day per class and the allowance, webhooks received / ignored / refused for their time, `lastError` (a code), `status`. `LIMIT`: the allowance is used up - no calls until 04:01 Muscat; ask Ayun to raise it. `AUTH`: the key is wrong or revoked - calls pause an hour; set the key again. Other errors back off from a minute up to 15 minutes. `skewSec` near +14400: Ayun sends local time - set the offset (-240). `webhooks.badTime` growing: the webhook offset is wrong.
-- **Rotate the key**: Ayun issues a new key, set `AYUN_API_KEY`, redeploy, Ayun revokes the old one. **Rotate the webhook secret**: set `AYUN_WEBHOOK_SECRET_PREVIOUS` to the old value and a new `AYUN_WEBHOOK_SECRET`, redeploy, give Ayun the new address, then remove `..._PREVIOUS`.
-- **Retention**: the trail is deleted after `ivmsTrailDays` (default 2), a live position as soon as its truck has no load out (all of them when the mode is OFF), the depot moves' positions after the trail days and the moves after the driver-position time. Start fresh removes the GPS rows of the days it removes and keeps the day's call counter.
-- **Turn it off**: mode OFF (immediate), or `ROUTEIQ_DISABLE_IVMS=1` and redeploy.
 
 ---
 

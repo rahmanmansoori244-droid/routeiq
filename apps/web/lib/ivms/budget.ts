@@ -1,6 +1,6 @@
 /**
  * IVMS live link (16 Oct 2026): how the provider's daily call allowance is shared and paced. Pure: the
- * database side (the counters, the lease) is lib/ivms/state.ts; the poller that follows these answers is
+ * database side (the counters, the lease) is lib/ivms/store.ts; the poller that follows these answers is
  * lib/ivms/poll.ts.
  *
  * The allowance (TenantConfig.ivmsDailyCallBudget; Ayun's default is 100 a day) is counted per UTC day,
@@ -120,6 +120,15 @@ export function mapIntervalSec(p: { pollSec: number; share: number; used: number
   const left = p.share - p.used;
   if (left <= 0) return null;
   return Math.max(p.pollSec, Math.ceil(p.horizonSec / left));
+}
+
+/**
+ * The live map's interval in effect now (seconds), as the poller paces it: for the day screen's caption
+ * (GET /api/runs/[id]/vehicles). Null = the MAP share of the day is used up. Pure.
+ */
+export function mapIntervalInEffect(p: { budget: number; mode: IvmsMode; webhookSecretSet: boolean; pollSec: number; hours: OperatingHours; mapCallsToday: number; now: Date }): number | null {
+  const shares = classShares(p.budget, p.mode, eventsBackstopOn(p.budget, p.webhookSecretSet));
+  return mapIntervalSec({ pollSec: p.pollSec, share: shares.MAP, used: p.mapCallsToday, horizonSec: horizonSec(p.now, p.hours) });
 }
 
 /**

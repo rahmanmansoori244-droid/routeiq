@@ -11,7 +11,7 @@
  *     the provider's next day; a class stops at its share; the admin's claim does not wait for the lease.
  *  3. Positions: only a newer fix moves the latest; trucks no longer out lose theirs. History: the same
  *     point twice is one row; IvmsTruckDay records the pull.
- *  4. The webhook: one row per event (twice = one), an unknown IMEI or another company's stores nothing,
+ *  4. The webhook: nothing in MAP; in TIMES one row per event (twice = one), an unknown IMEI or another company's stores nothing,
  *     ivmsMode OFF stores nothing and writes no counter.
  *  5. Retention: the trail after ivmsTrailDays, positions when OFF.
  */
@@ -181,8 +181,17 @@ describe('4. the webhook', () => {
     vi.stubEnv('ROUTEIQ_DISABLE_IVMS', '');
   };
 
+  it('MAP never stores a depot move (only TIMES reads them): 200, counted as ignored', async () => {
+    stub();
+    expect((await hook(event())).status).toBe(200);
+    expect(await prisma.ivmsEvent.count({ where: { tenantId } })).toBe(0);
+    expect((await prisma.ivmsState.findUniqueOrThrow({ where: { tenantId } })).webhooksIgnored).toBeGreaterThanOrEqual(1);
+  });
+
   it('one DEPOT_IN row per event (twice = one), in this company only; nothing it never reads is stored', async () => {
     stub();
+    // Depot moves are stored in TIMES only, for a truck with a load on the plans in use (truck A: DISPATCHED).
+    await prisma.tenantConfig.update({ where: { tenantId }, data: { ivmsMode: 'TIMES' } });
     const e = event();
     expect((await hook(e)).status).toBe(200);
     expect((await webhookPost(new Request(`https://routeiq.example/api/ivms/ayun/${SECRET}?${new URLSearchParams(e)}`, { method: 'POST' }), { params: { secret: SECRET } })).status).toBe(200);

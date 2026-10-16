@@ -17,10 +17,14 @@
  * COMPLETED only), the planned stop, the visit (created with its planned facts if new), the events, the
  * visit rebuilt (event-service.ts rebuildVisit). A busy lock skips the truck until the next run.
  *
- * Idempotent and first-write-wins (M2): an event's key is `ayun:<A|D>:<depot>:<date>:<truck>:<load>:<seq>:<ms>`
- * with the stay's first inside fix time (never a cycle index), so a rerun is a no-op; a stay whose start
- * moved (a delayed point arrived later) is recognised by an AYUN event of the same kind within 10 min of
- * it and never written twice. At most 4 AYUN events per stop, and none once the stop holds 36 of the 40
+ * Idempotent (M2): an event's key is `ayun:<A|D>:<depot>:<date>:<truck>:<load>:<seq>:<ms>` with the stay's
+ * first inside fix time (never a cycle index), so a rerun is a no-op; a stay whose start moved (a delayed
+ * point arrived later) is recognised by an AYUN event of the same kind within 10 min of it and never
+ * written twice. The first write wins, with one exception: an event that was NOT observed (a gap in the
+ * points before it, so its time is only an upper bound) is corrected in place when a later pull brings the
+ * missing points (the poller's final pull of the day re-reads the whole day, buffered points included)
+ * and the same stay is now observed, or still unobserved but earlier (correctGpsEvent). An observed GPS
+ * time is never moved. At most 4 AYUN events per stop, and none once the stop holds 36 of the 40
  * events shared with the driver and the office (event-service.ts MAX_EVENTS_PER_VISIT): the driver
  * always keeps room.
  */
@@ -64,6 +68,8 @@ export interface GpsTimesResult {
   skipped: GpsSkip | null;
   /** StopEvents written. */
   written: number;
+  /** Unobserved GPS events of a stay corrected in place by a better trail (correctGpsEvent). */
+  corrected: number;
   /** Candidates not written, by why: DUPLICATE (key or same stay), CAP, ROOM, NOT_ON_ROAD, NO_STOP, OFFICE. */
   kept: Record<string, number>;
   /** The truck was busy (lock timeout): the rest waits for the next run. */
@@ -101,6 +107,17 @@ export function clampEventAt(at: Date, dayStart: Date, now: Date): Date {
   return new Date(Math.min(max, Math.max(min, at.getTime())));
 }
 
+/**
+ * Should a candidate replace the AYUN event already written for the same stay? Only an event whose time
+ * is an upper bound (not observed): by an observed time, or by an earlier unobserved one (the points
+ * that arrived late narrowed the gap). An observed event is never moved (first write wins).
+ */
+export function correctGpsEvent(old: { at: Date; payloadJson: unknown }, c: Pick<StopCandidate, 'at' | 'observed'>): boolean {
+  const oldObserved = (old.payloadJson as { observed?: unknown } | null)?.observed !== false;
+  if (oldObserved) return false;
+  return c.observed || c.at.getTime() < old.at.getTime() - 60_000;
+}
+
 const isUniqueViolation = (e: unknown) => (e instanceof Prisma.PrismaClientKnownRequestError ? e.code === 'P2002' : (e as { code?: unknown } | null)?.code === 'P2002');
 
 interface CompanyGps {
@@ -130,7 +147,7 @@ async function companyGps(tenantId: string): Promise<CompanyGps | GpsSkip> {
  * any number of times; returns what was written and kept. Never throws for a busy plan.
  */
 export async function processGpsTimes(tenantId: string, truckId: string, date: string, now: Date = new Date()): Promise<GpsTimesResult> {
-  const res: GpsTimesResult = { truckId, date, skipped: null, written: 0, kept: {}, busy: false, trailMoves: 0, facts: [] };
+  const res: GpsTimesResult = { truckId, date, skipped: null, written: 0, corrected: 0, kept: {}, busy: false, trailMoves: 0, facts: [] };
   const company = await companyGps(tenantId);
   if (typeof company === 'string') return { ...res, skipped: company };
   const day = await prisma.ivmsTruckDay.findFirst({ where: { tenantId, truckId, deliveryDate: dateOnly(date) }, select: { id: true, suppressedAt: true } });
@@ -193,6 +210,7 @@ export async function processGpsTimes(tenantId: string, truckId: string, date: s
     try {
       const r = await writeStopCandidates(tenantId, truckId, date, dayStart, now, company.radiusM, load, list);
       res.written += r.written;
+      res.corrected += r.corrected;
       for (const [k, n] of Object.entries(r.kept)) bump(res.kept, k, n);
     } catch (e) {
       if (isLockBusy(e)) {
@@ -207,10 +225,13 @@ export async function processGpsTimes(tenantId: string, truckId: string, date: s
     }
   }
 
+  // A busy truck (lock timeout) is not marked processed: the poller's next pass (lib/ivms/poll.ts
+  // PROCESS_EVERY_MS) runs it again instead of waiting for the next history pull.
+  const processedAt = res.busy ? undefined : now;
   await prisma.ivmsTruckDay.upsert({
     where: { tenantId_truckId_deliveryDate: { tenantId, truckId, deliveryDate: dateOnly(date) } },
-    create: { tenantId, truckId, deliveryDate: dateOnly(date), processedAt: now, gpsFactsJson: res.facts as unknown as Prisma.InputJsonValue },
-    update: { processedAt: now, gpsFactsJson: res.facts as unknown as Prisma.InputJsonValue },
+    create: { tenantId, truckId, deliveryDate: dateOnly(date), processedAt: processedAt ?? null, gpsFactsJson: res.facts as unknown as Prisma.InputJsonValue },
+    update: { ...(processedAt ? { processedAt } : {}), gpsFactsJson: res.facts as unknown as Prisma.InputJsonValue },
   });
   return res;
 }
@@ -290,7 +311,7 @@ async function writeStopCandidates(
   radiusM: number,
   dayLoad: TruckDayLoad,
   list: StopCandidate[],
-): Promise<{ written: number; kept: Record<string, number> }> {
+): Promise<{ written: number; corrected: number; kept: Record<string, number> }> {
   const kept: Record<string, number> = {};
   const sequence = list[0]!.sequence;
   return prisma.$transaction(async (tx: Tx) => {
@@ -300,28 +321,44 @@ async function writeStopCandidates(
     // GPS never presses Dispatch: only a load on the road (or closed the same day) gets times.
     if (!load || (load.status !== 'DISPATCHED' && load.status !== 'COMPLETED')) {
       bump(kept, 'NOT_ON_ROAD', list.length);
-      return { written: 0, kept };
+      return { written: 0, corrected: 0, kept };
     }
     const planned = await plannedStopOf(tx, load, sequence);
     if (!planned) {
       bump(kept, 'NO_STOP', list.length);
-      return { written: 0, kept };
+      return { written: 0, corrected: 0, kept };
     }
     const vk: VisitKey = { tenantId, depotId: dayLoad.depotId, date, truckId, loadNo: dayLoad.loadNo, sequence };
     const visit = await ensureVisit(tx, vk, planned, dayLoad.id);
     // The office set the arrival: GPS adds nothing to that stop.
     if (visit.arrivalSource === 'DISPATCHER') {
       bump(kept, 'OFFICE', list.length);
-      return { written: 0, kept };
+      return { written: 0, corrected: 0, kept };
     }
-    const existing = await tx.stopEvent.findMany({ where: { tenantId, visitId: visit.id, kind: { in: ['ARRIVED', 'DEPARTED', 'OUTCOME'] } }, select: { kind: true, source: true, at: true, idempotencyKey: true, payloadJson: true } });
+    const existing: { id: string; kind: string; source: string; at: Date; idempotencyKey: string | null; payloadJson: Prisma.JsonValue }[] = await tx.stopEvent.findMany({
+      where: { tenantId, visitId: visit.id, kind: { in: ['ARRIVED', 'DEPARTED', 'OUTCOME'] } },
+      select: { id: true, kind: true, source: true, at: true, idempotencyKey: true, payloadJson: true },
+    });
     let ayun = existing.filter((e) => e.source === 'AYUN').length;
     let total = existing.length;
     let written = 0;
+    let corrected = 0;
     for (const c of [...list].sort((a, b) => a.at.getTime() - b.at.getTime() || (a.kind === 'ARRIVED' ? -1 : 1))) {
       const key = gpsEventKey(c, dayLoad.depotId, date, truckId);
-      const sameStay = existing.some((e) => e.source === 'AYUN' && e.kind === c.kind && (e.idempotencyKey === key || Math.abs(stayStartOf(e) - c.segmentStartAt.getTime()) <= SAME_STAY_MIN * 60_000));
-      if (sameStay || (await tx.stopEvent.findFirst({ where: { tenantId, idempotencyKey: key }, select: { id: true } }))) {
+      const payloadOf = (): Record<string, unknown> => ({ observed: c.observed, ...(c.kind === 'DEPARTED' && !c.observed ? { gap: true } : {}), detector: DETECTOR_VERSION, segmentStartAt: c.segmentStartAt.toISOString() });
+      const same = existing.find((e) => e.source === 'AYUN' && e.kind === c.kind && (e.idempotencyKey === key || Math.abs(stayStartOf(e) - c.segmentStartAt.getTime()) <= SAME_STAY_MIN * 60_000));
+      if (same) {
+        // The same stay: kept as written, unless its time was only an upper bound and the trail now knows better.
+        if (correctGpsEvent(same, c)) {
+          const at = clampEventAt(c.at, dayStart, now);
+          const payload = { ...payloadOf(), correctedAt: now.toISOString() };
+          await tx.stopEvent.update({ where: { id: same.id }, data: { at, lat: c.lat, lng: c.lng, distanceM: c.distanceM, payloadJson: payload as Prisma.InputJsonValue } });
+          Object.assign(same, { at, payloadJson: payload });
+          corrected++;
+        } else bump(kept, 'DUPLICATE');
+        continue;
+      }
+      if (await tx.stopEvent.findFirst({ where: { tenantId, idempotencyKey: key }, select: { id: true } })) {
         bump(kept, 'DUPLICATE');
         continue;
       }
@@ -334,8 +371,8 @@ async function writeStopCandidates(
         continue;
       }
       const at = clampEventAt(c.at, dayStart, now);
-      const payload: Record<string, unknown> = { observed: c.observed, ...(c.kind === 'DEPARTED' && !c.observed ? { gap: true } : {}), detector: DETECTOR_VERSION, segmentStartAt: c.segmentStartAt.toISOString() };
-      await tx.stopEvent.create({
+      const payload = payloadOf();
+      const row = await tx.stopEvent.create({
         data: {
           tenantId,
           depotId: dayLoad.depotId,
@@ -357,13 +394,13 @@ async function writeStopCandidates(
           payloadJson: payload as Prisma.InputJsonValue,
         },
       });
-      existing.push({ kind: c.kind, source: 'AYUN', at, idempotencyKey: key, payloadJson: payload as Prisma.JsonValue });
+      existing.push({ id: row.id, kind: c.kind, source: 'AYUN', at, idempotencyKey: key, payloadJson: payload as Prisma.JsonValue });
       ayun++;
       total++;
       written++;
     }
-    if (written) await rebuildVisit(tx, visit, { dayStart, radiusM, breakMin: planned.breakMin });
-    return { written, kept };
+    if (written || corrected) await rebuildVisit(tx, visit, { dayStart, radiusM, breakMin: planned.breakMin });
+    return { written, corrected, kept };
   });
 }
 
@@ -380,13 +417,28 @@ function stayStartOf(e: { at: Date; payloadJson: unknown }): number {
  * (a late Dispatch press, a completion). The processing hook the poller calls after its history pulls
  * (lib/ivms/poll.ts). Each truck-day in its own try: one failure never stops the others.
  */
-export async function processGpsTimesForCompany(tenantId: string, now: Date = new Date()): Promise<{ truckDays: number; written: number; busy: number; failed: number; skipped: GpsSkip | null }> {
+export interface GpsTimesSummary {
+  /** Truck-days processed. */
+  truckDays: number;
+  /** StopEvents written. */
+  written: number;
+  /** Unobserved GPS events corrected by a better trail. */
+  corrected: number;
+  /** Truck-days left for the next run (a lock was busy). */
+  busy: number;
+  /** Truck-days that failed (logged; retried by the next run). */
+  failed: number;
+  skipped: GpsSkip | null;
+}
+
+export async function processGpsTimesForCompany(tenantId: string, now: Date = new Date()): Promise<GpsTimesSummary> {
   const company = await companyGps(tenantId);
-  if (typeof company === 'string') return { truckDays: 0, written: 0, busy: 0, failed: 0, skipped: company };
+  if (typeof company === 'string') return { truckDays: 0, written: 0, corrected: 0, busy: 0, failed: 0, skipped: company };
   const today = todayIso(company.tz, now);
   const trucks = await prisma.truck.findMany({ where: { tenantId, ivmsImei: { not: null } }, select: { id: true } });
   let truckDays = 0;
   let written = 0;
+  let corrected = 0;
   let busy = 0;
   let failed = 0;
   for (const date of [addDaysIso(today, -1), today]) {
@@ -402,6 +454,7 @@ export async function processGpsTimesForCompany(tenantId: string, now: Date = ne
         const r = await processGpsTimes(tenantId, t.id, date, now);
         truckDays++;
         written += r.written;
+        corrected += r.corrected;
         if (r.busy) busy++;
       } catch (e) {
         failed++;
@@ -410,7 +463,7 @@ export async function processGpsTimesForCompany(tenantId: string, now: Date = ne
       }
     }
   }
-  return { truckDays, written, busy, failed, skipped: null };
+  return { truckDays, written, corrected, busy, failed, skipped: null };
 }
 
 /**

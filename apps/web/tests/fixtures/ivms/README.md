@@ -11,3 +11,4 @@ invented origin (10.5 N, 20.5 E) and the times are on 16 Oct 2026 in UTC.
 - `objects.json`: USER_GET_OBJECTS.
 - `webhook-depot-in.txt`: the query string of a "Depot IN" webhook call, with the fields RouteIQ never reads.
 - An empty answer is `[]`; an error is plain text such as `ERROR: wrong API key` with HTTP 200 (inline in the specs).
+- `day-script.json`: a whole invented delivery day for `tests/lib/ivms-day-simulation.spec.ts` (trucks' tracks as metre offsets from the invented depot of `tests/lib/ivms-trail.ts`, the drivers' and the office's entries, Ayun's webhooks and the provider's quirks: a coverage gap, points buffered and received late, a forged, a repeated and a foreign webhook). The spec's fake Ayun renders it in the shapes above.

@@ -7,7 +7,8 @@
  * - the kill switch and ivmsMode OFF: 200 and nothing written, not even a counter;
  * - GET, POST with the query string, urlencoded, multipart and JSON bodies; at most 16 KB;
  * - only zone_in / zone_out of an IMEI mapped to the company's own trucks is stored, as a depot move when
- *   the zone is a depot's (and the position near it); anything else is counted and dropped;
+ *   the zone is a depot's (and the position near it), only in TIMES (MAP never reads a move) and only for
+ *   a truck with a load on yesterday's or today's plans (never off duty); anything else is counted and dropped;
  * - the same event twice is one row; at most 200 rows per truck per day; 300 calls a minute per company;
  * - the fields RouteIQ never reads (user name, object name, driver, plate, SIM, VIN, ...) never reach the
  *   store, and nothing of the call is ever logged.
@@ -39,9 +40,9 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-function setup(mode: 'OFF' | 'MAP' | 'TIMES' = 'MAP') {
+function setup(mode: 'OFF' | 'MAP' | 'TIMES' = 'TIMES') {
   const store = new MemoryIvmsStore(company({ mode }));
-  store.fleetOf = () => [{ truckId: 't1', imei: IMEI_A, depotId: 'd1', days: [] }];
+  store.fleetOf = () => [{ truckId: 't1', imei: IMEI_A, depotId: 'd1', days: [{ date: '2026-10-16', loads: [{ loadNo: 1, status: 'DISPATCHED', statusChangedAt: null }] }] }];
   store.depots = [{ depotId: 'd1', zoneName: 'Example depot zone', lat: 10.5, lng: 20.5 }];
   const limiter = new RateLimiter({ now: () => NOW.getTime() });
   const call = (req: Request, secret: string = SECRET, env = ENV, now = NOW) => handleAyunWebhook(req, secret, { env, store, now, limiter });
@@ -182,6 +183,21 @@ describe('storing a depot move', () => {
 });
 
 describe('what is not stored', () => {
+  it('ivmsMode MAP: 200, counted as ignored, no row (only TIMES reads depot moves)', async () => {
+    const { store, call } = setup('MAP');
+    expect((await call(get())).status).toBe(200);
+    expect(store.events).toEqual([]);
+    expect(store.state).toMatchObject({ webhooksIgnored: 1, webhooksToday: 0 });
+  });
+
+  it("a truck without a load on yesterday's or today's plans (off duty): 200, counted, no row", async () => {
+    const { store, call } = setup();
+    store.fleetOf = () => [{ truckId: 't1', imei: IMEI_A, depotId: 'd1', days: [] }];
+    expect((await call(get())).status).toBe(200);
+    expect(store.events).toEqual([]);
+    expect(store.state).toMatchObject({ webhooksIgnored: 1, webhooksToday: 0 });
+  });
+
   it('an IMEI that is not one of the company\'s trucks: 200, counted, no row', async () => {
     const { store, call } = setup();
     const q = new URLSearchParams(QUERY);

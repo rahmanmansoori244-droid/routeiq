@@ -13,10 +13,11 @@ import { shownTruckCode } from '../dispatch/hire';
 import { readTruckSnapshot } from '../dispatch/snapshots';
 import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, todayIso, zonedDayStart } from '../dispatch/time';
 import { stopsOfLoads, type PlannedStopRow } from '../delivery/day-results';
+import { mapIntervalInEffect, utcDay } from './budget';
 import { readIvmsEnv } from './env';
 import { liveEta } from './eta';
 import { gpsFactText, liveVehicleOf, type DayVehicle, type DayVehiclesResponse } from './live-map';
-import { ivmsModeAtLeast, ivmsModeOf } from './settings';
+import { IVMS_SETTING_DEFAULTS, ivmsModeAtLeast, ivmsModeOf } from './settings';
 import type { IvmsMode } from './types';
 
 /** The live map's own request limit: 30 a minute per user (a 60 s refresh, some reloads). */
@@ -32,8 +33,12 @@ const empty = (mode: IvmsMode): DayVehiclesResponse => ({ mode, intervalSec: nul
 export async function readLiveVehicles(tenantId: string, runId: string, now: Date = new Date()): Promise<DayVehiclesResponse | null> {
   const run = await prisma.runPlan.findFirst({ where: { id: runId, tenantId }, select: { id: true, runDate: true } });
   if (!run) return null;
-  const cfg = await prisma.tenantConfig.findFirst({ where: { tenantId }, select: { ivmsMode: true, timezone: true, avgSpeedKmh: true, distanceMultiplier: true, ivmsPollSec: true } });
-  const mode: IvmsMode = readIvmsEnv().disabled ? 'OFF' : ivmsModeOf(cfg);
+  const cfg = await prisma.tenantConfig.findFirst({
+    where: { tenantId },
+    select: { ivmsMode: true, timezone: true, avgSpeedKmh: true, distanceMultiplier: true, ivmsPollSec: true, ivmsDailyCallBudget: true, ivmsFromMin: true, ivmsToMin: true },
+  });
+  const env = readIvmsEnv();
+  const mode: IvmsMode = env.disabled ? 'OFF' : ivmsModeOf(cfg);
   if (!ivmsModeAtLeast(mode, 'MAP')) return empty(mode);
   const tz = cfg?.timezone || DEFAULT_TZ;
   const date = isoOf(run.runDate);
@@ -44,8 +49,18 @@ export async function readLiveVehicles(tenantId: string, runId: string, now: Dat
     where: { tenantId, runId, status: { in: [...OUT] } },
     select: { id: true, truckId: true, loadNo: true, status: true, departMin: true, breakJson: true, truckSnapshotJson: true },
   });
-  const state = await prisma.ivmsState.findFirst({ where: { tenantId }, select: { lastOkAt: true } });
-  const base: DayVehiclesResponse = { mode, intervalSec: null, updatedAt: state?.lastOkAt ? state.lastOkAt.toISOString() : null, vehicles: [] };
+  // How often the poller asks for positions now (the allowance may stretch ivmsPollSec), for the caption.
+  const state = await prisma.ivmsState.findFirst({ where: { tenantId }, select: { mapCalls: true, usageDay: true } });
+  const intervalSec = mapIntervalInEffect({
+    budget: cfg?.ivmsDailyCallBudget ?? IVMS_SETTING_DEFAULTS.ivmsDailyCallBudget,
+    mode,
+    webhookSecretSet: env.webhookSecrets.length > 0,
+    pollSec: cfg?.ivmsPollSec ?? IVMS_SETTING_DEFAULTS.ivmsPollSec,
+    hours: { timezone: tz, fromMin: cfg?.ivmsFromMin ?? IVMS_SETTING_DEFAULTS.ivmsFromMin, toMin: cfg?.ivmsToMin ?? IVMS_SETTING_DEFAULTS.ivmsToMin },
+    mapCallsToday: state?.usageDay && state.usageDay.toISOString().slice(0, 10) === utcDay(now) ? (state.mapCalls ?? 0) : 0,
+    now,
+  });
+  const base: DayVehiclesResponse = { mode, intervalSec, updatedAt: null, vehicles: [] };
   if (!loads.length) return base;
   const loadOf = new Map<string, (typeof loads)[number]>();
   for (const l of loads) {
@@ -54,11 +69,13 @@ export async function readLiveVehicles(tenantId: string, runId: string, now: Dat
   }
   const truckIds = [...loadOf.keys()];
   const [positions, trucks, days] = await Promise.all([
-    prisma.truckPosition.findMany({ where: { tenantId, truckId: { in: truckIds } }, select: { truckId: true, fixAt: true, lat: true, lng: true, speedKmh: true, heading: true, flags: true, movedAt: true } }),
+    prisma.truckPosition.findMany({ where: { tenantId, truckId: { in: truckIds } }, select: { truckId: true, fixAt: true, receivedAt: true, lat: true, lng: true, speedKmh: true, heading: true, flags: true, movedAt: true } }),
     prisma.truck.findMany({ where: { tenantId, id: { in: truckIds } }, select: { id: true, code: true, onlyOnDate: true } }),
     prisma.ivmsTruckDay.findMany({ where: { tenantId, truckId: { in: truckIds }, deliveryDate: dateOnly(date) }, select: { truckId: true, gpsFactsJson: true } }),
   ]);
   if (!positions.length) return base;
+  // When RouteIQ last received a new position of these trucks (the live-position call; never a history pull's time).
+  base.updatedAt = new Date(Math.max(...positions.map((p) => (p.receivedAt ?? p.fixAt).getTime()))).toISOString();
 
   // The next stops of the trucks on the road with a usable fix (ETA from the plan's own legs).
   const onRoad = positions.map((p) => loadOf.get(p.truckId)!).filter((l) => l.status === 'DISPATCHED');

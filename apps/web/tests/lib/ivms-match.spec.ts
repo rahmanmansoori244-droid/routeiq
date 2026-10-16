@@ -192,7 +192,7 @@ describe('suggestions from Ayun', () => {
     expect(JSON.stringify(r)).not.toMatch(/Driver|Example/);
   });
 
-  it('the route is company admin only and, until the client is wired, answers NOT_CONFIGURED (409)', async () => {
+  it('the route is company admin only and, without the server variables, answers NOT_CONFIGURED (409) without a call', async () => {
     tables.tenantConfig![0]!.ivmsMode = 'MAP';
     session.value!.user.role = 'PLANNER';
     expect((await POST(new Request('https://routeiq.test/api/ivms/objects', { method: 'POST' }))).status).toBe(403);
