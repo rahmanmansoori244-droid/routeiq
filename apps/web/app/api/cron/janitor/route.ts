@@ -50,9 +50,20 @@ async function runJanitor() {
   // IVMS live link (16 Oct 2026): one tick now (`force` skips the wait only while the allowance is ample)
   // and the GPS retention. Both null - and the answer exactly as before - while the link is not in use
   // (no AYUN_* variables, the kill switch, ivmsMode OFF, no GPS data).
+  // Each in its own try, as in the in-process janitor (first review LOW): a database error there never turns
+  // the answer into a 500 after the steps above already ran; its code only is logged and answered.
   const now = new Date();
-  const ivmsTick = await runIvmsTick(now, { force: true });
-  const ivmsRetention = await runIvmsRetention(now, { force: true });
+  const step = async <T,>(name: string, run: () => Promise<T>): Promise<T | { error: string }> => {
+    try {
+      return await run();
+    } catch (err) {
+      const code = String((err as { code?: string; name?: string } | null)?.code ?? (err as Error)?.name ?? 'error').slice(0, 40);
+      console.error(`janitor: ${name} failed`, code);
+      return { error: code };
+    }
+  };
+  const ivmsTick = await step('ivms tick', () => runIvmsTick(now, { force: true }));
+  const ivmsRetention = await step('ivms retention', () => runIvmsRetention(now, { force: true }));
   const ivms = ivmsTick || ivmsRetention ? { tick: ivmsTick, retention: ivmsRetention } : null;
   return { jobs, shifts, returnedLoads, deliveryRetention, hire, ...(ivms ? { ivms } : {}) };
 }

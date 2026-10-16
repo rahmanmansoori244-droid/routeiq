@@ -15,7 +15,7 @@ import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, todayIso, zonedDayStart } from
 import { stopsOfLoads, type PlannedStopRow } from '../delivery/day-results';
 import { mapIntervalInEffect, utcDay } from './budget';
 import { readIvmsEnv } from './env';
-import { liveEta } from './eta';
+import { AT_STOP_MARGIN_M, liveEta } from './eta';
 import { gpsFactText, liveVehicleOf, type DayVehicle, type DayVehiclesResponse } from './live-map';
 import { IVMS_SETTING_DEFAULTS, ivmsModeAtLeast, ivmsModeOf } from './settings';
 import type { IvmsMode } from './types';
@@ -35,7 +35,7 @@ export async function readLiveVehicles(tenantId: string, runId: string, now: Dat
   if (!run) return null;
   const cfg = await prisma.tenantConfig.findFirst({
     where: { tenantId },
-    select: { ivmsMode: true, timezone: true, avgSpeedKmh: true, distanceMultiplier: true, ivmsPollSec: true, ivmsDailyCallBudget: true, ivmsFromMin: true, ivmsToMin: true },
+    select: { ivmsMode: true, timezone: true, avgSpeedKmh: true, distanceMultiplier: true, ivmsPollSec: true, ivmsDailyCallBudget: true, ivmsFromMin: true, ivmsToMin: true, ivmsStopRadiusM: true },
   });
   const env = readIvmsEnv();
   const mode: IvmsMode = env.disabled ? 'OFF' : ivmsModeOf(cfg);
@@ -125,6 +125,7 @@ export async function readLiveVehicles(tenantId: string, runId: string, now: Dat
         }),
         avgSpeedKmh: cfg?.avgSpeedKmh ?? 40,
         distanceMultiplier: cfg?.distanceMultiplier ?? 1.3,
+        atStopRadiusM: (cfg?.ivmsStopRadiusM ?? IVMS_SETTING_DEFAULTS.ivmsStopRadiusM) + AT_STOP_MARGIN_M,
       });
       const first = etas[0];
       if (first) {

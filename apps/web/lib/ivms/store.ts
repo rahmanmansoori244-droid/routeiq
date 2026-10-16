@@ -25,7 +25,7 @@ import { prisma } from '../db';
 import { addDaysIso, dateOnly, isoOf, todayIso } from '../dispatch/time';
 import { liveRunsInRange } from '../delivery/day-results';
 import type { LoadStatusName } from '../dispatch/load-state';
-import { utcDay } from './budget';
+import { utcDay, type SkewRecord } from './budget';
 import { MAX_EVENTS_PER_TRUCK_DAY, type DepotZone, type NewZoneEvent } from './events';
 import { ivmsModeOf } from './settings';
 import type { GpsTimesSummary } from './stop-events';
@@ -78,6 +78,10 @@ export interface IvmsStateRow {
   eventsLastAt: Date | null;
   failures: number;
   lastError: string | null;
+  /** The provider's clock as last measured (budget.ts clockCheck, first review H-1). */
+  providerSkewSec: number | null;
+  providerSkewAt: Date | null;
+  providerSkewOffsetMin: number | null;
 }
 
 /** IvmsTruckDay: how far a truck-day's history is pulled. */
@@ -89,6 +93,8 @@ export interface TruckDayRow {
   pulls: number;
   finalPullAt: Date | null;
   suppressedAt: Date | null;
+  /** The tracker was mapped to the truck at this time: nothing before it is pulled (second review M-1). */
+  trailFrom: Date | null;
 }
 
 export type WebhookCounter = 'webhooksToday' | 'webhooksIgnored' | 'webhooksBadTime';
@@ -115,7 +121,10 @@ export interface IvmsStore {
   /** Count one admin call (the tracker and zone pickers): budget only, no lease (M13). */
   claimAdmin(tenantId: string, now: Date, limits: Pick<ClaimLimits, 'share' | 'budget'>): Promise<boolean>;
   releaseLease(tenantId: string, owner: string, now: Date): Promise<void>;
-  recordOk(tenantId: string, now: Date, skewSec?: number | null): Promise<void>;
+  /** A call that worked; a live-position answer also records the provider's clock skew and the offset it was read with. */
+  recordOk(tenantId: string, now: Date, skew?: { sec: number; offsetMin: number } | null): Promise<void>;
+  /** The provider's clock as last recorded (for a tick that did not get the lease). */
+  readSkew(tenantId: string): Promise<SkewRecord | null>;
   /** A failed call: its kind (a code only); with `nextTryAt` a backoff starts and the failure is counted. */
   recordFailure(tenantId: string, now: Date, kind: AyunErrorKind, nextTryAt: Date | null): Promise<void>;
   /** The latest live fix per truck: moved forward only by a newer fix. The number written. */
@@ -244,7 +253,8 @@ export const prismaIvmsStore: IvmsStore = {
       WHERE "tenantId" = ${tenantId}
         AND ("leaseUntil" IS NULL OR "leaseUntil" < ${now} OR "leaseOwner" = ${owner})
         AND ("nextTryAt" IS NULL OR "nextTryAt" <= ${now})
-      RETURNING to_char("usageDay", 'YYYY-MM-DD') AS "usageDay", "mapCalls", "routeCalls", "eventCalls", "adminCalls", "mapLastAt", "eventsLastAt", "failures", "lastError"`;
+      RETURNING to_char("usageDay", 'YYYY-MM-DD') AS "usageDay", "mapCalls", "routeCalls", "eventCalls", "adminCalls", "mapLastAt", "eventsLastAt", "failures", "lastError",
+        "providerSkewSec", "providerSkewAt", "providerSkewOffsetMin"`;
     return rows[0] ?? null;
   },
 
@@ -254,8 +264,11 @@ export const prismaIvmsStore: IvmsStore = {
     const gap =
       lastAt && limits.minGapSec != null ? Prisma.sql`AND (${lastAt} IS NULL OR ${lastAt} <= ${new Date(now.getTime() - limits.minGapSec * 1000)})` : Prisma.empty;
     const setLast = lastAt ? Prisma.sql`, ${lastAt} = ${now}` : Prisma.empty;
+    // The lease is renewed from the wall clock, not the tick's start: a slow tick (several calls of up to
+    // 8 s) keeps it for leaseMs after its latest call (first review LOW).
+    const until = new Date(Math.max(now.getTime(), Date.now()) + limits.leaseMs);
     const rows = await prisma.$queryRaw<{ n: number }[]>`
-      UPDATE "IvmsState" SET ${counter} = ${counter} + 1${setLast}, "leaseUntil" = ${new Date(now.getTime() + limits.leaseMs)}, "updatedAt" = ${now}
+      UPDATE "IvmsState" SET ${counter} = ${counter} + 1${setLast}, "leaseUntil" = ${until}, "updatedAt" = ${now}
       WHERE "tenantId" = ${tenantId} AND "leaseOwner" = ${owner} AND "leaseUntil" >= ${now}
         AND "usageDay" = ${utcDay(now)}::date
         AND ${counter} < ${limits.share}
@@ -282,11 +295,22 @@ export const prismaIvmsStore: IvmsStore = {
     await prisma.$executeRaw`UPDATE "IvmsState" SET "leaseUntil" = NULL, "leaseOwner" = NULL, "updatedAt" = ${now} WHERE "tenantId" = ${tenantId} AND "leaseOwner" = ${owner}`;
   },
 
-  async recordOk(tenantId, now, skewSec = null) {
+  async recordOk(tenantId, now, skew = null) {
+    if (skew) {
+      await prisma.$executeRaw`
+        UPDATE "IvmsState" SET "lastOkAt" = ${now}, "failures" = 0, "nextTryAt" = NULL,
+          "providerSkewSec" = ${skew.sec}::integer, "providerSkewAt" = ${now}, "providerSkewOffsetMin" = ${skew.offsetMin}::integer, "updatedAt" = ${now}
+        WHERE "tenantId" = ${tenantId}`;
+      return;
+    }
     await prisma.$executeRaw`
-      UPDATE "IvmsState" SET "lastOkAt" = ${now}, "failures" = 0, "nextTryAt" = NULL,
-        "providerSkewSec" = COALESCE(${skewSec}::integer, "providerSkewSec"), "updatedAt" = ${now}
+      UPDATE "IvmsState" SET "lastOkAt" = ${now}, "failures" = 0, "nextTryAt" = NULL, "updatedAt" = ${now}
       WHERE "tenantId" = ${tenantId}`;
+  },
+
+  async readSkew(tenantId) {
+    const s = await prisma.ivmsState.findFirst({ where: { tenantId }, select: { providerSkewSec: true, providerSkewAt: true, providerSkewOffsetMin: true } });
+    return s ? { skewSec: s.providerSkewSec, skewAt: s.providerSkewAt, skewOffsetMin: s.providerSkewOffsetMin } : null;
   },
 
   async recordFailure(tenantId, now, kind, nextTryAt) {
@@ -312,6 +336,11 @@ export const prismaIvmsStore: IvmsStore = {
           "ignition" = EXCLUDED."ignition", "flags" = EXCLUDED."flags", "movedAt" = COALESCE(EXCLUDED."movedAt", "TruckPosition"."movedAt")
         WHERE "TruckPosition"."tenantId" = EXCLUDED."tenantId" AND "TruckPosition"."fixAt" < EXCLUDED."fixAt"`;
     }
+    // Every truck the answer included was read now, also a parked one with no newer fix: the map's "updated"
+    // time is the last answer, not the last movement (second review L-5: no false "positions delayed").
+    if (rows.length) {
+      await prisma.truckPosition.updateMany({ where: { tenantId, truckId: { in: [...new Set(rows.map((r) => r.truckId))] }, receivedAt: { lt: now } }, data: { receivedAt: now } });
+    }
     return n;
   },
 
@@ -324,9 +353,18 @@ export const prismaIvmsStore: IvmsStore = {
     if (!keys.length) return [];
     const rows = await prisma.ivmsTruckDay.findMany({
       where: { tenantId, truckId: { in: [...new Set(keys.map((k) => k.truckId))] }, deliveryDate: { in: [...new Set(keys.map((k) => k.date))].map(dateOnly) } },
-      select: { truckId: true, deliveryDate: true, pulledTo: true, lastPullAt: true, pulls: true, finalPullAt: true, suppressedAt: true },
+      select: { truckId: true, deliveryDate: true, pulledTo: true, lastPullAt: true, pulls: true, finalPullAt: true, suppressedAt: true, trailFrom: true },
     });
-    return rows.map((r) => ({ truckId: r.truckId, date: isoOf(r.deliveryDate), pulledTo: r.pulledTo, lastPullAt: r.lastPullAt, pulls: r.pulls, finalPullAt: r.finalPullAt, suppressedAt: r.suppressedAt }));
+    return rows.map((r) => ({
+      truckId: r.truckId,
+      date: isoOf(r.deliveryDate),
+      pulledTo: r.pulledTo,
+      lastPullAt: r.lastPullAt,
+      pulls: r.pulls,
+      finalPullAt: r.finalPullAt,
+      suppressedAt: r.suppressedAt,
+      trailFrom: r.trailFrom,
+    }));
   },
 
   async writeTrail(tenantId, truckId, points) {

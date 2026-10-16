@@ -263,3 +263,123 @@ describe('small rules', () => {
     expect(typeof fakePrisma.truckTrailPoint.findMany).toBe('function');
   });
 });
+
+describe('the reviews of 16 Oct 2026 (second review H-1, M-1, L-1; first review LOW)', () => {
+  const visitRow = (id: string, loadNo: number, sequence: number) => ({ id, tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't5', loadNo, sequence, customerId: 'C-A', firstLoadId: null, plannedLat: SHOP_A.lat, plannedLng: SHOP_A.lng, windowStartMin: null, windowEndMin: null, linesJson: [], casesPlanned: 30, arrivalSource: 'AYUN', arrivedAt: T('07:04:30'), locationPurgedAt: null });
+  const gpsEvent = (id: string, loadNo: number, sequence: number, kind: 'ARRIVED' | 'DEPARTED', atT: Date, visitId: string) => ({
+    id,
+    tenantId: TEN,
+    depotId: 'D1',
+    deliveryDate: day,
+    truckId: 't5',
+    loadNo,
+    sequence,
+    visitId,
+    kind,
+    source: 'AYUN',
+    at: atT,
+    receivedAt: T('08:00'),
+    idempotencyKey: `ayun:${kind === 'ARRIVED' ? 'A' : 'D'}:D1:${DATE}:t5:${loadNo}:${sequence}:${T('07:04:30').getTime()}`,
+    payloadJson: { observed: true, detector: 'ivms-v1', segmentStartAt: T('07:04:30').toISOString() },
+  });
+
+  it('a GPS time written for a load whose trip is now another load\'s is deleted and its visit rebuilt (H-1)', async () => {
+    // Written earlier for load 2 (an older match): trip 1 (07:01-07:36) is load 1's.
+    tables.stopVisit!.push(visitRow('v2', 2, 1));
+    tables.stopEvent!.push(gpsEvent('old-a', 2, 1, 'ARRIVED', T('07:04:30'), 'v2'), gpsEvent('old-d', 2, 1, 'DEPARTED', T('07:15'), 'v2'));
+    const r = await processGpsTimes(TEN, 't5', DATE, NOW);
+    expect(r).toMatchObject({ removed: 2, written: 4 });
+    expect(events().filter((e) => e.loadNo === 2)).toEqual([]);
+    expect(tables.stopVisit!.find((v) => v.id === 'v2')).toMatchObject({ arrivedAt: null, arrivalSource: null, departedAt: null });
+    expect(events().filter((e) => e.loadNo === 1 && e.source === 'AYUN')).toHaveLength(4);
+    // A GPS event in no trip of a load (nothing says it is wrong) is kept.
+    tables.stopEvent!.push(gpsEvent('far', 2, 1, 'ARRIVED', T('13:00'), 'v2'));
+    (tables.stopEvent!.find((e) => e.id === 'far')!.payloadJson as Record<string, unknown>).segmentStartAt = T('13:00').toISOString();
+    expect((await processGpsTimes(TEN, 't5', DATE, NOW)).removed).toBe(0);
+    expect(events().some((e) => e.id === 'far')).toBe(true);
+  });
+
+  it('a tracker found on another truck after GPS times were written: they are deleted too (M-1)', async () => {
+    await processGpsTimes(TEN, 't5', DATE, NOW);
+    expect(events().filter((e) => e.source === 'AYUN')).toHaveLength(4);
+    const ev = (t: string, east: number) => ({ id: `ph${t}`, tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't5', loadNo: 1, sequence: 1, visitId: null, kind: 'ARRIVED', source: 'PHONE_AUTO', at: T(t), receivedAt: T(t), ...at(east), idempotencyKey: `dl:${t}`, payloadJson: {} });
+    tables.stopEvent!.push(ev('07:05', 20_000), ev('07:10', 20_000), ev('07:20', 25_000));
+    expect(await processGpsTimes(TEN, 't5', DATE, NOW)).toMatchObject({ skipped: 'MISMATCH', removed: 4 });
+    expect(events().filter((e) => e.source === 'AYUN')).toEqual([]);
+    expect(visitOf(2)).toMatchObject({ arrivedAt: null, arrivalSource: null });
+    expect(tables.ivmsTruckDay![0]).toMatchObject({ suppressReason: 'MISMATCH' });
+  });
+
+  it('left to park and came back within 10 minutes: both stays are written, the departure after the result is the second one (L-1)', async () => {
+    const trail = new Trail('06:30').park(30).drive(3000).park(5).drive(3500).park(2).drive(3000).park(5).drive(6000).park(8).drive(0).park(20);
+    tables.truckTrailPoint = trail.pts.map((p, i) => ({ id: `tp${i}`, tenantId: TEN, truckId: 't5', ...p }));
+    const r = await processGpsTimes(TEN, 't5', DATE, NOW);
+    const a = events().filter((e) => e.source === 'AYUN' && e.sequence === 1);
+    expect(a.map((e) => e.kind)).toEqual(['ARRIVED', 'DEPARTED', 'ARRIVED', 'DEPARTED']);
+    expect(r.written).toBe(6);
+    // A rerun keeps both, writes nothing.
+    expect((await processGpsTimes(TEN, 't5', DATE, NOW)).written).toBe(0);
+  });
+
+  it('the facts never outgrow the 8 KB CHECK: many stops and many facts are cut (first review LOW)', async () => {
+    const { gpsFactsOf, MAX_FACTS_BYTES, MAX_FACT_SEQUENCES } = await import('@/lib/ivms/stop-events');
+    const amb = Array.from({ length: 60 }, (_, i) => ({ reason: 'SEVERAL_PINS' as const, loadNo: 1, sequences: Array.from({ length: 50 }, (_, j) => j + 1), from: T('07:00'), to: i % 2 ? null : T('07:30') }));
+    const facts = gpsFactsOf({ ambiguities: amb, notes: ['NO_DEPOT_BOUNDARY'] });
+    expect(Buffer.byteLength(JSON.stringify(facts))).toBeLessThanOrEqual(MAX_FACTS_BYTES);
+    expect(facts[0]).toEqual({ kind: 'NO_DEPOT_BOUNDARY' });
+    expect(facts.every((f) => !('sequences' in f) || f.sequences.length <= MAX_FACT_SEQUENCES)).toBe(true);
+  });
+
+  it('a failed truck-day is logged by its code only, never the message (it can quote positions)', async () => {
+    tables.ivmsTruckDay!.push({ id: 'td', tenantId: TEN, truckId: 't5', deliveryDate: day, lastPullAt: T('15:00'), processedAt: null, suppressedAt: null });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const orig = fakePrisma.truckTrailPoint.findMany;
+    fakePrisma.truckTrailPoint.findMany = (async () => {
+      throw Object.assign(new Error(`Invalid value near lat ${SHOP_A.lat}`), { name: 'PrismaClientValidationError' });
+    }) as never;
+    try {
+      expect(await processGpsTimesForCompany(TEN, NOW)).toMatchObject({ failed: 1 });
+    } finally {
+      fakePrisma.truckTrailPoint.findMany = orig;
+    }
+    expect(warn.mock.calls.map((c) => c.join(' '))).toEqual(['[ivms] GPS times failed for a truck-day PrismaClientValidationError']);
+    warn.mockRestore();
+  });
+});
+
+describe('the fixes of the reviews, wiring (16 Oct 2026)', () => {
+  const back = (source: string, atT: Date) => ({ id: `back-${source}`, tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't5', loadNo: 1, sequence: null, visitId: null, kind: 'BACK_AT_DEPOT', source, at: atT, receivedAt: atT, idempotencyKey: `back:${source}`, payloadJson: {} });
+
+  it("the driver's Back at depot bounds the load's trips; a GPS (AYUN) Back at depot is never read as the driver's", async () => {
+    // A Back at depot by the driver at 06:45 (before the 07:01 trip): that trip is not load 1's.
+    tables.stopEvent!.push(back('PHONE_MANUAL', T('06:45')));
+    expect(await processGpsTimes(TEN, 't5', DATE, NOW)).toMatchObject({ written: 0 });
+    expect(events().filter((e) => e.source === 'AYUN')).toEqual([]);
+    // The same time from GPS: ignored, the trip stays load 1's.
+    seed();
+    tables.stopEvent!.push(back('AYUN', T('06:45')));
+    expect(await processGpsTimes(TEN, 't5', DATE, NOW)).toMatchObject({ written: 4 });
+  });
+
+  it('no trail point from before the tracker was mapped to the truck is read (second review M-1)', async () => {
+    // Mapped at 07:10, while the truck was at shop A: shop A's arrival is unknown, shop B is timed.
+    tables.ivmsTruckDay!.push({ id: 'td', tenantId: TEN, truckId: 't5', deliveryDate: day, lastPullAt: T('15:00'), processedAt: null, suppressedAt: null, trailFrom: T('07:10') });
+    const r = await processGpsTimes(TEN, 't5', DATE, NOW);
+    expect(events().map((e) => `${e.sequence} ${e.kind}`)).toEqual(['2 ARRIVED', '2 DEPARTED']);
+    expect(r.written).toBe(2);
+  });
+
+  it('a GPS time still on a suppressed truck-day (a removal that failed, a run already under way) is removed by the next run', async () => {
+    await processGpsTimes(TEN, 't5', DATE, NOW);
+    expect(events().filter((e) => e.source === 'AYUN')).toHaveLength(4);
+    tables.stopEvent!.push(back('PHONE_MANUAL', T('07:40')));
+    tables.ivmsTruckDay![0]!.suppressedAt = T('15:30');
+    tables.ivmsTruckDay![0]!.suppressReason = 'UNDO';
+    const r = await processGpsTimesForCompany(TEN, NOW);
+    expect(r).toMatchObject({ removed: 4, failed: 0 });
+    expect(events().map((e) => `${e.kind} ${e.source}`)).toEqual(['BACK_AT_DEPOT PHONE_MANUAL']);
+    expect(visitOf(1)).toMatchObject({ arrivedAt: null, arrivalSource: null, departedAt: null });
+    // Nothing left: the next run reads and writes nothing more.
+    expect(await processGpsTimesForCompany(TEN, NOW)).toMatchObject({ removed: 0, truckDays: 0 });
+  });
+});

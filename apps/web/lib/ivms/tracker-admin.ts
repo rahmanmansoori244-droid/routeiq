@@ -7,7 +7,12 @@
  *   only suggests. Never on a one-day hired truck (database CHECK), never on two trucks (unique key).
  * - Changing a tracker removes the truck's live position, so the map never shows the old tracker's
  *   position for it; replacing or clearing one after today's trail was pulled marks today's GPS times of
- *   the truck suppressed (REMAP: the trail may be another truck's, review M8).
+ *   the truck suppressed AND deletes the GPS times already written for it, the visits rebuilt (REMAP: the
+ *   trail may be another truck's, review M8, second review M-1).
+ * - Setting a tracker (new or replaced) records when (IvmsTruckDay.trailFrom of today and yesterday): no
+ *   history from before it is ever pulled or read for the truck, so a tracker moved from another truck
+ *   never brings that truck's morning along (second review M-1). With GPS tracking OFF no truck-day row
+ *   is created for it (OFF writes no GPS row), only an existing one is marked.
  * - The audit row names the truck and the tracker's last 4 digits only ("ends 1234").
  * - Suggestions: one USER_GET_OBJECTS call (the ADMIN class of the allowance), only in ivmsMode MAP or
  *   TIMES (OFF never calls the provider), only for the company the Ayun account belongs to
@@ -15,10 +20,11 @@
  */
 import { prisma } from '../db';
 import { audit } from '../audit';
-import { dateOnly, DEFAULT_TZ, todayIso } from '../dispatch/time';
+import { addDaysIso, dateOnly, DEFAULT_TZ, todayIso } from '../dispatch/time';
 import { ivmsApiReady, readIvmsEnv } from './env';
 import { imeiTail, normalizeImei, suggestTrackers, trackerRowsOf, type TrackerSuggestion } from './match';
 import { ivmsModeAtLeast, ivmsModeOf } from './settings';
+import { suppressGpsTimes } from './stop-events';
 import type { AyunErrorKind, AyunResult } from './types';
 
 export type TrackerSetResult =
@@ -47,15 +53,34 @@ export async function setTruckTracker(tenantId: string, truckId: string, raw: st
   }
   // The old tracker's position must never show for this truck.
   await prisma.truckPosition.deleteMany({ where: { tenantId, truckId } });
+  const cfg = await prisma.tenantConfig.findFirst({ where: { tenantId }, select: { timezone: true, ivmsMode: true } });
+  const today = todayIso(cfg?.timezone || DEFAULT_TZ, now);
   // A tracker replaced or removed after today's trail was pulled: today's trail may be the old tracker's.
+  // Suppressed, and what GPS already wrote for the truck today is deleted (the visits rebuilt).
   let suppressedToday = false;
   if (truck.ivmsImei) {
-    const cfg = await prisma.tenantConfig.findFirst({ where: { tenantId }, select: { timezone: true } });
-    const today = todayIso(cfg?.timezone || DEFAULT_TZ, now);
     const pulled = await prisma.ivmsTruckDay.findFirst({ where: { tenantId, truckId, deliveryDate: dateOnly(today), lastPullAt: { not: null } }, select: { id: true, suppressedAt: true } });
     if (pulled && !pulled.suppressedAt) {
-      await prisma.ivmsTruckDay.update({ where: { id: pulled.id }, data: { suppressedAt: now, suppressReason: 'REMAP' } });
+      await suppressGpsTimes(tenantId, truckId, today, 'REMAP', { dryRun: false, now });
       suppressedToday = true;
+    }
+  }
+  // A tracker set now: nothing from before this moment is ever pulled for the truck (today's and
+  // yesterday's truck-days: a load of yesterday may still be out). With GPS tracking OFF only a truck-day
+  // the link already has is marked: OFF never creates a GPS row (its outputs stay exactly as before).
+  if (imei) {
+    const inUse = ivmsModeAtLeast(ivmsModeOf(cfg), 'MAP');
+    for (const date of [addDaysIso(today, -1), today]) {
+      const deliveryDate = dateOnly(date);
+      if (inUse) {
+        await prisma.ivmsTruckDay.upsert({
+          where: { tenantId_truckId_deliveryDate: { tenantId, truckId, deliveryDate } },
+          create: { tenantId, truckId, deliveryDate, trailFrom: now },
+          update: { trailFrom: now },
+        });
+      } else {
+        await prisma.ivmsTruckDay.updateMany({ where: { tenantId, truckId, deliveryDate }, data: { trailFrom: now } });
+      }
     }
   }
   await audit({
@@ -69,6 +94,42 @@ export async function setTruckTracker(tenantId: string, truckId: string, raw: st
     ip: actor.ip,
   });
   return { ok: true, truckId, imei, changed: true, suppressedToday };
+}
+
+export type GpsUndoResult =
+  | { ok: true; truckId: string; date: string; dryRun: boolean; events: number; visits: number }
+  | { ok: false; status: 404 | 422; code: 'NOT_FOUND' | 'BAD_DATE'; message: string };
+
+/**
+ * The undo of a truck-day's GPS times (first review M-3; the runbook in docs/admin.md): POST
+ * /api/ivms/trucks/[id]/gps-times, company admin. A dry run (the default) only counts. Otherwise the
+ * truck-day is marked "GPS suppressed" (UNDO: the next run writes nothing again), its AYUN arrival and
+ * departure events are deleted and the visits they were on rebuilt from the driver's and the office's
+ * events (lib/ivms/stop-events.ts suppressGpsTimes); one audit row with the truck, the date and the counts.
+ * Never touches a driver or office event, a result or a load. Works in every ivmsMode (the runbook sets
+ * OFF first) and with the kill switch set: it reads and writes RouteIQ's own rows only, never Ayun.
+ */
+export async function undoGpsTimes(tenantId: string, truckId: string, date: string, opts: { dryRun: boolean; actor: { userId: string; ip: string | null } }, now: Date = new Date()): Promise<GpsUndoResult> {
+  const truck = await prisma.truck.findFirst({ where: { id: truckId, tenantId }, select: { id: true, code: true } });
+  if (!truck) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Truck not found.' };
+  const cfg = await prisma.tenantConfig.findFirst({ where: { tenantId }, select: { timezone: true } });
+  const today = todayIso(cfg?.timezone || DEFAULT_TZ, now);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00Z`)) || date > today) {
+    return { ok: false, status: 422, code: 'BAD_DATE', message: 'A delivery date (YYYY-MM-DD) up to today.' };
+  }
+  const r = await suppressGpsTimes(tenantId, truckId, date, 'UNDO', { dryRun: opts.dryRun, now });
+  if (!opts.dryRun) {
+    await audit({
+      tenantId,
+      userId: opts.actor.userId,
+      action: 'GPS_TIMES_UNDONE',
+      entity: 'Truck',
+      entityId: truckId,
+      afterJson: { truck: truck.code, date, gpsTimesRemoved: r.events, visitsRebuilt: r.visits },
+      ip: opts.actor.ip,
+    });
+  }
+  return { ok: true, truckId, date, dryRun: r.dryRun, events: r.events, visits: r.visits };
 }
 
 /**

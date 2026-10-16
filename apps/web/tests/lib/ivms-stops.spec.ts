@@ -4,7 +4,7 @@
  * pins as metre offsets from it; trucks and customers are made up.
  */
 import { describe, expect, it } from 'vitest';
-import { detectTruckDay, matchTripsToLoads, staysAt, trackerMismatch, trailDepotMoves, tripsOf, type DetectorInput, type DetectorLoad, type DetectorStop, type DetectedTrip } from '@/lib/ivms/stops';
+import { detectTruckDay, loadAnchor, matchTripsToLoads, staysAt, trackerMismatch, trailDepotMoves, tripsOf, type DetectorInput, type DetectorLoad, type DetectorStop, type DetectedTrip } from '@/lib/ivms/stops';
 import { DETECTOR_FIXED, type DetectorParams, type TrailPoint } from '@/lib/ivms/types';
 import { T, Trail, at, hhmm } from './ivms-trail';
 
@@ -152,7 +152,7 @@ describe('the depot (H4) and its moves', () => {
     expect(moves.map((m) => m.kind)).toEqual(['DEPOT_OUT']);
   });
 
-  it('a provider zone move confirmed by the trail is used (its time); an unconfirmed one (forged) is never a boundary (M6)', () => {
+  it('a provider zone move confirmed by the trail is used (the trail keeps its own time); an unconfirmed one (forged) is never a boundary (M6)', () => {
     const trail = new Trail('06:30').park(30).drive(3000).park(10).drive(6000).park(8).drive(0).park(20);
     const out = detectTruckDay(
       input(trail.pts, [load(1, [stop(1, 3000), stop(2, 6000)])], {
@@ -167,7 +167,8 @@ describe('the depot (H4) and its moves', () => {
       { id: 'z2', outcome: 'UNCONFIRMED' },
     ]);
     expect(out.trips).toHaveLength(1);
-    expect(hhmm(out.trips[0]!.outAt)).toBe('06:59');
+    // The zone move only confirms the boundary: a forged or late move 2 min off never shifts the trip.
+    expect(hhmm(out.trips[0]!.outAt)).toBe('07:01');
     expect(out.trailMoves.map((m) => m.kind)).toEqual(['DEPOT_IN']);
     expect(brief(out)).toHaveLength(4);
   });
@@ -252,14 +253,22 @@ describe('building blocks', () => {
     ]);
   });
 
-  it('matching is order-preserving and leaves a load unmatched rather than paying too much', () => {
-    const trip = (out: string, back: string | null): DetectedTrip => ({ outAt: T(out), inAt: back ? T(back) : null, loadNo: null, depotId: 'dep1', openStart: false });
+  it('matching is order-preserving, the earlier-dispatched load first, and leaves a load unmatched rather than paying too much', () => {
+    const trip = (out: string, back: string | null): DetectedTrip => ({ outAt: T(out), inAt: back ? T(back) : null, loadNo: null, loadDepotId: null, depotId: 'dep1', openStart: false });
     const trips = [trip('07:00', '10:00'), trip('12:00', null)];
     const loads = [load(1, [], { dispatchedAt: T('06:50') }), load(2, [], { dispatchedAt: T('11:40') })];
-    const cost = (l: DetectorLoad, t: DetectedTrip) => Math.abs(t.outAt.getTime() - l.dispatchedAt!.getTime()) / 60_000;
+    const cost = (l: DetectorLoad, t: DetectedTrip) => {
+      const c = Math.abs(t.outAt.getTime() - l.dispatchedAt!.getTime()) / 60_000;
+      return c > 240 ? null : c;
+    };
     expect(matchTripsToLoads(trips, loads, cost)).toEqual([0, 1]);
     expect(matchTripsToLoads(trips, loads, () => null)).toEqual([null, null]);
-    expect(matchTripsToLoads([trips[1]!], loads, cost)).toEqual([null, 1 - 1]);
+    // Only the afternoon trip: load 1 cannot afford it, load 2 takes it.
+    expect(matchTripsToLoads([trips[1]!], loads, cost)).toEqual([null, 0]);
+    // One trip both can afford: the earlier-dispatched load takes it even when the later one is cheaper (H-1).
+    expect(matchTripsToLoads([trip('07:00', '08:00')], [load(1, [], { dispatchedAt: T('06:50') }), load(2, [], { dispatchedAt: T('06:58') })], cost)).toEqual([0, null]);
+    // ... and never leaves load 1 out so that load 2 can have it, whatever the costs.
+    expect(matchTripsToLoads([trip('07:00', '08:00')], loads, (l) => (l.loadNo === 1 ? 200 : -100))).toEqual([0, null]);
   });
 
   it('stays at a pin: two consecutive far points end it, at the first of them', () => {
@@ -281,5 +290,123 @@ describe('a tracker on another truck (M8)', () => {
     expect(trackerMismatch([near('07:05', 9000), near('07:10', 3000), near('07:12', 3000)], trail.pts)).toBe(false);
     expect(trackerMismatch([near('07:05', 9000), near('07:06', 9000), near('07:07', 9000)], trail.pts)).toBe(false);
     expect(trackerMismatch([near('12:00', 9000), near('12:10', 9000), near('12:20', 9000)], trail.pts)).toBe(false);
+  });
+});
+
+describe('press timings: an earlier load is never robbed of its trip (second review H-1)', () => {
+  // Trip 1 07:01-07:38 serves 3000 m and 6000 m; trip 2 11:39-12:16 serves the same two customers.
+  const day = new Trail('06:30').park(30).drive(3000).park(10).drive(6000).park(10).drive(0).park(240).drive(3000).park(10).drive(6000).park(10).drive(0).park(30);
+  const both = () => [stop(1, 3000), stop(2, 6000)];
+  const trips = (out: ReturnType<typeof detectTruckDay>) => out.trips.map((t) => `${hhmm(t.outAt)}-${t.inAt ? hhmm(t.inAt) : 'open'} L${t.loadNo}`);
+
+  it('both loads pressed in the morning, load 2 planned for 11:30: each load gets its own trip', () => {
+    const out = detectTruckDay(input(day.pts, [load(1, both(), { dispatchedAt: T('06:50') }), load(2, both(), { dispatchedAt: T('06:52'), plannedDepartAt: T('11:30') })]));
+    expect(trips(out)).toEqual(['07:01-07:38 L1', '11:39-12:16 L2']);
+    expect(brief(out)).toEqual([
+      'L1.1 ARRIVED 07:04',
+      'L1.1 DEPARTED 07:15',
+      'L1.2 ARRIVED 07:19',
+      'L1.2 DEPARTED 07:29',
+      'L2.1 ARRIVED 11:42',
+      'L2.1 DEPARTED 11:53',
+      'L2.2 ARRIVED 11:57',
+      'L2.2 DEPARTED 12:07',
+    ]);
+  });
+
+  it('the same at 08:00, when only trip 1 is in the trail: trip 1 is load 1, nothing for load 2', () => {
+    const early = day.pts.filter((pt) => pt.fixAt < T('08:00'));
+    const out = detectTruckDay(input(early, [load(1, both(), { dispatchedAt: T('06:50') }), load(2, both(), { dispatchedAt: T('06:52'), plannedDepartAt: T('11:30') })]));
+    expect(trips(out)).toEqual(['07:01-07:38 L1']);
+    expect(out.candidates.length).toBeGreaterThan(0);
+    expect(out.candidates.every((c) => c.loadNo === 1)).toBe(true);
+  });
+
+  it('load 2 pressed during trip 1, one customer shared with load 1: trip 1 stays load 1', () => {
+    const out = detectTruckDay(input(day.pts, [load(1, both(), { dispatchedAt: T('06:55') }), load(2, [stop(1, 3000)], { dispatchedAt: T('07:10'), plannedDepartAt: T('11:30') })]));
+    expect(trips(out)).toEqual(['07:01-07:38 L1', '11:39-12:16 L2']);
+    expect(brief(out).filter((x) => x.startsWith('L2'))).toEqual(['L2.1 ARRIVED 11:42', 'L2.1 DEPARTED 11:53']);
+  });
+
+  it('load 2 pressed while trip 1 is out and planned for the same time: load 1 keeps trip 1, load 2 gets nothing', () => {
+    const early = day.pts.filter((pt) => pt.fixAt < T('08:00'));
+    const out = detectTruckDay(input(early, [load(1, both(), { dispatchedAt: T('06:55') }), load(2, both(), { dispatchedAt: T('07:10') })]));
+    expect(trips(out)).toEqual(['07:01-07:38 L1']);
+    expect(out.candidates.every((c) => c.loadNo === 1)).toBe(true);
+  });
+
+  it('a drive-by is no pin evidence: a pin only passed on the road does not pull the trip to that load', () => {
+    const roadTrail = new Trail('06:30').park(30).drive(3000).park(10).drive(6000).park(10).drive(0).park(240).drive(4500).park(10).drive(0).park(30);
+    const out = detectTruckDay(
+      input(roadTrail.pts, [load(1, both(), { dispatchedAt: T('06:50') }), load(2, [stop(1, 4500)], { dispatchedAt: T('06:52'), plannedDepartAt: T('11:30') })]),
+    );
+    expect(trips(out).map((x) => x.slice(-2))).toEqual(['L1', 'L2']);
+    expect(out.candidates.filter((c) => c.loadNo === 2).map((c) => c.kind)).toEqual(['ARRIVED', 'DEPARTED']);
+    expect(out.candidates.filter((c) => c.loadNo === 1).length).toBe(4);
+  });
+
+  it("a load reported Back at depot never takes a later trip: its own trip missing from the trail, the next load's trip stays the next load's", () => {
+    // Load 1 went out at 08:00 and was back at 09:00 (driver), but the tracker sent nothing then; the trail
+    // has only load 2's trip (10:31). Both loads serve the same two customers.
+    const late = new Trail('10:00').park(30).drive(3000).park(10).drive(6000).park(10).drive(0).park(30);
+    const l1 = (over: Partial<DetectorLoad> = {}) =>
+      load(1, [stop(1, 3000, 0, { resultAt: T('08:20') }), stop(2, 6000, 0, { resultAt: T('08:40') })], { status: 'COMPLETED', dispatchedAt: T('08:00'), plannedDepartAt: T('08:00'), ...over });
+    const l2 = load(2, both(), { dispatchedAt: T('10:25'), plannedDepartAt: T('10:30') });
+    // Without the Back at depot, load 1 (earlier) would take the only trip and load 2 would get nothing.
+    expect(trips(detectTruckDay(input(late.pts, [l1(), l2])))).toEqual(['10:31-11:08 L1']);
+    const out = detectTruckDay(input(late.pts, [l1({ backAt: T('09:00') }), l2]));
+    expect(trips(out)).toEqual(['10:31-11:08 L2']);
+    expect(brief(out)).toEqual(['L2.1 ARRIVED 10:34', 'L2.1 DEPARTED 10:45', 'L2.2 ARRIVED 10:49', 'L2.2 DEPARTED 10:59']);
+    // A Back at depot pressed a few minutes before the truck left again (BACK_SLACK_MIN) does not exclude it.
+    expect(trips(detectTruckDay(input(late.pts, [l1({ backAt: T('10:25') }), l2])))).toEqual(['10:31-11:08 L1']);
+  });
+
+  it('the anchor: the press, or the planned departure less 2 h when that is later', () => {
+    expect(hhmm(loadAnchor({ dispatchedAt: T('06:52'), plannedDepartAt: T('11:30') }))).toBe('09:30');
+    expect(hhmm(loadAnchor({ dispatchedAt: T('10:00'), plannedDepartAt: T('11:30') }))).toBe('10:00');
+    expect(hhmm(loadAnchor({ dispatchedAt: null, plannedDepartAt: T('11:30') }))).toBe('11:30');
+  });
+});
+
+describe('one load over several trips (second review M-3)', () => {
+  it('a break at the depot in the middle of a load: both trips are the load, every stop gets its times', () => {
+    const trail = new Trail('06:30').park(30).drive(3000).park(10).drive(0).park(30).drive(6000).park(10).drive(9000).park(10).drive(0).park(30);
+    const out = detectTruckDay(input(trail.pts, [load(1, [stop(1, 3000), stop(2, 6000), stop(3, 9000)])]));
+    expect(out.trips.map((t) => t.loadNo)).toEqual([1, 1]);
+    expect(out.candidates.filter((c) => c.kind === 'ARRIVED').map((c) => c.sequence)).toEqual([1, 2, 3]);
+  });
+
+  it("a fuel run without a stay at the load's pins is not added to it, and the load never runs into the next load's trip", () => {
+    const trail = new Trail('06:30').park(30).drive(3000).park(10).drive(0).park(10).drive(1500).park(5).drive(0).park(10).drive(6000).park(10).drive(0).park(60).drive(9000).park(10).drive(0).park(30);
+    const out = detectTruckDay(
+      input(trail.pts, [load(1, [stop(1, 3000), stop(2, 6000)], { dispatchedAt: T('06:55') }), load(2, [stop(1, 9000)], { dispatchedAt: T('09:00'), plannedDepartAt: T('09:00') })]),
+    );
+    expect(out.trips.map((t) => t.loadNo)).toEqual([1, null, 1, 2]);
+    expect(out.candidates.map((c) => `L${c.loadNo}.${c.sequence} ${c.kind}`)).toEqual(['L1.1 ARRIVED', 'L1.1 DEPARTED', 'L1.2 ARRIVED', 'L1.2 DEPARTED', 'L2.1 ARRIVED', 'L2.1 DEPARTED']);
+  });
+});
+
+describe("a trail shifted by a wrong time offset; the trail's first point (first review H-1, second review L-4)", () => {
+  it('stays more than 60 min before the Dispatch press are never the load\'s (a trail stored 4 h early)', () => {
+    // The truck really served 3000 m and 6000 m from about 11:04; the trail was stored 4 h early (offset -240 on UTC times).
+    const shifted = new Trail('06:30').park(30).drive(3000).park(10).drive(6000).park(10).drive(0).park(30);
+    const out = detectTruckDay(input(shifted.pts, [load(2, [stop(1, 3000), stop(2, 6000)], { dispatchedAt: T('10:55'), plannedDepartAt: T('11:00') })]));
+    expect(out.candidates).toEqual([]);
+    // Pressed 30 min late (during the trip): the stays are still found (the design's late-press allowance).
+    expect(brief(detectTruckDay(input(shifted.pts, [load(1, [stop(1, 3000), stop(2, 6000)], { dispatchedAt: T('07:30') })]))).slice(0, 1)).toEqual(['L1.1 ARRIVED 07:04']);
+  });
+
+  it('a stay that begins after `now` is never proposed', () => {
+    const trail = new Trail('06:30').park(30).drive(3000).park(10).drive(6000).park(10).drive(0).park(30);
+    const out = detectTruckDay(input(trail.pts, [load(1, [stop(1, 3000), stop(2, 6000)])], { now: T('07:10') }));
+    expect(brief(out)).toEqual(['L1.1 ARRIVED 07:04', 'L1.1 DEPARTED 07:15']);
+  });
+
+  it('a trail that starts outside the depot, parked at a customer: no arrival from its first point', () => {
+    // Parked overnight next to stop 1 (the trail starts there at 05:00), then drives to stop 2.
+    const trail = new Trail('05:00', 3000).park(60).drive(6000).park(10).drive(9000).park(10);
+    const out = detectTruckDay(input(trail.pts, [load(1, [stop(1, 3000), stop(2, 6000)], { dispatchedAt: T('05:30') })]));
+    expect(out.candidates.filter((c) => c.sequence === 1)).toEqual([]);
+    expect(out.candidates.filter((c) => c.sequence === 2).map((c) => c.kind)).toEqual(['ARRIVED', 'DEPARTED']);
   });
 });

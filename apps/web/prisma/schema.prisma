@@ -1700,8 +1700,14 @@ model IvmsState {
   webhooksIgnored Int       @default(0)
   /// Webhooks refused for their time (outside [now - 26 h, now + 2 min]): a wrong offset shows here.
   webhooksBadTime Int       @default(0)
-  /// Median (dt_server - read) of fresh fixes, seconds: about +-14400 = provider times not in UTC.
+  /// The provider's clock as seen in the last live-position answer: its newest receipt time (dt_server,
+  /// with the API offset) minus RouteIQ's clock, seconds; about +-14400 = provider times not in UTC.
   providerSkewSec Int?
+  /// When providerSkewSec was measured, and with which AYUN_API_TIME_OFFSET_MIN: GPS times are processed
+  /// only while a skew measured with the offset in use is within limits (lib/ivms/budget.ts clockCheck,
+  /// first review H-1; migration 20261016220000_ivms_review_fixes).
+  providerSkewAt        DateTime? @db.Timestamptz(3)
+  providerSkewOffsetMin Int?
   updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
 }
 
@@ -1730,6 +1736,10 @@ model IvmsTruckDay {
   /// notes, review H4): a fact for the office, never a time. A JSON array, at most 8 KB (CHECK);
   /// rewritten by each detector run (migration 20261016210000_ivms_gps_facts).
   gpsFactsJson   Json?
+  /// The tracker was mapped to this truck at this time (it had none before): no point from before it is
+  /// pulled or used, so a tracker moved from another truck never brings that truck's morning along
+  /// (second review M-1; migration 20261016220000_ivms_review_fixes).
+  trailFrom      DateTime? @db.Timestamptz(3)
 
   @@unique([tenantId, truckId, deliveryDate])
   @@index([tenantId, deliveryDate])

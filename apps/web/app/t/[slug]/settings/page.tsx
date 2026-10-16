@@ -7,6 +7,7 @@ import { effectivePlannerValues } from '@/lib/dispatch/planner-config';
 import { DISPATCHER_SETTINGS_FIELDS, SETTINGS_FIELDS, type EditableConfig } from '@/lib/settings-fields';
 import { SettingsForm } from './settings-form';
 import { StartFreshPanel } from './start-fresh-panel';
+import { gpsStatusText, ivmsHealth } from '@/lib/ivms/status';
 
 export const metadata = { title: 'Settings — RouteIQ' };
 export const dynamic = 'force-dynamic';
@@ -31,6 +32,9 @@ export default async function SettingsPage({ params }: { params: { slug: string 
   // Only the settings the dispatch planner uses are sent to the page (review F21).
   const cfg = tenant.config;
   const editable = Object.fromEntries((admin ? SETTINGS_FIELDS : DISPATCHER_SETTINGS_FIELDS).map((k) => [k, cfg[k]])) as unknown as EditableConfig;
+  // IVMS live link: the Ayun link's state for the company admin of the Ayun account's company (null - and
+  // nothing shown - while the link is not in use or its mode is OFF; never fails the page).
+  const gpsHealth = admin ? await ivmsHealth(new Date(), { slug: tenant.slug }).catch(() => null) : null;
 
   return (
     <PageShell
@@ -44,6 +48,7 @@ export default async function SettingsPage({ params }: { params: { slug: string 
       <SettingsForm
         scope={admin ? 'ADMIN' : 'DISPATCHER'}
         dataRuleOn={cfg.requireDataBeforeLoading}
+        gpsStatus={gpsHealth ? gpsStatusText(gpsHealth) : null}
         initial={{
           tenant: {
             name: tenant.name,

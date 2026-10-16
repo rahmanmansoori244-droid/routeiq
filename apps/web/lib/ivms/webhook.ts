@@ -19,9 +19,12 @@
  *    provider adds are never read, stored or logged, and neither is the payload.
  * 6. Only zone_in / zone_out (Depot IN / OUT) are kept; anything else is counted as ignored. A time
  *    outside [now - 26 h, now + 2 min] (usually a wrong AYUN_WEBHOOK_TIME_OFFSET_MIN) is counted apart.
- * 7. The IMEI is looked up among the company's own active trucks only; an unknown IMEI is counted and
- *    nothing is stored (another vehicle's data never lands here). Neither is a move of a truck without a
- *    load on yesterday's or today's plans (off duty: review M7, the same trucks as the backstop's).
+ * 7. No depot of the company has its Ayun zone set: no move could ever be used, so nothing is stored
+ *    (counted as ignored). The IMEI is looked up among the company's own active trucks only; an unknown
+ *    IMEI is counted and nothing is stored (another vehicle's data never lands here). Neither is a move of
+ *    a truck without a load on yesterday's or today's plans (off duty: review M7, the same trucks as the
+ *    backstop's). The trucks on duty and the depot zones are read at most every 30 s per company, so a
+ *    leaked secret cannot make every call cost a fleet read (first review LOW).
  * 8. One IvmsEvent row (events.ts: depot or not; dedupe.ts: the same key as the backstop's), at most
  *    200 per truck per day (M6). The same event again is a 200 with no new row.
  * Never logged: the URL (it holds the secret), the parameters, the body.
@@ -29,7 +32,7 @@
 import { clientIp, isInternalIp } from '../client-ip';
 import { limiter as processLimiter, LIMITS, type RateLimiter } from '../rate-limit';
 import { ivmsWebhookReady, readIvmsEnv, type IvmsEnv } from './env';
-import { zoneEventRow } from './events';
+import { zoneEventRow, type DepotZone } from './events';
 import { zoneEventOf } from './parse';
 import { prismaIvmsStore, type IvmsCompany, type IvmsStore } from './store';
 import { ivmsWebhookAuthorized } from './webhook-auth';
@@ -120,9 +123,24 @@ async function companyOf(store: IvmsStore, slug: string, nowMs: number): Promise
   return company;
 }
 
+/** The company's trucks on duty and its depot zones, read at most every 30 s (first review LOW). */
+const dutyCache = new Map<string, { at: number; onDuty: Set<string>; zones: DepotZone[] }>();
+async function dutyOf(store: IvmsStore, c: IvmsCompany, now: Date): Promise<{ onDuty: Set<string>; zones: DepotZone[] }> {
+  const nowMs = now.getTime();
+  const hit = dutyCache.get(c.tenantId);
+  if (hit && nowMs - hit.at < 30_000 && nowMs >= hit.at) return hit;
+  const zones = await store.depotZones(c.tenantId);
+  // Without a depot zone nothing could be used: the fleet is not even read.
+  const onDuty = zones.length ? new Set((await store.fleet(c, now)).filter((t) => t.days.some((d) => d.loads.length > 0)).map((t) => t.truckId)) : new Set<string>();
+  const entry = { at: nowMs, onDuty, zones };
+  dutyCache.set(c.tenantId, entry);
+  return entry;
+}
+
 /** Tests only. */
 export function _resetWebhookCache(): void {
   cache.clear();
+  dutyCache.clear();
 }
 
 export interface WebhookDeps {
@@ -164,13 +182,13 @@ export async function handleAyunWebhook(req: Request, secret: unknown, deps: Web
       await store.bumpWebhookCounter(c.tenantId, parsed.problem === 'TIME' ? 'webhooksBadTime' : 'webhooksIgnored', now);
       return ok();
     }
-    const truck = await store.truckByImei(c.tenantId, parsed.event.imei);
-    const onDuty = truck && (await store.fleet(c, now)).some((t) => t.truckId === truck.truckId && t.days.some((d) => d.loads.length > 0));
-    if (!truck || !onDuty) {
+    const duty = await dutyOf(store, c, now);
+    const truck = duty.zones.length ? await store.truckByImei(c.tenantId, parsed.event.imei) : null;
+    if (!truck || !duty.onDuty.has(truck.truckId)) {
       await store.bumpWebhookCounter(c.tenantId, 'webhooksIgnored', now);
       return ok();
     }
-    const row = zoneEventRow(parsed.event, truck, await store.depotZones(c.tenantId), 'WEBHOOK', now);
+    const row = zoneEventRow(parsed.event, truck, duty.zones, 'WEBHOOK', now);
     const ins = await store.insertZoneEvents(c.tenantId, [row], now);
     await store.bumpWebhookCounter(c.tenantId, ins.inserted || ins.duplicates ? 'webhooksToday' : 'webhooksIgnored', now);
     return ok();

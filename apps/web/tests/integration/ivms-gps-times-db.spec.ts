@@ -1,13 +1,15 @@
 /**
  * IVMS LIVE LINK, GPS TIMES on real PostgreSQL, library level (lib/ivms/stop-events.ts with the stop
  * detector, the visit rebuild and the database's own keys and CHECKs). Needs DATABASE_URL (migrated, with
- * 20261016200000_ivms_live and 20261016210000_ivms_gps_facts); the web server and the solver are not used,
+ * 20261016200000_ivms_live, 20261016210000_ivms_gps_facts and 20261016220000_ivms_review_fixes); the web
+ * server and the solver are not used,
  * and no call is made to Ayun. Invented data only: the vendor documentation's dummy IMEI, a depot and
  * shops in empty desert.
  *
  *  1. A dispatched load with a stored trail gets AYUN arrivals and departures with natural keys, its
  *     visits rebuilt (GPS times, no result), the depot moves as TRAIL facts; a second run writes nothing.
- *  2. A driver's tap already on a stop stays its arrival (GPS fills the departure only).
+ *  2. A driver's tap already on a stop stays its arrival (GPS fills the departure only). A GPS time
+ *     written for another load inside this load's trip is removed (second review H-1).
  *  3. A Back at depot of source AYUN never completes the load (the returned-loads sweep, H1).
  *  4. The facts column takes a JSON array only (CHECK); the trail-move keys fit IvmsEvent's key CHECK.
  *  5. Undo marks the truck-day suppressed, removes the AYUN events, rebuilds the visits; the next run
@@ -129,6 +131,20 @@ describe('1-2. GPS times of a dispatched load', () => {
     expect(r.written).toBe(0);
     expect((await events()).length).toBe(before);
     expect(await prisma.ivmsEvent.count({ where: { tenantId, truckId } })).toBe(2);
+  });
+});
+
+describe('2b. a GPS time of the wrong load is removed (second review H-1)', () => {
+  it("an AYUN event of load 2 inside load 1's trip is deleted on the next run; load 1's stay times stay", async () => {
+    const start = L('07:04', 30);
+    await prisma.stopEvent.create({
+      data: { tenantId, depotId, deliveryDate: dayDate, truckId, loadNo: 2, sequence: 1, kind: 'ARRIVED', source: 'AYUN', at: start, idempotencyKey: `ayun:A:${depotId}:${D}:${truckId}:2:1:${start.getTime()}`, payloadJson: { observed: true, detector: 'ivms-v1', segmentStartAt: start.toISOString() } },
+    });
+    const before = (await events()).filter((e) => e.loadNo === 1).length;
+    const r = await processGpsTimes(tenantId, truckId, D, new Date());
+    expect(r).toMatchObject({ removed: 1, written: 0 });
+    expect(await prisma.stopEvent.count({ where: { tenantId, truckId, loadNo: 2 } })).toBe(0);
+    expect((await events()).filter((e) => e.loadNo === 1).length).toBe(before);
   });
 });
 

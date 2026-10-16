@@ -191,6 +191,7 @@ const EXPECTED: Record<string, string> = {
   'PATCH /api/drivers/[id]/leave/[leaveId]': 'PLANNER',
   'DELETE /api/drivers/[id]/leave/[leaveId]': 'PLANNER',
   'POST /api/drivers/[id]/pin': 'GONE',
+  // Stays public; its IVMS `ivms` block only with the janitor token (lib/ivms/status.ts ivmsHealthForCaller).
   'GET /api/health': 'PUBLIC',
   // Owner request 13 Oct 2026: helpers (truck crew), kept like drivers (a new code stays the admin's in the route).
   'GET /api/helpers': 'ANY',
@@ -252,6 +253,8 @@ const EXPECTED: Record<string, string> = {
   'GET /api/runs/[id]/vehicles': 'PLANNER',
   'POST /api/ivms/objects': 'TENANT_ADMIN',
   'PUT /api/ivms/trucks/[id]/tracker': 'TENANT_ADMIN',
+  // The undo of a truck-day's GPS times (first review M-3): company admin, dry run by default, audited.
+  'POST /api/ivms/trucks/[id]/gps-times': 'TENANT_ADMIN',
   'GET /api/runs/[id]/plan': 'ANY',
   'POST /api/runs/[id]/replan': 'PLANNER',
   'POST /api/runs/[id]/reset-stuck': 'PLANNER',

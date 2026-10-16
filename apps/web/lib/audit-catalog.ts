@@ -94,6 +94,8 @@ export const AUDIT_ACTIONS = {
   HIRED_TRUCKS_ADDED: { label: 'One-day hired trucks added' },
   HIRED_TRUCK_CHANGED: { label: 'One-day hired truck: plate or driver set' },
   ONE_DAY_TRUCKS_RETIRED: { label: 'One-day hired trucks retired after their day' },
+  // IVMS live link (16 Oct 2026): the company admin removed a truck-day's GPS times (the undo).
+  GPS_TIMES_UNDONE: { label: "GPS times of a truck's day removed" },
   BASELINE_UPLOADED: { label: 'Baseline uploaded (legacy run)' },
   ROUTE_MANUALLY_CHANGED: { label: 'Route changed by hand (legacy run)' },
   SECURITY_CLEANUP: { label: 'Security clean-up (migration)' },

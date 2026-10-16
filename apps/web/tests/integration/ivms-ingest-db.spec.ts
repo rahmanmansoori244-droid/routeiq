@@ -129,8 +129,12 @@ describe('2. the allowance in the database', () => {
     await prismaIvmsStore.recordFailure(tenantId, now, 'LIMIT', new Date(now.getTime() + 3600_000));
     expect(await prismaIvmsStore.acquireLease(tenantId, 'owner-3', now, 30_000)).toBeNull();
     expect(await prismaIvmsStore.claimAdmin(tenantId, now, { share: 20, budget: 3000 })).toBe(false); // LIMIT: no admin call either
-    await prismaIvmsStore.recordOk(tenantId, now, 5);
-    expect(await prisma.ivmsState.findUniqueOrThrow({ where: { tenantId } })).toMatchObject({ lastError: 'LIMIT', failures: 0, nextTryAt: null, providerSkewSec: 5 });
+    await prismaIvmsStore.recordOk(tenantId, now, { sec: 5, offsetMin: -240 });
+    expect(await prisma.ivmsState.findUniqueOrThrow({ where: { tenantId } })).toMatchObject({ lastError: 'LIMIT', failures: 0, nextTryAt: null, providerSkewSec: 5, providerSkewAt: now, providerSkewOffsetMin: -240 });
+    expect(await prismaIvmsStore.readSkew(tenantId)).toEqual({ skewSec: 5, skewAt: now, skewOffsetMin: -240 });
+    // A call without a skew (history, backstop) keeps the last one.
+    await prismaIvmsStore.recordOk(tenantId, new Date(now.getTime() + 1000));
+    expect(await prismaIvmsStore.readSkew(tenantId)).toEqual({ skewSec: 5, skewAt: now, skewOffsetMin: -240 });
   });
 });
 
@@ -143,6 +147,10 @@ describe('3. positions and history', () => {
     expect(await prismaIvmsStore.writePositions(tenantId, [{ truckId: truckB, fix: fix(new Date(t0.getTime() + 1000), 0) }], new Date())).toBe(1);
     const p = await prisma.truckPosition.findUniqueOrThrow({ where: { truckId: truckB } });
     expect(p.movedAt).toEqual(t0); // parked since the last moving fix
+    // Read again with no newer fix (a parked, silent truck): only the read time moves (second review L-5).
+    const later = new Date(Date.now() + 5_000);
+    expect(await prismaIvmsStore.writePositions(tenantId, [{ truckId: truckB, fix: fix(new Date(t0.getTime() + 1000), 0) }], later)).toBe(0);
+    expect(await prisma.truckPosition.findUniqueOrThrow({ where: { truckId: truckB } })).toMatchObject({ receivedAt: later, fixAt: new Date(t0.getTime() + 1000) });
     expect(await prismaIvmsStore.clearPositions(tenantId, [truckA])).toBe(1);
     expect(await prisma.truckPosition.count({ where: { truckId: truckB } })).toBe(0);
   });
@@ -156,8 +164,12 @@ describe('3. positions and history', () => {
     await prismaIvmsStore.markPulled(tenantId, truckA, date, { pulledTo: at, final: false, now: at });
     await prismaIvmsStore.markPulled(tenantId, truckA, date, { pulledTo: new Date(), final: true, now: new Date() });
     const [row] = await prismaIvmsStore.truckDays(tenantId, [{ truckId: truckA, date }]);
-    expect(row).toMatchObject({ truckId: truckA, date, pulls: 2 });
+    expect(row).toMatchObject({ truckId: truckA, date, pulls: 2, trailFrom: null });
     expect(row!.finalPullAt).not.toBeNull();
+    // The tracker mapping time (second review M-1) is read with the row.
+    const from = new Date(Date.now() - 600_000);
+    await prisma.ivmsTruckDay.update({ where: { tenantId_truckId_deliveryDate: { tenantId, truckId: truckA, deliveryDate: new Date(`${date}T00:00:00Z`) } }, data: { trailFrom: from } });
+    expect((await prismaIvmsStore.truckDays(tenantId, [{ truckId: truckA, date }]))[0]).toMatchObject({ trailFrom: from });
   });
 });
 

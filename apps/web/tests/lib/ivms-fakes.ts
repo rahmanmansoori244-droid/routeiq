@@ -54,7 +54,6 @@ type FullState = IvmsStateRow & {
   nextTryAt: Date | null;
   lastOkAt: Date | null;
   lastErrorAt: Date | null;
-  providerSkewSec: number | null;
   webhooksToday: number;
   webhooksIgnored: number;
   webhooksBadTime: number;
@@ -105,6 +104,8 @@ export class MemoryIvmsStore implements IvmsStore {
       lastOkAt: null,
       lastErrorAt: null,
       providerSkewSec: null,
+      providerSkewAt: null,
+      providerSkewOffsetMin: null,
       webhooksToday: 0,
       webhooksIgnored: 0,
       webhooksBadTime: 0,
@@ -137,8 +138,8 @@ export class MemoryIvmsStore implements IvmsStore {
     this.rollover(s, utcDay(now));
     s.leaseUntil = new Date(now.getTime() + leaseMs);
     s.leaseOwner = owner;
-    const { usageDay, mapCalls, routeCalls, eventCalls, adminCalls, mapLastAt, eventsLastAt, failures, lastError } = s;
-    return { usageDay, mapCalls, routeCalls, eventCalls, adminCalls, mapLastAt, eventsLastAt, failures, lastError };
+    const { usageDay, mapCalls, routeCalls, eventCalls, adminCalls, mapLastAt, eventsLastAt, failures, lastError, providerSkewSec, providerSkewAt, providerSkewOffsetMin } = s;
+    return { usageDay, mapCalls, routeCalls, eventCalls, adminCalls, mapLastAt, eventsLastAt, failures, lastError, providerSkewSec, providerSkewAt, providerSkewOffsetMin };
   }
   async claim(_t: string, owner: string, cls: Exclude<IvmsCallClass, 'ADMIN'>, now: Date, limits: ClaimLimits) {
     this.touched.push(`claim:${cls}`);
@@ -173,12 +174,28 @@ export class MemoryIvmsStore implements IvmsStore {
       s.leaseUntil = null;
     }
   }
-  async recordOk(_t: string, now: Date, skewSec: number | null = null) {
+  async recordOk(_t: string, now: Date, skew: { sec: number; offsetMin: number } | null = null) {
     const s = this.ensure(now);
     s.lastOkAt = now;
     s.failures = 0;
     s.nextTryAt = null;
-    if (skewSec !== null) s.providerSkewSec = skewSec;
+    if (skew) {
+      s.providerSkewSec = skew.sec;
+      s.providerSkewAt = now;
+      s.providerSkewOffsetMin = skew.offsetMin;
+    }
+  }
+  async readSkew() {
+    this.touched.push('readSkew');
+    const s = this.state;
+    return s ? { skewSec: s.providerSkewSec, skewAt: s.providerSkewAt, skewOffsetMin: s.providerSkewOffsetMin } : null;
+  }
+  /** Tests: the provider's clock as if a live-position answer measured it (offset 0 unless given). */
+  setSkew(sec: number, at: Date, offsetMin = 0) {
+    const s = this.ensure(at);
+    s.providerSkewSec = sec;
+    s.providerSkewAt = at;
+    s.providerSkewOffsetMin = offsetMin;
   }
   async recordFailure(_t: string, now: Date, kind: AyunErrorKind, nextTryAt: Date | null) {
     const s = this.ensure(now);
@@ -194,7 +211,11 @@ export class MemoryIvmsStore implements IvmsStore {
     let n = 0;
     for (const { truckId, fix } of rows) {
       const old = this.positions.get(truckId);
-      if (old && old.fix.fixAt.getTime() >= fix.fixAt.getTime()) continue;
+      if (old && old.fix.fixAt.getTime() >= fix.fixAt.getTime()) {
+        // Read now, no newer fix: only the time it was read moves (second review L-5).
+        old.receivedAt = now;
+        continue;
+      }
       const moved = fix.speedKmh !== null && fix.speedKmh >= MOVING_KMH ? fix.fixAt : null;
       this.positions.set(truckId, { fix, receivedAt: now, movedAt: moved ?? old?.movedAt ?? null });
       n++;
@@ -238,6 +259,7 @@ export class MemoryIvmsStore implements IvmsStore {
       pulls: (old?.pulls ?? 0) + 1,
       finalPullAt: p.final ? p.now : null,
       suppressedAt: old?.suppressedAt ?? null,
+      trailFrom: old?.trailFrom ?? null,
     });
   }
   async insertZoneEvents(tenantId: string, rows: readonly NewZoneEvent[], now: Date) {
@@ -289,7 +311,10 @@ export type FakeReply = { status?: number; body: string; headers?: Record<string
  * and the listings ([]) unless `override` answers first. Records every call (the command only, never the
  * key: it is checked apart).
  */
-export function fakeAyun(clock: () => Date, override?: (cmd: string, args: string[]) => FakeReply | undefined) {
+export function fakeAyun(clock: () => Date, override?: (cmd: string, args: string[]) => FakeReply | undefined, opts: { providerShiftMin?: number } = {}) {
+  // A provider whose clock is not UTC (Muscat local time: +240): its live positions carry shifted times. Its
+  // history answers look right whatever the shift: the window is asked, and answered, in its own time.
+  const shift = (opts.providerShiftMin ?? 0) * 60_000;
   const calls: { cmd: string; args: string[]; url: string; init?: RequestInit }[] = [];
   const f = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
@@ -305,8 +330,8 @@ export function fakeAyun(clock: () => Date, override?: (cmd: string, args: strin
       imeis.forEach((imei, i) => {
         body[imei] = {
           name: `Example object ${i}`,
-          dt_server: providerTime(new Date(now.getTime() - 5_000)),
-          dt_tracker: providerTime(new Date(now.getTime() - 10_000)),
+          dt_server: providerTime(new Date(now.getTime() - 5_000 + shift)),
+          dt_tracker: providerTime(new Date(now.getTime() - 10_000 + shift)),
           lat: (ORIGIN.lat + i * 0.01).toFixed(6),
           lng: (ORIGIN.lng + i * 0.01).toFixed(6),
           altitude: '10',

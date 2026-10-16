@@ -12,6 +12,11 @@
  *
  * Stale handling (H5): no ETA at all from a fix older than STALE_FIX_SEC, an invalid fix or a device
  * clock ahead ("-" on the screen): an old position must never pass for a live one.
+ *
+ * Which stop is next (second review M-2): the truck is "at" a stop with an open arrival only while its
+ * fresh fix is within atStopRadiusM of that stop's pin (an arrival whose result or departure is not in
+ * yet, while the truck is 10 km on, is behind it); a stop before the latest stop the truck has been at
+ * (arrived or done) was skipped and is not "next".
  */
 import { distanceM } from '../dispatch/snapshots';
 import { STALE_FIX_SEC, type FixFlag } from './types';
@@ -40,7 +45,12 @@ export interface EtaInput {
   stops: readonly EtaStop[];
   avgSpeedKmh: number;
   distanceMultiplier: number;
+  /** "At the stop" only within this distance (m) of its pin: the stop radius plus a margin (default 250). */
+  atStopRadiusM?: number;
 }
+
+/** The margin over the GPS stop radius within which a truck with an open arrival is at that stop. */
+export const AT_STOP_MARGIN_M = 150;
 
 export interface StopEta {
   sequence: number;
@@ -84,7 +94,14 @@ export function liveEta(i: EtaInput): StopEta[] {
   if (!fixUsable(i.fix, i.now)) return [];
   const fix = i.fix!;
   const sorted = [...i.stops].sort((a, b) => a.sequence - b.sequence);
-  const ahead = sorted.filter((s) => !s.done);
+  // A stop before the latest one the truck has been at (arrived or done) was skipped: not "next".
+  const touched = sorted.filter((s) => s.done || s.arrivedAt).map((s) => s.sequence);
+  const latest = touched.length ? Math.max(...touched) : -Infinity;
+  let ahead = sorted.filter((s) => !s.done && s.sequence >= latest);
+  // An open arrival while the fresh fix is away from that stop's pin: the truck left it (the result or the
+  // departure is not in yet), it is behind the truck.
+  const radius = i.atStopRadiusM ?? 100 + AT_STOP_MARGIN_M;
+  if (ahead[0]?.arrivedAt && ahead[0].pin && distanceM(fix, ahead[0].pin) > radius) ahead = ahead.slice(1);
   if (!ahead.length) return [];
   const plannedAt = (s: EtaStop) => (s.etaMin === null ? null : new Date(i.dayStart.getTime() + s.etaMin * MIN));
   const out: StopEta[] = [];
@@ -100,7 +117,7 @@ export function liveEta(i: EtaInput): StopEta[] {
     push(first, first.arrivedAt, true);
     departAt = Math.max(i.now.getTime(), first.arrivedAt.getTime() + (first.plannedServiceMin ?? 0) * MIN);
   } else {
-    const prev = [...sorted].reverse().find((s) => s.sequence < first.sequence && s.done) ?? null;
+    const prev = [...sorted].reverse().find((s) => s.sequence < first.sequence && (s.done || s.arrivedAt)) ?? null;
     const prevPin = prev?.pin ?? (prev ? null : i.depot);
     const leg = plannedLeg(prev, first, i.departMin);
     let driveMin: number;

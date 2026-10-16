@@ -124,6 +124,27 @@ describe('who is asked about (M7)', () => {
     expect(ayun.calls).toHaveLength(1);
     expect(store.positions.size).toBe(0);
   });
+
+  it("yesterday's load nobody closed never keeps a truck on the map: LOCKED or LOADING not at all, DISPATCHED only in the hours (first review LOW)", () => {
+    const YDAY = '2026-10-15';
+    const fleet = [truck(1, ['LOCKED'], { date: YDAY }), truck(2, ['LOADING'], { date: YDAY }), truck(3, ['DISPATCHED'], { date: YDAY }), truck(4, ['DISPATCHED'])];
+    expect(planTick(company({ mode: 'MAP' }), fleet, muscat('10:00')).mapTrucks.map((t) => t.truckId)).toEqual(['t3', 't4']);
+    // After the hours: only today's loads on the road.
+    expect(planTick(company({ mode: 'MAP' }), fleet, muscat('23:30')).mapTrucks.map((t) => t.truckId)).toEqual(['t4']);
+    expect(planTick(company({ mode: 'MAP' }), fleet, muscat('02:00', '2026-10-17')).mapTrucks).toEqual([]);
+  });
+
+  it('a parked truck asked about again keeps its fix, and its "read" time moves (second review L-5: no false "positions delayed")', async () => {
+    const { store, tick } = setup(company({ dailyBudget: 3000 }), [truck(1, ['DISPATCHED'], { imei: IMEI_A })], (cmd) =>
+      cmd === 'OBJECT_GET_LOCATIONS'
+        ? { body: JSON.stringify({ [IMEI_A]: { dt_server: providerTime(muscat('09:50')), dt_tracker: providerTime(muscat('09:50')), lat: '10.5', lng: '20.5', speed: '0', loc_valid: '1' } }) }
+        : undefined,
+    );
+    await tick(muscat('10:00'));
+    await tick(muscat('10:05'));
+    expect(store.positions.get('t1')).toMatchObject({ receivedAt: muscat('10:05') });
+    expect(store.positions.get('t1')!.fix.fixAt).toEqual(muscat('09:50'));
+  });
 });
 
 describe('MAP: positions for the map only', () => {
@@ -255,12 +276,20 @@ describe('TIMES: history pulls (H5)', () => {
 
   it('the window: from the hours\' start of the delivery date; then overlapping the last pull by 10 min; the final pull the whole day', () => {
     expect(routeWindow(rd('REGULAR'), undefined, HOURS, muscat('09:00'))).toEqual({ from: muscat('05:00'), to: muscat('09:00') });
-    const row = { truckId: 't1', date: DAY, pulledTo: muscat('09:00'), lastPullAt: muscat('09:00'), pulls: 1, finalPullAt: null, suppressedAt: null };
+    const row = { truckId: 't1', date: DAY, pulledTo: muscat('09:00'), lastPullAt: muscat('09:00'), pulls: 1, finalPullAt: null, suppressedAt: null, trailFrom: null };
     expect(routeWindow(rd('REGULAR'), row, HOURS, muscat('10:00'))).toEqual({ from: muscat('08:50'), to: muscat('10:00') });
     expect(routeWindow(rd('FINAL', muscat('17:00')), row, HOURS, muscat('20:00'))).toEqual({ from: muscat('05:00'), to: muscat('17:30') });
     // A load never closed: nothing after the next day's start.
     const stuck = { ...row, pulledTo: muscat('05:00', '2026-10-17') };
     expect(routeWindow(rd('REGULAR'), stuck, HOURS, muscat('09:00', '2026-10-17'))).toBeNull();
+  });
+
+  it('never from before the tracker was mapped to the truck (second review M-1: a tracker moved from another truck)', () => {
+    const fresh = { truckId: 't1', date: DAY, pulledTo: null, lastPullAt: null, pulls: 0, finalPullAt: null, suppressedAt: null, trailFrom: muscat('11:30') };
+    expect(routeWindow(rd('REGULAR'), fresh, HOURS, muscat('12:00'))).toEqual({ from: muscat('11:30'), to: muscat('12:00') });
+    expect(routeWindow(rd('FINAL', muscat('17:00')), fresh, HOURS, muscat('20:00'))).toEqual({ from: muscat('11:30'), to: muscat('17:30') });
+    // Mapped after the truck-day's end: nothing to ask for.
+    expect(routeWindow(rd('REGULAR'), { ...fresh, trailFrom: muscat('06:00', '2026-10-17') }, HOURS, muscat('06:30', '2026-10-17'))).toBeNull();
   });
 
   it('pulls while out, final 10 min after the last completion, then nothing; the trail holds the history points only', async () => {
@@ -289,7 +318,7 @@ describe('TIMES: history pulls (H5)', () => {
 
   it('a suppressed truck-day (undo, mismatch) is not pulled', async () => {
     const { store, ayun, tick } = setup(company({ mode: 'TIMES', dailyBudget: 3000 }));
-    store.days.set(`t1|${DAY}`, { truckId: 't1', date: DAY, pulledTo: null, lastPullAt: null, pulls: 0, finalPullAt: null, suppressedAt: muscat('08:00') });
+    store.days.set(`t1|${DAY}`, { truckId: 't1', date: DAY, pulledTo: null, lastPullAt: null, pulls: 0, finalPullAt: null, suppressedAt: muscat('08:00'), trailFrom: null });
     await tick(muscat('09:00'));
     expect(ayun.calls.map((c) => c.cmd)).toEqual(['OBJECT_GET_LOCATIONS']);
   });

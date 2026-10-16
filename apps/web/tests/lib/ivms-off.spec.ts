@@ -50,7 +50,7 @@ vi.mock('@/lib/db', () => ({
     truckPosition: { deleteMany: vi.fn(async () => ({ count: 0 })) },
   },
 }));
-vi.mock('@/lib/janitor-auth', () => ({ janitorAuthorized: () => true }));
+vi.mock('@/lib/janitor-auth', () => ({ janitorAuthorized: (r: Request) => r.headers.get('x-janitor-token') === 'x' }));
 vi.mock('@/lib/jobs/optimize-job', () => ({ reapStuckJobs: async () => ({ reaped: 0, repaired: 0 }) }));
 vi.mock('@/lib/jobs/shift-janitor', () => ({ reapStaleShifts: async () => ({ reaped: 0 }) }));
 vi.mock('@/lib/delivery/event-service', () => ({ completeReturnedLoads: async () => ({ completed: 0, checked: 2 }) }));
@@ -146,7 +146,12 @@ describe('in use: the counters, never a secret', () => {
       webhooksBadTime: 0,
       providerSkewSec: 3,
     };
-    const r1 = await healthGet();
+    // The public answer (no janitor token) never shows the GPS block (first review LOW), and reads nothing for it.
+    db.calls = [];
+    const open = JSON.parse(await (await healthGet(new Request('http://localhost/api/health'))).text());
+    expect(open).not.toHaveProperty('ivms');
+    expect(db.calls).toEqual([]);
+    const r1 = await healthGet(req('/api/health'));
     expect(r1.status).toBe(r0.status);
     const body = JSON.parse(await r1.text());
     expect(body.ivms).toMatchObject({
@@ -156,9 +161,23 @@ describe('in use: the counters, never a secret', () => {
       calls: { map: 12, route: 0, events: 0, admin: 1, total: 13, budget: 100 },
       webhooks: { received: 4, ignored: 1, badTime: 0 },
       skewSec: 3,
+      clock: 'UNKNOWN',
+      suggestedOffsetMin: null,
     });
     const text = JSON.stringify(body);
     for (const s of [KEY, SECRET, 'provider.example', 'example-co']) expect(text).not.toContain(s);
+  });
+
+  it("the Settings status line: the link, the calls, and in TIMES why GPS times are paused with the offset to set", async () => {
+    const { gpsStatusText } = await import('@/lib/ivms/status');
+    const h = { mode: 'TIMES' as const, status: 'ok' as const, lastOkAgeSec: 40, lastError: null, calls: { map: 30, route: 6, events: 0, admin: 1, total: 37, budget: 100 }, webhooks: { received: 0, ignored: 0, badTime: 0 }, skewSec: 14_395, clock: 'AHEAD' as const, suggestedOffsetMin: -240 };
+    expect(gpsStatusText(h)).toEqual({
+      text: "Ayun link: working (last answer 40 s ago); 37 of 100 calls today. Ayun's times look about 4 h ahead of RouteIQ's clock: GPS arrival and departure times are paused (nothing is pulled or written). Set the Railway variable AYUN_API_TIME_OFFSET_MIN to -240 and redeploy.",
+      warn: true,
+    });
+    expect(gpsStatusText({ ...h, clock: 'OK', skewSec: 2, suggestedOffsetMin: null })).toEqual({ text: 'Ayun link: working (last answer 40 s ago); 37 of 100 calls today.', warn: false });
+    // MAP never pauses anything for the clock.
+    expect(gpsStatusText({ ...h, mode: 'MAP' }).warn).toBe(false);
   });
 
   it('the cron route gains `ivms` once the mode is on (nothing out: no call)', async () => {

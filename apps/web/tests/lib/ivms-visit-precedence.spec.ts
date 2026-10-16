@@ -1,13 +1,14 @@
 /**
  * The visit rebuild with GPS (AYUN) events, IVMS live link (lib/delivery/visit.ts; design section 6.4
- * with the binding review's H1/M1/M3/M4): GPS has its own cycles and only fills what the driver and the
- * office left; it never writes a result, never feeds the measured unloading times, counts as on time
- * only at a stop where goods were handed over, and never restores the phone's stop timer. Synthetic
- * stop, invented pin.
+ * with the binding review's H1/M1/M3/M4 and the second review's H-2/L-2/L-3): the visit is the driver's
+ * and the office's exactly as with the link off; GPS only fills an arrival or a departure nothing else
+ * gave, never writes a result, never touches the automatic (measured) timing, counts as on time only at
+ * a stop where goods were handed over, and is never the driver page's arrival. Synthetic stop, invented
+ * pin.
  */
 import { describe, expect, it } from 'vitest';
 import { deriveVisit, type VisitContext, type VisitEvent } from '@/lib/delivery/visit';
-import { arrivalByText, arrivalNote, departureNote, sourceWord, timedByText } from '@/lib/delivery/office-text';
+import { actualMinutes, arrivalByText, arrivalNote, departureNote, sourceWord, timedByText } from '@/lib/delivery/office-text';
 import { arrivalIsObserved, arrivedInsideWindow, type KpiVisit } from '@/lib/delivery/kpis';
 import { eligibleForMeasured } from '@/lib/delivery/measured';
 import { applyQueued, stopInProgress } from '@/lib/driver-page/overlay';
@@ -34,21 +35,25 @@ const result = (at: string, outcome = 'DELIVERED', source: VisitEvent['source'] 
 const office = (kind: 'ARRIVED' | 'DEPARTED', at: string) => ev(kind, 'DISPATCHER', at, { mode: 'OFFICE' }, { receivedAt: L('16:00'), userId: 'u1' });
 
 describe('GPS alone fills a stop the phone did not time', () => {
-  it('arrival and departure from GPS: automatic timing to the departure, but never a measured time (M3)', () => {
+  it('arrival and departure from GPS: shown, never automatic and never a measured time (M3)', () => {
     const v = deriveVisit([gpsIn('10:00'), gpsOut('10:25'), result('10:20')], CTX);
-    expect(v).toMatchObject({ arrivalSource: 'AYUN', departureSource: 'AYUN', arrivalObserved: true, autoBasis: 'DEPARTURE', autoMinutes: 25, autoServiceMinutes: null, state: 'DONE' });
+    expect(v).toMatchObject({ arrivalSource: 'AYUN', departureSource: 'AYUN', arrivalObserved: true, autoBasis: null, autoMinutes: null, autoServiceMinutes: null, state: 'DONE' });
     expect(v.arrivedAt).toEqual(L('10:00'));
+    expect(v.departedAt).toEqual(L('10:25'));
     expect(eligibleForMeasured({ ...v, plannedServiceMin: 20, deliveryDate: '2026-10-05' })).toBe(false);
+    // The unloading shown is arrival to departure, not "auto"; "timed by" says GPS.
+    expect(actualMinutes(v)).toEqual({ min: 25, label: 'arrival to departure', auto: false });
+    expect(timedByText(v)).toBe('GPS (Ayun)');
   });
 
-  it('a GPS arrival and the driver result: automatic timing to the result, still not measured', () => {
-    expect(deriveVisit([gpsIn('10:00'), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'AYUN', autoBasis: 'RESULT', autoMinutes: 20, autoServiceMinutes: null, departedAtOutcome: true });
+  it('a GPS arrival and the driver result: the result ends the stop, still not automatic', () => {
+    expect(deriveVisit([gpsIn('10:00'), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'AYUN', autoBasis: null, autoMinutes: null, autoServiceMinutes: null, departedAtOutcome: true, departureSource: 'PHONE_MANUAL' });
   });
 
-  it('an unobserved GPS arrival is shown but never automatic; a GPS departure after a gap is not observed', () => {
+  it('an unobserved GPS arrival is shown as not observed; a GPS departure after a gap is not observed', () => {
     expect(deriveVisit([gpsIn('10:00', false), gpsOut('10:25'), result('10:20')], CTX)).toMatchObject({ arrivalObserved: false, autoArrivedAt: null, autoBasis: null });
     const gap = deriveVisit([gpsIn('10:00'), gpsOut('10:22', true), result('10:20')], CTX);
-    expect(gap).toMatchObject({ departureGap: true, autoDepartedAt: null, autoBasis: 'RESULT' });
+    expect(gap).toMatchObject({ departureGap: true, departureSource: 'AYUN', autoDepartedAt: null, autoBasis: null });
   });
 
   it('a GPS stay without a result is in progress (ARRIVED), then PENDING after the departure', () => {
@@ -59,6 +64,25 @@ describe('GPS alone fills a stop the phone did not time', () => {
   it('GPS positions are never plausibility evidence (pin check stays phone-only)', () => {
     const atPin = ev('ARRIVED', 'AYUN', '10:00', { observed: true }, { lat: PIN.lat, lng: PIN.lng });
     expect(deriveVisit([atPin, result('10:20')], CTX)).toMatchObject({ timingSuspect: false, suspect: [] });
+  });
+});
+
+describe("the phone's measured times are never touched by GPS (second review H-2)", () => {
+  const keys = ['arrivedAt', 'arrivalSource', 'departedAt', 'departureSource', 'departedAtOutcome', 'autoArrivedAt', 'autoDepartedAt', 'autoBasis', 'autoMinutes', 'autoServiceMinutes', 'state'] as const;
+  const pick = (v: ReturnType<typeof deriveVisit>) => Object.fromEntries(keys.map((k) => [k, v[k]]));
+  const phone = [autoIn('09:00'), result('09:12')];
+
+  it('phone automatic arrival + result, and a GPS stay around it: exactly as with the link off', () => {
+    const off = deriveVisit(phone, CTX);
+    expect(off).toMatchObject({ autoBasis: 'RESULT', autoMinutes: 12, autoServiceMinutes: 12 });
+    expect(pick(deriveVisit([...phone, gpsIn('08:59'), gpsOut('09:14')], CTX))).toEqual(pick(off));
+    // A GPS arrival just after the phone's, and its departure: still the phone's timing.
+    expect(pick(deriveVisit([...phone, gpsIn('09:01'), gpsOut('09:14')], CTX))).toEqual(pick(off));
+  });
+
+  it('phone arrival and departure: the GPS stay changes nothing', () => {
+    const own = [autoIn('09:00'), autoOut('09:20'), result('09:12')];
+    expect(pick(deriveVisit([...own, gpsIn('08:58'), gpsOut('09:22')], CTX))).toEqual(pick(deriveVisit(own, CTX)));
   });
 });
 
@@ -76,23 +100,24 @@ describe('the driver and the office always win (design 6.4, owner decision D-3 r
     expect(tapped.arrivedAt).toEqual(L('10:01'));
   });
 
-  it('two automatic arrivals: the observed one first, then the earlier (M1)', () => {
-    // Both observed: the earlier (GPS) wins.
-    expect(deriveVisit([autoIn('10:00'), gpsIn('09:58'), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'AYUN' });
-    // The phone's observed arrival beats an earlier GPS upper bound.
+  it("the phone's automatic arrival, observed or found later, beats any GPS arrival (H-2)", () => {
+    expect(deriveVisit([autoIn('10:00'), gpsIn('09:58'), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'PHONE_AUTO', arrivalObserved: true });
     expect(deriveVisit([autoIn('10:00'), gpsIn('09:40', false), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'PHONE_AUTO', arrivalObserved: true });
-    // The phone's arrival found when the page came back loses to an observed GPS arrival.
-    expect(deriveVisit([autoIn('10:05', false), gpsIn('10:00'), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'AYUN', arrivalObserved: true });
-    // Neither observed: the earlier.
-    expect(deriveVisit([autoIn('10:05', false), gpsIn('10:00', false), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'AYUN', arrivalObserved: false });
+    expect(deriveVisit([autoIn('10:05', false), gpsIn('10:00'), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'PHONE_AUTO', arrivalObserved: false });
   });
 
-  it('departure: the office, else the phone, else the GPS stay that began near the arrival', () => {
+  it('departure: the office, else the phone, else the result time, else the GPS stay that began near the arrival', () => {
     expect(deriveVisit([autoIn('10:00'), autoOut('10:22'), gpsIn('09:59'), gpsOut('10:24'), result('10:20')], CTX)).toMatchObject({ departureSource: 'PHONE_AUTO' });
     expect(deriveVisit([autoIn('10:00'), gpsIn('09:59'), gpsOut('10:24'), result('10:20'), office('DEPARTED', '10:30')], CTX)).toMatchObject({ departureSource: 'DISPATCHER' });
-    // The phone saw no departure: the GPS one fills it.
-    const filled = deriveVisit([autoIn('10:00'), gpsIn('09:59'), gpsOut('10:24'), result('10:20')], CTX);
-    expect(filled).toMatchObject({ departureSource: 'AYUN', departedAtOutcome: false, autoBasis: 'DEPARTURE' });
+    // The driver's result ends the stop (Auto to result): the GPS departure does not replace it.
+    expect(deriveVisit([autoIn('10:00'), gpsIn('09:59'), gpsOut('10:24'), result('10:20')], CTX)).toMatchObject({ departureSource: 'PHONE_MANUAL', departedAtOutcome: true, autoBasis: 'RESULT' });
+    // The driver tapped "I arrived" and saved the result: the result time only stood in for the departure, GPS saw it.
+    const tapped = deriveVisit([tap('10:01'), gpsIn('09:59'), gpsOut('10:24'), result('10:20')], CTX);
+    expect(tapped).toMatchObject({ arrivalSource: 'PHONE_MANUAL', departureSource: 'AYUN', departedAtOutcome: false, autoBasis: null, autoServiceMinutes: null });
+    expect(timedByText(tapped)).toBe('Manual arrival, GPS (Ayun) departure');
+    // No result yet and the phone saw no departure: the GPS one fills it (the phone's timing stays as it was).
+    const filled = deriveVisit([autoIn('10:00'), gpsIn('09:59'), gpsOut('10:24')], CTX);
+    expect(filled).toMatchObject({ departureSource: 'AYUN', departedAtOutcome: false, autoBasis: null, state: 'PENDING' });
     expect(filled.departedAt).toEqual(L('10:24'));
   });
 
@@ -103,17 +128,21 @@ describe('the driver and the office always win (design 6.4, owner decision D-3 r
 
   it('the 15-minute rule after the result applies to a GPS departure too', () => {
     const parked = deriveVisit([gpsIn('10:00'), gpsOut('10:50'), result('10:20')], CTX);
-    expect(parked).toMatchObject({ departedAtOutcome: true, departureSource: 'PHONE_MANUAL', autoBasis: 'RESULT' });
+    expect(parked).toMatchObject({ departedAtOutcome: true, departureSource: 'PHONE_MANUAL', autoBasis: null });
   });
 
-  it('the GPS cycle used is the one overlapping the phone cycle, never an earlier stay nearby', () => {
-    const v = deriveVisit([gpsIn('08:00'), gpsOut('08:10'), autoIn('10:00'), gpsIn('10:02'), gpsOut('10:21'), result('10:15')], CTX);
+  it('the GPS stay used is the one at the arrival shown, never an earlier stay nearby', () => {
+    const v = deriveVisit([gpsIn('08:00'), gpsOut('08:10'), autoIn('10:00'), gpsIn('10:02'), gpsOut('10:21')], CTX);
     expect(v).toMatchObject({ arrivalSource: 'PHONE_AUTO', departureSource: 'AYUN' });
     expect(v.departedAt).toEqual(L('10:21'));
   });
 
   it('GPS never gives a result: a visit with only GPS events has none', () => {
     expect(deriveVisit([gpsIn('10:00'), gpsOut('10:25')], CTX)).toMatchObject({ outcome: null, outcomeSource: null, driverResultAt: null });
+  });
+
+  it('a GPS arrival never comes after the Left the office entered', () => {
+    expect(deriveVisit([gpsIn('10:30'), gpsOut('10:45'), office('DEPARTED', '10:20')], CTX)).toMatchObject({ arrivedAt: null, departureSource: 'DISPATCHER' });
   });
 });
 
@@ -163,19 +192,23 @@ describe('the words for GPS times', () => {
     expect(departureNote(true, false, 'AYUN')).toBe('result time');
     // The fixed bug: a GPS arrival without automatic timing was labelled "Manual".
     expect(timedByText({ autoBasis: null, arrivalSource: 'AYUN', departureSource: null, departedAtOutcome: false, outcomeSource: null })).toBe('GPS (Ayun)');
-    expect(timedByText({ autoBasis: 'DEPARTURE', arrivalSource: 'AYUN', departureSource: 'AYUN', departedAtOutcome: false, outcomeSource: 'PHONE_MANUAL' })).toBe('GPS to departure');
-    expect(timedByText({ autoBasis: 'DEPARTURE', arrivalSource: 'PHONE_AUTO', departureSource: 'AYUN', departedAtOutcome: false, outcomeSource: 'PHONE_MANUAL' })).toBe('GPS to departure');
-    expect(timedByText({ autoBasis: 'RESULT', arrivalSource: 'AYUN', departureSource: 'PHONE_MANUAL', departedAtOutcome: true, outcomeSource: 'PHONE_MANUAL' })).toBe('GPS to result');
+    expect(timedByText({ autoBasis: null, arrivalSource: 'AYUN', departureSource: 'AYUN', departedAtOutcome: false, outcomeSource: 'PHONE_MANUAL' })).toBe('GPS (Ayun)');
+    expect(timedByText({ autoBasis: null, arrivalSource: 'AYUN', departureSource: 'PHONE_MANUAL', departedAtOutcome: true, outcomeSource: 'PHONE_MANUAL' })).toBe('GPS (Ayun)');
+    // The driver's own arrival and a GPS departure: never just "GPS (Ayun)" (second review L-2).
+    expect(timedByText({ autoBasis: null, arrivalSource: 'PHONE_MANUAL', departureSource: 'AYUN', departedAtOutcome: false, outcomeSource: null })).toBe('Manual arrival, GPS (Ayun) departure');
+    expect(timedByText({ autoBasis: null, arrivalSource: 'PHONE_AUTO', departureSource: 'AYUN', departedAtOutcome: false, outcomeSource: null })).toBe('Auto arrival, GPS (Ayun) departure');
   });
   it('the phone and office words are unchanged', () => {
     expect(departureNote(false, true)).toBe('not observed');
     expect(departureNote(false, false, 'PHONE_AUTO')).toBeNull();
     expect(arrivalNote('PHONE_AUTO', false)).toBe('arrival not observed (page opened at the shop)');
     expect(timedByText({ autoBasis: null, arrivalSource: 'PHONE_AUTO', departureSource: null, departedAtOutcome: false, outcomeSource: null })).toBe('Manual');
+    expect(timedByText({ autoBasis: 'DEPARTURE', arrivalSource: 'PHONE_AUTO', departureSource: 'PHONE_AUTO', departedAtOutcome: false, outcomeSource: 'PHONE_MANUAL' })).toBe('Auto to departure');
+    expect(timedByText({ autoBasis: 'RESULT', arrivalSource: 'PHONE_AUTO', departureSource: 'PHONE_MANUAL', departedAtOutcome: true, outcomeSource: 'PHONE_MANUAL' })).toBe('Auto to result');
   });
 });
 
-describe('the driver page never restores its stop timer from a GPS arrival (M4)', () => {
+describe("the driver page: a GPS-only arrival is never the driver's (M4, first review M-2, second review L-3)", () => {
   const T0 = Date.parse('2026-10-05T06:00:00Z');
   const res = (over: Partial<StopResult>): StopResult => ({
     state: 'ARRIVED',
@@ -225,22 +258,31 @@ describe('the driver page never restores its stop timer from a GPS arrival (M4)'
   const manifest = (stops: ManifestStop[]): Pick<DriverManifest, 'loads'> =>
     ({ loads: [{ key: 'D1:1', depotId: 'D1', loadNo: 1, trips: 1, status: 'DISPATCHED', actionable: true, departMin: 430, returnMin: 900, driverName: 'Driver A', cases: 60, backAtDepotAt: null, stops }] }) as Pick<DriverManifest, 'loads'>;
 
-  it('a stop arrived by GPS shows the arrival, labelled, and is not the stop in progress', () => {
-    const [l] = applyQueued(manifest([stop(1, res({ arrivalByGps: true }))]), []);
-    expect(l!.stops[0]!.view).toMatchObject({ state: 'ARRIVED', arrivedAt: T0, arrivalByGps: true });
+  it('a stop arrived only by GPS is not arrived on the phone: "I arrived" stays, no timer, no "At stop", not visited', () => {
+    const [l] = applyQueued(manifest([stop(1, res({ arrivalByGps: true, minutes: 95 }))]), []);
+    const v = l!.stops[0]!.view;
+    // The sheet shows "I arrived" while arrivedAt is null; the list's "At stop" chip needs state ARRIVED; the
+    // tracker's "visited" needs arrivedAt or doneAt.
+    expect(v).toMatchObject({ state: 'PENDING', arrivedAt: null, doneAt: null, minutes: null, gpsArrivedAt: T0 });
     expect(stopInProgress([l!], 'D1:1')).toBeNull();
   });
 
-  it("the phone's own unsent arrival replaces the GPS one and restores the timer", () => {
+  it('with a result after a GPS-only arrival: done, and still no arrival of the driver', () => {
+    const [l] = applyQueued(manifest([stop(1, res({ arrivalByGps: true, state: 'DONE', outcome: 'DELIVERED', outcomeAt: new Date(T0 + 600_000).toISOString() }))]), []);
+    expect(l!.stops[0]!.view).toMatchObject({ state: 'DONE', arrivedAt: null, doneAt: T0 + 600_000 });
+  });
+
+  it("the phone's own unsent arrival replaces the GPS note and restores the timer", () => {
     const mine = actionItem('t5|2026-10-05', { key: newKey(), type: 'ARRIVE', stop: 'D1:1:1', at: new Date(T0 + 120_000).toISOString(), mode: 'AUTO' }, T0 + 120_000, false);
     const [l] = applyQueued(manifest([stop(1, res({ arrivalByGps: true }))]), [mine]);
-    expect(l!.stops[0]!.view.arrivalByGps).toBeUndefined();
+    expect(l!.stops[0]!.view.gpsArrivedAt).toBeUndefined();
     expect(stopInProgress([l!], 'D1:1')).toEqual({ key: 'D1:1:1', arrivedAt: T0 + 120_000, observed: true });
   });
 
   it('a stop without a GPS arrival is exactly as before (no new field)', () => {
     const [l] = applyQueued(manifest([stop(1, res({}))]), []);
-    expect('arrivalByGps' in l!.stops[0]!.view).toBe(false);
+    expect('gpsArrivedAt' in l!.stops[0]!.view).toBe(false);
+    expect(l!.stops[0]!.view).toMatchObject({ state: 'ARRIVED', arrivedAt: T0 });
     expect(stopInProgress([l!], 'D1:1')).toEqual({ key: 'D1:1:1', arrivedAt: T0, observed: true });
   });
 });

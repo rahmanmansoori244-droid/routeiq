@@ -9,14 +9,24 @@
  * 1. Depot moves from the trail: the first point inside the depot radius (or past it + 50 m for an
  *    exit: hysteresis, so a truck at the zone edge does not flap) held for depotDwellMin. A depot zone
  *    move from Ayun (webhook or backstop) is used only when the trail confirms it (a trail move of the
- *    same kind within 10 min): its time then replaces the trail's. An unconfirmed zone move is never a
- *    trip boundary (a forged or misplaced webhook cannot cut trips: review M6).
+ *    same kind within 10 min), and the boundary keeps the TRAIL's time (the device's own points; a
+ *    forged or late zone move can never shift a trip: second review, LOW). An unconfirmed zone move is
+ *    never a trip boundary (a forged or misplaced webhook cannot cut trips: review M6).
  * 2. Trips: from a depot OUT to the next depot IN (a trail that starts outside the depot opens a trip
  *    at its first point). Trips are matched to the truck-day's DISPATCHED / COMPLETED loads in dispatch
  *    order (the LOAD_DISPATCHED audit time, never a COMPLETED load's statusChangedAt): an
- *    order-preserving assignment that prefers the trip during which (or right after which) the load
- *    was dispatched and the trip that passes the load's own pins; a fuel run is simply left without a
- *    load (H3). With several loads and no trip boundary at all, nothing is matched.
+ *    order-preserving assignment in which an EARLIER-dispatched load always comes first (a load is left
+ *    without a trip only when no affordable trip is left for it, never while a later load takes that
+ *    trip: second review H-1), then the cheapest: the trip during which (or right after which) the
+ *    load's anchor falls - its Dispatch press, or for a load pressed long before it left its planned
+ *    departure less ANCHOR_EARLY_MIN - and the trip with STAYS at the load's own pins (a drive-by is no
+ *    evidence). A trip that left more than BACK_SLACK_MIN after the load's Back at depot (the driver's or
+ *    the office's) is never that load's: a load whose own trip is missing from the trail (a tracker gap)
+ *    cannot take the next load's. A fuel run is simply left without a load (H3). A load also keeps the
+ *    following (or preceding) trips without a load that stay at its pins before the next load's anchor
+ *    and its Back at depot: a break at the depot or a run back for missing goods splits one load into
+ *    several trips (second review M-3). With several loads and no trip boundary at all, nothing is
+ *    matched.
  * 3. Stays: per pin of the trip's load, a run of points from the first point inside stopRadiusM (the
  *    arrival: never the detection time) to the first of two consecutive points beyond radius + 50 m, or
  *    the first point beyond the radius at 10 km/h or more (the departure). A single drifting point does
@@ -26,7 +36,10 @@
  * 4. Never automatic (H4): a pin within depotRadiusM of the depot (the truck waiting at the depot is not
  *    at that customer), or two pending pins with stays at the same time (the phone asks "Which
  *    customer?"; GPS writes nothing and leaves a fact for the office). A stop that is not pending (a
- *    result recorded before the stay, an office arrival) gets nothing.
+ *    result recorded before the stay, an office arrival) gets nothing. Nor does a stay that began more
+ *    than LATE_PRESS_MAX_MIN before its load's Dispatch press or after `now` (a trail shifted by a wrong
+ *    time offset; first review H-1), or one that began at the first point of a trail that started
+ *    outside the depot (when the truck got there is unknown: second review L-4).
  * 5. At most 2 stays per stop (leaving to park and coming back), each an ARRIVED and, once the truck
  *    left, a DEPARTED. An arrival is `observed` only when the point before it is at most
  *    observedMaxGapSec earlier, a departure only when the last point inside is (else its time is an
@@ -63,6 +76,11 @@ export interface DetectorLoad {
   dispatchedAt: Date | null;
   /** The planned departure from the depot: the order when the dispatch time is unknown. */
   plannedDepartAt: Date;
+  /**
+   * The driver's or the office's latest Back at depot of the load (never a GPS one), or null: a trip that
+   * leaves the depot more than BACK_SLACK_MIN after it is never this load's (absent: no bound).
+   */
+  backAt?: Date | null;
   stops: DetectorStop[];
 }
 
@@ -74,6 +92,8 @@ export interface DetectorInput {
   zoneMoves: readonly ZoneMove[];
   loads: readonly DetectorLoad[];
   params: DetectorParams;
+  /** The processing time: a stay that begins after it is never proposed (absent: no upper bound). */
+  now?: Date;
 }
 
 /** A depot move derived from the trail (stored as IvmsEvent origin TRAIL when no zone move confirms it). */
@@ -87,6 +107,8 @@ export interface TrailMove {
 
 export interface DetectedTrip extends GpsTrip {
   depotId: string | null;
+  /** The depot of the load the trip is (loadNo), or null: a truck can have a Load 1 at two depots. */
+  loadDepotId: string | null;
   /** The trail started outside the depot: outAt is its first point, not a seen departure. */
   openStart: boolean;
 }
@@ -110,12 +132,28 @@ export const ZONE_CONFIRM_MIN = 10;
 export const EXIT_FAST_KMH = 10;
 /** At most this many stays per stop. */
 export const MAX_STAYS_PER_STOP = 2;
-/** Trip to load matching: the cost (minutes) of a load left without a trip; anything costlier is never chosen. */
-const UNMATCHED_COST = 240;
+/** Trip to load matching: a trip further than this (minutes) from the load's anchor is never its trip. */
+export const MAX_TRIP_COST_MIN = 240;
 /** A load dispatched after its trip came back (a very late press) costs this much more. */
 const AFTER_RETURN_COST = 60;
-/** A trip that passes all of a load's pins is worth this many minutes of timing slack. */
+/** A trip with stays at all of a load's pins is worth this many minutes of timing slack. */
 const PIN_EVIDENCE_MIN = 60;
+/**
+ * A load pressed long before it left (the office presses Dispatch for the day's loads in the morning) is
+ * anchored at its planned departure less this much, when that is later than the press (second review H-1).
+ */
+export const ANCHOR_EARLY_MIN = 120;
+/**
+ * Dispatch pressed late: the stays of a load may begin at most this long before the press (the design's
+ * late-press allowance). Anything earlier is another trip, or a trail shifted by a wrong time offset.
+ */
+export const LATE_PRESS_MAX_MIN = 60;
+/**
+ * A load the driver or the office reported Back at depot never takes a trip that left more than this
+ * after it: with an earlier load first (H-1), a load whose own trip is missing from the trail (a tracker
+ * gap, a tracker mapped later) must not take the next load's trip instead.
+ */
+export const BACK_SLACK_MIN = 10;
 
 const ms = (d: Date) => d.getTime();
 const MIN = 60_000;
@@ -186,13 +224,13 @@ export function tripsOf(boundaries: readonly Boundary[], startsInside: boolean |
   const trips: DetectedTrip[] = [];
   let open: DetectedTrip | null = null;
   if (startsInside === false && firstAt) {
-    open = { outAt: firstAt, inAt: null, loadNo: null, depotId: null, openStart: true };
+    open = { outAt: firstAt, inAt: null, loadNo: null, loadDepotId: null, depotId: null, openStart: true };
     trips.push(open);
   }
   for (const b of sorted) {
     if (b.kind === 'DEPOT_OUT') {
       if (open) continue; // already out
-      open = { outAt: b.at, inAt: null, loadNo: null, depotId: b.depotId, openStart: false };
+      open = { outAt: b.at, inAt: null, loadNo: null, loadDepotId: null, depotId: b.depotId, openStart: false };
       trips.push(open);
     } else if (open) {
       open.inAt = b.at;
@@ -202,7 +240,16 @@ export function tripsOf(boundaries: readonly Boundary[], startsInside: boolean |
   return trips;
 }
 
-/** The minutes a load's dispatch time is away from a trip (0 = dispatched during it); null = too far. */
+/**
+ * Where a load is expected to leave (second review H-1): its Dispatch press, or - pressed long before it
+ * left - its planned departure less ANCHOR_EARLY_MIN when that is later. Unknown press: the plan.
+ */
+export function loadAnchor(l: Pick<DetectorLoad, 'dispatchedAt' | 'plannedDepartAt'>): Date {
+  if (!l.dispatchedAt) return l.plannedDepartAt;
+  return new Date(Math.max(ms(l.dispatchedAt), ms(l.plannedDepartAt) - ANCHOR_EARLY_MIN * MIN));
+}
+
+/** The minutes a load's anchor is away from a trip (0 = during it); null = too far (never its trip). */
 function timeCost(d: Date, trip: DetectedTrip): number | null {
   const out = ms(trip.outAt);
   const back = trip.inAt ? ms(trip.inAt) : Infinity;
@@ -211,15 +258,20 @@ function timeCost(d: Date, trip: DetectedTrip): number | null {
   if (t >= out && t <= back) c = 0;
   else if (t < out) c = (out - t) / MIN;
   else c = (t - back) / MIN + AFTER_RETURN_COST;
-  return c > UNMATCHED_COST ? null : c;
+  return c > MAX_TRIP_COST_MIN ? null : c;
 }
 
-/** The share (0..1) of a load's usable pins that the trail passes within the stop radius during a trip. */
-function pinEvidence(load: DetectorLoad, trip: DetectedTrip, points: readonly TrailPoint[], p: DetectorParams, nearDepot: (pin: { lat: number; lng: number }) => boolean): number {
-  const pins = load.stops.map((s) => s.pin).filter((x): x is { lat: number; lng: number } => !!x && !nearDepot(x));
-  if (!pins.length) return 0;
-  const inTrip = points.filter((pt) => inside(trip, pt.fixAt));
-  const hit = pins.filter((pin) => inTrip.some((pt) => distanceM(pt, pin) <= p.stopRadiusM)).length;
+/** Is a stay long and slow enough to be a stop (the in-sequence dwell)? */
+const isStop = (s: Stay, p: DetectorParams) => s.hasSlowPoint && dwellMinOf(s) >= p.dwellMin;
+
+/**
+ * The share (0..1) of a load's usable pins with a STAY (a slow point and the dwell) during a trip: a
+ * truck driving past a pin is no evidence (second review H-1).
+ */
+function pinEvidence(load: DetectorLoad, tripPoints: readonly TrailPoint[], prevIdx: PrevIndex, p: DetectorParams, nearDepot: (pin: { lat: number; lng: number }) => boolean): number {
+  const pins = load.stops.filter((s) => !!s.pin && !nearDepot(s.pin));
+  if (!pins.length || !tripPoints.length) return 0;
+  const hit = pins.filter((s) => staysAt(tripPoints, tripPoints, s.pin!, s.sequence, p, prevIdx).some((st) => isStop(st, p))).length;
   return hit / pins.length;
 }
 
@@ -229,29 +281,39 @@ function inside(trip: GpsTrip, at: Date): boolean {
 
 /**
  * Loads to trips, in dispatch order and order-preserving (a later-dispatched load never takes an earlier
- * trip than an earlier-dispatched one), at the least total cost: timeCost minus the pin evidence; a load
- * with no affordable trip stays unmatched. Returns the trip index per load (null = none).
+ * trip than an earlier-dispatched one). An earlier load always comes first (second review H-1): of all
+ * assignments, the one that leaves the EARLIEST loads matched wins (lexicographic: matching load 1 is
+ * worth more than matching every later load), so a load is left unmatched only when no affordable trip
+ * is left for it, never while a later load takes a trip it could have. Among those, the least total
+ * cost (timeCost minus the pin evidence). Returns the trip index per load (null = none).
  */
 export function matchTripsToLoads(trips: readonly DetectedTrip[], loads: readonly DetectorLoad[], cost: (load: DetectorLoad, trip: DetectedTrip) => number | null): (number | null)[] {
   const L = loads.length;
   const T = trips.length;
-  // dp[k][i]: the least cost of the first k loads using only the first i trips; how it was reached.
+  // dp[k][i]: the best [unmatched weight, cost] of the first k loads using only the first i trips. Leaving
+  // load k (1-based) unmatched weighs 2^(L-k): more than all later loads together (exact for L <= 52).
   type Step = 'TAKE' | 'SKIP_TRIP' | 'UNMATCHED';
-  const dp: number[][] = Array.from({ length: L + 1 }, () => new Array<number>(T + 1).fill(Infinity));
+  type Val = [number, number];
+  const weight = (k: number) => Math.pow(2, Math.min(52, L - k));
+  const less = (a: Val, b: Val) => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1] - 1e-9);
+  const dp: Val[][] = Array.from({ length: L + 1 }, () => Array.from({ length: T + 1 }, (): Val => [Infinity, Infinity]));
   const how: (Step | null)[][] = Array.from({ length: L + 1 }, () => new Array<Step | null>(T + 1).fill(null));
-  for (let i = 0; i <= T; i++) dp[0]![i] = 0;
+  for (let i = 0; i <= T; i++) dp[0]![i] = [0, 0];
   for (let k = 1; k <= L; k++) {
-    dp[k]![0] = dp[k - 1]![0]! + UNMATCHED_COST;
+    const w = weight(k);
+    dp[k]![0] = [dp[k - 1]![0]![0] + w, dp[k - 1]![0]![1]];
     how[k]![0] = 'UNMATCHED';
     for (let i = 1; i <= T; i++) {
       const c = cost(loads[k - 1]!, trips[i - 1]!);
-      const options: [number, Step][] = [
-        [c === null ? Infinity : dp[k - 1]![i - 1]! + c, 'TAKE'],
+      const take = dp[k - 1]![i - 1]!;
+      const unmatched = dp[k - 1]![i]!;
+      const options: [Val, Step][] = [
+        [c === null ? [Infinity, Infinity] : [take[0], take[1] + c], 'TAKE'],
         [dp[k]![i - 1]!, 'SKIP_TRIP'],
-        [dp[k - 1]![i]! + UNMATCHED_COST, 'UNMATCHED'],
+        [[unmatched[0] + w, unmatched[1]], 'UNMATCHED'],
       ];
       let best = options[0]!;
-      for (const o of options.slice(1)) if (o[0] < best[0]) best = o; // ties: TAKE, then SKIP_TRIP
+      for (const o of options.slice(1)) if (less(o[0], best[0])) best = o; // ties: TAKE, then SKIP_TRIP
       dp[k]![i] = best[0];
       how[k]![i] = best[1];
     }
@@ -286,14 +348,18 @@ export interface Stay {
   hasSlowPoint: boolean;
 }
 
-/** The stays of a sorted trail (one trip's window) at one pin. */
-export function staysAt(points: readonly TrailPoint[], all: readonly TrailPoint[], pin: { lat: number; lng: number }, sequence: number, p: DetectorParams): Stay[] {
+/** The point before each point of the whole sorted trail (built once per truck-day, not per pin). */
+export type PrevIndex = ReadonlyMap<TrailPoint, TrailPoint | null>;
+
+export function prevIndexOf(all: readonly TrailPoint[]): PrevIndex {
+  return new Map(all.map((pt, i) => [pt, i > 0 ? all[i - 1]! : null] as const));
+}
+
+/** The stays of a sorted trail (one trip's window) at one pin; `prevIdx` from prevIndexOf(all) (built here when absent). */
+export function staysAt(points: readonly TrailPoint[], all: readonly TrailPoint[], pin: { lat: number; lng: number }, sequence: number, p: DetectorParams, prevIdx?: PrevIndex): Stay[] {
   const stays: Stay[] = [];
-  const idxInAll = new Map(all.map((pt, i) => [pt, i] as const));
-  const prevOf = (pt: TrailPoint) => {
-    const i = idxInAll.get(pt);
-    return i !== undefined && i > 0 ? all[i - 1]! : null;
-  };
+  const idx = prevIdx ?? prevIndexOf(all);
+  const prevOf = (pt: TrailPoint) => idx.get(pt) ?? null;
   let cur: Stay | null = null;
   let pendingExit: TrailPoint | null = null;
   for (const pt of points) {
@@ -356,7 +422,8 @@ export function detectTruckDay(input: DetectorInput): DetectorOutput {
     const match = moves.find((m) => !usedTrail.has(m) && m.kind === z.kind && Math.abs(ms(m.at) - ms(z.at)) <= ZONE_CONFIRM_MIN * MIN);
     if (match) {
       usedTrail.add(match);
-      boundaries.push({ kind: z.kind, at: z.at, depotId: z.depotId ?? match.depotId });
+      // The trail's own time: the zone move only confirms the boundary, it never moves it.
+      boundaries.push({ kind: z.kind, at: match.at, depotId: z.depotId ?? match.depotId });
       out.zoneOutcomes.push({ id: z.id, outcome: 'USED' });
     } else {
       out.zoneOutcomes.push({ id: z.id, outcome: 'UNCONFIRMED' });
@@ -383,28 +450,70 @@ export function detectTruckDay(input: DetectorInput): DetectorOutput {
     out.notes.push('NO_DEPOT_BOUNDARY');
     return out;
   }
+  const prevIdx = prevIndexOf(points);
+  const pointsOf = trips.map((t) => points.filter((pt) => inside(t, pt.fixAt)));
+  // Pin evidence per (load, trip), computed once (the matching asks for each pair more than once).
+  const evidence = new Map<string, number>();
+  const evidenceOf = (k: number, i: number) => {
+    const key = `${k}|${i}`;
+    if (!evidence.has(key)) evidence.set(key, pinEvidence(loads[k]!, pointsOf[i]!, prevIdx, p, nearDepot));
+    return evidence.get(key)!;
+  };
+  const anchors = loads.map(loadAnchor);
+  // A trip that left after the load was reported Back at depot (the driver's or the office's) is never its.
+  const afterBack = (k: number, t: DetectedTrip) => {
+    const b = loads[k]!.backAt;
+    return !!b && ms(t.outAt) > ms(b) + BACK_SLACK_MIN * MIN;
+  };
   const tripOfLoad = matchTripsToLoads(trips, loads, (l, t) => {
-    const c = timeCost(l.dispatchedAt ?? l.plannedDepartAt, t);
-    return c === null ? null : c - PIN_EVIDENCE_MIN * pinEvidence(l, t, points, p, nearDepot);
+    const k = loads.indexOf(l);
+    if (afterBack(k, t)) return null;
+    const c = timeCost(anchors[k]!, t);
+    return c === null ? null : c - PIN_EVIDENCE_MIN * evidenceOf(k, trips.indexOf(t));
+  });
+  // A load keeps the trips without a load next to its own that stay at its pins, inside its window: from
+  // its anchor (less the late-press allowance) to the next load's, never after its Back at depot (second
+  // review M-3: a break at the depot, a run back for missing goods).
+  const matchedTrips = new Set(tripOfLoad.filter((i): i is number => i !== null));
+  const tripsOfLoad: number[][] = loads.map((_, k) => {
+    const own = tripOfLoad[k];
+    if (own === null || own === undefined) return [];
+    const from = ms(anchors[k]!) - LATE_PRESS_MAX_MIN * MIN;
+    const to = k + 1 < loads.length ? ms(anchors[k + 1]!) : Infinity;
+    const list = [own];
+    for (const dir of [-1, 1]) {
+      for (let i = own + dir; i >= 0 && i < trips.length && !matchedTrips.has(i); i += dir) {
+        const at = ms(trips[i]!.outAt);
+        if (at < from || at >= to || afterBack(k, trips[i]!)) break;
+        if (evidenceOf(k, i) > 0) list.push(i); // a fuel run in between stays without a load
+      }
+    }
+    for (const i of list) matchedTrips.add(i);
+    return list.sort((a, b) => a - b);
   });
   loads.forEach((l, k) => {
-    const i = tripOfLoad[k];
-    if (i !== null && i !== undefined) trips[i]!.loadNo = l.loadNo;
+    for (const i of tripsOfLoad[k]!) Object.assign(trips[i]!, { loadNo: l.loadNo, loadDepotId: l.depotId });
   });
 
-  // 3-5. Stays of each matched load's pins inside its own trip only.
+  // 3-5. Stays of each matched load's pins inside its own trips only.
   loads.forEach((load, k) => {
-    const ti = tripOfLoad[k];
-    if (ti === null || ti === undefined) return;
-    const trip = trips[ti]!;
-    const tripPoints = points.filter((pt) => inside(trip, pt.fixAt));
+    const own = tripsOfLoad[k]!;
+    if (!own.length) return;
+    const tripPoints = points.filter((pt) => own.some((i) => inside(trips[i]!, pt.fixAt)));
+    // A trail that started outside the depot: when the truck got to its first point is unknown (L-4).
+    const unknownStart = new Set(own.filter((i) => trips[i]!.openStart).map((i) => ms(trips[i]!.outAt)));
+    // A stay before the Dispatch press less the late-press allowance, or after now, is never this load's (H-1).
+    const notBefore = load.dispatchedAt ? ms(load.dispatchedAt) - LATE_PRESS_MAX_MIN * MIN : -Infinity;
+    const notAfter = input.now ? ms(input.now) : Infinity;
     const pending = (s: DetectorStop, at: Date) => !s.officeArrival && (s.resultAt === null || ms(s.resultAt) >= ms(at));
     type Found = { stop: DetectorStop; stay: Stay };
     const found: Found[] = [];
     for (const s of load.stops) {
       if (!s.pin) continue;
-      for (const stay of staysAt(tripPoints, points, s.pin, s.sequence, p)) {
-        if (!stay.hasSlowPoint || dwellMinOf(stay) < p.dwellMin) continue;
+      for (const stay of staysAt(tripPoints, points, s.pin, s.sequence, p, prevIdx)) {
+        if (!isStop(stay, p)) continue;
+        const start = ms(stay.first.fixAt);
+        if (start < notBefore || start > notAfter || unknownStart.has(start)) continue;
         if (!pending(s, stay.first.fixAt)) continue;
         if (nearDepot(s.pin)) {
           out.ambiguities.push({ reason: 'NEAR_DEPOT', loadNo: load.loadNo, sequences: [s.sequence], from: stay.first.fixAt, to: stay.exit?.fixAt ?? null });

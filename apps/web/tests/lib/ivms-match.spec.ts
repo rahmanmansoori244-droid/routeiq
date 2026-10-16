@@ -25,6 +25,7 @@ vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => session.value) }));
 const { setTruckTracker, trackerSuggestions } = await import('@/lib/ivms/tracker-admin');
 const { PUT } = await import('@/app/api/ivms/trucks/[id]/tracker/route');
 const { POST } = await import('@/app/api/ivms/objects/route');
+const { POST: UNDO } = await import('@/app/api/ivms/trucks/[id]/gps-times/route');
 
 const IMEI_A = '111111111111111';
 const IMEI_B = '222222222222222';
@@ -154,6 +155,46 @@ describe('PUT /api/ivms/trucks/[id]/tracker (company admin)', () => {
     expect(tables.ivmsTruckDay![0]!.suppressedAt).toBeInstanceOf(Date);
   });
 
+  it("replacing a tracker after today's pull also deletes the GPS times already written for the truck today (second review M-1)", async () => {
+    const today = todayIso('Asia/Muscat');
+    const d = new Date(`${today}T00:00:00Z`);
+    tables.ivmsTruckDay!.push({ id: 'td', tenantId: TEN, truckId: 't6', deliveryDate: d, lastPullAt: new Date(), suppressedAt: null, suppressReason: null });
+    tables.stopVisit = [{ id: 'v1', tenantId: TEN, depotId: 'D1', deliveryDate: d, truckId: 't6', loadNo: 1, sequence: 1, firstLoadId: null, linesJson: [], casesPlanned: 10, arrivalSource: 'AYUN', arrivedAt: new Date(), locationPurgedAt: null }];
+    const ev = (id: string, source: string) => ({ id, tenantId: TEN, depotId: 'D1', deliveryDate: d, truckId: 't6', loadNo: 1, sequence: 1, visitId: 'v1', kind: 'ARRIVED', source, at: new Date(), receivedAt: new Date(), idempotencyKey: `k:${id}`, payloadJson: {} });
+    tables.stopEvent = [ev('gps', 'AYUN'), ev('tap', 'PHONE_MANUAL')];
+    const r = await put('t6', IMEI_C);
+    expect(r.body.data).toMatchObject({ changed: true, suppressedToday: true });
+    expect(tables.stopEvent.map((e) => e.id)).toEqual(['tap']);
+    expect(tables.stopVisit[0]).toMatchObject({ arrivalSource: 'PHONE_MANUAL' });
+  });
+
+  it('a tracker set on a truck records when: nothing from before it is pulled for today or yesterday (second review M-1)', async () => {
+    tables.tenantConfig![0]!.ivmsMode = 'MAP';
+    const before = Date.now();
+    await put('t5', IMEI_A);
+    const rows = tables.ivmsTruckDay!.filter((x) => x.truckId === 't5');
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect((row.trailFrom as Date).getTime()).toBeGreaterThanOrEqual(before);
+    // Clearing it records nothing new.
+    tables.ivmsTruckDay = [];
+    await put('t5', null);
+    expect(tables.ivmsTruckDay.filter((x) => x.truckId === 't5' && x.trailFrom)).toEqual([]);
+  });
+
+  it('with GPS tracking OFF, setting a tracker creates no GPS row (OFF outputs unchanged); an existing truck-day is still marked', async () => {
+    expect(tables.tenantConfig![0]!.ivmsMode).toBe('OFF');
+    tables.ivmsTruckDay = [];
+    await put('t5', IMEI_A);
+    expect(tables.ivmsTruckDay).toEqual([]);
+    await put('t5', null);
+    const today = todayIso('Asia/Muscat');
+    tables.ivmsTruckDay.push({ id: 'td-old', tenantId: TEN, truckId: 't5', deliveryDate: new Date(`${today}T00:00:00Z`), lastPullAt: null, suppressedAt: null, trailFrom: null });
+    const before = Date.now();
+    await put('t5', IMEI_A);
+    expect(tables.ivmsTruckDay).toHaveLength(1);
+    expect((tables.ivmsTruckDay[0]!.trailFrom as Date).getTime()).toBeGreaterThanOrEqual(before);
+  });
+
   it('VIEWER, PLANNER and SUPERVISOR are refused (403); nothing changes', async () => {
     for (const role of ['VIEWER', 'PLANNER', 'SUPERVISOR']) {
       session.value!.user.role = role;
@@ -204,5 +245,55 @@ describe('suggestions from Ayun', () => {
 
   it('a direct setTruckTracker refuses a one-day truck even with a valid IMEI', async () => {
     expect(await setTruckTracker(TEN, 'h1', IMEI_A, { userId: 'admin', ip: null })).toMatchObject({ ok: false, status: 422, code: 'ONE_DAY_TRUCK' });
+  });
+});
+
+describe('POST /api/ivms/trucks/[id]/gps-times: the undo of a truck-day (first review M-3)', () => {
+  const today = () => todayIso('Asia/Muscat');
+  const seedGps = () => {
+    const d = new Date(`${today()}T00:00:00Z`);
+    tables.stopVisit = [{ id: 'v1', tenantId: TEN, depotId: 'D1', deliveryDate: d, truckId: 't6', loadNo: 1, sequence: 1, firstLoadId: null, linesJson: [], casesPlanned: 10, arrivalSource: 'AYUN', arrivedAt: new Date(), locationPurgedAt: null }];
+    const ev = (id: string, source: string, kind = 'ARRIVED') => ({ id, tenantId: TEN, depotId: 'D1', deliveryDate: d, truckId: 't6', loadNo: 1, sequence: 1, visitId: 'v1', kind, source, at: new Date(), receivedAt: new Date(), idempotencyKey: `k:${id}`, payloadJson: {} });
+    tables.stopEvent = [ev('g1', 'AYUN'), ev('g2', 'AYUN', 'DEPARTED'), ev('r1', 'PHONE_MANUAL', 'OUTCOME')];
+  };
+  const post = async (truckId: string, body: Record<string, unknown>) => {
+    const res = await UNDO(new Request(`https://routeiq.test/api/ivms/trucks/${truckId}/gps-times`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }), { params: { id: truckId } });
+    return { status: res.status, body: (await res.json()) as { data: { events: number; visits: number; dryRun: boolean } | null; error?: { code?: string } } };
+  };
+
+  it('a dry run by default: counts only, nothing changes, no audit row', async () => {
+    seedGps();
+    const r = await post('t6', { date: today() });
+    expect(r.status).toBe(200);
+    expect(r.body.data).toMatchObject({ dryRun: true, events: 2, visits: 1 });
+    expect(tables.stopEvent!.map((e) => e.id)).toEqual(['g1', 'g2', 'r1']);
+    expect(tables.auditLog).toEqual([]);
+  });
+
+  it('dryRun false: the GPS events go, the visit is rebuilt, the day is suppressed, one audit row with counts only', async () => {
+    seedGps();
+    const r = await post('t6', { date: today(), dryRun: false });
+    expect(r.body.data).toMatchObject({ dryRun: false, events: 2, visits: 1 });
+    expect(tables.stopEvent!.map((e) => e.id)).toEqual(['r1']);
+    expect(tables.stopVisit![0]).toMatchObject({ arrivalSource: null, arrivedAt: null });
+    expect(tables.ivmsTruckDay![0]).toMatchObject({ truckId: 't6', suppressReason: 'UNDO' });
+    expect(tables.auditLog).toHaveLength(1);
+    expect(tables.auditLog![0]).toMatchObject({ action: 'GPS_TIMES_UNDONE', entity: 'Truck', entityId: 't6', afterJson: { truck: '5678 CD', date: today(), gpsTimesRemoved: 2, visitsRebuilt: 1 } });
+    expect(JSON.stringify(tables.auditLog)).not.toContain(IMEI_B);
+  });
+
+  it('works with GPS tracking OFF (the runbook switches it off first); refuses another company (404), a future date (422), lower roles (403)', async () => {
+    seedGps();
+    expect(tables.tenantConfig![0]!.ivmsMode).toBe('OFF');
+    expect((await post('t6', { date: '2999-01-01' })).status).toBe(422);
+    expect((await post('t6', { date: 'yesterday' })).status).toBe(422);
+    tables.truck!.find((t) => t.id === 't6')!.tenantId = 'tB';
+    expect((await post('t6', { date: today() })).status).toBe(404);
+    tables.truck!.find((t) => t.id === 't6')!.tenantId = TEN;
+    for (const role of ['VIEWER', 'PLANNER', 'SUPERVISOR']) {
+      session.value!.user.role = role;
+      expect((await post('t6', { date: today(), dryRun: false })).status).toBe(403);
+    }
+    expect(tables.stopEvent).toHaveLength(3);
   });
 });

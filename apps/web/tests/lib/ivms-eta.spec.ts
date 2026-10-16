@@ -45,9 +45,24 @@ describe('live ETA', () => {
   });
 
   it('at a stop now: that stop is "at stop", the next one follows its planned unloading and leg', () => {
-    const etas = liveEta(input({ stops: [stop(1, 10_000, '08:30', { arrivedAt: T('08:55') }), stop(2, 20_000, '09:15')] }));
+    const etas = liveEta(input({ fix: { fixAt: new Date(NOW.getTime() - 60_000), ...at(10_050) }, stops: [stop(1, 10_000, '08:30', { arrivedAt: T('08:55') }), stop(2, 20_000, '09:15')] }));
     expect(etas[0]).toMatchObject({ sequence: 1, atStop: true });
     expect(hhmm(etas[1]!.etaAt)).toBe('09:40'); // leaves 09:10 (08:55 + 15), leg 30 min
+  });
+
+  it('an open arrival while the truck is far from that stop: it is behind the truck, the next stop is ETA\'d from the fix (second review M-2)', () => {
+    // Arrived at stop 1 (10 km) at 08:30, no result yet; the fresh fix is at 15 km, on the way to stop 2 (20 km).
+    const etas = liveEta(input({ fix: { fixAt: new Date(NOW.getTime() - 60_000), ...at(15_000) }, stops: [stop(1, 10_000, '08:30', { arrivedAt: T('08:30') }), stop(2, 20_000, '09:15')] }));
+    expect(etas.map((e) => [e.sequence, e.atStop])).toEqual([[2, false]]);
+    // Half the planned leg left (08:45 -> 09:15: 30 min) = 15 min from now.
+    expect(hhmm(etas[0]!.etaAt)).toBe('09:15');
+    // The radius is the stop radius plus a margin: 200 m from the pin is still "at the stop".
+    expect(liveEta(input({ fix: { fixAt: new Date(NOW.getTime() - 60_000), ...at(10_200) }, stops: [stop(1, 10_000, '08:30', { arrivedAt: T('08:30') }), stop(2, 20_000, '09:15')] }))[0]).toMatchObject({ sequence: 1, atStop: true });
+  });
+
+  it('a stop skipped by the driver (a later stop already done or arrived) is not "next"', () => {
+    const etas = liveEta(input({ stops: [stop(1, 10_000, '08:30'), stop(2, 20_000, '09:15', { done: true }), stop(3, 30_000, '10:00')] }));
+    expect(etas.map((e) => e.sequence)).toEqual([3]);
   });
 
   it('done stops are behind the truck; nothing left gives no ETA', () => {

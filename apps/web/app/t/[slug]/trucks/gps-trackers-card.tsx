@@ -5,7 +5,8 @@
  * its Ayun tracker by IMEI. Shown to the company admin only (the Trucks page decides). "Suggest from
  * Ayun" makes one call to the provider's object list (only when GPS tracking is MAP or TIMES) and offers,
  * per truck without a tracker, the trackers with the same plate digits: never a provider name or plate.
- * A one-day hired truck never gets a tracker.
+ * A one-day hired truck never gets a tracker. "Remove GPS times of a day" is the undo of the runbook
+ * (docs/admin.md, first review M-3): a check (dry run) first, then the removal, audited.
  */
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -31,6 +32,16 @@ interface Suggestion {
 
 const MATCH_TEXT: Record<MatchKind, string> = { EXACT: 'same plate', DIGITS: 'same plate digits', AMBIGUOUS: 'one of several with these digits' };
 
+/** Today in the browser's time zone, YYYY-MM-DD (the office is in the company's time zone). */
+const localToday = () => new Date().toLocaleDateString('en-CA');
+
+interface UndoCount {
+  truckId: string;
+  date: string;
+  events: number;
+  visits: number;
+}
+
 async function send<T>(url: string, init: RequestInit): Promise<{ ok: true; data: T } | { ok: false; message: string }> {
   try {
     const res = await fetch(url, { ...init, headers: { 'content-type': 'application/json' } });
@@ -48,6 +59,9 @@ export function GpsTrackersCard({ trucks, canSuggest, modeText }: { trucks: Trac
   const [busy, setBusy] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[] | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
+  const [undoTruck, setUndoTruck] = useState(trucks[0]?.id ?? '');
+  const [undoDate, setUndoDate] = useState(localToday);
+  const [undoCount, setUndoCount] = useState<UndoCount | null>(null);
 
   async function save(truckId: string, value: string | null) {
     setBusy(truckId);
@@ -58,6 +72,18 @@ export function GpsTrackersCard({ trucks, canSuggest, modeText }: { trucks: Trac
     setTyped((m) => ({ ...m, [truckId]: r.data.imei ?? '' }));
     toast.success(r.data.imei ? 'GPS tracker saved.' : 'GPS tracker removed.');
     if (r.data.suppressedToday) toast.message("Today's GPS times of this truck are no longer written (the tracker changed during the day).");
+  }
+
+  async function undo(dryRun: boolean) {
+    const code = rows.find((x) => x.id === undoTruck)?.code ?? '';
+    if (!dryRun && !window.confirm(`Remove the GPS times of ${code} on ${undoDate}? The driver's and the office's times stay; GPS writes nothing more for this truck and day.`)) return;
+    setBusy('undo');
+    const r = await send<UndoCount & { dryRun: boolean }>(`/api/ivms/trucks/${undoTruck}/gps-times`, { method: 'POST', body: JSON.stringify({ date: undoDate, dryRun }) });
+    setBusy(null);
+    if (!r.ok) return void toast.error(r.message);
+    if (dryRun) return void setUndoCount({ truckId: r.data.truckId, date: r.data.date, events: r.data.events, visits: r.data.visits });
+    setUndoCount(null);
+    toast.success(`${r.data.events} GPS time${r.data.events === 1 ? '' : 's'} removed from ${r.data.visits} stop${r.data.visits === 1 ? '' : 's'}.`);
   }
 
   async function suggest() {
@@ -137,6 +163,54 @@ export function GpsTrackersCard({ trucks, canSuggest, modeText }: { trucks: Trac
             })}
           </tbody>
         </table>
+        <div className="space-y-2 border-t pt-3" data-testid="gps-undo">
+          <p className="font-medium">Remove GPS times of a day</p>
+          <p className="text-xs text-muted-foreground">
+            If a tracker or the time setting was wrong: removes the GPS arrival and departure times one truck got on one day. The driver&apos;s and the office&apos;s times stay, and GPS writes nothing more for
+            that truck and day.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Truck"
+              className="h-8 rounded-md border px-2 text-sm"
+              value={undoTruck}
+              onChange={(e) => {
+                setUndoTruck(e.target.value);
+                setUndoCount(null);
+              }}
+            >
+              {rows.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.code}
+                </option>
+              ))}
+            </select>
+            <Input
+              type="date"
+              aria-label="Delivery date"
+              className="h-8 w-40"
+              value={undoDate}
+              max={localToday()}
+              onChange={(e) => {
+                setUndoDate(e.target.value);
+                setUndoCount(null);
+              }}
+            />
+            <Button type="button" size="sm" variant="outline" className="h-8" disabled={busy !== null || !undoTruck || !undoDate} onClick={() => void undo(true)}>
+              Check
+            </Button>
+            {undoCount && undoCount.truckId === undoTruck && undoCount.date === undoDate ? (
+              <>
+                <span className="text-xs text-muted-foreground">
+                  {undoCount.events} GPS time{undoCount.events === 1 ? '' : 's'} on {undoCount.visits} stop{undoCount.visits === 1 ? '' : 's'}.
+                </span>
+                <Button type="button" size="sm" variant="destructive" className="h-8" disabled={busy !== null} onClick={() => void undo(false)}>
+                  Remove
+                </Button>
+              </>
+            ) : null}
+          </div>
+        </div>
       </CardContent>
     </Card>
   );

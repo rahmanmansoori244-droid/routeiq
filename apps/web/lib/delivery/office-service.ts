@@ -171,9 +171,13 @@ export async function recordOfficeOutcome(
         if (!norm.ok) throw new OfficeOutcomeError(norm.message, 422, 'INVALID');
         const vk: VisitKey = { tenantId, depotId: load.depotId, date: input.date, truckId: input.truckId, loadNo: input.loadNo, sequence: input.sequence };
         const visit = await findVisit(tx, vk);
-        // "Left" needs an arrival (typed now, or already stored) and must come after it.
-        const arrivalForLeft = arrivedAt ?? visit?.arrivedAt ?? null;
-        if (departedAt && !arrivalForLeft) throw new OfficeOutcomeError('Enter "Arrived" too: "Left" needs an arrival time.', 422, 'INVALID');
+        // "Left" needs an arrival (typed now, or already stored) and must come after it. A GPS (AYUN) arrival does
+        // not count (IVMS live link, first review LOW): the office confirms the arrival with the Left.
+        const arrivalForLeft = arrivedAt ?? (visit && visit.arrivalSource !== 'AYUN' ? visit.arrivedAt : null) ?? null;
+        if (departedAt && !arrivalForLeft) {
+          const gps = visit?.arrivalSource === 'AYUN' && !!visit.arrivedAt;
+          throw new OfficeOutcomeError(gps ? 'Enter "Arrived" too: "Left" needs an arrival time (the GPS arrival is not enough).' : 'Enter "Arrived" too: "Left" needs an arrival time.', 422, 'INVALID');
+        }
         if (departedAt && arrivalForLeft && departedAt <= arrivalForLeft) throw new OfficeOutcomeError('"Left" must be after "Arrived".', 422, 'INVALID');
         const after = new Map(planned.lines.map((l) => [l.lineId, 0]));
         if (norm.outcome !== null) for (const l of norm.lines) after.set(l.lineId, l.planned - l.delivered);

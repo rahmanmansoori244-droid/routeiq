@@ -105,12 +105,25 @@ describe('the poller runs the processing step (TIMES)', () => {
 
   it('runs also while another container holds the lease (the trail already pulled), never calling Ayun for it', async () => {
     const { store, ayun, tick } = poller('TIMES');
+    store.setSkew(5, muscat('08:58')); // the other container's last live-position answer
     await store.acquireLease(TEN, 'other', muscat('09:00'), 30_000);
     const r = await tick(muscat('09:00'));
     expect(r?.skipped).toBe('LEASE_OR_BACKOFF');
+    expect(r?.clock).toBe('OK');
     expect(ayun.calls).toEqual([]);
     expect(store.processed).toEqual([muscat('09:00')]);
   });
+
+  it('... but not while the provider clock is wrong or unknown (first review H-1)', async () => {
+    const { store, tick } = poller('TIMES');
+    await store.acquireLease(TEN, 'other', muscat('09:00'), 30_000);
+    expect((await tick(muscat('09:00')))?.clock).toBe('UNKNOWN');
+    store.setSkew(4 * 3600, muscat('08:58'));
+    await store.acquireLease(TEN, 'other', muscat('09:01'), 30_000);
+    expect((await tick(muscat('09:01')))?.clock).toBe('AHEAD');
+    expect(store.processed).toEqual([]);
+  });
+
 
   it('a processing failure never fails the tick: its code only in the log and the result', async () => {
     const { store, tick } = poller('TIMES');
@@ -126,14 +139,77 @@ describe('the poller runs the processing step (TIMES)', () => {
     expect(store.processed).toHaveLength(2);
   });
 
-  it('the final pull of a truck-day is processed right away', async () => {
+  it('the final pull of a truck-day is processed right away (the clock as measured while the load was out)', async () => {
     const fleet = fleetOut('COMPLETED');
     const { store, ayun, tick } = poller('TIMES', fleet);
+    store.setSkew(-20, muscat('07:55'));
     await tick(muscat('08:10'));
     expect(ayun.calls.map((c) => c.cmd)).toEqual(['OBJECT_GET_ROUTE']);
     expect(store.processed).toEqual([muscat('08:10')]);
   });
 });
+
+describe('a wrong provider clock never writes GPS times (first review H-1)', () => {
+  const run = async (opts: { offsetMin?: number; providerShiftMin?: number }) => {
+    const store = new MemoryIvmsStore(company({ mode: 'TIMES', dailyBudget: 3000, routePullMin: 30 }));
+    store.fleetOf = () => fleetOut();
+    let clock = muscat('09:00');
+    const ayun = fakeAyun(() => clock, undefined, { providerShiftMin: opts.providerShiftMin });
+    const env = ivmsTestEnv({ AYUN_WEBHOOK_SECRET: undefined, ...(opts.offsetMin !== undefined ? { AYUN_API_TIME_OFFSET_MIN: String(opts.offsetMin) } : {}) });
+    store.processImpl = async () => ({ truckDays: 1, written: 1, corrected: 0, busy: 0, failed: 0, skipped: null });
+    const results = [];
+    for (const t of ['09:00', '09:31', '10:02']) {
+      clock = muscat(t);
+      results.push(await runIvmsTick(clock, {}, { store, env, fetchImpl: ayun.fetch, owner: 'me', random: () => 0.5 }));
+    }
+    return { store, ayun, results };
+  };
+
+  it('Ayun in UTC and the offset right (0): history pulled and processed', async () => {
+    const { ayun, store, results } = await run({});
+    expect(results.map((r) => r?.clock)).toEqual(['OK', 'OK', 'OK']);
+    expect(ayun.calls.filter((c) => c.cmd === 'OBJECT_GET_ROUTE').length).toBeGreaterThan(0);
+    expect(store.processed.length).toBeGreaterThan(0);
+  });
+
+  it('Ayun in Muscat local time with the offset left at 0: the map still asks, no history pull, no GPS time', async () => {
+    const { ayun, store, results } = await run({ providerShiftMin: 240 });
+    expect(results.map((r) => r?.clock)).toEqual(['AHEAD', 'AHEAD', 'AHEAD']);
+    expect(ayun.calls.map((c) => c.cmd).every((c) => c === 'OBJECT_GET_LOCATIONS')).toBe(true);
+    expect(store.trail.size).toBe(0);
+    expect(store.processed).toEqual([]);
+    // The skew is kept for the Settings card: about +4 h (set the offset to -240).
+    expect(store.state?.providerSkewSec).toBeGreaterThan(4 * 3600 - 60);
+  });
+
+  it('Ayun in UTC with the offset set to -240 by mistake: no history pull, no GPS time', async () => {
+    const { ayun, store, results } = await run({ offsetMin: -240 });
+    expect(results.map((r) => r?.clock)).toEqual(['BEHIND', 'BEHIND', 'BEHIND']);
+    expect(ayun.calls.some((c) => c.cmd === 'OBJECT_GET_ROUTE')).toBe(false);
+    expect(store.processed).toEqual([]);
+  });
+
+  it('Ayun in local time and the offset set right (-240): pulled and processed', async () => {
+    const { ayun, store, results } = await run({ offsetMin: -240, providerShiftMin: 240 });
+    expect(results.map((r) => r?.clock)).toEqual(['OK', 'OK', 'OK']);
+    expect(ayun.calls.some((c) => c.cmd === 'OBJECT_GET_ROUTE')).toBe(true);
+    expect(store.processed.length).toBeGreaterThan(0);
+  });
+
+  it('a skew measured with another offset (the variable was just changed) is unknown until the next live-position answer', async () => {
+    const { clockCheck } = await import('@/lib/ivms/budget');
+    const at = muscat('09:00');
+    expect(clockCheck({ skewSec: 3, skewAt: at, skewOffsetMin: 0 }, 0, at)).toBe('OK');
+    expect(clockCheck({ skewSec: 3, skewAt: at, skewOffsetMin: 0 }, -240, at)).toBe('UNKNOWN');
+    expect(clockCheck({ skewSec: 3, skewAt: at, skewOffsetMin: 0 }, 0, new Date(at.getTime() + 13 * 3600_000))).toBe('UNKNOWN');
+    expect(clockCheck(null, 0, at)).toBe('UNKNOWN');
+    // A fleet parked with the ignition off for an hour is not a clock problem; 4 h is.
+    expect(clockCheck({ skewSec: -3600, skewAt: at, skewOffsetMin: 0 }, 0, at)).toBe('OK');
+    expect(clockCheck({ skewSec: -4 * 3600, skewAt: at, skewOffsetMin: 0 }, 0, at)).toBe('BEHIND');
+    expect(clockCheck({ skewSec: 11 * 60, skewAt: at, skewOffsetMin: 0 }, 0, at)).toBe('AHEAD');
+  });
+});
+
 
 describe("the admin's tracker picker: one call in the ADMIN share", () => {
   const seedCompany = (mode = 'MAP', budget = 100) => {

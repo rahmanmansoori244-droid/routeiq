@@ -278,3 +278,23 @@ describe('what is not stored', () => {
     expect(store.events).toHaveLength(2);
   });
 });
+
+describe('the cost of a call (first review LOW: a leaked secret)', () => {
+  it('no depot zone set: nothing stored, counted as ignored, the fleet never read', async () => {
+    const { store, call } = setup();
+    store.depots = [];
+    expect((await call(get())).status).toBe(200);
+    expect(store.events).toEqual([]);
+    expect(store.state).toMatchObject({ webhooksIgnored: 1, webhooksToday: 0 });
+    expect(store.touched.filter((x) => x === 'fleet' || x === 'truckByImei')).toEqual([]);
+  });
+
+  it('the trucks on duty and the zones are read once per 30 s, however many calls come', async () => {
+    const { store, call } = setup();
+    for (let i = 0; i < 20; i++) expect((await call(get())).status).toBe(200);
+    expect(store.touched.filter((x) => x === 'fleet')).toHaveLength(1);
+    expect(store.touched.filter((x) => x === 'depotZones')).toHaveLength(1);
+    await call(get(), SECRET, ENV, new Date(NOW.getTime() + 31_000));
+    expect(store.touched.filter((x) => x === 'fleet')).toHaveLength(2);
+  });
+});

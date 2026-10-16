@@ -113,10 +113,13 @@ export function SettingsForm({
   profiles,
   scope = 'ADMIN',
   dataRuleOn = false,
+  gpsStatus = null,
 }: {
   initial: Initial;
   effective: EffectiveRow[];
   profiles: TypeProfileRow[];
+  /** IVMS live link: the Ayun link's state for the company admin (lib/ivms/status.ts gpsStatusText); null while it is not in use. */
+  gpsStatus?: { text: string; warn: boolean } | null;
   /** DISPATCHER: only the driver shift card (the API refuses every other field for that role). */
   scope?: 'ADMIN' | 'DISPATCHER';
   /** DISPATCHER: whether the loading rule is on (shown, not editable: only a company admin switches it). */
@@ -634,6 +637,11 @@ export function SettingsForm({
             {ivmsModeOf(c) !== 'OFF' ? (
               <p className="text-xs text-muted-foreground" data-testid="gps-pace">
                 {gpsPaceText(c)}
+              </p>
+            ) : null}
+            {gpsStatus ? (
+              <p className={gpsStatus.warn ? 'rounded-md bg-amber-50 p-2 text-xs text-amber-900' : 'text-xs text-muted-foreground'} data-testid="gps-status">
+                {gpsStatus.text}
               </p>
             ) : null}
           </fieldset>

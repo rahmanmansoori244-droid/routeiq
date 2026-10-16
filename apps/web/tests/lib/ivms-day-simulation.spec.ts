@@ -571,7 +571,7 @@ function kpisOf(): ReturnType<typeof deliveryKpis> {
 
 // ---------------------------------------------------------------------------------------------------
 
-const ENV_KEYS = ['AYUN_BASE_URL', 'AYUN_API_KEY', 'AYUN_TENANT_SLUG', 'AYUN_WEBHOOK_SECRET', 'ROUTEIQ_DISABLE_IVMS'] as const;
+const ENV_KEYS = ['AYUN_BASE_URL', 'AYUN_API_KEY', 'AYUN_TENANT_SLUG', 'AYUN_WEBHOOK_SECRET', 'ROUTEIQ_DISABLE_IVMS', 'AYUN_API_TIME_OFFSET_MIN'] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 const days: Record<string, DayResult & { kpis: ReturnType<typeof deliveryKpis> }> = {};
 
@@ -583,13 +583,17 @@ beforeAll(async () => {
   process.env.AYUN_WEBHOOK_SECRET = SECRET;
   delete process.env.ROUTEIQ_DISABLE_IVMS;
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-  for (const [name, mode, budget] of [
-    ['OFF', 'OFF', 100],
-    ['MAP', 'MAP', 100],
-    ['TIMES', 'TIMES', 100],
-    ['TIMES3000', 'TIMES', 3000],
+  for (const [name, mode, budget, offset] of [
+    ['OFF', 'OFF', 100, null],
+    ['MAP', 'MAP', 100, null],
+    ['TIMES', 'TIMES', 100, null],
+    ['TIMES3000', 'TIMES', 3000, null],
+    // First review H-1: Ayun sends UTC but AYUN_API_TIME_OFFSET_MIN was set to -240 by mistake.
+    ['TIMES_BAD_OFFSET', 'TIMES', 3000, '-240'],
   ] as const) {
+    if (offset) process.env.AYUN_API_TIME_OFFSET_MIN = offset;
     const r = await runDay(mode, budget);
+    delete process.env.AYUN_API_TIME_OFFSET_MIN;
     days[name] = { ...r, kpis: kpisOf() };
   }
 }, 300_000);
@@ -686,8 +690,9 @@ describe('a whole invented day in TIMES: what the visits show', () => {
 
   it('GPS-timed visits never feed the measured unloading times; a GPS arrival counts on time only where goods were handed over', () => {
     expect(days.TIMES!.kpis.unloadSample).toBe(days.OFF!.kpis.unloadSample);
-    // Shop A and shop G are timed by GPS alone: an unloading time is shown, never fed to "Use measured time".
-    for (const stop of ['T05 L1 #1 A', 'T06 L1 #2 G']) expect(visitOf('TIMES', stop)).toMatchObject({ timedBy: 'GPS to departure', measured: false });
+    // Shop A and shop G are timed by GPS alone: an unloading time is shown (arrival to departure, not "auto"),
+    // never fed to "Use measured time" (second review H-2: the automatic timing is the phone's only).
+    for (const stop of ['T05 L1 #1 A', 'T06 L1 #2 G']) expect(visitOf('TIMES', stop)).toMatchObject({ timedBy: 'GPS (Ayun)', measured: false });
     // A (observed, delivered) and G (observed, delivered by the office, after its 07:30 window) join the on-time KPI; C (not observed) never.
     expect(days.TIMES!.kpis.timedArrivals).toBe(days.OFF!.kpis.timedArrivals + 2);
     expect(days.TIMES!.kpis.insideWindow).toBe(days.OFF!.kpis.insideWindow + 1);
@@ -704,6 +709,16 @@ describe('a whole invented day in TIMES: what the visits show', () => {
     // T06's points of 07:40-07:52 reach Ayun only later (buffered): at 07:46 its newest known fix is older than 5 min.
     expect(stale).toEqual(['07:46 T06']);
     expect(days.TIMES!.screens.flatMap((s) => s.vehicles).some((v) => v.stale)).toBe(true);
+  });
+});
+
+describe('a whole invented day with a wrong time offset (first review H-1)', () => {
+  it('-240 set on UTC times: no history pull, no trail, no GPS time; the visits and KPIs are exactly the OFF ones', () => {
+    const d = days.TIMES_BAD_OFFSET!;
+    expect(d.calls.some((c) => c.cmd === 'OBJECT_GET_ROUTE')).toBe(false);
+    expect([d.trail, d.ayunEvents.length]).toEqual([0, 0]);
+    expect(JSON.stringify(d.visits)).toBe(JSON.stringify(days.OFF!.visits));
+    expect(JSON.stringify(d.kpis)).toBe(JSON.stringify(days.OFF!.kpis));
   });
 });
 

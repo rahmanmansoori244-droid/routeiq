@@ -6,9 +6,11 @@
  * or ROUTEIQ_DISABLE_IVMS=1: no call, no write (the timer is not even started without the variables).
  *
  * One tick, when something is due:
- * 1. Who is out. Only trucks with a tracker and a load out (LOCKED, LOADING or DISPATCHED on yesterday's
- *    or today's plan in use) are ever asked about (M7); after the operating hours only those with a
- *    DISPATCHED load. Nothing out: no call, and every live position of the company is deleted.
+ * 1. Who is out. Only trucks with a tracker and a load out are ever asked about (M7): inside the operating
+ *    hours a LOCKED, LOADING or DISPATCHED load of today's plan, or a load of yesterday's still DISPATCHED
+ *    (never yesterday's LOCKED or LOADING: a load nobody closed); after the hours only today's DISPATCHED
+ *    loads (first review LOW: no overnight tracking through a load left open). Nothing out: no call, and
+ *    every live position of the company is deleted.
  * 2. The lease (IvmsState, lib/ivms/store.ts): one container at a time; a backoff refuses it.
  * 3. MAP (mode MAP and TIMES): one OBJECT_GET_LOCATIONS for those trucks' IMEIs, paced to the MAP share
  *    of the allowance (budget.ts). The fixes update the map's latest position per truck - and nothing
@@ -18,7 +20,13 @@
  *    date: every ivmsRoutePullMin (30-60 min; longer when the ROUTE share would not last) while a load of
  *    that day is out, and once more, over the whole day, 10 minutes after its last load was completed
  *    (late buffered points included). The points are the trail (TruckTrailPoint), the only source of GPS
- *    arrival and departure times (H5); a suppressed truck-day (undo, mismatch) is not pulled.
+ *    arrival and departure times (H5); a suppressed truck-day (undo, mismatch) is not pulled, nor anything
+ *    from before the tracker was mapped to the truck (IvmsTruckDay.trailFrom, second review M-1). Only
+ *    while the provider's clock is right (budget.ts clockCheck, first review H-1): the skew of the latest
+ *    live-position answer, measured with the AYUN_API_TIME_OFFSET_MIN in use, within 10 min ahead and 2 h
+ *    behind. A wrong offset (the provider in local time, or -240 on UTC times) stops every history pull
+ *    and the processing (7) until it is fixed, so a trail shifted by hours is never stored or used. A
+ *    history answer cannot show it by itself: its window is asked in the same shifted time.
  * 5. EVENTS (an allowance of 1,000 a day or more and a webhook secret set): every 15 min one
  *    OBJECT_GET_LAST_EVENTS, the backstop for missed depot webhooks; the same rows and keys as the webhook.
  * 6. The lease is released (M13: the admin's picker never waits behind it).
@@ -40,6 +48,7 @@ import {
   backoffUntil,
   callDue,
   classShares,
+  clockCheck,
   eventsBackstopOn,
   EVENTS_EVERY_SEC,
   horizonSec,
@@ -52,8 +61,11 @@ import {
   opsStartOf,
   routePullEveryMin,
   transientKind,
+  type ClockState,
   type OperatingHours,
+  type SkewRecord,
 } from './budget';
+import { todayIso } from '../dispatch/time';
 import { ivmsApiReady, readIvmsEnv, type IvmsEnv } from './env';
 import { zoneEventRow } from './events';
 import { parseLastEvents, parseLocations, parseRoute, providerSkewSec } from './parse';
@@ -103,7 +115,11 @@ export interface TickPlan {
 export function planTick(c: Pick<IvmsCompany, 'mode' | 'timezone' | 'fromMin' | 'toMin'>, fleet: readonly FleetTruck[], now: Date): TickPlan {
   const hours: OperatingHours = { timezone: c.timezone, fromMin: c.fromMin, toMin: c.toMin };
   const inHours = inOperatingHours(now, hours);
-  const mapTrucks = fleet.filter((t) => t.days.some((d) => d.loads.some((l) => (inHours ? OUT.has(l.status) : l.status === 'DISPATCHED'))));
+  const today = todayIso(c.timezone, now);
+  // Yesterday's LOCKED or LOADING load is one nobody closed, never a truck at work; outside the hours only
+  // today's loads on the road (first review LOW: no overnight positions through a load left open).
+  const onMap = (date: string, status: string) => (inHours ? (date === today ? OUT.has(status) : status === 'DISPATCHED') : date === today && status === 'DISPATCHED');
+  const mapTrucks = fleet.filter((t) => t.days.some((d) => d.loads.some((l) => onMap(d.date, l.status))));
   const routeDays: RouteDay[] = [];
   if (c.mode === 'TIMES') {
     for (const t of fleet) {
@@ -132,6 +148,8 @@ export function routeWindow(day: RouteDay, row: TruckDayRow | undefined, hours: 
   } else if (row?.pulledTo) {
     from = Math.max(start, row.pulledTo.getTime() - ROUTE_OVERLAP_MS);
   }
+  // Never from before the tracker was mapped to this truck (second review M-1).
+  if (row?.trailFrom) from = Math.max(from, row.trailFrom.getTime());
   from = Math.max(from, to - ROUTE_MAX_WINDOW_MS);
   return to > from ? { from: new Date(from), to: new Date(to) } : null;
 }
@@ -162,12 +180,14 @@ export interface IvmsTickResult {
   mode: IvmsMode;
   /** Why nothing was called. */
   skipped?: 'NOTHING_OUT' | 'LEASE_OR_BACKOFF';
+  /** TIMES: the provider's clock as last measured (budget.ts clockCheck); anything but OK stops the history pulls and the GPS times. */
+  clock?: ClockState;
   /** notReturned: trackers asked for that the answer did not include (not visible with this key, or no fix). */
   map?: { trucks: number; intervalSec: number | null; called: boolean; written?: number; notReturned?: number; error?: AyunErrorKind };
   route?: { due: number; pulls: number; points: number; everyMin: number | null; errors: AyunErrorKind[] };
   events?: { called: boolean; inserted?: number; duplicates?: number; error?: AyunErrorKind };
   /** TIMES: the processing step's counts (only when it ran); `error` when it failed (its code only). */
-  times?: { truckDays: number; written: number; corrected: number; busy: number; failed: number; error?: string };
+  times?: { truckDays: number; written: number; corrected: number; busy: number; failed: number; removed?: number; error?: string };
 }
 
 interface ProcState {
@@ -243,10 +263,14 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
   const state = await store.acquireLease(c.tenantId, owner, now, IVMS_LEASE_MS);
   if (!state) {
     result.skipped = 'LEASE_OR_BACKOFF';
-    // Another container holds the lease, or the provider backs off: the trail already pulled still gets processed.
+    // Another container holds the lease, or the provider backs off: the trail already pulled still gets
+    // processed, while the provider's clock is right.
+    if (c.mode === 'TIMES' && plan.routeDays.length) result.clock = clockCheck(await store.readSkew(c.tenantId), env.apiTimeOffsetMin, now);
     await processTimes(store, c, plan, result, now, false);
     return result;
   }
+  // The provider's clock as last measured; a live-position answer of this tick replaces it (below).
+  let skew: SkewRecord = { skewSec: state.providerSkewSec, skewAt: state.providerSkewAt, skewOffsetMin: state.providerSkewOffsetMin };
   const p = proc();
   const ctrl = new AbortController();
   (p.ctrls ??= new Set()).add(ctrl);
@@ -290,7 +314,9 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
           const rows = parsed.fixes.filter((f) => !f.flags.includes('CLOCK_AHEAD')).map((fix) => ({ truckId: byImei.get(fix.imei)!, fix }));
           result.map.written = await store.writePositions(c.tenantId, rows, now);
           result.map.notReturned = Math.max(0, byImei.size - parsed.fixes.length - parsed.invalid);
-          await store.recordOk(c.tenantId, now, providerSkewSec(parsed.fixes, now));
+          const sec = providerSkewSec(parsed.fixes, now);
+          await store.recordOk(c.tenantId, now, sec === null ? null : { sec, offsetMin: env.apiTimeOffsetMin });
+          if (sec !== null) skew = { skewSec: sec, skewAt: now, skewOffsetMin: env.apiTimeOffsetMin };
           logKind('MAP', null);
         } else {
           const kind: AyunErrorKind = r.ok ? 'PARSE' : r.kind;
@@ -302,8 +328,9 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
     }
     await clearPositionsIfChanged(store, c.tenantId, plan.mapTrucks.map((t) => t.truckId), now);
 
-    // ROUTE: the trucks' history, the only source of GPS times (TIMES).
-    if (!stop && plan.routeDays.length) {
+    // ROUTE: the trucks' history, the only source of GPS times (TIMES); only while the provider's clock is right.
+    if (plan.routeDays.length) result.clock = clockCheck(skew, env.apiTimeOffsetMin, now);
+    if (!stop && plan.routeDays.length && result.clock === 'OK') {
       const rows = await store.truckDays(c.tenantId, plan.routeDays.map((d) => ({ truckId: d.truckId, date: d.date })));
       const rowOf = new Map(rows.map((r) => [`${r.truckId}|${r.date}`, r]));
       const trucksOut = plan.routeDays.filter((d) => d.kind === 'REGULAR').length;
@@ -392,13 +419,15 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
  */
 async function processTimes(store: IvmsStore, c: IvmsCompany, plan: TickPlan, result: IvmsTickResult, now: Date, due: boolean): Promise<void> {
   if (c.mode !== 'TIMES' || !plan.routeDays.length) return;
+  // A provider clock that is wrong or unknown: no GPS stop time at all (first review H-1).
+  if (result.clock !== 'OK') return;
   const p = proc();
   const last = (p.processedAt ??= new Map()).get(c.tenantId);
   if (!due && last !== undefined && now.getTime() - last < PROCESS_EVERY_MS && now.getTime() >= last) return;
   p.processedAt.set(c.tenantId, now.getTime());
   try {
     const r = await store.processTimes(c.tenantId, now);
-    if (r.truckDays || r.failed) result.times = { truckDays: r.truckDays, written: r.written, corrected: r.corrected, busy: r.busy, failed: r.failed };
+    if (r.truckDays || r.failed) result.times = { truckDays: r.truckDays, written: r.written, corrected: r.corrected, busy: r.busy, failed: r.failed, ...(r.removed ? { removed: r.removed } : {}) };
   } catch (err) {
     const code = (err as { code?: string; name?: string } | null)?.code ?? (err as Error)?.name ?? 'error';
     console.error('ivms: GPS times not processed', code);

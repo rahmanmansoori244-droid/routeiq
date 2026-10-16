@@ -190,14 +190,18 @@ export function departureNote(atOutcome: boolean, gap: boolean, source?: string 
   return null;
 }
 
-/** "Timed by" in the Excel ("GPS ..." when the trucks' tracker gave the arrival or the end). */
+/**
+ * "Timed by" in the Excel. The automatic timing is the phone's only (GPS never feeds it, visit.ts); a
+ * GPS arrival says "GPS (Ayun)", a GPS departure after the driver's own arrival says so too (second
+ * review L-2: never "GPS (Ayun)" for a stop the driver tapped).
+ */
 export function timedByText(v: { autoBasis: string | null; arrivalSource: string | null; departureSource?: string | null; departedAtOutcome: boolean; outcomeSource: string | null }): string {
-  const gps = v.arrivalSource === 'AYUN' || (v.departureSource === 'AYUN' && !v.departedAtOutcome);
-  if (v.autoBasis === 'DEPARTURE') return gps ? 'GPS to departure' : 'Auto to departure';
-  if (v.autoBasis === 'RESULT') return v.arrivalSource === 'AYUN' ? 'GPS to result' : 'Auto to result';
+  if (v.autoBasis === 'DEPARTURE') return 'Auto to departure';
+  if (v.autoBasis === 'RESULT') return 'Auto to result';
   if (v.arrivalSource === 'DISPATCHER' || v.departureSource === 'DISPATCHER' || (v.departedAtOutcome && v.outcomeSource === 'DISPATCHER')) return 'Office';
   // A GPS arrival is not a manual one (it was labelled "Manual" before the IVMS live link).
-  if (gps) return GPS_WORD;
+  if (v.arrivalSource === 'AYUN') return GPS_WORD;
+  if (v.departureSource === 'AYUN' && !v.departedAtOutcome) return `${v.arrivalSource === 'PHONE_AUTO' ? 'Auto' : 'Manual'} arrival, ${GPS_WORD} departure`;
   if (v.departedAtOutcome) return 'Result time';
   if (v.arrivalSource) return 'Manual';
   return '';

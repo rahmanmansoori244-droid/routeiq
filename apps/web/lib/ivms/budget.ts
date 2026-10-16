@@ -174,3 +174,42 @@ export function backoffUntil(kind: AyunErrorKind, failures: number, now: Date, b
   const jitter = 0.8 + 0.4 * Math.min(1, Math.max(0, random()));
   return new Date(now.getTime() + Math.round(step * jitter * 1000));
 }
+
+// ---------------------------------------------------------------------------------------------------
+// The provider's clock (first review H-1)
+
+/** A provider receipt time this far AHEAD of RouteIQ's clock (seconds) is impossible: its times are shifted. */
+export const CLOCK_AHEAD_MAX_SEC = 10 * 60;
+/**
+ * ... and this far BEHIND. A wrong offset is whole hours (4 h in Muscat: a provider in local time, or
+ * -240 set on UTC times); the newest receipt of a fleet that is all parked with the ignition off can be
+ * 30-60 min old, which is not a clock problem, so the limit behind is wider than ahead.
+ */
+export const CLOCK_BEHIND_MAX_SEC = 2 * 3600;
+/** A skew measured longer ago than this is not trusted (it must be seen the same working day). */
+export const CLOCK_SKEW_MAX_AGE_MS = 12 * 3600_000;
+
+/** What the last live-position answer said of the provider's clock (IvmsState.providerSkew*). */
+export interface SkewRecord {
+  skewSec: number | null;
+  skewAt: Date | null;
+  /** The AYUN_API_TIME_OFFSET_MIN it was measured with. */
+  skewOffsetMin: number | null;
+}
+
+/**
+ * OK: GPS times may be pulled and processed. UNKNOWN: no skew measured with the offset in use within the
+ * last 12 h (a changed offset needs a new live-position answer first). AHEAD / BEHIND: the provider's
+ * times are shifted (a wrong AYUN_API_TIME_OFFSET_MIN): no history pull and no GPS stop time at all until
+ * it is fixed, so a shifted trail is never stored and never written as times (first review H-1). Pure.
+ */
+export type ClockState = 'OK' | 'UNKNOWN' | 'AHEAD' | 'BEHIND';
+
+export function clockCheck(s: SkewRecord | null, offsetMin: number, now: Date): ClockState {
+  if (!s || s.skewSec === null || !s.skewAt || s.skewOffsetMin !== offsetMin) return 'UNKNOWN';
+  const age = now.getTime() - s.skewAt.getTime();
+  if (age > CLOCK_SKEW_MAX_AGE_MS || age < -60_000) return 'UNKNOWN';
+  if (s.skewSec > CLOCK_AHEAD_MAX_SEC) return 'AHEAD';
+  if (s.skewSec < -CLOCK_BEHIND_MAX_SEC) return 'BEHIND';
+  return 'OK';
+}
