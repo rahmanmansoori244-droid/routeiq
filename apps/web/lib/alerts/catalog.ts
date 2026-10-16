@@ -247,7 +247,7 @@ export const ALERT_RULE_SPECS: Record<AlertRule, AlertRuleSpec> = {
     no: 8,
     owner: false,
     label: 'Delivered with a note',
-    meaning: 'The driver marked a stop Delivered and wrote a note: check everything was delivered.',
+    meaning: 'The driver marked a stop Delivered and wrote a note: check everything was delivered. A note that only confirms the delivery ("delivered", "received at 11:25") is not reported.',
     kind: 'EVENT',
     subject: 'STOP',
     unit: null,

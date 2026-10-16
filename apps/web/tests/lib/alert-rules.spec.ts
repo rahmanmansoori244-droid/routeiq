@@ -230,6 +230,36 @@ describe('R1 UNLOAD_OVER (owner rule 1: unloading more than planned by 30 min)',
     r.none('UNLOAD_OVER');
     expect(r.ended('UNLOAD_OVER', stopKey(1))?.text).toContain('recorded by the office');
   });
+
+  // The 15 Oct 2026 replay (integration of the operations alerts): two kinds of false alarm of R1.
+  it('a load the office completed is not being unloaded: no row, the open one closes', () => {
+    const done = facts([load({ status: 'COMPLETED', stops: [stop(1, 480, { visit: visit({ arrivedAt: at('08:00') }) }), stop(2, 540), stop(3, 600)] })]);
+    const r = run(done, at('10:00'));
+    r.none('UNLOAD_OVER');
+    expect(r.ended('UNLOAD_OVER', stopKey(1))?.text).toBe('T05 L1 stop 1 Hyper Example A (C100): no result or departure tapped; the load was completed.');
+  });
+
+  it('a result tapped hours later is not the end of the unloading when the truck reached a later stop before it', () => {
+    // Arrived 08:00, planned 20 min; the next stop's arrival 08:45; this stop's result only at 10:40.
+    const f = facts([
+      load({
+        stops: [
+          stop(1, 480, { visit: visit({ arrivedAt: at('08:00'), departedAt: at('10:40'), departedAtOutcome: true, outcome: 'DELIVERED', outcomeAt: at('10:40'), outcomeSource: 'PHONE_MANUAL' }) }),
+          stop(2, 540, { visit: visit({ arrivedAt: at('08:45') }) }),
+          stop(3, 600),
+        ],
+      }),
+    ]);
+    const r = run(f, at('10:45'));
+    r.none('UNLOAD_OVER', stopKey(1));
+    expect(r.ended('UNLOAD_OVER', stopKey(1))?.text).toBe('T05 L1 stop 1 Hyper Example A (C100): unloading took 45 min (until the truck reached a later stop at 08:45), planned 20 min (25 min over).');
+    // Reached the later stop only at 09:10: 70 min, 50 over - a history row with the capped time.
+    const late = facts([load({ stops: [stop(1, 480, { visit: visit({ arrivedAt: at('08:00'), departedAt: at('10:40'), departedAtOutcome: true, outcome: 'DELIVERED', outcomeAt: at('10:40'), outcomeSource: 'PHONE_MANUAL' }) }), stop(2, 540, { visit: visit({ arrivedAt: at('09:10') }) }), stop(3, 600)] })]);
+    expect(run(late, at('10:45')).one('UNLOAD_OVER', stopKey(1))).toMatchObject({ history: true, value: 50 });
+    // A later stop's tap before this arrival (stops done out of order) does not shorten it.
+    const order = facts([load({ stops: [stop(1, 480, { visit: visit({ arrivedAt: at('08:00'), departedAt: at('09:10') }) }), stop(2, 540, { visit: visit({ arrivedAt: at('07:40'), departedAt: at('07:55') }) }), stop(3, 600)] })]);
+    expect(run(order, at('09:15')).one('UNLOAD_OVER', stopKey(1))).toMatchObject({ history: true, value: 50 });
+  });
 });
 
 describe('R2 LOADING_OVER (owner rule 2: loading more than 40 min; H1: off by default)', () => {
@@ -500,6 +530,17 @@ describe('R7 PRIORITY_NOT_DELIVERED, R8 DELIVERED_WITH_NOTE (events)', () => {
     expect(c.text).toBe('T05 L1 stop 1 Hyper Example A (C100) marked DELIVERED with a note: "two cases missing" (driver, 11:20). Check everything was delivered.');
     run(result({ outcome: 'DELIVERED', reasonNote: 'two cases missing', outcomeSource: 'DISPATCHER' }), at('11:25')).none('DELIVERED_WITH_NOTE');
     run(result({ outcome: 'DELIVERED', reasonNote: '   ' }), at('11:25')).none('DELIVERED_WITH_NOTE');
+  });
+
+  it('a note that only confirms the delivery is not news (the 15 Oct 2026 replay: 12 of 13); one that says anything else is', () => {
+    for (const note of ['تم التسليم', 'تم التسليم بنجاح', 'تم الاستلام', 'التسليم الساعه 11:25', 'Delivered OK', 'all delivered at 9:40 am']) {
+      const r = run(result({ outcome: 'DELIVERED', reasonNote: note }), at('11:25'));
+      r.none('DELIVERED_WITH_NOTE');
+      expect(r.ended('DELIVERED_WITH_NOTE', stopKey(1))?.text, note).toContain('the note only confirms the delivery');
+    }
+    for (const note of ['باقي 14 لم يتم التسليم', 'تم التسليم ناقص كرتون', 'not all delivered', 'delivered to the guard']) {
+      expect(run(result({ outcome: 'DELIVERED', reasonNote: note }), at('11:25')).one('DELIVERED_WITH_NOTE').text, note).toContain('marked DELIVERED with a note');
+    }
   });
 });
 

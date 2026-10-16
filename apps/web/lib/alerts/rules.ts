@@ -13,7 +13,9 @@
  * - R1 UNLOAD_OVER: a stop being unloaded (arrived; no departure, no result, no later stop with
  *   activity) longer than its planned unloading + T, counted from the arrival or the window start when
  *   early. An arrival tapped far from the pin (UNLOAD_ARRIVAL_FAR_M with good accuracy) is not counted
- *   (M9). A stop that ended over the limit without a row becomes a history row (no toast, no e-mail).
+ *   (M9). A stop that ended over the limit without a row becomes a history row (no toast, no e-mail); its
+ *   unloading ends at the latest at the first tap of a later stop (a result recorded hours later is not
+ *   the end). Not on a load the office completed (the 15 Oct 2026 replay).
  * - R2 LOADING_OVER: a LOADING load not marked Loaded, whose Loading press (statusChangedAt) is more than
  *   T ago and less than 12 h ago (H1: off by default; it means something only when the warehouse presses
  *   Loading as it starts each truck and Loaded when done).
@@ -32,7 +34,9 @@
  *   unloading under FINISH): WARN, closes 10 min under T (H5).
  * - R7 PRIORITY_NOT_DELIVERED: the driver's Not delivered (HIGH) or Partly delivered (WARN) at a stop of
  *   priority T or better; a result the office recorded itself does not count (L8).
- * - R8 DELIVERED_WITH_NOTE: the driver's Delivered with a note (WARN, never a toast).
+ * - R8 DELIVERED_WITH_NOTE: the driver's Delivered with a note (WARN, never a toast); a note that only
+ *   confirms the delivery ("delivered", "received", "delivered at 11:25"; text.ts noteOnlyConfirms) is
+ *   not news.
  * - R9 PROOF_FAR: a photo or result more than T from the customer's pin, only when the pin is verified and
  *   not on the "Pin may be wrong" list (M1); HIGH beyond 4T.
  * - R10 LOAD_NOT_CLOSED: a DISPATCHED load T after its planned return with no Back at depot or a stop
@@ -69,6 +73,7 @@ import {
   fmtDuration,
   loadLabel,
   minutesOnDate,
+  noteOnlyConfirms,
   noteText,
   planTime,
   sequencesText,
@@ -300,6 +305,17 @@ const windowStartOf = (s: FactStop) => (s.visit?.windowStartMin ?? null) ?? s.wi
 const plannedServiceOf = (s: FactStop) => (s.visit?.plannedServiceMin ?? null) ?? s.plannedServiceMin;
 const stopsWithoutResult = (l: FactLoad) => l.stops.filter((s) => !s.visit?.outcome).length;
 
+/** The first arrival, departure or result at a stop after index `i` that came after `since` (null: none). */
+function laterActivityAfter(stops: readonly FactStop[], i: number, since: Date): Date | null {
+  let first: Date | null = null;
+  for (const s of stops.slice(i + 1)) {
+    for (const t of [s.visit?.arrivedAt, s.visit?.departedAt, s.visit?.outcomeAt]) {
+      if (t && t > since && (!first || t < first)) first = t;
+    }
+  }
+  return first;
+}
+
 // ---------------------------------------------------------------------------------------------
 // R1 UNLOAD_OVER
 // ---------------------------------------------------------------------------------------------
@@ -323,7 +339,11 @@ function unloadOver(out: Out, c: LoadCtx): void {
     const start = winStartAt && winStartAt > v.arrivedAt ? winStartAt : v.arrivedAt;
     const fromWindow = start !== v.arrivedAt;
     const later = c.laterActivity[i] ?? false;
-    const live = !v.departedAt && !v.outcomeAt && !later;
+    const noEnd = !v.departedAt && !v.outcomeAt;
+    // A load the office completed is not being unloaded any more (15 Oct 2026 replay: a stop of a load
+    // completed at 12:18 stayed "unloading" for 12 h).
+    if (noEnd && !later && c.load.status === 'COMPLETED') return out.end(rule, key, `${label}: no result or departure tapped; the load was completed.`);
+    const live = noEnd && !later;
     const occurredAt = new Date(start.getTime() + (planned + T) * 60_000);
     if (live) {
       const elapsed = Math.max(0, minutesBetween(start, out.now));
@@ -349,13 +369,21 @@ function unloadOver(out: Out, c: LoadCtx): void {
       const at = next?.visit?.arrivedAt ?? next?.visit?.outcomeAt ?? null;
       return out.end(rule, key, `${label}: no departure or result was tapped; the truck moved on to stop ${next?.sequence ?? '?'}${at ? ` at ${clockText(at, c.load.date, tz)}` : ''}.`);
     }
-    const took = actualMinutes(v).min;
+    const actual = actualMinutes(v);
+    let took = actual.min;
+    // The unloading ended at the latest when the truck showed up at a later stop: a result tapped hours
+    // later (results recorded in a batch, a customer who sent the driver away and called him back) is not
+    // the end of the unloading (15 Oct 2026 replay: "2 h 40 min" at a stop the truck had left after 52 min).
+    const moved = !actual.auto && took !== null ? laterActivityAfter(c.load.stops, i, v.arrivedAt) : null;
+    const capped = moved !== null && took !== null && minutesBetween(v.arrivedAt, moved) < took;
+    if (capped) took = minutesBetween(v.arrivedAt, moved!);
     if (took === null) {
       const who = v.outcomeSource === 'DISPATCHER' ? 'the result was recorded by the office' : 'the unloading time is not known';
       return out.end(rule, key, `${label}: ${who}.`);
     }
     const over = took - planned;
-    const final = `${label}: unloading took ${fmtDuration(took)}, planned ${fmtDuration(planned)}${over > 0 ? ` (${fmtDuration(over)} over)` : ''}.`;
+    const until = capped ? ` (until the truck reached a later stop at ${clockText(moved!, c.load.date, tz)})` : '';
+    const final = `${label}: unloading took ${fmtDuration(took)}${until}, planned ${fmtDuration(planned)}${over > 0 ? ` (${fmtDuration(over)} over)` : ''}.`;
     const tier = tierAt(over, T);
     // A stop that ended over the limit before any sweep saw it live: kept as history (no toast, no e-mail).
     if (!out.isOpen(rule, key) && tier) {
@@ -749,6 +777,11 @@ function deliveredWithNote(out: Out, c: LoadCtx): void {
     const note = shortNote(v?.reasonNote);
     if (!(v?.outcome === 'DELIVERED' && v.outcomeSource && PHONE_SOURCES.has(v.outcomeSource) && note && v.outcomeAt)) {
       out.end(rule, key, `${label}: the note was removed or the result changed (now ${resultWords(v, tz, c.load.date)}).`);
+      continue;
+    }
+    // "Delivered", "received", "delivered at 11:25": the note only confirms the delivery, nothing to check.
+    if (noteOnlyConfirms(v.reasonNote)) {
+      out.end(rule, key, `${label}: the note only confirms the delivery ("${note}").`);
       continue;
     }
     out.raise({

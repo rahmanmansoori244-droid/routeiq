@@ -120,3 +120,85 @@ export function noteText(note: string | null | undefined): string {
   const n = shortNote(note);
   return n ? ` Note: "${n}"` : '';
 }
+
+/**
+ * The words of a note that only confirms the delivery ("delivered", "received", "delivered at 11:25",
+ * in Arabic or English): on the 15 Oct 2026 replay, 12 of the 13 "Delivered with a note" alerts were such
+ * notes. Normalised: Arabic diacritics and tatweel removed, alef / taa marbuta / alef maqsura folded.
+ */
+const CONFIRMING_WORDS = new Set([
+  // Arabic: "done", "delivered / delivery", "received", "successfully", "the order", "complete", "at (the hour)", "photographed", "thanks".
+  'تم',
+  'وتم',
+  'التسليم',
+  'تسليم',
+  'بالتسليم',
+  'الاستلام',
+  'استلام',
+  'التوصيل',
+  'توصيل',
+  'بنجاح',
+  'الطلب',
+  'الطلبيه',
+  'كامل',
+  'كامله',
+  'بالكامل',
+  'الساعه',
+  'ساعه',
+  'صباحا',
+  'مساء',
+  'مساءا',
+  'ظهرا',
+  'التصوير',
+  'تصوير',
+  'تصور',
+  'الحمد',
+  'لله',
+  'شكرا',
+  // English.
+  'delivered',
+  'delivery',
+  'received',
+  'done',
+  'ok',
+  'okay',
+  'successfully',
+  'success',
+  'complete',
+  'completed',
+  'full',
+  'fully',
+  'all',
+  'order',
+  'the',
+  'at',
+  'am',
+  'pm',
+  'thanks',
+  'thank',
+  'you',
+]);
+
+function noteWords(note: string): string[] {
+  return note
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[ً-ٰٟـ]/g, '')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/[^\p{L}]+/gu, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+}
+
+/**
+ * The note only confirms the delivery: it has at least one word and every word is one of
+ * CONFIRMING_WORDS (digits, times and punctuation ignored). Any other word ("missing", "not", "باقي",
+ * "لم", a name) keeps the note: a note that says something is never dropped.
+ */
+export function noteOnlyConfirms(note: string | null | undefined): boolean {
+  const words = noteWords(oneLine(note));
+  return words.length > 0 && words.every((w) => CONFIRMING_WORDS.has(w));
+}

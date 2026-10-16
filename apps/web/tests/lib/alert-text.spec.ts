@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { ALERT_NOTE_MAX } from '@/lib/alerts/catalog';
-import { ALERT_NAME_MAX, REDACTED_NUMBER, clockText, cut, fmtDistance, fmtDuration, loadLabel, minutesOnDate, noteText, oneLine, redactNumbers, safeName, sequencesText, shortNote, stopLabel } from '@/lib/alerts/text';
+import { ALERT_NAME_MAX, REDACTED_NUMBER, clockText, cut, fmtDistance, fmtDuration, loadLabel, minutesOnDate, noteOnlyConfirms, noteText, oneLine, redactNumbers, safeName, sequencesText, shortNote, stopLabel } from '@/lib/alerts/text';
 
 const SIX_DIGITS = /\p{Nd}(?:[\s\-+/.()]*\p{Nd}){5,}/u;
 
@@ -102,5 +102,40 @@ describe('fuzz: names and notes with numbers in every form never leave 6 digits 
       expect(shortNote(text) ?? '', text).not.toMatch(SIX_DIGITS);
       expect(safeName(text), text).not.toMatch(SIX_DIGITS);
     }
+  });
+});
+
+describe('noteOnlyConfirms: a driver note that only confirms the delivery (R8 skips it)', () => {
+  it.each([
+    'تم التسليم',
+    'تم التسليم بنجاح',
+    'تم تسليم',
+    'تم الاستلام',
+    'تم توصيل',
+    'تم تصوير',
+    'تم التسليم الساعه 09:00',
+    'التسليم الساعة ١١:٢٥',
+    'تمّ التسليم.',
+    'Delivered',
+    'delivered OK!',
+    'All delivered at 9:40 am',
+    'done',
+  ])('%s', (note) => {
+    expect(noteOnlyConfirms(note)).toBe(true);
+  });
+
+  it.each([
+    'باقي 14 لم يتم التسليم',
+    'تم التسليم ناقص كرتون',
+    'لم يتم التسليم',
+    'تم التسليم للحارس',
+    'not all delivered',
+    'delivered, 2 cases short',
+    'delivered to the guard',
+    '14',
+    '',
+    null,
+  ])('%s: kept', (note) => {
+    expect(noteOnlyConfirms(note)).toBe(false);
   });
 });
