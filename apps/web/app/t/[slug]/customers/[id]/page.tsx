@@ -13,6 +13,7 @@ import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { CustomerEditor } from './customer-editor';
 import { CustomerDetailsButton } from './customer-details-button';
 import { SMALL_TRUCK_BADGE, SMALL_TRUCK_FIELD_LABEL } from '@/lib/dispatch/small-truck';
+import { LOADING_INSTRUCTION_FIELD_LABEL, loadingInstructionText } from '@/lib/dispatch/loading-instruction';
 import type { EditableCustomer } from '../../dispatch/customer-dialog';
 
 export const dynamic = 'force-dynamic';
@@ -77,7 +78,10 @@ export default async function CustomerDetailPage({
     windowConfirmedAt: customer.windowConfirmedAt ? customer.windowConfirmedAt.toISOString() : null,
     phone: customer.phone,
     smallTruckOnly: customer.smallTruckOnly,
+    loadingInstruction: customer.loadingInstruction,
   };
+  // As the sheets print it (one line; a longer value written by hand is shortened, never hidden).
+  const loadingInstruction = loadingInstructionText(customer.loadingInstruction);
 
   return (
     <PageShell
@@ -202,6 +206,15 @@ export default async function CustomerDetailPage({
                   {customer.smallTruckOnly ? <Badge variant="warning">{SMALL_TRUCK_BADGE}</Badge> : 'no (any truck)'}
                 </span>
               </Field>
+              {/* Owner request 16 Oct 2026: printed in the SPECIAL LOADING box of the load sheets (set in Details). */}
+              <Field label={LOADING_INSTRUCTION_FIELD_LABEL}>
+                <span className="block max-w-xs whitespace-normal break-words" data-testid="customer-loading-instruction">
+                  {loadingInstruction ? <span className="font-medium text-amber-800">{loadingInstruction}</span> : '—'}
+                  {!loadingInstruction && canEdit ? (
+                    <span className="block text-xs text-muted-foreground">Optional: add it in Details when the warehouse must load this customer in a specific way.</span>
+                  ) : null}
+                </span>
+              </Field>
               {customer.accessNotes ? <Field label="Access notes">{customer.accessNotes}</Field> : null}
             </CardContent>
           </Card>
@@ -210,7 +223,7 @@ export default async function CustomerDetailPage({
               <CardTitle className="text-base">Phase 1 scope</CardTitle>
             </CardHeader>
             <CardContent className="space-y-1 text-xs text-muted-foreground">
-              <p>Set location opens the same checks as ADD LOCATION on Daily dispatch: a reading that is not exact needs the pin placed by hand. Details opens the same dialog as on Daily dispatch (customer type, priority, unloading time and receiving hours, with Open all day and confirmed with the customer, and the phone for the driver); the payment type is changed in the customer list.</p>
+              <p>Set location opens the same checks as ADD LOCATION on Daily dispatch: a reading that is not exact needs the pin placed by hand. Details opens the same dialog as on Daily dispatch (customer type, priority, unloading time and receiving hours, with Open all day and confirmed with the customer, the phone for the driver and the loading instruction for the warehouse); the payment type is changed in the customer list.</p>
               <p>The {regions.length} regions in this tenant are visible in the dropdown filter.</p>
             </CardContent>
           </Card>

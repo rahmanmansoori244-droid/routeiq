@@ -23,8 +23,14 @@
  *   the server would store it: "9123  4567" typed for "9123 4567" is no change); emptied = no phone.
  * - Owner request 13 Oct 2026: "Small truck only (3-ton)", a tick box, sent only when it changed
  *   (lib/dispatch/small-truck.ts: planned on small trucks only, refused at LOCK on a bigger truck).
+ * - Owner request 16 Oct 2026: "Loading instruction (warehouse)", optional, at most 200 characters on one
+ *   line, checked with the server's own rule (readLoadingInstruction, lib/dispatch/loading-instruction.ts)
+ *   only when it changed as the server would store it (line breaks and spaces typed differently are no
+ *   change), and sent only then; emptied = none (null). A stored value that breaks the rule (written to
+ *   the database by hand) does not stop a save of the other fields while it is left as it is.
  */
 import { readCustomerPhone } from '@/lib/dispatch/customer-phone';
+import { foldLoadingInstruction, readLoadingInstruction } from '@/lib/dispatch/loading-instruction';
 import { MAX_SERVICE_MIN } from '@/lib/dispatch/service-time';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 
@@ -49,6 +55,8 @@ export interface DetailsCustomer {
   phone?: string | null;
   /** Small trucks only (owner request 13 Oct 2026). Absent = false. */
   smallTruckOnly?: boolean;
+  /** The warehouse's loading instruction (owner request 16 Oct 2026). Absent or null = none. */
+  loadingInstruction?: string | null;
 }
 
 /** The form as typed. '' = not set / the default applies. */
@@ -70,6 +78,8 @@ export interface DetailsForm {
   phone?: string;
   /** "Small truck only (3-ton)" ticked. Absent = false. */
   smallTruckOnly?: boolean;
+  /** "Loading instruction (warehouse)" as typed; '' = none. Absent = ''. */
+  loadingInstruction?: string;
 }
 
 /** The PATCH /api/customers/:id body: only the fields that changed (a changed window with both ends). */
@@ -88,9 +98,11 @@ export interface DetailsPatch {
   phone?: string | null;
   /** Small trucks only (owner request 13 Oct 2026). */
   smallTruckOnly?: boolean;
+  /** The warehouse's loading instruction (owner request 16 Oct 2026); null = none any more. */
+  loadingInstruction?: string | null;
 }
 
-export const EMPTY_DETAILS: DetailsForm = { type: '', priority: '', service: '', hardStart: '', hardEnd: '', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false, phone: '', smallTruckOnly: false };
+export const EMPTY_DETAILS: DetailsForm = { type: '', priority: '', service: '', hardStart: '', hardEnd: '', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false, phone: '', smallTruckOnly: false, loadingInstruction: '' };
 
 const isOwn = (source: string | undefined) => source === undefined || source === 'CUSTOMER';
 
@@ -116,6 +128,7 @@ export function detailsFormOf(c: DetailsCustomer): DetailsForm {
     confirmHours: !!c.windowConfirmed,
     phone: c.phone ?? '',
     smallTruckOnly: !!c.smallTruckOnly,
+    loadingInstruction: c.loadingInstruction ?? '',
   };
 }
 
@@ -178,6 +191,12 @@ export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsRes
   if (now.priority !== '' && !/^[1-5]$/.test(now.priority)) return { ok: false, error: 'Priority: P1 to P5.' };
   const phone = readCustomerPhone(now.phone);
   if (!phone.ok) return phone;
+  // The loading instruction is checked only when it changed (compared as the server stores it: one line,
+  // trimmed, so typed differently is no change). A value written to the database by hand that breaks the
+  // rule (over 200 characters) never stops a save of the customer's other fields (review of 16 Oct).
+  const instructionNow = foldLoadingInstruction(now.loadingInstruction ?? '');
+  const instruction = instructionNow !== foldLoadingInstruction(initial.loadingInstruction ?? '') ? readLoadingInstruction(instructionNow) : null;
+  if (instruction && !instruction.ok) return instruction;
 
   const patch: DetailsPatch = {};
   if (now.type !== initial.type) patch.customerType = now.type || null;
@@ -189,6 +208,7 @@ export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsRes
   const phoneWas = readCustomerPhone(initial.phone);
   if (!phoneWas.ok || phoneWas.phone !== phone.phone) patch.phone = phone.phone;
   if (!!now.smallTruckOnly !== !!initial.smallTruckOnly) patch.smallTruckOnly = !!now.smallTruckOnly;
+  if (instruction?.ok) patch.loadingInstruction = instruction.text;
   // Receiving hours (owner decision 1 Oct 2026, "own confirmed window"): hours the dispatcher enters
   // are confirmed by the server; "Open all day" is confirmed with no hours; ticking "confirmed with
   // the customer" confirms the hours as shown (sent whole, so what is confirmed is what was seen).

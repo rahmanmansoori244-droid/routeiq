@@ -21,6 +21,7 @@ import { addDaysIso } from '@/lib/dispatch/time';
 import type { CustomerDeliveryStats } from '@/lib/delivery/customer-stats';
 import { measuredServiceValue } from '@/lib/delivery/measured';
 import { SMALL_TRUCK_BADGE } from '@/lib/dispatch/small-truck';
+import { LOADING_INSTRUCTION_BADGE } from '@/lib/dispatch/loading-instruction';
 
 interface CustomerRow {
   id: string;
@@ -45,6 +46,8 @@ interface CustomerRow {
   paymentType: PaymentType;
   /** Small trucks only (owner request 13 Oct 2026): a badge next to the name. */
   smallTruckOnly?: boolean;
+  /** The warehouse's loading instruction (owner request 16 Oct 2026): a badge next to the name, the text as its title. */
+  loadingInstruction?: string;
   active: boolean;
 }
 
@@ -345,6 +348,11 @@ export function CustomersClient({
                   {c.smallTruckOnly ? (
                     <Badge variant="warning" className="ms-2 text-[10px]" data-testid="customer-small-truck" data-customer={c.code} title="The unloading area takes small trucks only: planned on small trucks only (Settings: Small truck = at most N bays).">
                       {SMALL_TRUCK_BADGE}
+                    </Badge>
+                  ) : null}
+                  {c.loadingInstruction ? (
+                    <Badge variant="warning" className="ms-2 text-[10px]" data-testid="customer-loading-instruction" data-customer={c.code} title={c.loadingInstruction}>
+                      {LOADING_INSTRUCTION_BADGE}
                     </Badge>
                   ) : null}
                   {toCollect[c.id] ? (

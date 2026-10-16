@@ -702,6 +702,7 @@ const FIELD_WORDS: Record<string, string> = {
   accessNotes: 'Access notes',
   phone: 'Phone',
   smallTruckOnly: 'Small truck only',
+  loadingInstruction: 'Loading instruction',
   active: 'Active',
   customerType: 'Customer type',
   hardWindowStartMin: 'Receiving hours',

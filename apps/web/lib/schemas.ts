@@ -15,6 +15,7 @@ import { COUNTRY_NAMES } from './countries';
 import { DELIVERY_SETTING_BOUNDS } from './settings-fields';
 import { parseProductCode } from './product-code';
 import { readCustomerPhone } from './dispatch/customer-phone';
+import { readLoadingInstruction } from './dispatch/loading-instruction';
 import { WINDOW_RULES } from './dispatch/window-rule';
 
 /** A number inside a planner bound (lib/planner-bounds.ts: never outside what the optimizer accepts). */
@@ -61,6 +62,19 @@ const customerPhoneSchema = z.string().transform((v, ctx) => {
     return z.NEVER;
   }
   return r.phone;
+});
+
+/**
+ * The customer's loading instruction (owner request 16 Oct 2026, lib/dispatch/loading-instruction.ts):
+ * stored folded to one line, at most 200 characters; refused with the reason otherwise.
+ */
+const loadingInstructionSchema = z.string().transform((v, ctx) => {
+  const r = readLoadingInstruction(v);
+  if (!r.ok) {
+    ctx.addIssue({ code: 'custom', message: r.error });
+    return z.NEVER;
+  }
+  return r.text;
 });
 
 /** Cases per pallet (lib/dispatch/pallets.ts validPalletFactor): a whole number 1-10,000; '' / null = not set; left out = unchanged. */
@@ -356,6 +370,9 @@ export const customerSchema = z.object({
   // Owner request 13 Oct 2026: the unloading area takes small trucks only (3-ton): planned on trucks with
   // at most TenantConfig.smallTruckMaxBays bays (lib/dispatch/small-truck.ts). A JSON boolean only.
   smallTruckOnly: z.boolean().optional(),
+  // Owner request 16 Oct 2026: what the warehouse must do when loading this customer's orders, printed in
+  // the SPECIAL LOADING box of the load sheets (lib/dispatch/loading-instruction.ts). '' or null clears it.
+  loadingInstruction: clearable(loadingInstructionSchema),
   active: z.boolean().optional(),
 });
 export type CustomerInput = z.infer<typeof customerSchema>;

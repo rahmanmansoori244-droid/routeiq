@@ -48,6 +48,7 @@ import { loadCustomerCount, loadPallets, palletText, palletUnits, plannedLoadRoo
 import { CUSTOMER_DATA_REASONS, idleTrucksNote, unservedNowPlannable } from './left-out-note';
 import { hadTimeHere } from './cross-depot';
 import { isSmallTruck, smallTruckMaxBaysOf } from './small-truck';
+import { loadingInstructionText } from './loading-instruction';
 import { echoedWindowRule, windowRuleAskedText, type WindowRule } from './window-rule';
 
 export interface DetailStop {
@@ -105,6 +106,19 @@ export interface DetailStop {
    * badge is red. Absent = no.
    */
   smallTruckBreach?: boolean;
+  /**
+   * The warehouse's loading instruction (owner request 16 Oct 2026, lib/dispatch/loading-instruction.ts),
+   * as the customer is NOW: live like accessNotes (never the snapshot, never a reason to re-plan), so a
+   * change reaches a load already locked, loading or printed when its sheets are printed again. Folded to
+   * one line, a longer stored value shortened (never dropped). Absent = none.
+   */
+  loadingInstruction?: string;
+  /**
+   * The orders of this stop brought forward to a later day (of `orderIds`; `carriedTo` is the stop's
+   * latest such day). Only on a stop with a loading instruction: what the sheets need to leave out a stop
+   * none of whose orders is loaded (loadInstructions, review L1). Absent = none, or no instruction.
+   */
+  carriedOrderIds?: string[];
   /** Split delivery: this stop is part `part` of the customer's `parts` deliveries on trucks;
    * `restUnserved` = more of the customer's cases are on the unserved list. */
   split: { part: number; parts: number; restUnserved: boolean } | null;
@@ -611,6 +625,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     const withPortion = new Set<number>();
     const carriedAwayOrders = new Set<string>();
     const cancelledOrders = new Set<string>();
+    // The orders of each stop brought forward to a later day (by sequence): see DetailStop.carriedOrderIds.
+    const carriedByStop = new Map<number, string[]>();
     // A load planned by pallets (its stored pallets, and bays + room in its truck snapshot, both kept
     // only from the optimizer's echo): each product's pallets on it, line by line as it was planned.
     const tsPallets = readTruckSnapshot(l.truckSnapshotJson);
@@ -661,7 +677,10 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       // of a split order that left), and nothing is marked there (carriedLoadShows).
       const cameFrom = o.carriedFromDate ? isoOf(o.carriedFromDate) : null;
       const wentTo = o.carriedTo && carriedLoadShows(l.status) ? isoOf(o.carriedTo.deliveryDate) : null;
-      if (wentTo) carriedAwayOrders.add(o.id);
+      if (wentTo) {
+        carriedAwayOrders.add(o.id);
+        carriedByStop.set(a.sequenceInTruck, [...(carriedByStop.get(a.sequenceInTruck) ?? []), o.id]);
+      }
       // Cancel order: cancelled since it was planned (only a load that never left can hold one).
       const isCancelled = !!o.cancelledAt && carriedLoadShows(l.status);
       if (isCancelled) cancelledOrders.add(o.id);
@@ -687,6 +706,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       const planned = snap ? plannedWindows(snap) : null;
       const lat = snap ? snap.lat : c.lat;
       const lng = snap ? snap.lng : c.lng;
+      // The warehouse's loading instruction as the customer has it now (folded, never dropped): DetailStop.loadingInstruction.
+      const instruction = loadingInstructionText(c.loadingInstruction);
       stops.set(a.sequenceInTruck, {
         sequence: a.sequenceInTruck,
         customerId: c.id,
@@ -727,6 +748,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         customerPhone: c.phone ?? null,
         // Live (owner request 13 Oct 2026): the customer's mark and the truck as they are now.
         ...(c.smallTruckOnly ? { smallTruckOnly: true, ...(isSmallTruck(l.truck.bays, smallMaxBays) ? {} : { smallTruckBreach: true }) } : {}),
+        // Live (owner request 16 Oct 2026), like accessNotes; absent when the customer has none.
+        ...(instruction ? { loadingInstruction: instruction } : {}),
         split: null,
         snapshot: !!snap,
         masterChanged: snap
@@ -764,6 +787,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     const stopList = [...stops.values()].sort((a, b) => a.sequence - b.sequence);
     for (const s of stopList) {
       s.weightKg = Math.round(s.weightKg * 10) / 10;
+      const carried = carriedByStop.get(s.sequence);
+      if (s.loadingInstruction && carried?.length) s.carriedOrderIds = [...new Set(carried)];
       portionStops.push({ stop: s, customerId: s.customerId, portion: withPortion.has(s.sequence), departMin: l.departMin, truckCode: l.truck.code, sequence: s.sequence });
     }
     const ts = tsPallets;
