@@ -200,6 +200,9 @@ model Tenant {
   // Helpers (truck crew), owner request 13 Oct 2026.
   helpers              Helper[]
   planLoadHelpers      PlanLoadHelper[]
+  // Operations alerts, owner request 16 Oct 2026.
+  opsAlerts            OpsAlert[]
+  opsAlertDigests      OpsAlertDigest[]
   // IVMS live link (Ayun GPS trackers), 16 Oct 2026: lib/ivms/*.
   truckPositions       TruckPosition[]
   truckTrailPoints     TruckTrailPoint[]
@@ -318,6 +321,51 @@ model TenantConfig {
   // Deliveries before this moment are outside the no-result list and the outcome KPIs (set to the
   // migration time for existing companies).
   outcomesSince            DateTime @default(now())
+  // Operations alerts (owner request 16 Oct 2026: "notify me when a rule I set is broken"). Company admin
+  // only; lib/alerts/catalog.ts holds the rules, their defaults and bounds (database CHECKs in migration
+  // 20261016180000_ops_alerts). The master switch is OFF by default: merging and deploying change nothing
+  // until a company admin switches it on. A NULL threshold turns that rule off.
+  alertsEnabled            Boolean  @default(false)
+  // Set by the settings save that switches alerts on (app/api/tenant/config): nothing that began or
+  // happened before it raises an alert (no backlog on switch-on). Not a Settings field.
+  alertsEnabledAt          DateTime?
+  // Per rule, when it was last switched on or set to catch more (a lower limit; for R7 a higher priority
+  // number): { "PROOF_FAR": ISO time }, set by the same save. A rule switched on after the master switch
+  // raises nothing that began before its own switch-on either (review of 16 Oct 2026). Not a Settings field.
+  alertRuleOnAtJson        Json?
+  // R1 unloading longer than planned by more than N min (owner rule 1: 30).
+  alertUnloadOverMin       Int?     @default(30)
+  // R2 loading between trips longer than N min (owner rule 2: 40). Owner decision 16 Oct 2026: measured
+  // from the driver's Back at depot to his "Leaving for next load" (StopEvent DEPOT_DEPART; the Dispatch
+  // press or the first arrival when he did not tap), never for the first trip of the day (loaded the night
+  // before), so it is on (40) like the other rules, under the master switch (off).
+  alertLoadingOverMin      Int?     @default(40)
+  // R3 the projected arrival at the next stop is more than N min late (owner rule 3: 30).
+  alertEtaLateMin          Int?     @default(30)
+  // R4 a Locked or Loading load still not dispatched N min after its planned departure (today only).
+  alertDepartLateMin       Int?     @default(30)
+  // R5 nothing from the driver's phone for N min while stops are left.
+  alertSilentMin           Int?     @default(120)
+  // R11 dispatched, but the driver page was never opened N min after the planned departure.
+  alertPageNotOpenedMin    Int?     @default(30)
+  // R6 a stop reached (or projected) more than N min after its delivery window ends.
+  alertAfterClosingMin     Int?     @default(15)
+  // R7 a stop of priority N or better (1 = highest) not delivered or partly delivered.
+  alertPriorityMax         Int?     @default(2)
+  // R8 a stop marked Delivered by the driver with a note.
+  alertDeliveredNote       Boolean  @default(true)
+  // R9 a delivery photo or result more than N metres from a verified customer pin.
+  alertProofFarM           Int?     @default(500)
+  // R10 a dispatched load still not closed N min after its planned return.
+  alertNotClosedMin        Int?     @default(120)
+  // E-mail: at most 5 comma-separated addresses (NULL = in the app only); at most one e-mail every N min
+  // (0 = never); only alerts of this severity or above (HIGH by default); no e-mail in the quiet hours
+  // (from-to, minutes from local midnight, may pass midnight; both NULL = none). In the app always.
+  alertEmails              String?
+  alertEmailEveryMin       Int      @default(15)
+  alertEmailMinSeverity    String   @default("HIGH")
+  alertQuietFromMin        Int?     @default(1320)
+  alertQuietToMin          Int?     @default(360)
   // IVMS live link (Ayun GPS trackers, 16 Oct 2026; lib/ivms/settings.ts IVMS_SETTING_BOUNDS, database
   // CHECKs in 20261016200000_ivms_live). Company admin only. Nothing here is read while ivmsMode is OFF.
   // OFF (default: no call to Ayun, nothing new shown) | MAP (live truck positions on the day screen) |
@@ -394,6 +442,7 @@ model User {
   driverLeavesAdded    DriverLeave[]        @relation("DriverLeaveCreatedBy")
   driverLeavesChanged  DriverLeave[]        @relation("DriverLeaveUpdatedBy")
   loadHelpersSet       PlanLoad[]           @relation("PlanLoadHelpersSetBy")
+  opsAlertsAcked       OpsAlert[]           @relation("OpsAlertAckedBy")
 
   @@index([tenantId])
 }
@@ -1328,6 +1377,10 @@ enum StopEventKind {
   PHOTO          // payload: { photoId }
   BACK_AT_DEPOT  // load level: sequence is NULL
   CARRY_CONFLICT // a result change refused because the order was brought forward; ignored by deriveVisit
+  // Load level (sequence NULL), on the load the truck leaves with: the driver's "Leaving for next load"
+  // after Back at depot of his previous trip (owner decision 16 Oct 2026: alert rule R2 measures the
+  // turnaround at the depot from these two taps). At most one per load.
+  DEPOT_DEPART
 }
 
 enum PhotoPositionStatus {
@@ -1340,7 +1393,7 @@ enum PhotoPositionStatus {
 
 enum StopEventSource {
   PHONE_AUTO     // the driver page's geofence (no tap)
-  PHONE_MANUAL   // the driver tapped (I have arrived, a result, a photo, Back at depot)
+  PHONE_MANUAL   // the driver tapped (I have arrived, a result, a photo, Back at depot, Leaving for next load)
   DISPATCHER     // recorded or corrected on the plan screen
   AYUN           // later: Ayun GPS stop events
   SYSTEM         // derived by RouteIQ (for example the janitor completing a returned load)
@@ -1494,7 +1547,7 @@ model StopEvent {
   deliveryDate    DateTime        @db.Date
   truckId         String
   loadNo          Int
-  sequence        Int? // NULL = load level (BACK_AT_DEPOT)
+  sequence        Int? // NULL = load level (BACK_AT_DEPOT, DEPOT_DEPART)
   visitId         String?
   visit           StopVisit?      @relation(fields: [visitId], references: [id], onDelete: Cascade)
   kind            StopEventKind
@@ -1504,7 +1557,7 @@ model StopEvent {
   lat             Float?
   lng             Float?
   accuracyM       Float?
-  distanceM       Float? // from the stop's planned pin (the depot pin for BACK_AT_DEPOT)
+  distanceM       Float? // from the stop's planned pin (the depot pin for BACK_AT_DEPOT and DEPOT_DEPART)
   speedMps        Float?
   driverLinkId    String?
   driverLink      DriverLink?     @relation(fields: [driverLinkId], references: [id], onDelete: SetNull)
@@ -1572,6 +1625,91 @@ model DeliveryPhoto {
   @@index([tenantId, receivedAt])
   /// The daily photo cap per driver link.
   @@index([driverLinkId])
+}
+
+/// Operations alerts (owner request 16 Oct 2026: "notify me when a rule I set is broken"). One row per rule
+/// and physical subject: `subjectKey` is depot|date|truck|loadNo[|seq] (a stop or a load) or
+/// depot|date|truck (a truck-day), never a PlanLoad id, so a re-plan's copies keep their rows
+/// (lib/alerts/catalog.ts subjectKeyOf). Written only by the alert sweep (lib/alerts/store.ts), with
+/// duplicates refused by the unique key (two sweeps during a deploy overlap raise one row);
+/// acknowledged in the app. Nothing that plans or delivers reads it. States (lib/alerts/types.ts
+/// alertStateOf): a CONDITION row is open until its condition ends (resolvedAt); an EVENT row is open until
+/// it is acknowledged or corrected; resolvedReason says why a row closed. Rows hold customer names and
+/// shortened driver notes (digit runs removed, never a phone number): deleted after 90 days and by Start
+/// fresh with the day's data.
+model OpsAlert {
+  id             String    @id @default(cuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// No foreign key: the rows are history; Start fresh and hired one-day trucks delete freely.
+  depotId        String
+  deliveryDate   DateTime  @db.Date
+  /// A code of lib/alerts/catalog.ts ALERT_RULES (checked in the app, not by a CHECK: a new rule needs no migration).
+  rule           String
+  subjectKey     String
+  truckId        String
+  /// As shown (a hired truck's plate) when the row was raised.
+  truckCode      String
+  loadNo         Int?
+  sequence       Int?
+  customerId     String?
+  /// 'CONDITION' | 'EVENT' (CHECK).
+  kind           String
+  /// 'WARN' | 'HIGH' (CHECK): tier 1 is WARN, tier 2 and 3 are HIGH (lib/alerts/catalog.ts severityOf).
+  severity       String
+  tier           Int       @default(1)
+  /// Minutes, metres or the priority, as the rule measures it; threshold = the setting it was compared with.
+  value          Int
+  threshold      Int
+  /// Plain English, built by lib/alerts/text.ts; the final words once the row is resolved.
+  text           String
+  factsJson      Json?
+  /// The current tier may pop up as a toast / go in an e-mail (lib/alerts/catalog.ts deliveryOf).
+  mayToast       Boolean   @default(true)
+  mayEmail       Boolean   @default(true)
+  /// When the condition began or the event happened (no row for anything before TenantConfig.alertsEnabledAt).
+  occurredAt     DateTime  @db.Timestamptz(3)
+  firstSeenAt    DateTime  @default(now()) @db.Timestamptz(3)
+  lastSeenAt     DateTime  @default(now()) @db.Timestamptz(3)
+  resolvedAt     DateTime? @db.Timestamptz(3)
+  /// lib/alerts/catalog.ts RESOLVED_REASONS: ENDED, CORRECTED, NOT_IN_PLAN, EXPIRED, RULE_OFF.
+  resolvedReason String?
+  occurrences    Int       @default(1)
+  ackedAt        DateTime? @db.Timestamptz(3)
+  ackedById      String?
+  ackedBy        User?     @relation("OpsAlertAckedBy", fields: [ackedById], references: [id], onDelete: SetNull)
+  /// The tier last e-mailed (0 = never); the e-mail claim takes rows with emailedTier < tier.
+  emailedTier    Int       @default(0)
+  emailedAt      DateTime? @db.Timestamptz(3)
+  /// The OpsAlertDigest that last carried it (no foreign key).
+  digestId       String?
+  emailAttempts  Int       @default(0)
+  emailError     String?
+
+  @@unique([tenantId, rule, subjectKey])
+  @@index([tenantId, deliveryDate])
+  @@index([tenantId, resolvedAt, ackedAt])
+  @@index([tenantId, lastSeenAt])
+}
+
+/// One alert e-mail per row (owner request 16 Oct 2026, lib/alerts/notify.ts): the throttle ("at most one
+/// e-mail every N min") and the daily cap count these rows, inside the claim's transaction. Counts only:
+/// never an address or an alert text.
+model OpsAlertDigest {
+  id             String    @id @default(cuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  /// 'SENDING' | 'SENT' | 'FAILED' (CHECK).
+  status         String    @default("SENDING")
+  alertCount     Int
+  highCount      Int
+  recipientCount Int
+  sentAt         DateTime? @db.Timestamptz(3)
+  /// The provider's status code or a short reason; never an address.
+  error          String?
+
+  @@index([tenantId, createdAt])
 }
 
 // IVMS live link (Ayun, a GPS-Server.net tracking platform), 16 Oct 2026: lib/ivms/*. Off by default

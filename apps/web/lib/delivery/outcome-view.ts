@@ -13,7 +13,11 @@
  * after the carry (the red chip and the Lock question). And (owner decision 2, 5 Oct 2026) every
  * result saved without a photo ("Camera not working", or a named photo that never arrived: stop,
  * customer, driver, time, what changed after), with the driver links with 3 or more that day. They are
- * read from the driver's own results, so a stop the office corrected stays listed.
+ * read from the driver's own results, so a stop the office corrected stays listed. And (owner decision of
+ * 16 Oct 2026, alert rule R2) the turnaround at the depot before each trip after the truck's first: Back
+ * at depot of the trip before to the driver's Leaving for next load (or the Dispatch press / the first
+ * stop reached less the planned drive when he did not tap; lib/delivery/turnaround.ts), live while the
+ * truck is still at the depot; only while the company has the alerts and rule R2 on.
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
@@ -27,6 +31,9 @@ import {
   cameraCountsByTruckDay,
   keyOfVisit,
   kpiVisitOf,
+  leftDepotTaps,
+  liveRunsInRange,
+  loadOrigins,
   loadIsBack,
   loadsOfRuns,
   outcomeSettings,
@@ -36,7 +43,10 @@ import {
   visitKey,
   visitsInRange,
   type NoResultStop,
+  type RoadLoad,
 } from './day-results';
+import { firstSignOf, plannedDriveOf, previousTrip, turnaroundLine, turnaroundOf, type LeftHow, type NotMeasured, type SignVisit } from './turnaround';
+import { clockText } from '../alerts/text';
 import { actualMinutes, arrivalNote, departureNote, noPhotoText, OUTCOME_LABEL, reasonText, sourceWord } from './office-text';
 import { copyConflicts } from './carry-conflicts';
 import { readVisitLines, type VisitLine } from './visit';
@@ -116,6 +126,27 @@ export interface OverlayLoad {
   cameraFailedToday: number;
 }
 
+/**
+ * The turnaround at the depot before a trip (owner decision of 16 Oct 2026, alert rule R2): from Back at
+ * depot of the trip before (`afterLoadNo`, same depot) to the truck leaving with this one. Only when Back
+ * at depot was tapped; never for the truck's first trip of the day.
+ */
+export interface LoadTurnaround {
+  afterLoadNo: number;
+  backAt: string;
+  /** null: the truck is still at the depot (`minutes` so far). */
+  leftAt: string | null;
+  /** TAP: the driver's Leaving for next load; DISPATCH / ARRIVAL: a fallback (no tap, or a tap after the first arrival). */
+  how: LeftHow | null;
+  tapLate: boolean;
+  minutes: number;
+  final: boolean;
+  /** BACK_LATE: Back at depot of the trip before was tapped after this trip had started; NO_LEAVE: no leave recorded (Completed). */
+  notMeasured: NotMeasured | null;
+  /** "back 11:20, left 12:08, 48 min" / "back 11:20, not left yet, 25 min so far" / "back 11:20, no leave recorded" (company time). */
+  line: string;
+}
+
 export interface OutcomeOverlay {
   runId: string;
   date: string;
@@ -136,6 +167,8 @@ export interface OutcomeOverlay {
   cameraExceptions: CameraException[];
   /** The driver links (truck-days) that used it 3 times or more that day. */
   cameraAlerts: CameraLinkAlert[];
+  /** Per load id of ANY status of this version: the turnaround at the depot before it (rule R2), when known. */
+  turnarounds: Record<string, LoadTurnaround>;
 }
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
@@ -163,6 +196,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
     lockWarnings: {},
     cameraExceptions: [],
     cameraAlerts: [],
+    turnarounds: {},
   };
 
   // Brought-forward copies on any load of this version (the chip and the Lock question).
@@ -192,7 +226,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
     visitIds.length
       ? db.deliveryPhoto.findMany({
           where: { tenantId, visitId: { in: visitIds } },
-          select: { id: true, visitId: true, takenAt: true, distanceM: true, positionStatus: true, oldPhoto: true, purgedAt: true },
+          select: { id: true, visitId: true, source: true, takenAt: true, distanceM: true, positionStatus: true, oldPhoto: true, purgedAt: true },
           orderBy: [{ takenAt: 'asc' }],
         })
       : [],
@@ -350,7 +384,103 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
   empty.summary = deliveryKpis(kpiStops);
   empty.cameraExceptions = sortCameraExceptions(empty.cameraExceptions);
   empty.cameraAlerts = cameraLinkAlerts(empty.cameraExceptions, cameraCounts);
+  // A Back at depot is needed for any turnaround: none tapped at this depot that day, nothing more to read.
+  // A failure here never takes the delivery results down with it (second review of 16 Oct 2026, M3).
+  if (backs.size) {
+    try {
+      empty.turnarounds = await turnaroundsOf(db, tenantId, { id: run.id, depotId: run.depotId, date }, { backs, visits, photos, stopsBy, tz: set.tz, now, today });
+    } catch (e) {
+      console.error('[delivery] turnaround line not read', (e as Error)?.message ?? e);
+      empty.turnarounds = {};
+    }
+  }
   return empty;
+}
+
+const ALL_STATUSES = ['PLANNED', 'LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED'] as const;
+
+/** A visit as turnaroundsOf reads it. */
+type TurnaroundVisit = { id: string; depotId: string; deliveryDate: Date; truckId: string; loadNo: number } & SignVisit;
+
+/**
+ * The turnaround before each load of the version (every status: a trip still Locked or Loading shows the
+ * time so far), read with rule R2's own inputs (lib/delivery/turnaround.ts): the driver's latest Leaving
+ * tap before the truck reached a stop (none on a Planned load), the Dispatch press whatever the status now
+ * and when the trip was planned (loadOrigins), the first sign at a stop (arrival, departure, the phone's
+ * result or photo) and the planned drive to the first stop. The trip before is the truck-day's load before
+ * it in departure order, the other depots' plans in use included (a trip after one at another depot is
+ * not measured, as rule R2 does not). Shown only while the company has the alerts on with rule R2 on: the
+ * driver's Leaving button is offered then only (lib/driver-link/manifest.ts), so merging changes nothing
+ * on the screens until the owner turns them on (second review of 16 Oct 2026, M1 and M3). A day that is
+ * over shows "no leave recorded" for a trip that never left, as does a wait over TURNAROUND_MAX_MIN.
+ */
+async function turnaroundsOf(
+  db: Db,
+  tenantId: string,
+  run: { id: string; depotId: string; date: string },
+  known: {
+    backs: ReadonlyMap<string, Date>;
+    visits: readonly TurnaroundVisit[];
+    photos: readonly { visitId: string; source: string; takenAt: Date; oldPhoto: boolean }[];
+    stopsBy: ReadonlyMap<string, readonly { sequence: number; etaMin: number | null }[]>;
+    tz: string;
+    now: Date;
+    today: string;
+  },
+): Promise<Record<string, LoadTurnaround>> {
+  const out: Record<string, LoadTurnaround> = {};
+  const cfg = await db.tenantConfig.findFirst({ where: { tenantId }, select: { alertsEnabled: true, alertLoadingOverMin: true } });
+  if (!cfg?.alertsEnabled || cfg.alertLoadingOverMin === null || cfg.alertLoadingOverMin === undefined) return out;
+  const mine = await loadsOfRuns(db, tenantId, [run], { statuses: ALL_STATUSES });
+  if (mine.length < 2) return out;
+  const trucks = new Set(mine.map((l) => l.truckId));
+  const others = (await liveRunsInRange(db, tenantId, run.date, run.date)).filter((r) => r.depotId !== run.depotId);
+  const elsewhere = others.length ? (await loadsOfRuns(db, tenantId, others, { statuses: ALL_STATUSES })).filter((l) => trucks.has(l.truckId)) : [];
+  const dayOf = (l: RoadLoad) => [...mine, ...elsewhere].filter((x) => x.truckId === l.truckId);
+  const pairs = mine
+    .map((l) => ({ l, prev: previousTrip(dayOf(l), l.id) }))
+    .filter((p): p is { l: RoadLoad; prev: RoadLoad } => !!p.prev && p.prev.depotId === p.l.depotId && known.backs.has(backKey(p.prev)));
+  if (!pairs.length) return out;
+  const [lefts, origins] = await Promise.all([leftDepotTaps(db, tenantId, run.date, run.date, run.depotId), loadOrigins(db, tenantId, pairs.map((p) => p.l.id))]);
+  const visitsOf = new Map<string, TurnaroundVisit[]>();
+  for (const v of known.visits) {
+    const k = backKey({ depotId: v.depotId, date: isoOf(v.deliveryDate), truckId: v.truckId, loadNo: v.loadNo });
+    visitsOf.set(k, [...(visitsOf.get(k) ?? []), v]);
+  }
+  const phoneTimes = new Map<string, Date[]>();
+  for (const p of known.photos) {
+    if ((p.source !== 'PHONE_AUTO' && p.source !== 'PHONE_MANUAL') || p.oldPhoto) continue;
+    phoneTimes.set(p.visitId, [...(phoneTimes.get(p.visitId) ?? []), p.takenAt]);
+  }
+  const clock = (d: Date) => clockText(d, run.date, known.tz);
+  const dayOver = run.date < known.today;
+  for (const { l, prev } of pairs) {
+    const vs = visitsOf.get(backKey(l)) ?? [];
+    const o = origins.get(l.id);
+    const t = turnaroundOf({
+      backAt: known.backs.get(backKey(prev)) ?? null,
+      leftTaps: l.status === 'PLANNED' ? [] : (lefts.get(backKey(l)) ?? []),
+      dispatchAt: o?.dispatchedAt ?? (l.status === 'DISPATCHED' ? l.statusChangedAt : null),
+      firstSignAt: firstSignOf(vs, vs.flatMap((v) => phoneTimes.get(v.id) ?? [])),
+      plannedDriveMin: plannedDriveOf(l.departMin, known.stopsBy.get(l.id) ?? []),
+      existedAt: o?.firstAt ?? null,
+      completed: l.status === 'COMPLETED',
+      now: known.now,
+    });
+    if (!t) continue;
+    out[l.id] = {
+      afterLoadNo: prev.loadNo,
+      backAt: t.backAt.toISOString(),
+      leftAt: t.leftAt ? t.leftAt.toISOString() : null,
+      how: t.how,
+      tapLate: t.tapLate,
+      minutes: Math.round(t.minutes),
+      final: t.final,
+      notMeasured: t.notMeasured,
+      line: turnaroundLine(t, clock, { dayOver }),
+    };
+  }
+  return out;
 }
 
 /** The Loads table chip: "Delivered 7/12". */

@@ -5,6 +5,8 @@ import { prisma } from '@/lib/db';
 import { PageShell } from '@/components/page-shell';
 import { effectivePlannerValues } from '@/lib/dispatch/planner-config';
 import { DISPATCHER_SETTINGS_FIELDS, SETTINGS_FIELDS, type EditableConfig } from '@/lib/settings-fields';
+import { plainEmailConfigured } from '@/lib/email';
+import { alertEmailAllowed } from '@/lib/alerts/catalog';
 import { SettingsForm } from './settings-form';
 import { StartFreshPanel } from './start-fresh-panel';
 import { gpsStatusText, ivmsHealth } from '@/lib/ivms/status';
@@ -49,6 +51,8 @@ export default async function SettingsPage({ params }: { params: { slug: string 
         scope={admin ? 'ADMIN' : 'DISPATCHER'}
         dataRuleOn={cfg.requireDataBeforeLoading}
         gpsStatus={gpsHealth ? gpsStatusText(gpsHealth) : null}
+        // Operations alerts: the "Email is not set up on the server" note and the test e-mail button.
+        emailConfigured={admin && plainEmailConfigured() && alertEmailAllowed(tenant.slug)}
         initial={{
           tenant: {
             name: tenant.name,

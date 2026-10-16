@@ -30,6 +30,8 @@ import { completeReturnedLoads } from '@/lib/delivery/event-service';
 import { runDeliveryJanitor } from '@/lib/jobs/delivery-janitor';
 import { failLostHireChecks, retireOneDayTrucks } from '@/lib/dispatch/hire-whatif';
 import { janitorAuthorized } from '@/lib/janitor-auth';
+import { runAlertSweep } from '@/lib/alerts/sweep';
+import { sendAlertDigest } from '@/lib/alerts/notify';
 import { runIvmsTick } from '@/lib/ivms/poll';
 import { runIvmsRetention } from '@/lib/ivms/retention';
 
@@ -65,7 +67,12 @@ async function runJanitor() {
   const ivmsTick = await step('ivms tick', () => runIvmsTick(now, { force: true }));
   const ivmsRetention = await step('ivms retention', () => runIvmsRetention(now, { force: true }));
   const ivms = ivmsTick || ivmsRetention ? { tick: ivmsTick, retention: ivmsRetention } : null;
-  return { jobs, shifts, returnedLoads, deliveryRetention, hire, ...(ivms ? { ivms } : {}) };
+  // Operations alerts (owner request 16 Oct 2026): the companies that switched them on, now, each followed
+  // by its e-mail digest (null when ROUTEIQ_DISABLE_ALERTS=1 or a sweep is still running in this process).
+  // After the IVMS tick, so the sweep sees the GPS times it just wrote; its own try as well (merge of
+  // 16 Oct 2026: a database error in one feature never hides the other's answer or turns it into a 500).
+  const alerts = await step('alerts', () => runAlertSweep(new Date(), { force: true, notify: sendAlertDigest }));
+  return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts, ...(ivms ? { ivms } : {}) };
 }
 
 export async function POST(req: Request) {

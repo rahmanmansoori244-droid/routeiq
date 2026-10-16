@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { emailDeliveryConfigured } from '@/lib/password-reset';
 import { checkDispatchReadiness, overallReadiness, solverField } from '@/lib/health';
+import { alertSweepHealth } from '@/lib/alerts/sweep';
 import { ivmsHealthForCaller } from '@/lib/ivms/status';
 
 export const runtime = 'nodejs';
@@ -29,10 +30,12 @@ async function checkDb(): Promise<'up' | 'down'> {
  *   load re-check was skipped) - alert, but do not
  *   block the deploy;
  * - 200 `ready` (`ok: true`).
- * It never starts an optimization. `routing` and `email` are informational and never change the
- * answer: without OSRM plans still work (distances labelled estimated) - alert on
+ * It never starts an optimization. `routing`, `email` and `alerts` are informational and never change
+ * the answer: without OSRM plans still work (distances labelled estimated) - alert on
  * routing.status !== 'up' instead; without email, tenant admins reset passwords on the Users
- * screen ("Reset password", POST /api/users/:id/reset-password).
+ * screen ("Reset password", POST /api/users/:id/reset-password); `alerts` says when the
+ * operations-alert sweep last ran in this process and how many companies' last sweep failed or is
+ * overdue (counts only, never a company; review of 16 Oct 2026, M2).
  */
 /**
  * The IVMS live link's counters. The route stays public; only a caller with the janitor token gets this
@@ -61,6 +64,7 @@ export async function GET(req?: Request) {
       dispatch: { status: dispatch.status, reason: dispatch.reason, message: dispatch.message },
       routing: dispatch.routing,
       email,
+      alerts: alertSweepHealth(),
       // IVMS live link (16 Oct 2026): calls and webhooks of the provider's day, the last error's kind, the
       // provider's clock; only with the janitor token and while the link is in use (AYUN_* variables set
       // and the company's ivmsMode not OFF).

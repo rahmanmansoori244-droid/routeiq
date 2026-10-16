@@ -9,10 +9,12 @@ interface SidebarProps {
   slug: string;
   tenantName: string;
   role: Role;
+  /** The company has operations alerts on (the Alerts item shows only then). */
+  alertsOn?: boolean;
 }
 
-export function Sidebar({ slug, tenantName, role }: SidebarProps) {
-  const items = visibleNavItems(role);
+export function Sidebar({ slug, tenantName, role, alertsOn = false }: SidebarProps) {
+  const items = visibleNavItems(role, { alerts: alertsOn });
   return (
     <aside className="hidden w-60 shrink-0 border-r bg-card md:flex md:flex-col">
       <Link href={`/t/${slug}`} className="flex h-14 items-center border-b px-4">

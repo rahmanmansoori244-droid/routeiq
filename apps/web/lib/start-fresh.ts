@@ -33,14 +33,19 @@
  *     for a day whose plan goes. Nobody else takes both kinds, so their order cannot deadlock;
  *  3. the plan rows it removes (FOR UPDATE), then the driver links it removes (FOR UPDATE: a result
  *     sent with a link waits on its key, then fails once the run commits);
+ *  4. the company's operations-alerts lock (lib/alerts/locks.ts, 16 Oct 2026): a sweep in flight
+ *     finishes first and the next one finds the data gone, so no alert row is written for a day being
+ *     removed (its holder takes no other lock, so taking it last cannot deadlock);
  * and only then decides: refused (409, nothing removed) while an optimization or a hire check of the
  * company is queued or running, in "before a date" mode when the date would split a Bring forward or a plan
  * from its orders, when there is more to remove than the preview the admin was shown
  * (PREVIEW_STALE), and when the removal includes loads that left or orders and links from today on
  * without the extra tick (LIVE_DATA_CONFIRM). Plans and orders are deleted by the exact ids read
  * under the locks, children first (START_FRESH_DELETE_ORDER), so RouteAssignment.orderId (RESTRICT),
- * UnservedOrder.orderId and the Bring forward links (NO ACTION) never refuse; delivery results and
- * driver links by the company and the date, so a row written before those statements goes too.
+ * UnservedOrder.orderId and the Bring forward links (NO ACTION) never refuse; delivery results,
+ * driver links and the operations alerts of those days by the company and the date, so a row written
+ * before those statements goes too. The alerts are derived from what is removed: they are counted in the
+ * audit row (alertsRemoved), not on the panel.
  * Every statement names the company (tenantId) or ids read for it. Lists are sent in parts
  * (IN_LIST_PART: PostgreSQL's bind parameter limit).
  */
@@ -54,6 +59,7 @@ import { FROZEN } from './dispatch/load-state';
 import { DEFAULT_TZ, addDaysIso, dateOnly, isoOf, todayIso, zonedDayStart } from './dispatch/time';
 import { outcomesLockKey } from './delivery/locks';
 import { driverLinkLockKey } from './driver-link/service';
+import { lockTenantAlerts } from './alerts/locks';
 import {
   startFreshHasLive,
   startFreshLiveText,
@@ -95,6 +101,8 @@ export const START_FRESH_DELETE_ORDER = [
   'truckPosition',
   'ivmsEvent',
   'ivmsTruckDay',
+  // Operations alerts (16 Oct 2026): the days' alert rows (no foreign keys; derived from the rows above).
+  'opsAlert',
   'driver',
 ] as const;
 
@@ -573,8 +581,11 @@ export async function previewStartFresh(tenantId: string, before: string | null,
   return (await collect(db, await scopeOf(db, tenantId, before, opts.now ?? new Date()))).report;
 }
 
-/** Delete everything in `sets` and the delivery results in scope, children first (START_FRESH_DELETE_ORDER). The numbers actually deleted. */
-async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<Partial<StartFreshRemoved>> {
+/**
+ * Delete everything in `sets` and the delivery results in scope, children first (START_FRESH_DELETE_ORDER).
+ * The numbers actually deleted, and the operations alerts of those days (not a panel line: derived data).
+ */
+async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<{ removed: Partial<StartFreshRemoved>; alerts: number }> {
   const t = s.tenantId;
   // 1. Plans: the rows that name orders (stops, unserved rows) and the retired driver app's rows first.
   const unserved = await deleteIn(sets.scenarioIds, (part) => tx.unservedOrder.deleteMany({ where: { scenarioId: { in: part } } }));
@@ -627,6 +638,9 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<Partial<StartFre
     (await tx.truckPosition.deleteMany({ where: gw.position })).count +
     (await tx.ivmsEvent.deleteMany({ where: gw.event })).count +
     (await tx.ivmsTruckDay.deleteMany({ where: gw.day })).count;
+  // The operations alerts of those days (16 Oct 2026), by the company and the date as well: the company's
+  // alert lock (taken last in runStartFresh) keeps a sweep from writing new ones until the run commits.
+  const alerts = (await tx.opsAlert.deleteMany({ where: dayWhere })).count;
 
   // 4. One-day hired trucks of the days in scope, read again here (a truck rented since the check
   // goes too): deleted, or retired while a row that stays names one.
@@ -637,24 +651,27 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<Partial<StartFre
   const drivers = await deleteIn(casual, (part) => tx.driver.deleteMany({ where: { tenantId: t, casual: true, id: { in: part } } }));
 
   return {
-    uploadBatches: batches,
-    orders,
-    orderLines: lines,
-    planVersions: plans,
-    planOptions: options,
-    optimizationJobs: jobs,
-    loads,
-    stops,
-    unserved,
-    driverLinks: links,
-    stopVisits: visits,
-    stopEvents: events,
-    deliveryPhotos: photos,
-    dailyDrivers: drivers,
-    hiredTrucks: hired.deleted + hired.retired,
-    baselines,
-    oldDriverApp: shifts + positions + proofs,
-    ...(gps > 0 ? { gpsTracking: gps } : {}),
+    removed: {
+      uploadBatches: batches,
+      orders,
+      orderLines: lines,
+      planVersions: plans,
+      planOptions: options,
+      optimizationJobs: jobs,
+      loads,
+      stops,
+      unserved,
+      driverLinks: links,
+      stopVisits: visits,
+      stopEvents: events,
+      deliveryPhotos: photos,
+      dailyDrivers: drivers,
+      hiredTrucks: hired.deleted + hired.retired,
+      baselines,
+      oldDriverApp: shifts + positions + proofs,
+      ...(gps > 0 ? { gpsTracking: gps } : {}),
+    },
+    alerts,
   };
 }
 
@@ -694,6 +711,8 @@ export async function runStartFresh(
         await tx.$queryRaw`SELECT id FROM "RunPlan" WHERE "tenantId" = ${tenantId} ORDER BY id FOR UPDATE`;
         await tx.$queryRaw`SELECT id FROM "DriverLink" WHERE "tenantId" = ${tenantId} ORDER BY id FOR UPDATE`;
       }
+      // Operations alerts (16 Oct 2026): a sweep in flight finishes first; none starts until this commits.
+      await lockTenantAlerts(tx, tenantId);
       const { sets, report } = await collect(tx, s);
       const blocker = report.blockers[0];
       if (blocker) throw new StartFreshRefused(blocker.message, blocker.code);
@@ -704,7 +723,7 @@ export async function runStartFresh(
       if (startFreshHasLive(report.live) && opts.liveDataConfirmed !== true) {
         throw new StartFreshRefused(`${startFreshLiveText(report.live)} Nothing was removed. If they are test data, tick that and press Remove again.`, 'LIVE_DATA_CONFIRM');
       }
-      const done = await removeAll(tx, s, sets);
+      const { removed: done, alerts } = await removeAll(tx, s, sets);
       const result: StartFreshReport = { ...report, removed: { ...report.removed, ...done } };
       // The preview counted GPS rows and the run found none left (the janitor's retention got there first).
       if (result.removed.gpsTracking !== undefined && done.gpsTracking === undefined) result.removed.gpsTracking = 0;
@@ -723,6 +742,8 @@ export async function runStartFresh(
             live: result.live,
             backupConfirmed: true,
             liveDataConfirmed: opts.liveDataConfirmed === true,
+            // Operations alerts of the removed days (derived from them; not a line on the panel).
+            alertsRemoved: alerts,
             by: { name: actor.name ?? null, email: actor.email ?? null },
           } as unknown as Prisma.InputJsonValue,
           ip,

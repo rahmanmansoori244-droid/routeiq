@@ -180,6 +180,74 @@ describe('PATCH /api/tenant/config as the dispatcher (PLANNER, owner decision 29
   });
 });
 
+describe('PATCH /api/tenant/config: operations alerts (owner request 16 Oct 2026)', () => {
+  beforeEach(() => {
+    Object.assign(state.config, { alertsEnabled: false, alertsEnabledAt: null, alertUnloadOverMin: 30, alertLoadingOverMin: null, alertQuietFromMin: 1320, alertQuietToMin: 360, alertEmails: null });
+  });
+
+  it('switching alerts on stamps the moment (no backlog); saving again or switching off keeps it', async () => {
+    const before = Date.now();
+    expect((await patch({ config: { alertsEnabled: true }, expect: { config: { alertsEnabled: false } } })).status).toBe(200);
+    const stamped = state.config.alertsEnabledAt as Date;
+    expect(stamped).toBeInstanceOf(Date);
+    expect(stamped.getTime()).toBeGreaterThanOrEqual(before);
+    // The audit row names the field the admin changed.
+    expect(state.audits.at(-1)!.afterJson).toEqual({ tenant: {}, config: { alertsEnabled: true } });
+    expect((await patch({ config: { alertUnloadOverMin: 45 } })).status).toBe(200);
+    expect(state.config.alertsEnabledAt).toBe(stamped);
+    expect((await patch({ config: { alertsEnabled: true } })).status).toBe(200);
+    expect(state.config.alertsEnabledAt).toBe(stamped);
+    expect((await patch({ config: { alertsEnabled: false } })).status).toBe(200);
+    expect(state.config.alertsEnabledAt).toBe(stamped);
+    // alertsEnabledAt itself is never a field a save can set.
+    expect((await patch({ config: { alertsEnabledAt: new Date().toISOString() } })).status).toBe(400);
+  });
+
+  it('a threshold is within its bounds or empty (the rule off); the loading rule switches on at 40', async () => {
+    expect((await patch({ config: { alertUnloadOverMin: 4 } })).status).toBe(400);
+    expect((await patch({ config: { alertUnloadOverMin: 481 } })).status).toBe(400);
+    expect((await patch({ config: { alertEtaLateMin: 30.5 } })).status).toBe(400);
+    expect((await patch({ config: { alertUnloadOverMin: null } })).status).toBe(200);
+    expect(state.config.alertUnloadOverMin).toBeNull();
+    expect((await patch({ config: { alertLoadingOverMin: 40 } })).status).toBe(200);
+    expect(state.config.alertLoadingOverMin).toBe(40);
+  });
+
+  it('the quiet hours have both ends or none, and different ones', async () => {
+    const one = await patch({ config: { alertQuietToMin: null } });
+    expect(one.status).toBe(400);
+    expect(JSON.stringify(await one.json())).toMatch(/both a start and an end/);
+    const same = await patch({ config: { alertQuietFromMin: 360 } });
+    expect(same.status).toBe(400);
+    expect(JSON.stringify(await same.json())).toMatch(/another time/);
+    expect((await patch({ config: { alertQuietFromMin: null, alertQuietToMin: null } })).status).toBe(200);
+    expect((await patch({ config: { alertQuietFromMin: 1380, alertQuietToMin: 300 } })).status).toBe(200);
+    expect(state.updates).toHaveLength(2);
+  });
+
+  it('the recipients: at most 5 addresses, stored one way; a typo is refused; empty = in the app only', async () => {
+    expect((await patch({ config: { alertEmails: ' Owner@Ops.example; second@ops.example ,owner@ops.example ' } })).status).toBe(200);
+    expect(state.config.alertEmails).toBe('Owner@Ops.example, second@ops.example');
+    const typo = await patch({ config: { alertEmails: 'owner@ops' } });
+    expect(typo.status).toBe(400);
+    expect(JSON.stringify(await typo.json())).toMatch(/not an e-mail address/);
+    expect((await patch({ config: { alertEmails: 'a@x.example b@x.example c@x.example d@x.example e@x.example f@x.example' } })).status).toBe(400);
+    expect((await patch({ config: { alertEmails: '' } })).status).toBe(200);
+    expect(state.config.alertEmails).toBeNull();
+  });
+
+  it('a dispatcher (or supervisor) cannot change an alert setting (403 ADMIN_ONLY_SETTING)', async () => {
+    for (const role of ['PLANNER', 'SUPERVISOR']) {
+      state.role = role;
+      const res = await patch({ config: { alertsEnabled: true } });
+      expect(res.status, role).toBe(403);
+      expect((await res.json()).error).toMatchObject({ code: 'ADMIN_ONLY_SETTING', fields: ['alertsEnabled'] });
+    }
+    expect(state.config.alertsEnabled).toBe(false);
+    expect(state.updates).toEqual([]);
+  });
+});
+
 describe('PATCH /api/tenant/config: the GPS tracking settings (IVMS live link, 16 Oct 2026)', () => {
   beforeEach(() => {
     Object.assign(state.config, { ivmsMode: 'OFF', ivmsFromMin: 300, ivmsToMin: 1380, ivmsPollSec: 60 });

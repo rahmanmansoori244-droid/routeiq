@@ -227,6 +227,12 @@ function seedCompany(tenantId: string, p: string) {
     { id: `${p}a2`, action: 'CASUAL_DRIVER_ADDED', entity: 'Driver' },
   ]);
   push('customerTypeProfile', [{ id: `${p}ctp` }]);
+  // Operations alerts (16 Oct 2026): one of the 2nd, one of the 6th; the e-mail records (counts only) stay.
+  push('opsAlert', [
+    { id: `${p}al2`, depotId: `${p}dep`, deliveryDate: day('2026-10-02'), rule: 'ETA_LATE', subjectKey: `${p}dep|2026-10-02|${p}t1|1` },
+    { id: `${p}al6`, depotId: `${p}dep`, deliveryDate: day('2026-10-06'), rule: 'DEPART_LATE', subjectKey: `${p}dep|2026-10-06|${p}t1|1` },
+  ]);
+  push('opsAlertDigest', [{ id: `${p}ad1`, createdAt: new Date('2026-10-02T06:00:00Z'), alertCount: 1, highCount: 1, recipientCount: 1 }]);
   // The hire suggestion: no check running (a running one refuses the run).
   tables.hireSuggestion ??= [];
   // IVMS live link (16 Oct 2026): the GPS tracking tables exist, empty (a company that never used the link).
@@ -400,9 +406,11 @@ describe('run: everything', () => {
     const r = await run(null, {}, '10.0.0.1');
 
     // Nothing left of the activity data of company A.
-    for (const m of ['uploadBatch', 'order', 'orderLine', 'intakeLineKey', 'runPlan', 'scenarioResult', 'unservedOrder', 'planLoad', 'routeAssignment', 'runJob', 'manualBaseline', 'manualBaselineAssignment', 'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'driverShift', 'truckLocation', 'deliveryProof']) {
+    for (const m of ['uploadBatch', 'order', 'orderLine', 'intakeLineKey', 'runPlan', 'scenarioResult', 'unservedOrder', 'planLoad', 'routeAssignment', 'runJob', 'manualBaseline', 'manualBaselineAssignment', 'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'driverShift', 'truckLocation', 'deliveryProof', 'opsAlert']) {
       expect(idsOf(m, 'a'), m).toEqual([]);
     }
+    // Operations alerts (16 Oct 2026): the alert rows go with their days; the e-mail records (counts only) stay.
+    expect(idsOf('opsAlertDigest', 'a')).toEqual(['aad1']);
     // Daily drivers: only the truck's default driver stays; the regular driver stays.
     expect(idsOf('driver', 'a')).toEqual(['acas2', 'areg1']);
     // Masters unchanged.
@@ -416,8 +424,10 @@ describe('run: everything', () => {
     expect(auditA.map((a) => a.action)).toEqual(['LOAD_DISPATCHED', 'CASUAL_DRIVER_ADDED', 'TEST_DATA_CLEARED']);
     const row = auditA[2]!;
     expect(row).toMatchObject({ userId: 'uA', entity: 'Tenant', entityId: 'tA', ip: '10.0.0.1' });
-    expect(row.afterJson).toMatchObject({ before: null, removed: r.removed, kept: r.kept, backupConfirmed: true, by: { name: 'Owner', email: 'owner@a.example' } });
+    expect(row.afterJson).toMatchObject({ before: null, removed: r.removed, kept: r.kept, backupConfirmed: true, alertsRemoved: 2, by: { name: 'Owner', email: 'owner@a.example' } });
     expect(r.removed).toMatchObject({ orders: 4, planVersions: 4, dailyDrivers: 3, stopEvents: 4, oldDriverApp: 3 });
+    // The alerts are not a line of the panel (derived data: a new alert would make the preview stale).
+    expect(r.removed).not.toHaveProperty('opsAlerts');
   });
 
   it('deletes children before the rows they point at (the documented order)', async () => {
@@ -467,7 +477,12 @@ describe('run: everything', () => {
     expect(calls[2]!.values[0]).toEqual(['driver-link:tA|at1|2026-10-02', 'driver-link:tA|at1|2026-10-03']);
     expect(calls[3]!.sql).toMatch(/SELECT id FROM "RunPlan" WHERE "tenantId" = \? AND "runDate" < \?::date ORDER BY id FOR UPDATE/);
     expect(calls[4]!.sql).toMatch(/SELECT id FROM "DriverLink" WHERE "tenantId" = \? AND "deliveryDate" < \?::date ORDER BY id FOR UPDATE/);
-    expect(calls).toHaveLength(5);
+    // Operations alerts (16 Oct 2026): the company's alert lock last (lib/alerts/locks.ts), so no sweep writes rows meanwhile.
+    expect(calls[5]!.sql).toMatch(/pg_advisory_xact_lock\(hashtextextended\(\?, 0\)\)/);
+    expect(calls[5]!.values[0]).toBe('ops-alerts:tA');
+    expect(calls).toHaveLength(6);
+    // Only the days before the date: the alert of the 6th stays.
+    expect(idsOf('opsAlert', 'a')).toEqual(['aal6']);
   });
 
   it('everything: the same locks for every day of the company', async () => {
@@ -479,6 +494,8 @@ describe('run: everything', () => {
       'SELECT 1 AS locked FROM unnest(?::text[]) AS k(key), LATERAL pg_advisory_xact_lock(hashtextextended(k.key, 0))',
       'SELECT id FROM "RunPlan" WHERE "tenantId" = ? ORDER BY id FOR UPDATE',
       'SELECT id FROM "DriverLink" WHERE "tenantId" = ? ORDER BY id FOR UPDATE',
+      // Operations alerts (16 Oct 2026): the company's alert lock.
+      'SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(?, 0))',
     ]);
   });
 

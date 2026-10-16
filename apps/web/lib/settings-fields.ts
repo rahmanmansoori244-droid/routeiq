@@ -1,11 +1,42 @@
 /**
  * The tenant settings the Settings page edits (review F21): exactly the fields of
  * tenantConfigSchema, i.e. the ones the daily dispatch planner reads, and the web-only ones beside
- * them (the driver page's, the IVMS live link's). Kept in a plain module so both the server page and
- * the client form can import it.
+ * them (the driver page's, the operations alerts', the IVMS live link's). Kept in a plain module so both
+ * the server page and the client form can import it.
  */
 import type { TenantConfig } from '@prisma/client';
+import { ALERT_EMAIL_EVERY_BOUNDS, ALERT_QUIET_BOUNDS, ALERT_THRESHOLD_BOUNDS } from './alerts/catalog';
 import { IVMS_SETTINGS_FIELDS } from './ivms/settings';
+
+/**
+ * Operations alerts (owner request 16 Oct 2026, lib/alerts/catalog.ts): company admin only. The master
+ * switch first; the rest is shown on Settings only while it is on (ALERT_DETAIL_FIELDS). Not read by the
+ * optimizer. `alertsEnabledAt` is not a field: the save that switches alerts on sets it.
+ */
+export const ALERT_SETTINGS_FIELDS = [
+  'alertsEnabled',
+  'alertUnloadOverMin',
+  'alertLoadingOverMin',
+  'alertEtaLateMin',
+  'alertDepartLateMin',
+  'alertSilentMin',
+  'alertPageNotOpenedMin',
+  'alertAfterClosingMin',
+  'alertPriorityMax',
+  'alertDeliveredNote',
+  'alertProofFarM',
+  'alertNotClosedMin',
+  'alertEmails',
+  'alertEmailEveryMin',
+  'alertEmailMinSeverity',
+  'alertQuietFromMin',
+  'alertQuietToMin',
+] as const satisfies readonly (keyof TenantConfig)[];
+export type AlertSettingsField = (typeof ALERT_SETTINGS_FIELDS)[number];
+/** The alert settings Settings shows only while the master switch is on. */
+export const ALERT_DETAIL_FIELDS: readonly Exclude<AlertSettingsField, 'alertsEnabled'>[] = ALERT_SETTINGS_FIELDS.filter(
+  (k): k is Exclude<AlertSettingsField, 'alertsEnabled'> => k !== 'alertsEnabled',
+);
 
 export const SETTINGS_FIELDS = [
   'shiftStartMin',
@@ -46,6 +77,8 @@ export const SETTINGS_FIELDS = [
   'photoRetentionDays',
   'locationRetentionDays',
   'dispatcherPhone',
+  // Operations alerts (owner request 16 Oct 2026): company admin only.
+  ...ALERT_SETTINGS_FIELDS,
   // The IVMS live link (Ayun GPS trackers, 16 Oct 2026): company admin only, never read by the planner
   // (lib/ivms/settings.ts IVMS_SETTINGS_FIELDS, the same order).
   ...IVMS_SETTINGS_FIELDS,
@@ -65,6 +98,34 @@ export const DELIVERY_SETTING_BOUNDS = {
   photoRetentionDays: { min: 30, max: 1095 },
   locationRetentionDays: { min: 30, max: 1095 },
 } as const;
+
+/**
+ * Bounds of the operations-alert settings (web only: the optimizer never reads them): each rule's
+ * threshold (NULL = the rule is off), the e-mail interval (0 = never) and the quiet hours (minutes from
+ * local midnight). The database CHECKs the same (migration 20261016180000_ops_alerts).
+ */
+export const ALERT_SETTING_BOUNDS = {
+  ...ALERT_THRESHOLD_BOUNDS,
+  alertEmailEveryMin: ALERT_EMAIL_EVERY_BOUNDS,
+  alertQuietFromMin: ALERT_QUIET_BOUNDS,
+  alertQuietToMin: ALERT_QUIET_BOUNDS,
+} as const;
+
+/**
+ * The quiet hours (no alert e-mail, 22:00-06:00 by default) are both set and different, or both empty
+ * (none). Only a save that changes either is held to it (the route and the form alike).
+ */
+export function alertQuietSaveProblem(
+  changed: Record<string, unknown>,
+  merged: { alertQuietFromMin: number | null; alertQuietToMin: number | null },
+): string | null {
+  if (!('alertQuietFromMin' in changed) && !('alertQuietToMin' in changed)) return null;
+  const from = merged.alertQuietFromMin;
+  const to = merged.alertQuietToMin;
+  if ((from == null) !== (to == null)) return 'Quiet hours need both a start and an end (or neither, for no quiet hours).';
+  if (from != null && from === to) return 'Quiet hours must end at another time than they start.';
+  return null;
+}
 
 /**
  * Positions are never kept longer than the photos (spec 12.4): a save that changes either retention

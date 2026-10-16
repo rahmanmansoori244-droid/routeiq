@@ -364,6 +364,49 @@ describe('tenantDb isolation (Phase 1 scope)', () => {
     await prisma.planLoad.deleteMany({ where: { tenantId: { in: [tenantAId, tenantBId] } } });
   });
 
+  it('OpsAlert and OpsAlertDigest (owner request 16 Oct 2026) are scoped both ways: reads, acknowledge and writes', async () => {
+    // The same rule and subject key in both companies (the unique key includes tenantId).
+    const subjectKey = 'D1|2026-10-16|T1|1|3';
+    const seedAlerts = async (tid: string, tag: string) => {
+      const db = tenantDb(tid);
+      const alert = await db.opsAlert.create({
+        data: {
+          depotId: 'D1', deliveryDate: new Date('2026-10-16T00:00:00Z'), rule: 'UNLOAD_OVER', subjectKey, truckId: 'T1', truckCode: 'T05', loadNo: 1, sequence: 3,
+          kind: 'CONDITION', severity: 'WARN', tier: 1, value: 35, threshold: 30, text: `${tag} T05 L1 stop 3 Shop Example C: unloading 35 min over`,
+          occurredAt: new Date('2026-10-16T06:10:00Z'),
+        } as Any,
+      });
+      const digest = await db.opsAlertDigest.create({ data: { alertCount: 1, highCount: 0, recipientCount: 1 } as Any });
+      return { alert, digest };
+    };
+    const a = await seedAlerts(tenantAId, 'A');
+    const b = await seedAlerts(tenantBId, 'B');
+    for (const [tid, own, other] of [
+      [tenantAId, a, b],
+      [tenantBId, b, a],
+    ] as const) {
+      const db = tenantDb(tid);
+      expect((await db.opsAlert.findMany()).map((r) => r.id)).toEqual([own.alert.id]);
+      expect(await db.opsAlert.findUnique({ where: { id: other.alert.id } })).toBeNull();
+      expect(await db.opsAlert.count({ where: { resolvedAt: null, ackedAt: null } })).toBe(1);
+      expect((await db.opsAlertDigest.findMany()).map((r) => r.id)).toEqual([own.digest.id]);
+    }
+    // Acknowledging the other company's ids changes nothing there (the ack route then answers 404).
+    const acked = await tenantDb(tenantAId).opsAlert.updateMany({ where: { id: { in: [b.alert.id] }, ackedAt: null }, data: { ackedAt: new Date(), ackedById: userAId } });
+    expect(acked.count).toBe(0);
+    expect((await tenantDb(tenantBId).opsAlert.findFirst())?.ackedAt).toBeNull();
+    // A sweep's insert of an existing subject is skipped, and only within the company itself.
+    const again = await tenantDb(tenantAId).opsAlert.createMany({
+      data: [{ depotId: 'D1', deliveryDate: new Date('2026-10-16T00:00:00Z'), rule: 'UNLOAD_OVER', subjectKey, truckId: 'T1', truckCode: 'T05', kind: 'CONDITION', severity: 'WARN', value: 40, threshold: 30, text: 'again', occurredAt: new Date() } as Any],
+      skipDuplicates: true,
+    });
+    expect(again.count).toBe(0);
+    await tenantDb(tenantAId).opsAlert.deleteMany({});
+    await tenantDb(tenantAId).opsAlertDigest.deleteMany({});
+    expect(await tenantDb(tenantBId).opsAlert.count()).toBe(1);
+    expect(await tenantDb(tenantBId).opsAlertDigest.count()).toBe(1);
+  });
+
   it('TruckPosition, TruckTrailPoint, IvmsEvent, IvmsState and IvmsTruckDay (IVMS live link, 16 Oct 2026) are scoped both ways: reads and writes', async () => {
     // Invented data only: the vendor documentation's dummy IMEI in both companies, made-up coordinates.
     const seedIvms = async (tid: string, tag: string) => {

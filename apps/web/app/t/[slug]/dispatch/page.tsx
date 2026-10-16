@@ -1,4 +1,5 @@
 import { getCurrentTenant } from '@/lib/tenant';
+import { prisma } from '@/lib/db';
 import { canManageMasterData, canPlan } from '@/lib/rbac';
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
 import { readIvmsEnv } from '@/lib/ivms/env';
@@ -15,6 +16,9 @@ export default async function DispatchPage({ params, searchParams }: { params: {
   // (positions of people at work). OFF (the default) or the kill switch: nothing changes on this screen.
   const ivms = await db.tenantConfig.findFirst({ select: { ivmsMode: true } });
   const liveMap = canPlan(user.role) && !readIvmsEnv().disabled && ivmsModeAtLeast(ivmsModeOf(ivms), 'MAP');
+  // Operations alerts (owner request 16 Oct 2026): the day's Alerts card, only while they are on and in the
+  // user's own company (the alert API answers for the session's company).
+  const alerts = user.tenantId === tenant.id ? await prisma.tenantConfig.findUnique({ where: { tenantId: tenant.id }, select: { alertsEnabled: true } }) : null;
   return (
     <PageShell
       title="Daily dispatch planning"
@@ -30,6 +34,7 @@ export default async function DispatchPage({ params, searchParams }: { params: {
         initialDepot={searchParams.depot ?? null}
         phoneCountryCode={phoneCountryCode(tenant.country)}
         liveMap={liveMap}
+        alertsEnabled={!!alerts?.alertsEnabled}
       />
     </PageShell>
   );

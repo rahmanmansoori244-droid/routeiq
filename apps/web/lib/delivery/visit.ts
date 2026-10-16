@@ -35,7 +35,7 @@
  */
 import { distanceM } from '../dispatch/snapshots';
 
-export type EventKind = 'ARRIVED' | 'DEPARTED' | 'OUTCOME' | 'PHOTO' | 'BACK_AT_DEPOT' | 'CARRY_CONFLICT';
+export type EventKind = 'ARRIVED' | 'DEPARTED' | 'OUTCOME' | 'PHOTO' | 'BACK_AT_DEPOT' | 'CARRY_CONFLICT' | 'DEPOT_DEPART';
 export type EventSource = 'PHONE_AUTO' | 'PHONE_MANUAL' | 'DISPATCHER' | 'AYUN' | 'SYSTEM';
 export type OutcomeName = 'DELIVERED' | 'PARTLY_DELIVERED' | 'NOT_DELIVERED';
 
@@ -352,7 +352,8 @@ function withGps(v: VisitState, gpsEvents: readonly VisitEvent[], ctx: VisitCont
 /** The visit from the driver's and the office's events (spec section 8.4): the rebuild with the IVMS link off. */
 function deriveOwnVisit(events: readonly VisitEvent[], ctx: VisitContext): VisitState {
   const maxAfter = (ctx.maxAfterOutcomeMin ?? 15) * 60_000;
-  const evs = events.filter((e) => e.kind !== 'CARRY_CONFLICT' && e.kind !== 'BACK_AT_DEPOT');
+  // Load-level events (Back at depot, Leaving for next load) never belong to a visit; ignored if given.
+  const evs = events.filter((e) => e.kind !== 'CARRY_CONFLICT' && e.kind !== 'BACK_AT_DEPOT' && e.kind !== 'DEPOT_DEPART');
   // 1. Result.
   const res = resultEvent(evs);
   const rp = res?.payload ?? null;

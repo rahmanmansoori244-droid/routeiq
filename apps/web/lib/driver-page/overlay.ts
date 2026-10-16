@@ -7,6 +7,7 @@
  * - an unsent result shows with "Saved on phone - waiting to send" and ends the stop for the tracker;
  * - an unsent arrival shows "Arrived 10:02" and the running timer;
  * - an unsent Back at depot closes the trip on the phone (the tracker moves to the next trip);
+ * - an unsent Leaving for next load shows the trip as left (the latest tap, on the phone or the server);
  * - a server result that differs from what this phone sent, with nothing left to send for the stop,
  *   shows "Changed by office / another phone" instead of flipping silently.
  */
@@ -53,7 +54,16 @@ export interface StopView {
 }
 
 export type OverlayStop = ManifestStop & { view: StopView };
-export type OverlayLoad = Omit<ManifestLoad, 'stops'> & { stops: OverlayStop[]; back: boolean; backAt: number | null; backPending: boolean };
+export type OverlayLoad = Omit<ManifestLoad, 'stops'> & {
+  stops: OverlayStop[];
+  back: boolean;
+  backAt: number | null;
+  backPending: boolean;
+  /** "Leaving for next load" was tapped for this load (the truck left the depot with it): on the server or still on the phone. */
+  left: boolean;
+  leftAt: number | null;
+  leftPending: boolean;
+};
 
 const ms = (iso: string | null | undefined): number | null => {
   if (!iso) return null;
@@ -124,11 +134,22 @@ export function applyQueued(m: Pick<DriverManifest, 'loads'>, items: readonly Qu
     const backItem = actions.find((i) => (i.body as DriverAction).type === 'BACK_AT_DEPOT' && manifestLoadKey(m.loads, i) === l.key);
     const serverBack = ms(l.backAtDepotAt);
     const backAt = serverBack ?? (backItem ? ms((backItem.body as DriverAction).at) : null);
+    // Held too (a load still Planned keeps it on the phone until it is locked): it was tapped. The latest
+    // tap, on the server or still on the phone, is the one shown (a tap too early is corrected by tapping again).
+    const phoneLeft = items
+      .filter((i) => i.kind === 'action' && (i.body as DriverAction).type === 'DEPOT_DEPART' && manifestLoadKey(m.loads, i) === l.key)
+      .map((i) => ms((i.body as DriverAction).at))
+      .reduce<number | null>((a, t) => (t !== null && (a === null || t > a) ? t : a), null);
+    const serverLeft = ms(l.leftDepotAt);
+    const leftAt = serverLeft !== null && phoneLeft !== null ? Math.max(serverLeft, phoneLeft) : (serverLeft ?? phoneLeft);
     return {
       ...l,
       back: backAt !== null,
       backAt,
       backPending: serverBack === null && !!backItem,
+      left: leftAt !== null,
+      leftAt,
+      leftPending: phoneLeft !== null && (serverLeft === null || phoneLeft > serverLeft),
       stops: l.stops.map((s) => ({ ...s, view: stopView(s, l, actions.filter((i) => stopOf.get(i) === s.key), live.filter((i) => i.kind === 'photo' && stopOf.get(i) === s.key).length, sent[s.key]) })),
     };
   });
@@ -187,6 +208,32 @@ function stopView(s: ManifestStop, l: ManifestLoad, mine: QueueItem[], localPhot
   }
   if (!mine.length && sentByPhone && r && (r.outcome ?? null) !== sentByPhone.outcome) base.changedByOffice = true;
   return base;
+}
+
+/** After a Leaving for next load tap, it is offered again this long (to correct a tap made too early). */
+export const LEAVE_RETAP_MIN = 30;
+
+/**
+ * "Leaving for next load" (owner decision 16 Oct 2026, pure): offered after Back at depot of a trip when
+ * the truck has a later trip that day - never after the last one. The latest trip that is back decides:
+ * its next trip (departure order) must not be back or completed yet, have no arrival or result at a stop
+ * yet (the truck is already out), be at the same depot (no turnaround is measured across two depots:
+ * second review of 16 Oct 2026, finding 5) and name its depot (the action needs it). Once tapped it is
+ * offered again for LEAVE_RETAP_MIN after the tap (`now`; without it, not again): a tap made too early is
+ * corrected by tapping again, the latest one counts (finding 2). `from`: the trip the truck came back
+ * from; `to`: the one it leaves with.
+ */
+export function leaveOffer(loads: readonly OverlayLoad[], now?: number): { from: OverlayLoad; to: OverlayLoad } | null {
+  for (let i = loads.length - 2; i >= 0; i--) {
+    const from = loads[i]!;
+    if (!from.back) continue;
+    const to = loads[i + 1]!;
+    if (to.back || to.status === 'COMPLETED' || !to.depotId || to.depotId !== from.depotId) return null;
+    if (to.stops.some((s) => s.view.arrivedAt !== null || s.view.doneAt !== null)) return null;
+    if (to.left && (now === undefined || to.leftAt === null || now - to.leftAt > LEAVE_RETAP_MIN * 60_000)) return null;
+    return { from, to };
+  }
+  return null;
 }
 
 /**

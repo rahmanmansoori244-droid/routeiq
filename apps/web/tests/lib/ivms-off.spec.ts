@@ -57,10 +57,12 @@ vi.mock('@/lib/delivery/event-service', () => ({ completeReturnedLoads: async ()
 vi.mock('@/lib/jobs/delivery-janitor', () => ({ runDeliveryJanitor: async () => ({ photos: { count: 0 }, locations: { events: 0, visits: 0, photos: 0, links: 0 }, casual: null }) }));
 vi.mock('@/lib/dispatch/hire-whatif', () => ({ failLostHireChecks: async () => 0, retireOneDayTrucks: async () => 0 }));
 
+import { prisma } from '@/lib/db';
 import { GET as cronGet } from '@/app/api/cron/janitor/route';
 import { GET as healthGet } from '@/app/api/health/route';
 import { _resetIvmsProcessState } from '@/lib/ivms/poll';
 import { purgeIvmsData } from '@/lib/ivms/retention';
+import { resetAlertSweepClock } from '@/lib/alerts/sweep';
 import { driverTracesSampler, scrubBreadcrumb, scrubDriverToken, scrubIvmsSecrets, scrubSentryEvent } from '@/lib/observability-scrub';
 import { KEY, SECRET } from './ivms-fakes';
 
@@ -78,6 +80,9 @@ beforeEach(() => {
   db.state = null;
   _resetIvmsProcessState();
   for (const k of [...Object.keys(AYUN), 'ROUTEIQ_DISABLE_IVMS', 'SOLVER_URL', 'SOLVER_TOKEN']) vi.stubEnv(k, '');
+  // The operations-alert sweep (main, merged 16 Oct 2026) has its own spec (alert-sweep.spec.ts): off here, so
+  // the cron answer stays the same bytes (the sweep's report carries its duration). `alerts` is then null.
+  vi.stubEnv('ROUTEIQ_DISABLE_ALERTS', '1');
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -94,6 +99,7 @@ describe('OFF: the existing answers are byte-identical', () => {
         returnedLoads: { completed: 0, checked: 2 },
         deliveryRetention: { photos: { count: 0 }, locations: { events: 0, visits: 0, photos: 0, links: 0 }, casual: null },
         hire: { lostChecks: 0, oneDayTrucksRetired: 0 },
+        alerts: null,
       },
       error: null,
     });
@@ -185,6 +191,26 @@ describe('in use: the counters, never a secret', () => {
     db.mode = 'MAP';
     const body = JSON.parse(await (await cronGet(req('/api/cron/janitor'))).text());
     expect(body.data.ivms).toEqual({ tick: { mode: 'MAP', skipped: 'NOTHING_OUT' }, retention: null });
+  });
+
+  it('merge with the operations alerts (16 Oct 2026): the alert sweep has its own try; its database error never hides the IVMS answer', async () => {
+    setAyun();
+    db.mode = 'MAP';
+    vi.stubEnv('ROUTEIQ_DISABLE_ALERTS', '');
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.mocked(prisma.tenantConfig.findMany).mockRejectedValueOnce(Object.assign(new Error('connection lost'), { code: 'P1001' }));
+    const res = await cronGet(req('/api/cron/janitor'));
+    expect(res.status).toBe(200);
+    const body = JSON.parse(await res.text());
+    expect(body.data.alerts).toEqual({ error: 'P1001' });
+    expect(body.data.ivms).toEqual({ tick: { mode: 'MAP', skipped: 'NOTHING_OUT' }, retention: null });
+    expect(errors).toHaveBeenCalledWith('janitor: alerts failed', 'P1001');
+    // Alerts on and nothing wrong: the sweep's report (no company has them on here) beside the IVMS answer.
+    _resetIvmsProcessState();
+    const ok = JSON.parse(await (await cronGet(req('/api/cron/janitor'))).text());
+    expect(ok.data.alerts).toMatchObject({ tenants: 0, failed: 0, raised: 0 });
+    expect(ok.data.ivms).toEqual({ tick: { mode: 'MAP', skipped: 'NOTHING_OUT' }, retention: null });
+    resetAlertSweepClock();
   });
 });
 

@@ -11,6 +11,8 @@ import { reapStaleShifts } from './shift-janitor';
 import { completeReturnedLoads } from '../delivery/event-service';
 import { runDeliveryJanitor } from './delivery-janitor';
 import { failLostHireChecks, retireOneDayTrucks } from '../dispatch/hire-whatif';
+import { runAlertSweep } from '../alerts/sweep';
+import { sendAlertDigest } from '../alerts/notify';
 import { startIvmsTimer } from '../ivms/poll';
 import { ivmsRetentionChanged, runIvmsRetention } from '../ivms/retention';
 
@@ -52,7 +54,7 @@ async function sweep() {
   // most every 10 min (the daily drivers once a day). Its own try as well.
   try {
     const kept = await runDeliveryJanitor();
-    if (kept && (kept.photos.count || kept.locations.events || kept.locations.visits || kept.locations.photos || kept.casual?.deactivated || kept.casual?.phonesCleared)) {
+    if (kept && (kept.photos.count || kept.locations.events || kept.locations.visits || kept.locations.photos || kept.casual?.deactivated || kept.casual?.phonesCleared || kept.alerts?.alerts || kept.alerts?.digests)) {
       console.warn('janitor: delivery retention', kept);
     }
   } catch (err) {
@@ -65,6 +67,17 @@ async function sweep() {
     if (ivmsRetentionChanged(gps)) console.warn('janitor: GPS tracking retention', gps);
   } catch (err) {
     console.error('janitor: GPS tracking retention not run', (err as { code?: string } | null)?.code ?? (err as Error)?.name ?? 'error');
+  }
+  // Operations alerts (owner request 16 Oct 2026): the companies that switched them on, at most every
+  // 2 min (lib/alerts/sweep.ts throttles and logs), each followed by its e-mail digest (lib/alerts/notify.ts:
+  // sends only with Resend set up and recipients saved, never in the quiet hours). Its own try as well;
+  // ROUTEIQ_DISABLE_ALERTS=1 skips it.
+  if (process.env.ROUTEIQ_DISABLE_ALERTS !== '1') {
+    try {
+      await runAlertSweep(new Date(), { notify: sendAlertDigest });
+    } catch (err) {
+      console.error('janitor: alerts not checked', (err as Error)?.message ?? err);
+    }
   }
 }
 

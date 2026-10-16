@@ -22,8 +22,19 @@ def _disable_osrm_by_default(monkeypatch):
 def _second_search_off_by_default(monkeypatch):
     """The second route search (PyVRP, on in production) is off unless a test switches it on
     (test_pyvrp_candidate.py, and the parametrized end-to-end tests): every other test keeps its
-    exact behaviour and time."""
+    exact behaviour and time. SOLVER_PYVRP_ALLOWED starts at its production default (skip) whatever
+    the shell running the tests has set."""
     monkeypatch.setenv("SOLVER_PYVRP", "off")
+    monkeypatch.delenv("SOLVER_PYVRP_ALLOWED", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _search_upgrade_settings_at_defaults(monkeypatch):
+    """Best-of-N (best_of.py) and the priority repair start at their production defaults (off) whatever
+    the shell running the tests has set; a test that needs one sets it itself."""
+    for name in ("SOLVER_BEST_OF", "SOLVER_BEST_OF_QUICK", "SOLVER_BEST_OF_SOURCES", "SOLVER_BEST_OF_JOIN_SEC",
+                 "SOLVER_BEST_OF_STRATEGIES", "SOLVER_PRIORITY_REPAIR"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)

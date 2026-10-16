@@ -1670,6 +1670,10 @@ class Source:
 
     name: str
     plan: TimedPlan  # timetable as the search reported it (used as the repack hint)
+    # One of best-of-N's other route searches of RECOMMENDED (dispatch_solver._post_solve's extra_sources): its
+    # plan only adds candidates, so it is repacked after the options' own (build_candidates), and a plan both
+    # make keeps the name of the option's own source.
+    extra: bool = False
 
 
 # The fit pool holds at most this many entries per stop it covers, + one per load + FIT_POOL_MIN (a
@@ -2138,8 +2142,9 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
     if time_raw:
         for src in sources:
             add(src.name, plan_of(src.plan))
-    # Fewest loads first: fewer, fuller loads leave the most room to share trucks.
-    order = sorted(sources, key=lambda s: (sum(len(v) for v in s.plan.values()),
+    # Fewest loads first: fewer, fuller loads leave the most room to share trucks. Best-of-N's other searches
+    # after the options' own (Source.extra): theirs only add candidates (without them, the order from before).
+    order = sorted(sources, key=lambda s: (s.extra, sum(len(v) for v in s.plan.values()),
                                            sum(day.metres(tl.stops) for v in s.plan.values() for tl in v)))
     for n, src in enumerate(order):
         loads = [tl.stops for v in src.plan.values() for tl in v]

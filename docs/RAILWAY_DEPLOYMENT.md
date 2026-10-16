@@ -50,7 +50,7 @@ Follow-ups:
    - Since audit P5 (each uploaded file is read in its own short-lived process): optional `UPLOAD_WORKER_MAX_HEAP_MB` (default 512), `UPLOAD_PARSE_TIMEOUT_MS` (default 15000) and `UPLOAD_PARSE_CONCURRENCY` (default 2) on web; leave them unset unless the owner decides other values. **Memory:** while files are read, the web service needs its own memory plus, for each file read at once, about the heap cap + 150 MB: with the defaults up to about 1.3 GB more (NMWC's real files need about 60-70 MB each). The web process itself also holds the rows of each file being handled: at most 200 cells a row and 2,500,000 cells per file, kept compact (since the P5 second review; the parser's 128 MB answer cap alone did not bound them). Measured: 20-26 MB for the largest legal files, well under 1 MB for NMWC's files; so with two files at once, about 50 MB more at most. This does not bound the upload request itself (P5 third review): the web process reads a whole request body before the 10 MB check, about twice its size in memory, even without a session (a 300 MB request: 500-620 MB more). Unless something in front of the web service caps request bodies (not recorded in the repo), one very large request can take the web service to its memory limit; the cap is an owner question (handbook 7.5). Before the deploy, check the web service's memory limit and its usage in Railway (web → Metrics); if the limit is lower, raise it, or set `UPLOAD_PARSE_CONCURRENCY=1`. The build also makes `apps/web/.next/upload-parser/parse.cjs` (the file reader), and the start command must run in `apps/web`, as `pnpm --filter @routeiq/web start` does. After the deploy the web log shows `[upload-parse] the file reader works (startup check)`; a `[config]` error about the upload file reader means every upload is refused: redeploy with the build command above. No migration; rollback is a redeploy of the previous commit.
    - Since review M3 (the driver sheets are made in their own short-lived process, like uploads): optional `PDF_RENDER_MAX_HEAP_MB` (default 1024), `PDF_RENDER_TIMEOUT_MS` (default 120000) and `PDF_RENDER_CONCURRENCY` (default 2) on web; leave them unset unless the owner decides other values. **Memory:** each pack being made needs about 130 MB for one load and 460-560 MB for a whole day of 300-400 stops (measured), so two whole-day packs next to two large uploads need about 2.5 GB beside the web's own; if the web service's limit is lower, raise it or set `PDF_RENDER_CONCURRENCY=1`. The build also makes `apps/web/.next/pdf-renderer/render.cjs` (`scripts/build-pdf-renderer.mjs`), found by `next start` run in `apps/web`. After the deploy the web log shows `[pdf-render] the driver sheet maker works (startup check)`; a `[config]` error about the driver sheet maker means every driver sheet is refused: redeploy with the build command above. Check one "Driver sheets (PDF)" on the plan screen: the web log shows `[pdf-render] made <n> driver sheet(s), <KB> KB, in <ms> ms, renderer peak <MB> MB (process <pid>)`, and `GET /api/health/live` keeps answering while it is made. No migration; rollback is a redeploy of the previous commit.
 3. **solver** redeploys from `main` with the new OR-Tools engine. `OSRM_URL` is already set.
-   - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools worker processes plus 1 for the PyVRP second search, more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
+   - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools worker processes plus 1 for the PyVRP second search - and K-1 more with best-of-N, `SOLVER_BEST_OF`, off by default - more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
    - Never set `SOLVER_PARALLEL` on the solver: `0` disables every deadline and the time budget (the solver logs an error at startup on Railway when it is set). The same for `SOLVER_ALLOW_INPROCESS_FALLBACK` (rule 22, see "The planner cannot start its worker processes" below).
    - Since stabilization PR4 the solver adds an optional `feasibility` report to every option. Deploy order does not matter: the web treats a missing report as "not checked by the optimizer" and blocks such a plan only on a concrete problem it finds itself.
    - Web and solver build independently. Until the new solver is live, an optimize answers "The route optimizer is being updated. Try again in a minute."
@@ -248,6 +248,15 @@ never worse than the engine alone would have chosen from the same search. See `d
   - `SOLVER_PYVRP_MIN_CPUS` (default 2): the CPU gate. Below it the second search switches itself off (`CPU_GATE`).
   - Optional: `SOLVER_PYVRP_SEED` (1), `SOLVER_PYVRP_STOP_GRACE_SEC` (10). Never set `SOLVER_PYVRP_MAX_ITERS` or
     `SOLVER_PYVRP_STALL_SEC` / `SOLVER_PYVRP_STALL_SHARE` on Railway (tests and development only).
+  - `SOLVER_PYVRP_ALLOWED` (16 Oct 2026; default `skip`): a day with a small-truck-only customer whose list leaves out a
+    truck that can still load. `skip` (unset, or any value other than the two below): the second search does not run on
+    such a day (`pyvrp run=<id> skipped: ALLOWED_TRUCKS`), as since 13 Oct 2026. `thorough`: it runs on Thorough solves,
+    with the lists modelled (a routing profile per truck class, the stops a class may not carry forbidden); `model`: on
+    every solve, Quick solves and hire checks included. Its plans are judged like any day's (the mapping back, the exact
+    timing and the independent check refuse a stop on a truck it may not use). It changes the plans of such days: set it
+    only with the owner's OK after a replay of saved real requests passes (`scripts/bench_search.py`, arm `pyvrp_model`:
+    see "Best-of-N route search and the priority repair" below), `thorough` first, never during the evening's planning (a variable
+    change restarts the solver).
 - **CPU and memory per solve.** One more busy process while the searches run (Quick: the whole search, about 1.5 x the day's
   search time; Thorough: while the engine searches, then until its last better plan is max(30 s, 10% of its search time)
   old, at most until the load re-check's reserve), and its own load re-check job
@@ -266,12 +275,115 @@ never worse than the engine alone would have chosen from the same search. See `d
   the second search's note is one of the plan's own warnings; an old web shows the new status `SECOND_SEARCH` as the code
   itself, a new web as "plan from the second route search").
 - **Verify after the deploy:** the solver's startup log has the line `PyVRP second search: on for every search (pyvrp 0.14.0,
-  effective CPUs N, min 2)` (or `off (...)` with the reason); `GET /ready` (with the solver token, or through the web's
-  `/api/health`) has `"pyvrp": {"enabled": true, "version": "0.14.0", "effective_cpus": N, ...}`, and N is the vCPU count the
+  effective CPUs N, min 2)` (or `off (...)` with the reason); `GET /ready` (with the solver token; the web's `/api/health`
+  passes on only `ok`, `workers` and `routing`) has `"pyvrp": {"enabled": true, "version": "0.14.0", "effective_cpus": N, ...}`, and N is the vCPU count the
   container really gets. One Quick optimization of a normal day: the solver log shows `pyvrp run=<id> done: stop=SEARCH_END ...`
   and, when its plan was used, the option carries the note *"A second route search found a better plan for this option ..."*.
+  With `SOLVER_PYVRP_ALLOWED` set, the startup line ends `; small-truck-only days: modelled (SOLVER_PYVRP_ALLOWED=model)`
+  (or `modelled on Thorough solves (...=thorough)`; a value it does not understand: `skipped (... is not skip, model or
+  thorough)`), `/ready` has `"pyvrp": {..., "allowed": "model"}`, and the next solve of a day with such a customer logs
+  `pyvrp run=<id> model: ... limits=N` instead of `skipped: ALLOWED_TRUCKS`. A day that also has a stop filling a truck
+  alone under the one-customer rule still logs `skipped: FULL_TRUCK` (checked after the lists; not modelled yet): check
+  how many real days that is on the saved requests (`dispatch_solver._full_truck_day`) before counting on the change.
 - **Rollback:** set `SOLVER_PYVRP=off` (no code change). A full rollback to the previous solver image also works: the web
-  treats a missing `search.pyvrp` as "no second search".
+  treats a missing `search.pyvrp` as "no second search". For small-truck-only days only: set `SOLVER_PYVRP_ALLOWED=skip`
+  (or delete it).
+
+## The route engine version: OR-Tools pinned (16 Oct 2026)
+
+`apps/solver/requirements.txt` pins `ortools==9.15.6755`, the version the solver build of 15 Oct 2026 installed. Before, it
+was a range (`>=9.10,<10`) and Railway re-resolves pip on every solver deploy, so any new 9.x would have arrived with the next
+merge to `main`, a docs-only one included. The pin itself changes nothing in production (it installs the same version).
+
+- **A bump is an engine change**, not a routine dependency update: a Dependabot PR that raises it fails
+  `test_ortools_version_is_pinned` on purpose. Merge one only after replaying saved real requests on both versions
+  (`docs/PROJECT_HANDBOOK.md` 5.4), and outside the evening's planning.
+- **Verify after the deploy:** the solver's startup log (`railway logs --service solver`) has the line
+  `Route engine: OR-Tools 9.15.6755 (the version requirements.txt pins)`; any other version logs an ERROR line
+  `Route engine: OR-Tools X is installed, but requirements.txt pins 9.15.6755 ...`. `GET /ready` (with the solver token) has
+  `"ortools": "9.15.6755"`, and the next optimization's stored response (`RunJob.responseJson`) has
+  `search.ortools_version` = `"9.15.6755"`.
+- **Rollback:** revert the commit (the range comes back); the new response field is additive, an old web ignores it.
+
+## Best-of-N route search and the priority repair (16 Oct 2026, both off by default)
+
+Two solver switches ship **off**; with both at their defaults every plan is the one from before (only the timing-drop
+reason and warning texts changed, where they were untrue).
+
+- `SOLVER_BEST_OF` (THOROUGH) / `SOLVER_BEST_OF_QUICK` (QUICK): RECOMMENDED's route search runs K times at once (1-8,
+  default 1). `SOLVER_PRIORITY_REPAIR=on`: after the load re-check, a P1-P3 stop left out while a lower priority rides is
+  put back in its place where it fits. See `docs/PROJECT_HANDBOOK.md` 2.9 and 4.11.
+- **Not yet: turn none on (nor `SOLVER_PYVRP_ALLOWED`, above) before its replay passes.** Each needs a replay of saved
+  real requests with it on and off through `apps/solver/scripts/bench_search.py`, judged by the rule the tool prints,
+  which was written down before any replay ran: over every pair of runs (the same request, mode and repetition, base
+  arm beside the switched one) RECOMMENDED never serves the day worse by priority; every option of every run is
+  VERIFIED; the median paired difference in RECOMMENDED's operating cost is not above 0; every run answers within its cap
+  minus 60 s; no search ends `TIMEOUT` or `LOST`, no solve fails and no worker process is left. An ad-hoc replay is not
+  enough. Then turn one on with the owner's OK, one at a time, and never during the evening's planning: a variable change
+  restarts the solver and cuts any running solve.
+- **The replay** (`scripts/bench_search.py`): never in CI and never against production; one replay at a time on a machine
+  of its own. The saved requests stay outside the repository, which is public (on the codespace, `~/ds-data`), and so
+  does the output: the tool refuses an `--out` folder inside the repository.
+
+  ```
+  cd apps/solver
+  .venv/bin/python scripts/bench_search.py ~/ds-data/day-*-request.json --dry-run
+  .venv/bin/python scripts/bench_search.py ~/ds-data/day-*-request.json --out ~/bench/run1 \
+      --arms base,best_of,pyvrp_model,repair_on,all_on --modes QUICK,THOROUGH --reps 3 --cpu-note "codespace 4 vCPU"
+  .venv/bin/python scripts/bench_search.py --summary-only --out ~/bench/run1
+  ```
+
+  - **Arms.** Presets: `base` (every switch at its default), `best_of` (`SOLVER_BEST_OF=3`, `SOLVER_BEST_OF_QUICK=3`),
+    `pyvrp_model` (`SOLVER_PYVRP_ALLOWED=model`), `repair_on` (`SOLVER_PRIORITY_REPAIR=on`), `all_on`; or your own,
+    separated by `;`: `k4=SOLVER_BEST_OF=4,SOLVER_BEST_OF_SOURCES=2`. Before each run every switch is unset and the arm's
+    own values set; the solver reads them on every solve, and each record keeps them as the solver read them. A variable
+    the solver never reads, or a value it cannot read, is refused. The arms take turns within each repetition (A B C,
+    then B C A), so the two runs of a pair ran minutes apart.
+  - **As production runs a solve:** `optimize_dispatch` in a solve thread, its searches in worker pools
+    (`SOLVER_PARALLEL=1`); `--modes QUICK,THOROUGH` (or `ASKED`, each request's own), THOROUGH with the request's own cap.
+    `MAX_CONCURRENT_DISPATCH=1` in the bench (one solve at a time), so a 4-CPU machine's CPU gate still lets best-of run
+    3 searches; the records and the summary say when the gate cut them. The road matrix is built once per request (OSRM
+    when the bench machine's `OSRM_URL` is set, else straight-line estimates; a request's own `osrm_url` is never
+    called) and every run uses that same matrix. The summary lists what is
+    not production conditions (estimated distances, fewer CPUs, the shell's own `SOLVER_*` / `THOROUGH_*` variables).
+  - **`--dry-run`** checks the requests and the arms, shows each arm's settings as the solver reads them, says whether a
+    day has small-truck-only stops that decide something and a stop that fills a truck alone (PyVRP then skips the day
+    as `FULL_TRUCK` whatever `SOLVER_PYVRP_ALLOWED` says) and the worst-case run time; it solves and writes nothing.
+  - **Output** in `--out`: `results.jsonl` (one line per run: stops and cases left out per P1-P5, trucks, loads,
+    operating cost, km, `used_sec`, stop reason, the best-of report (which search won, its gains), PyVRP's status, the
+    priority repair's actions, warnings with every id replaced by `<id>`, any error); `summary.md` (each arm's verdict
+    per mode, the paired differences per request as median [min, max], and the benefit: wins and losses, service first
+    then cost, with a sign test); `bench.json`; `solver.log` (the solver's own log, which names stop ids). Running the
+    same command again continues a stopped replay; `--stop-after-min` stops it on purpose (a codespace stops after its
+    idle timeout).
+  - **Reading it.** PASS means the switch did no harm on those days, not that it helps: the benefit column says whether
+    it does (p <= 0.10 needs at least 4 decisive pairs). NOT EXERCISED means it never took effect (best-of cut to one
+    search, no small-truck-only day, nothing to repair). Publish only differences and digests (`OPTIMIZER_BENCHMARK.md`),
+    never a real day's totals.
+- **What each one changes.** `SOLVER_BEST_OF_QUICK` changes every Quick solve: the evening's plan when it is a Quick
+  one, every re-plan of the day and the hire check's main solve (its trials always search once). `SOLVER_BEST_OF` changes
+  Thorough solves only; `SOLVER_PRIORITY_REPAIR` every solve but the hire check's trials. Each other search is one more
+  busy worker process for the whole search and holds its own copy of the day's matrices, and the CPU gate counts CPUs
+  only: before choosing K, measure the solver's peak memory with K searches on a 600-stop day with plan continuity on.
+- **Verify after the deploy or a change** (`railway logs --service solver`): the startup lines
+  `Best-of route search: off (one route search per solve; SOLVER_BEST_OF=1, SOLVER_BEST_OF_QUICK=1)` (or
+  `THOROUGH K searches, ...` with `of N asked (CPU_GATE)` when the CPUs allow fewer) and
+  `Priority repair: off (the default; ...)` (or `on (...)`). `GET /ready` (with the solver token) has `best_of`
+  (`effective_thorough`, `effective_quick`) and `priority_repair`. With best-of on, the next optimization's stored response
+  (`RunJob.responseJson`) has `search.best_of.searches` (one entry per search) and the log `best-of run=<id> search i of K ...`
+  lines; with it off, `search.best_of` is null. A value the solver cannot read counts as its default (off for the switches) and
+  is named in the startup line (`...; SOLVER_BEST_OF='10' not read (a whole number from 1 to 8): its default is used)`,
+  `Priority repair: off (SOLVER_PRIORITY_REPAIR='enable' not read: on, 1, true or yes switch it on)`).
+- **The first nights after turning one on:** read each night's `search.best_of` (or the priority repair's note and log
+  lines) the next morning, and after the first week check Railway → solver → Usage (CPU and memory against the week
+  before).
+- **Roll back at once** (no code change) on any of: an optimization answering 503 or 504; a Thorough solve whose
+  `search.used_sec` is above its cap minus 60 s; an other search `TIMEOUT` or `LOST` (`search.best_of.searches`) on two
+  nights; RECOMMENDED's cost above the median of the 7 nights before at the same service by priority.
+- **If a Thorough solve fails during the evening's planning** (whatever is switched on): run a Quick solve of the day,
+  dispatch from it, and tell the engineer the run id.
+- **Rollback:** unset the variables (or set `SOLVER_BEST_OF=1`, `SOLVER_BEST_OF_QUICK=1` and `SOLVER_PRIORITY_REPAIR=off`);
+  no code change.
 
 ## Private networking notes
 

@@ -108,7 +108,12 @@ export type DriverAction =
    * `depot` names the load's depot (a truck can load at two depots on one date, each with its own
    * Load 1); an action queued before it was sent has none and is accepted only when one load matches.
    */
-  | { key: string; type: 'BACK_AT_DEPOT'; load: number; depot?: string; at: string; pos?: DriverPos };
+  | { key: string; type: 'BACK_AT_DEPOT'; load: number; depot?: string; at: string; pos?: DriverPos }
+  /**
+   * "Leaving for next load" (owner decision 16 Oct 2026): tapped after Back at depot when the truck leaves
+   * the depot again. `load` / `depot` name the load it leaves WITH (never the day's first load).
+   */
+  | { key: string; type: 'DEPOT_DEPART'; load: number; depot: string; at: string; pos?: DriverPos };
 
 /** The answer per action: ok, a duplicate of one already stored, or refused (with the driver's words). */
 export interface DriverActionResult {
@@ -126,6 +131,11 @@ export interface DriverResults {
   stops: Record<string, StopResult>;
   /** Back at depot per load key (`<depotId>:<loadNo>`, stop-key.ts) (ISO time). */
   back: Record<string, string>;
+  /**
+   * Leaving for next load per load key: the time the truck left the depot WITH that load (ISO; the latest
+   * tap). Absent in an answer of a server from before 16 Oct 2026.
+   */
+  left?: Record<string, string>;
 }
 
 export interface ManifestOrderLine {
@@ -200,6 +210,12 @@ export interface ManifestLoad {
   cases: number;
   /** When the driver reported back at the depot (Part 2); null = not yet. */
   backAtDepotAt: string | null;
+  /**
+   * When the driver tapped "Leaving for next load" for THIS load (the truck left the depot with it, after
+   * Back at depot of the trip before; the latest tap: a tap too early is corrected by tapping again);
+   * null = not yet. Absent on a manifest kept on the phone from before.
+   */
+  leftDepotAt?: string | null;
   stops: ManifestStop[];
 }
 
@@ -219,7 +235,19 @@ export interface DriverManifest {
    */
   helpers?: string[];
   depot: { code: string; name: string; lat: number; lng: number };
-  settings: { radiusM: number; photoRequired: boolean; maxPhotos: 3; locationRetentionDays: number; photoRetentionDays: number; dispatcherPhone: string | null };
+  settings: {
+    radiusM: number;
+    photoRequired: boolean;
+    maxPhotos: 3;
+    locationRetentionDays: number;
+    photoRetentionDays: number;
+    dispatcherPhone: string | null;
+    /**
+     * "Leaving for next load" is offered (the company has the operations alerts and rule R2 on:
+     * manifest.ts leaveTapOffered). Absent on a manifest kept on the phone from before: not offered.
+     */
+    leaveTap?: boolean;
+  };
   /** Set when a signed-in RouteIQ user opened the page: results are then recorded as the office. */
   office: { userName: string } | null;
   loads: ManifestLoad[];

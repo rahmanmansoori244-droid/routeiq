@@ -12,7 +12,8 @@ import { PALLET_FACTOR_MAX } from './dispatch/pallets';
 import { LEAVE_NOTE_MAX } from './dispatch/driver-leave';
 import { CONFIG_BOUNDS, DEPOT_BOUNDS, TRUCK_BOUNDS, type Bound } from './planner-bounds';
 import { COUNTRY_NAMES } from './countries';
-import { DELIVERY_SETTING_BOUNDS } from './settings-fields';
+import { ALERT_SETTING_BOUNDS, DELIVERY_SETTING_BOUNDS } from './settings-fields';
+import { ALERT_EMAIL_SEVERITIES, readAlertEmails, type AlertThresholdColumn } from './alerts/catalog';
 import { parseProductCode } from './product-code';
 import { readCustomerPhone } from './dispatch/customer-phone';
 import { readLoadingInstruction } from './dispatch/loading-instruction';
@@ -427,6 +428,29 @@ export function normalizeBranchKey(branchCode: string | null | undefined): strin
   return trimmed === '' ? '__MAIN__' : trimmed;
 }
 
+/** An operations-alert threshold within its bounds (lib/alerts/catalog.ts), or null / '' = the rule is off. */
+function alertThreshold(k: AlertThresholdColumn) {
+  const b = ALERT_SETTING_BOUNDS[k];
+  return z.preprocess(
+    (v) => (v === '' ? null : v),
+    z.number({ invalid_type_error: 'Enter a whole number' }).int('Enter a whole number').min(b.min).max(b.max).nullable(),
+  );
+}
+/** A minute of the day (the alert quiet hours), or null / '' = none. */
+const alertMinuteOfDay = z.preprocess(
+  (v) => (v === '' ? null : v),
+  z.number().int().min(ALERT_SETTING_BOUNDS.alertQuietFromMin.min).max(ALERT_SETTING_BOUNDS.alertQuietFromMin.max).nullable(),
+);
+/** The alert e-mail recipients: at most 5 addresses, stored "a@x.example, b@y.example"; '' or null = none. */
+const alertEmailsSchema = z.union([z.string(), z.null()]).transform((v, ctx) => {
+  const r = readAlertEmails(v);
+  if (!r.ok) {
+    ctx.addIssue({ code: 'custom', message: r.error });
+    return z.NEVER;
+  }
+  return r.value;
+});
+
 /** A whole-number IVMS setting inside its bounds (lib/ivms/settings.ts, the database CHECKs). */
 function ivmsSetting(k: IvmsNumberSetting) {
   return z.number().int().min(IVMS_SETTING_BOUNDS[k].min).max(IVMS_SETTING_BOUNDS[k].max);
@@ -487,6 +511,25 @@ export const tenantConfigSchema = z
     // The company number behind the driver page's "Call dispatcher" button, used when the truck's depot
     // has none of its own (owner decision 3, 5 Oct 2026); '' or null = none.
     dispatcherPhone: z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? null : v), driverPhoneSchema.nullable()),
+    // Operations alerts (owner request 16 Oct 2026, lib/alerts/catalog.ts). Web only, company admin. A
+    // threshold of null (or '') switches that rule off.
+    alertsEnabled: z.boolean(),
+    alertUnloadOverMin: alertThreshold('alertUnloadOverMin'),
+    alertLoadingOverMin: alertThreshold('alertLoadingOverMin'),
+    alertEtaLateMin: alertThreshold('alertEtaLateMin'),
+    alertDepartLateMin: alertThreshold('alertDepartLateMin'),
+    alertSilentMin: alertThreshold('alertSilentMin'),
+    alertPageNotOpenedMin: alertThreshold('alertPageNotOpenedMin'),
+    alertAfterClosingMin: alertThreshold('alertAfterClosingMin'),
+    alertPriorityMax: alertThreshold('alertPriorityMax'),
+    alertDeliveredNote: z.boolean(),
+    alertProofFarM: alertThreshold('alertProofFarM'),
+    alertNotClosedMin: alertThreshold('alertNotClosedMin'),
+    alertEmails: alertEmailsSchema,
+    alertEmailEveryMin: z.number().int().min(ALERT_SETTING_BOUNDS.alertEmailEveryMin.min).max(ALERT_SETTING_BOUNDS.alertEmailEveryMin.max),
+    alertEmailMinSeverity: z.enum(ALERT_EMAIL_SEVERITIES),
+    alertQuietFromMin: alertMinuteOfDay,
+    alertQuietToMin: alertMinuteOfDay,
     // The IVMS live link (Ayun GPS trackers, 16 Oct 2026). Web only (the optimizer never reads them), company
     // admin. Bounds = the database CHECKs (lib/ivms/settings.ts); OFF = no call to Ayun, nothing new shown.
     ivmsMode: z.enum(IVMS_MODES),
@@ -503,7 +546,7 @@ export const tenantConfigSchema = z
   .strict();
 export type TenantConfigInput = z.infer<typeof tenantConfigSchema>;
 
-export { breakSaveProblem, overtimeProblem, overtimeSaveProblem, retentionSaveProblem } from './settings-fields';
+export { alertQuietSaveProblem, breakSaveProblem, overtimeProblem, overtimeSaveProblem, retentionSaveProblem } from './settings-fields';
 
 export const tenantSettingsSchema = z.object({
   name: z.string().trim().min(2).max(120),

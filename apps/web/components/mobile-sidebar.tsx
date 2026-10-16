@@ -13,11 +13,13 @@ interface MobileSidebarProps {
   slug: string;
   tenantName: string;
   role: Role;
+  /** The company has operations alerts on (the Alerts item shows only then). */
+  alertsOn?: boolean;
 }
 
-export function MobileSidebar({ slug, tenantName, role }: MobileSidebarProps) {
+export function MobileSidebar({ slug, tenantName, role, alertsOn = false }: MobileSidebarProps) {
   const [open, setOpen] = useState(false);
-  const items = visibleNavItems(role);
+  const items = visibleNavItems(role, { alerts: alertsOn });
 
   return (
     <Sheet open={open} onOpenChange={setOpen}>

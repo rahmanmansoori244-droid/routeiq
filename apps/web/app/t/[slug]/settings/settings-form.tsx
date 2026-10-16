@@ -15,10 +15,11 @@ import { errorMessage } from '@/lib/error-message';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 import { boundText, CONFIG_BOUNDS, inBound, type Bound, type ConfigBoundKey } from '@/lib/planner-bounds';
 import { SETTING_LABELS, type EffectiveRow } from '@/lib/dispatch/planner-config';
-import { breakSaveProblem, changedFields, DELIVERY_SETTING_BOUNDS, overtimeSaveProblem, retentionSaveProblem, withFirstDeparture, type EditableConfig } from '@/lib/settings-fields';
+import { ALERT_SETTINGS_FIELDS, breakSaveProblem, changedFields, DELIVERY_SETTING_BOUNDS, overtimeSaveProblem, retentionSaveProblem, withFirstDeparture, type EditableConfig } from '@/lib/settings-fields';
 import { COUNTRY_NAMES, countryRoutingNote, isListedCountry } from '@/lib/countries';
 import { DATA_COLLECT_DAYS_MAX } from '@/lib/dispatch/data-collection';
 import { preferredEndText, WINDOW_RULE_CHOICES, WINDOW_RULES, windowRuleOf } from '@/lib/dispatch/window-rule';
+import { AlertSettingsCard, alertSettingsProblem } from './alert-settings-card';
 import { IVMS_SETTING_BOUNDS, ivmsHoursSaveProblem, ivmsModeOf, type IvmsNumberSetting } from '@/lib/ivms/settings';
 import { classShares } from '@/lib/ivms/budget';
 import { IVMS_MODES, type IvmsMode } from '@/lib/ivms/types';
@@ -114,6 +115,7 @@ export function SettingsForm({
   scope = 'ADMIN',
   dataRuleOn = false,
   gpsStatus = null,
+  emailConfigured = false,
 }: {
   initial: Initial;
   effective: EffectiveRow[];
@@ -124,6 +126,8 @@ export function SettingsForm({
   scope?: 'ADMIN' | 'DISPATCHER';
   /** DISPATCHER: whether the loading rule is on (shown, not editable: only a company admin switches it). */
   dataRuleOn?: boolean;
+  /** Operations alerts: the server can send e-mail (RESEND_API_KEY and RESEND_FROM; lib/email.ts). */
+  emailConfigured?: boolean;
 }) {
   const admin = scope === 'ADMIN';
   const router = useRouter();
@@ -189,6 +193,15 @@ export function SettingsForm({
       toast.error(gpsHours);
       return;
     }
+    // Operations alerts (owner request 16 Oct 2026): thresholds within their bounds, the recipients, the
+    // e-mail interval, and quiet hours with both ends or none - as the API checks them.
+    const alertProblem = admin ? alertSettingsProblem(configDiff.changes, c) : null;
+    if (alertProblem) {
+      toast.error(alertProblem);
+      return;
+    }
+    const onlyAlerts =
+      !Object.keys(tenantDiff.changes).length && Object.keys(configDiff.changes).every((k) => (ALERT_SETTINGS_FIELDS as readonly string[]).includes(k));
     startSave(async () => {
       const body: Record<string, unknown> = { expect: {} };
       if (Object.keys(tenantDiff.changes).length) {
@@ -221,7 +234,7 @@ export function SettingsForm({
         setT(next.tenant);
         setC(next.config);
       }
-      toast.success('Settings saved. The next optimization uses them.');
+      toast.success(onlyAlerts ? 'Alert settings saved.' : 'Settings saved. The next optimization uses them.');
       router.refresh();
     });
   }
@@ -665,6 +678,14 @@ export function SettingsForm({
           {(['ivmsStopRadiusM', 'ivmsStopDwellMin', 'ivmsDepotRadiusM', 'ivmsTrailDays'] as const).map((k) => gpsNum(k))}
         </CardContent>
       </Card>
+
+      <AlertSettingsCard
+        c={c}
+        set={(patch) => setC({ ...c, ...patch })}
+        changed={new Set(Object.keys(configDiff.changes))}
+        emailConfigured={emailConfigured}
+        savedEmails={baseline.config.alertEmails}
+      />
         </>
       ) : null}
 

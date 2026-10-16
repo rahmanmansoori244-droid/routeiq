@@ -79,6 +79,8 @@ export const AUDIT_ACTIONS = {
   DELIVERY_PHOTO_ADDED: { label: 'Delivery photo added' },
   STOP_ARRIVAL_MANUAL: { label: 'Arrival at a stop recorded by hand' },
   DRIVER_BACK_AT_DEPOT: { label: 'Driver back at the depot' },
+  // Owner decision 16 Oct 2026 (alert rule R2): the driver left the depot again with his next load.
+  DRIVER_DEPOT_DEPART: { label: 'Driver left the depot with the next load' },
   DELIVERY_CARRY_CONFLICT: { label: 'Result change refused: already brought forward' },
   ORDERS_CARRY_UNDONE: { label: 'Bring forward undone' },
   DELIVERY_PHOTOS_PURGED: { label: 'Old delivery photos removed (retention)' },
@@ -93,6 +95,8 @@ export const AUDIT_ACTIONS = {
   HIRE_SUGGESTION_USED: { label: 'Hire suggestion used ("Use this plan")' },
   HIRED_TRUCKS_ADDED: { label: 'One-day hired trucks added' },
   HIRED_TRUCK_CHANGED: { label: 'One-day hired truck: plate or driver set' },
+  // Operations alerts (owner request 16 Oct 2026): one row per acknowledgement (raising an alert is not audited).
+  ALERTS_ACKNOWLEDGED: { label: 'Operations alerts acknowledged' },
   ONE_DAY_TRUCKS_RETIRED: { label: 'One-day hired trucks retired after their day' },
   // IVMS live link (16 Oct 2026): the company admin removed a truck-day's GPS times (the undo).
   GPS_TIMES_UNDONE: { label: "GPS times of a truck's day removed" },
@@ -137,6 +141,7 @@ export const AUDIT_ENTITIES = {
   StopVisit: { label: 'Delivery stop' },
   HireOption: { label: 'Truck to hire (hire option)' },
   HireSuggestion: { label: 'Hire suggestion' },
+  OpsAlert: { label: 'Operations alert' },
   RunJob: { label: 'Optimization job', legacy: true },
   DriverShift: { label: 'Driver shift (retired app)', legacy: true },
 } as const satisfies Record<string, AuditActionInfo>;

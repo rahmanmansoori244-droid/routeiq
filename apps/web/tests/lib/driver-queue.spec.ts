@@ -217,6 +217,25 @@ describe('held items, drafts, namespaces', () => {
     expect(released).toEqual([expect.objectContaining({ key: h1.key, state: 'ready', body: h1.body })]);
   });
 
+  it('a Leaving for next load held for a Planned trip is sent once that trip is dispatched, with its own time; its answer brings the left times', async () => {
+    const leave = actionItem(NS, { key: newKey(), type: 'DEPOT_DEPART', load: 2, depot: 'D1', at: new Date(T0).toISOString() }, T0, true);
+    const ok = (body: unknown) => ({ status: 200, body: { data: body, error: null }, retryAfter: null });
+    expect(leave).toMatchObject({ stopKey: null, loadNo: 2, loadKey: 'D1:2', state: 'held' });
+    expect(releaseHeld([leave], new Set(['D1:1']), T0 + 500)).toEqual([]);
+    expect(releaseHeld([leave], new Set(['D1:2']), T0 + 500)).toEqual([expect.objectContaining({ key: leave.key, state: 'ready', body: leave.body })]);
+    const store = memoryStore();
+    await store.put(releaseHeld([leave], new Set(['D1:2']), T0 + 500));
+    const r = await flushQueue({
+      store,
+      ns: NS,
+      now: () => T0 + 1_000,
+      postActions: async (actions) => ok({ results: actions.map((x) => ({ key: x.key, status: 'ok' })), stops: {}, back: { 'D1:1': 'b' }, left: { 'D1:2': new Date(T0).toISOString() } }),
+      postPhoto: async () => ok({}),
+    });
+    expect(r.results).toEqual({ stops: {}, back: { 'D1:1': 'b' }, left: { 'D1:2': new Date(T0).toISOString() } });
+    expect(await store.items(NS)).toEqual([]);
+  });
+
   it('Save commits the draft photos and the result in one step; other drafts of the stop go; Cancel drops them', async () => {
     const store = memoryStore();
     const used = photo('D1:1:1', T0, { state: 'draft' });

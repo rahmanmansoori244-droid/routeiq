@@ -2810,6 +2810,14 @@ async function changeStatusCore(
     where: { id: loadId },
     data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: actor.userId },
   });
+  // Operations alerts rule R2 (second review of 16 Oct 2026, finding 3): the driver may tap "Leaving for
+  // next load" on a Locked or Loading load. Moved back to Planned, the load may be planned again, and a
+  // later load with its number must not inherit those taps: they are removed with the move (the
+  // DRIVER_DEPOT_DEPART audit rows keep them; this move's audit row counts them).
+  const leavingRemoved =
+    to === 'PLANNED'
+      ? (await tx.stopEvent.deleteMany({ where: { tenantId, depotId: run.depotId, deliveryDate: run.runDate, truckId: load.truckId, loadNo: load.loadNo, kind: 'DEPOT_DEPART' } })).count
+      : 0;
   const orderIds = [...new Set((await tx.routeAssignment.findMany({ where: { loadId }, select: { orderId: true } })).map((a) => a.orderId))];
   if (to === 'DISPATCHED' && orderIds.length) {
     // A split order is DISPATCHED only once every part is out (and none is unserved).
@@ -2848,6 +2856,7 @@ async function changeStatusCore(
         ...(actor.label ? { actor: actor.label } : {}),
         // The dispatcher's answer: this driver drives although he is on leave that day.
         ...(driverOnLeave ? { driverOnLeave } : {}),
+        ...(leavingRemoved ? { leavingTapsRemoved: leavingRemoved } : {}),
       } as never,
       // A row without a user (the driver link, the janitor) keeps no IP: a driver's IP is erased with
       // the stop events after the location retention, audit rows are kept for good.

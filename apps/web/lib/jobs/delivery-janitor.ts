@@ -15,16 +15,21 @@
  *   later) is hidden from the Driver list (active false; the quick add finds and reactivates them by
  *   phone); after locationRetentionDays without a load their phone number is erased (the name stays:
  *   plans and audit rows show it).
+ * - purgeOldAlerts (once a day, operations alerts of 16 Oct 2026): alert rows of a delivery date older
+ *   than 90 days and alert e-mail records older than 90 days are deleted.
  *
  * Each sweep works per company in batches of 200, at most 5 batches, and writes one audit row per
- * company per sweep that changed something. The deletions reach the live database only: Railway's
- * backups keep the old data until they expire (docs/admin.md, SECURITY.md).
+ * company per sweep that changed something (the alert rows: none, they are derived). The deletions
+ * reach the live database only: Railway's backups keep the old data until they expire (docs/admin.md,
+ * SECURITY.md).
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { audit } from '../audit';
 import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, todayIso } from '../dispatch/time';
 import { DEFAULT_LOCATION_RETENTION_DAYS, DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
+import { ALERT_RETENTION_DAYS } from '../alerts/catalog';
+import { purgeOldAlertRows } from '../alerts/store';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -208,6 +213,22 @@ export async function clearIdleCasualDrivers(now: Date = new Date(), db: Db = pr
   return out;
 }
 
+/**
+ * Operations alerts (owner request 16 Oct 2026): rows of a delivery date older than ALERT_RETENTION_DAYS
+ * (90; they hold customer names and shortened driver notes) and alert e-mail records older than that.
+ * Per company, by its own today. No audit row: the rows are derived from data that stays.
+ */
+export async function purgeOldAlerts(now: Date = new Date(), db: Db = prisma): Promise<{ alerts: number; digests: number }> {
+  const out = { alerts: 0, digests: 0 };
+  for (const t of await tenants(db)) {
+    const cutoffIso = addDaysIso(todayIso(t.timezone, now), -ALERT_RETENTION_DAYS);
+    const r = await purgeOldAlertRows(db, t.tenantId, cutoffIso, new Date(now.getTime() - ALERT_RETENTION_DAYS * DAY_MS));
+    out.alerts += r.alerts;
+    out.digests += r.digests;
+  }
+  return out;
+}
+
 const g = globalThis as unknown as { __routeiqDeliverySweepAt?: number; __routeiqCasualSweepDay?: string };
 
 /**
@@ -221,9 +242,17 @@ export async function runDeliveryJanitor(now: Date = new Date(), opts: { force?:
   const locations = await purgeOldLocations(now);
   const dayKey = now.toISOString().slice(0, 10);
   let casual: { deactivated: number; phonesCleared: number } | null = null;
+  let alerts: { alerts: number; digests: number } | null = null;
   if (opts.force || g.__routeiqCasualSweepDay !== dayKey) {
     g.__routeiqCasualSweepDay = dayKey;
     casual = await clearIdleCasualDrivers(now);
+    // Operations alerts older than 90 days: once a day too. In its own try (review L3): its failure is
+    // logged under its own name and never stops the steps after it (the cron route's hire step and sweep).
+    try {
+      alerts = await purgeOldAlerts(now);
+    } catch (err) {
+      console.error('[janitor] alert retention not run', { error: (err as Error)?.message ?? String(err) });
+    }
   }
-  return { photos, locations, casual };
+  return { photos, locations, casual, alerts };
 }
