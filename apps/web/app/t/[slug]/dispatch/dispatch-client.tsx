@@ -17,6 +17,7 @@ import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from 
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
 import { DeliverySummary } from './delivery-summary';
+import { AlertsCard } from './alerts-card';
 import { CrewReport } from './crew-report';
 import type { DayDeliveries } from '@/lib/delivery/day-results';
 import { DeliveryTimesPanel, type DayOrderTimeRow } from './delivery-times';
@@ -25,7 +26,7 @@ import { DataToCollectPanel, LoadingGapsNote } from './data-to-collect';
 import { confirmNotesSummary, resolveIssuesStep, type DataGap } from '@/lib/dispatch/data-collection';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
 import { keepDeliveries, optimizeStartedText, searchModeNow, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
-import { fmtDayMonth } from '@/lib/dispatch/time';
+import { DEFAULT_TZ, fmtDayMonth } from '@/lib/dispatch/time';
 import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
@@ -181,9 +182,11 @@ interface Props {
   initialDepot: string | null;
   /** Calling code for drivers' phones saved without one (WhatsApp links); null = unknown. */
   phoneCountryCode: string | null;
+  /** Operations alerts (owner request 16 Oct 2026) are switched on: the Alerts card above Deliveries. */
+  alertsEnabled?: boolean;
 }
 
-export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, initialDate, initialDepot, phoneCountryCode }: Props) {
+export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, initialDate, initialDepot, phoneCountryCode, alertsEnabled = false }: Props) {
   const router = useRouter();
   const [date, setDate] = useState<string | null>(initialDate);
   const [depotId, setDepotId] = useState<string | null>(initialDepot);
@@ -801,6 +804,15 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               // plan stays as it is (with its own Try again) until the day's Try again reloads both.
               if (await refresh()) setPlanKey((k) => k + 1);
             }}
+          />
+          <AlertsCard
+            slug={slug}
+            date={day.date}
+            depotId={day.depot.id}
+            today={day.today}
+            timezone={day.timezone ?? DEFAULT_TZ}
+            canAck={canPlan}
+            enabled={alertsEnabled}
           />
           <DeliverySummary
             deliveries={day.deliveries}

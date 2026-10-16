@@ -2,10 +2,11 @@
  * What happens at a stop, written by the driver page (owner request 4 Oct 2026, spec sections 8.1 to
  * 8.7 and 13.3). Server only.
  *
- * Every action (ARRIVE, DEPART, OUTCOME, BACK_AT_DEPOT) runs in ONE short transaction, in this order:
+ * Every action (ARRIVE, DEPART, OUTCOME, BACK_AT_DEPOT, DEPOT_DEPART) runs in ONE short transaction, in this order:
  * the lock timeout, the outcome-day lock, the live load and its planned stop (read under the lock),
  * the idempotency check (`dl:<uuid>`, a duplicate only for the same link), the rules (section 8.3),
- * the caps (40 arrivals, departures and results per stop, 5 Back at depot per load), the StopEvent,
+ * the caps (40 arrivals, departures and results per stop, 5 Back at depot and 5 Leaving for next load per
+ * load), the StopEvent,
  * the StopVisit rebuilt from all its events (visit.ts), the audit row. A result equal to the stop's
  * current one and not dated after its latest stored result is answered ok and stores nothing. After
  * an action answered 'error', the later actions of its stop in the same request are answered 'error'
@@ -16,7 +17,18 @@
  * never retried inside it (PostgreSQL refuses every statement after the first error).
  *
  * Stop events are the record of automatic arrivals and departures: they are not audited (about 600
- * rows a day of noise). Results, manual arrivals, photos and Back at depot are.
+ * rows a day of noise). Results, manual arrivals, photos, Back at depot and Leaving for next load are.
+ *
+ * Leaving for next load (DEPOT_DEPART, owner decision 16 Oct 2026): tapped after Back at depot of one
+ * trip when the truck leaves the depot again with its next load. Stored on THAT load (the one it leaves
+ * with), at load level like Back at depot, with the phone's position and its distance from the depot pin;
+ * never on the truck-day's first load (loaded the night before: there is no turnaround to measure) nor
+ * on one whose trip before was at another depot (nothing is measured there). A tap made too early is
+ * corrected by tapping again: every tap is kept (at most MAX_LEAVE_EVENTS_PER_LOAD) and the latest one
+ * before the truck reached a stop counts (second review of 16 Oct 2026, finding 2). Alert rule R2
+ * measures the turnaround at the depot from the previous trip's Back at depot to it (lib/alerts/rules.ts);
+ * the dispatcher's Dispatch press or the first stop reached stand in for it when the driver did not tap
+ * (lib/delivery/turnaround.ts). Moving the load back to Planned removes its taps (plan-service.ts).
  */
 import { Prisma, type DriverLink } from '@prisma/client';
 import { z } from 'zod';
@@ -34,6 +46,7 @@ import { loadKeyOf, maybeSameStop, parseStopKey as readStopKey, stopKeyOf, type 
 import type { DriverActionResult, DriverResults, NotDeliveredReasonName, StopResult } from '../driver-link/manifest-types';
 import { lockOutcomesDay } from './locks';
 import { plannedStopOf, type PlannedStop } from './planned-stop';
+import { previousTrip } from './turnaround';
 import {
   actionTime,
   carryChangeCheck,
@@ -110,6 +123,15 @@ const actionSchema = z.discriminatedUnion('type', [
     load: z.number().int().min(1).max(999),
     // The load's depot; absent on an action queued before the update (accepted when one load matches).
     depot: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
+    at: isoString,
+    pos: posSchema.optional(),
+  }),
+  // "Leaving for next load": `load` / `depot` name the load the truck leaves with (the page always sends the depot).
+  z.object({
+    key,
+    type: z.literal('DEPOT_DEPART'),
+    load: z.number().int().min(1).max(999),
+    depot: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
     at: isoString,
     pos: posSchema.optional(),
   }),
@@ -437,6 +459,8 @@ export async function carryBases(tx: Tx, tenantId: string, planned: PlannedStop)
 export const MAX_EVENTS_PER_VISIT = 40;
 /** At most this many Back at depot events per load. */
 export const MAX_BACK_EVENTS_PER_LOAD = 5;
+/** At most this many Leaving for next load events per load (a tap too early is corrected by tapping again). */
+export const MAX_LEAVE_EVENTS_PER_LOAD = 5;
 
 /**
  * Whether a result repeats the visit's current one exactly (same source kind, outcome, reason, note,
@@ -467,18 +491,22 @@ interface Applied {
   completeLoad?: LoadRef;
 }
 
-const kindOf: Record<ParsedAction['type'], WriteKind> = { ARRIVE: 'ARRIVE', DEPART: 'DEPART', OUTCOME: 'OUTCOME', BACK_AT_DEPOT: 'BACK_AT_DEPOT' };
+const kindOf: Record<ParsedAction['type'], WriteKind> = { ARRIVE: 'ARRIVE', DEPART: 'DEPART', OUTCOME: 'OUTCOME', BACK_AT_DEPOT: 'BACK_AT_DEPOT', DEPOT_DEPART: 'DEPOT_DEPART' };
 
 async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAction, skew: number): Promise<Applied> {
   const office = !!ctx.session;
   const storedKey = `dl:${a.key}`;
   const at = actionTime(new Date(a.at), skew, { receivedAt: ctx.now, dayStart: facts.dayStart, expiresAt: ctx.link.expiresAt });
   if (at === 'TIME_OUT_OF_RANGE') return { result: refused(a.key, 'TIME_OUT_OF_RANGE') };
-  const where: Target | null = a.type === 'BACK_AT_DEPOT' ? { depotId: a.depot ?? null, loadNo: a.load, sequence: null } : parseStopKey(a.stop);
+  const where: Target | null = a.type === 'BACK_AT_DEPOT' || a.type === 'DEPOT_DEPART' ? { depotId: a.depot ?? null, loadNo: a.load, sequence: null } : parseStopKey(a.stop);
   if (!where) return { result: refused(a.key, 'INVALID') };
   const found = await resolveTarget(facts.loads, where, (ids, seq) => loadsWithStop(prisma, ids, seq));
   if (!found.ok) return { result: refused(a.key, found.code) };
   const dayLoad = found.load;
+  // Leaving for next load: never on the truck-day's first load (there is no trip to leave from), nor after
+  // a trip at another depot (no turnaround is measured across two depots).
+  const previous = a.type === 'DEPOT_DEPART' ? previousTrip(facts.loads, dayLoad.id) : null;
+  if (a.type === 'DEPOT_DEPART' && (!previous || previous.depotId !== dayLoad.depotId)) return { result: refused(a.key, 'INVALID') };
   const here: LoadRef = { depotId: dayLoad.depotId, loadNo: dayLoad.loadNo };
   const pos = a.pos;
   const posAt = posDate(pos, skew);
@@ -519,6 +547,10 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
       if (a.type === 'BACK_AT_DEPOT') {
         const backs = await tx.stopEvent.count({ where: { tenantId: ctx.tenantId, deliveryDate: dateOnly(ctx.date), truckId: ctx.truckId, depotId: dayLoad.depotId, loadNo: where.loadNo, kind: 'BACK_AT_DEPOT' } });
         if (backs >= MAX_BACK_EVENTS_PER_LOAD) return { result: refused(a.key, 'INVALID') };
+      } else if (a.type === 'DEPOT_DEPART') {
+        // Every tap is kept (the latest before the truck reached a stop counts), within a cap.
+        const left = await tx.stopEvent.count({ where: { tenantId: ctx.tenantId, deliveryDate: dateOnly(ctx.date), truckId: ctx.truckId, depotId: dayLoad.depotId, loadNo: where.loadNo, kind: 'DEPOT_DEPART' } });
+        if (left >= MAX_LEAVE_EVENTS_PER_LOAD) return { result: refused(a.key, 'INVALID') };
       } else if (visit) {
         const n = await tx.stopEvent.count({ where: { tenantId: ctx.tenantId, visitId: visit.id, kind: { in: ['ARRIVED', 'DEPARTED', 'OUTCOME'] } } });
         if (n >= MAX_EVENTS_PER_VISIT) return { result: refused(a.key, 'INVALID') };
@@ -574,6 +606,37 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
           tx,
         );
         return { result: { key: a.key, status: 'ok' }, completeLoad: load.status === 'DISPATCHED' ? here : undefined };
+      }
+
+      // --- Leaving for next load: a load-level event on the load the truck leaves with -------
+      if (a.type === 'DEPOT_DEPART') {
+        const origin = readLoadOrigin(readTruckSnapshot(load.truckSnapshotJson));
+        const depotPin = origin ?? (await tx.depot.findFirst({ where: { id: dayLoad.depotId, tenantId: ctx.tenantId }, select: { lat: true, lng: true } }));
+        await tx.stopEvent.create({
+          data: {
+            ...base,
+            sequence: null,
+            visitId: null,
+            kind: 'DEPOT_DEPART',
+            source: office ? 'DISPATCHER' : 'PHONE_MANUAL',
+            at,
+            distanceM: pos && depotPin ? Math.round(distanceM(pos, depotPin)) : null,
+            payloadJson: { ...common, after: { depotId: previous!.depotId, loadNo: previous!.loadNo } } as Prisma.InputJsonValue,
+          },
+        });
+        await audit(
+          {
+            tenantId: ctx.tenantId,
+            userId: who.userId,
+            action: 'DRIVER_DEPOT_DEPART',
+            entity: 'PlanLoad',
+            entityId: dayLoad.id,
+            afterJson: { truckId: ctx.truckId, depotId: dayLoad.depotId, loadNo: where.loadNo, previousLoadNo: previous!.loadNo, date: ctx.date, at: at.toISOString(), status: load.status, late, ...who.extra } as Prisma.InputJsonValue,
+            ip: who.ip,
+          },
+          tx,
+        );
+        return { result: { key: a.key, status: 'ok' } };
       }
 
       const p = planned!;
@@ -811,7 +874,7 @@ export async function recordDriverActions(ctx: DriverWriteContext, body: { clien
       continue;
     }
     const a = parsed.data;
-    const stopRef = a.type === 'BACK_AT_DEPOT' ? null : parseStopKey(a.stop);
+    const stopRef = a.type === 'BACK_AT_DEPOT' || a.type === 'DEPOT_DEPART' ? null : parseStopKey(a.stop);
     if (stopRef && failedStops.some((f) => maybeSameStop(f, stopRef))) {
       results.push({ key: a.key, status: 'error' });
       continue;
@@ -938,20 +1001,30 @@ export interface ResultsLoad {
   stops: { sequence: number; orderIds: string[] }[];
 }
 
-/** The results of the truck-day's stops and the Back at depot times, for the manifest and the action answers. */
+/** The results of the truck-day's stops, the Back at depot and Leaving for next load times, for the manifest and the action answers. */
 export async function truckDayResults(db: Db, tenantId: string, truckId: string, date: string, loads: readonly ResultsLoad[], viewer: 'DRIVER' | 'OFFICE' = 'DRIVER'): Promise<DriverResults> {
   const stops: Record<string, StopResult> = {};
   const back: Record<string, string> = {};
-  if (!loads.length) return { stops, back };
+  const left: Record<string, string> = {};
+  if (!loads.length) return { stops, back, left };
   const [visits, backs] = await Promise.all([
     db.stopVisit.findMany({ where: { tenantId, truckId, deliveryDate: dateOnly(date) } }),
-    db.stopEvent.findMany({ where: { tenantId, truckId, deliveryDate: dateOnly(date), kind: 'BACK_AT_DEPOT' }, select: { depotId: true, loadNo: true, at: true } }),
+    db.stopEvent.findMany({
+      where: { tenantId, truckId, deliveryDate: dateOnly(date), kind: { in: ['BACK_AT_DEPOT', 'DEPOT_DEPART'] } },
+      select: { kind: true, depotId: true, loadNo: true, at: true },
+    }),
   ]);
   const live = new Set(loads.map((l) => loadKeyOf(l.depotId, l.loadNo)));
+  // A load that is Planned now has no Leaving tap that counts (moving it back to Planned removes them).
+  const planned = new Set(loads.filter((l) => l.status === 'PLANNED').map((l) => loadKeyOf(l.depotId, l.loadNo)));
   for (const b of backs) {
     const k = loadKeyOf(b.depotId, b.loadNo);
     if (!live.has(k)) continue;
-    if (!back[k] || b.at.toISOString() < back[k]!) back[k] = b.at.toISOString();
+    const at = b.at.toISOString();
+    // Back at depot: the earliest tap; Leaving for next load: the latest (a tap too early is corrected by tapping again).
+    if (b.kind === 'DEPOT_DEPART') {
+      if (!planned.has(k) && (!left[k] || at > left[k]!)) left[k] = at;
+    } else if (!back[k] || at < back[k]!) back[k] = at;
   }
   const visitIds = visits.map((v) => v.id);
   const [photos, results] = visitIds.length
@@ -1011,7 +1084,7 @@ export async function truckDayResults(db: Db, tenantId: string, truckId: string,
       };
     }
   }
-  return { stops, back };
+  return { stops, back, left };
 }
 
 function emptyResult(dispatched: boolean, carriedTo: string | null): StopResult {
@@ -1040,7 +1113,7 @@ function emptyResult(dispatched: boolean, carriedTo: string | null): StopResult 
 /** truckDayResults with the stops read from the plan rows of the truck-day's live loads. */
 export async function truckDayResultsFromDb(db: Db, tenantId: string, truckId: string, date: string, viewer: 'DRIVER' | 'OFFICE' = 'DRIVER'): Promise<DriverResults> {
   const loads = await truckDayLoads(db, tenantId, truckId, date);
-  if (!loads.length) return { stops: {}, back: {} };
+  if (!loads.length) return { stops: {}, back: {}, left: {} };
   const rows = await db.routeAssignment.findMany({ where: { loadId: { in: loads.map((l) => l.id) } }, select: { loadId: true, sequenceInTruck: true, orderId: true } });
   return truckDayResults(
     db,

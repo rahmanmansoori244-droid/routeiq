@@ -78,6 +78,15 @@ export function posOf(f: Fix | null): DriverPos | undefined {
   return { lat: f.lat, lng: f.lng, accuracyM: Math.round(f.accuracyM * 10) / 10, at: new Date(f.at).toISOString(), gpsAt: f.gpsAt ? new Date(f.gpsAt).toISOString() : null, speedMps: f.speedMps };
 }
 
+/**
+ * The fix as a position only when it is at most `maxAgeMs` old. Leaving for next load: between two trips
+ * the tracker may be stopped, and a fix kept from Back at depot says nothing about where the truck is
+ * when it leaves (second review of 16 Oct 2026, finding 8).
+ */
+export function recentPosOf(f: Fix | null, now: number, maxAgeMs: number): DriverPos | undefined {
+  return f && now - f.at <= maxAgeMs ? posOf(f) : undefined;
+}
+
 type WakeLockLike = { release: () => Promise<void> };
 
 export function useTracker(opts: TrackerOptions): TrackerApi {

@@ -594,6 +594,106 @@ describe('results arriving out of order (review of 8 Oct 2026)', () => {
   });
 });
 
+describe('Leaving for next load (DEPOT_DEPART, owner decision 16 Oct 2026: alert rule R2 measures the turnaround from the driver taps)', () => {
+  /** T05's second trip of the day, after L1 (planned back 15:00). */
+  const addTrip2 = (status = 'LOCKED', over: Record<string, unknown> = {}) =>
+    tables.planLoad.push({ id: 'L2', tenantId: T, runId: 'R1', truckId: 't5', loadNo: 2, status, departMin: 960, returnMin: 1200, driverId: 'salim', statusChangedAt: new Date(Date.now() - 3600_000), breakJson: null, truckSnapshotJson: null, ...over });
+  const atDepot = (msAgo: number) => ({ lat: 23.55, lng: 58.35, accuracyM: 12, at: iso(msAgo) });
+  const back1 = () => ({ key: randomUUID(), type: 'BACK_AT_DEPOT', load: 1, depot: 'D1', at: iso(50 * 60_000), pos: atDepot(50 * 60_000) });
+  const leave = (load = 2, over: Record<string, unknown> = {}) => ({ key: randomUUID(), type: 'DEPOT_DEPART', load, depot: 'D1', at: iso(5 * 60_000), pos: atDepot(5 * 60_000), ...over });
+  const departs = () => tables.stopEvent.filter((e) => e.kind === 'DEPOT_DEPART');
+  type WithLeft = { left?: Record<string, string>; back?: Record<string, string> };
+
+  it('is recorded on the load the truck leaves with: load level, the phone position and its distance from the depot pin, audited; the answer carries it', async () => {
+    addTrip2();
+    const token = makeLink('t5');
+    const l = leave();
+    const r = await act(token, [back1(), l]);
+    expect(r.body.data!.results.map((x) => x.status)).toEqual(['ok', 'ok']);
+    expect(departs()).toHaveLength(1);
+    const ev = departs()[0]!;
+    expect(ev).toMatchObject({ loadNo: 2, depotId: 'D1', truckId: 't5', sequence: null, visitId: null, source: 'PHONE_MANUAL', distanceM: 0, lat: 23.55, idempotencyKey: `dl:${l.key}` });
+    expect(ev.payloadJson).toMatchObject({ after: { depotId: 'D1', loadNo: 1 } });
+    const audit = tables.auditLog.find((a) => a.action === 'DRIVER_DEPOT_DEPART');
+    expect(audit).toMatchObject({ entity: 'PlanLoad', entityId: 'L2', userId: null });
+    expect(audit!.afterJson).toMatchObject({ truckId: 't5', depotId: 'D1', loadNo: 2, previousLoadNo: 1, date: D, status: 'LOCKED', late: false, actor: expect.stringContaining('Salim') });
+    const data = r.body.data as unknown as WithLeft;
+    expect(data.left).toEqual({ 'D1:2': (ev.at as Date).toISOString() });
+    expect(Object.keys(data.back ?? {})).toEqual(['D1:1']);
+  });
+
+  it('review finding 2: a tap made too early is corrected by tapping again (stored, the answer carries the latest); the same key again is a duplicate; at most 5 per load', async () => {
+    addTrip2('LOADING');
+    const token = makeLink('t5');
+    const early = leave(2, { at: iso(20 * 60_000) });
+    await act(token, [back1(), early]);
+    expect((await act(token, [early])).body.data!.results).toEqual([{ key: early.key, status: 'duplicate' }]);
+    const again = leave(2, { at: iso(60_000) });
+    const r = await act(token, [again]);
+    expect(r.body.data!.results).toEqual([{ key: again.key, status: 'ok' }]);
+    expect(departs()).toHaveLength(2);
+    const stored = departs().find((e) => e.idempotencyKey === `dl:${again.key}`)!;
+    expect((r.body.data as unknown as WithLeft).left).toEqual({ 'D1:2': (stored.at as Date).toISOString() });
+    expect(tables.auditLog.filter((a) => a.action === 'DRIVER_DEPOT_DEPART')).toHaveLength(2);
+    for (let i = 0; i < 3; i++) await act(token, [leave(2, { at: iso(50_000 - i * 1000) })]);
+    expect(departs()).toHaveLength(5);
+    const sixth = leave(2, { at: iso(30_000) });
+    expect((await act(token, [sixth])).body.data!.results).toEqual([expect.objectContaining({ key: sixth.key, status: 'refused', code: 'INVALID' })]);
+    expect(departs()).toHaveLength(5);
+  });
+
+  it('review finding 5: refused when the trip before was at another depot (nothing is measured across two depots)', async () => {
+    tables.runPlan.push({ id: 'R2', tenantId: T, depotId: 'D2', runDate: dateOnly(D), status: 'DISPATCHED', version: 1, supersededAt: null, chosenScenarioId: 'sc2', createdAt: new Date() });
+    tables.depot.push({ id: 'D2', tenantId: T, code: 'D2', name: 'Depot 2', lat: 23.4, lng: 58.1 });
+    tables.planLoad.push({ id: 'LB', tenantId: T, runId: 'R2', truckId: 't5', loadNo: 1, status: 'LOCKED', departMin: 960, returnMin: 1200, driverId: 'salim', statusChangedAt: new Date(Date.now() - 3600_000), breakJson: null, truckSnapshotJson: null });
+    const token = makeLink('t5');
+    const other = leave(1, { depot: 'D2' });
+    expect((await act(token, [back1(), other])).body.data!.results).toEqual([{ key: expect.any(String), status: 'ok' }, expect.objectContaining({ key: other.key, status: 'refused', code: 'INVALID' })]);
+    expect(departs()).toEqual([]);
+  });
+
+  it('never on the first trip of the day (refused, nothing stored); a Planned next trip keeps it on the phone (transient) until it is locked or dispatched', async () => {
+    const token = makeLink('t5');
+    const first = leave(1);
+    expect((await act(token, [first])).body.data!.results).toEqual([expect.objectContaining({ key: first.key, status: 'refused', code: 'INVALID' })]);
+    addTrip2('PLANNED');
+    const planned = leave(2);
+    expect((await act(token, [planned])).body.data!.results).toEqual([expect.objectContaining({ key: planned.key, status: 'refused', code: 'LOAD_NOT_DISPATCHED', transient: true })]);
+    expect(departs()).toEqual([]);
+    // Dispatched meanwhile: the held tap is sent again with its own time and recorded.
+    row('planLoad', 'L2').status = 'DISPATCHED';
+    expect((await act(token, [planned])).body.data!.results).toEqual([{ key: planned.key, status: 'ok' }]);
+    expect(departs()[0]!.at).toEqual(new Date(planned.at));
+  });
+
+  it('a trip already completed takes it only dated before its completion (gap filling, late), as every driver write', async () => {
+    addTrip2('COMPLETED', { statusChangedAt: new Date(Date.now() - 10 * 60_000) });
+    const token = makeLink('t5');
+    const after = leave(2, { at: iso(60_000) });
+    expect((await act(token, [after])).body.data!.results).toEqual([expect.objectContaining({ code: 'LOAD_COMPLETED' })]);
+    const before = leave(2, { at: iso(30 * 60_000) });
+    expect((await act(token, [before])).body.data!.results).toEqual([{ key: before.key, status: 'ok' }]);
+    expect(departs()[0]!.payloadJson).toMatchObject({ late: true });
+  });
+
+  it('a signed-in planner on the driver page records it as the office (DISPATCHER), audited with the user', async () => {
+    addTrip2();
+    const token = makeLink('t5');
+    session.value = { user: { id: 'u-ali', name: 'Ali', role: 'PLANNER', tenantId: T } };
+    await act(token, [leave()]);
+    expect(departs()[0]).toMatchObject({ source: 'DISPATCHER', userId: 'u-ali' });
+    expect(tables.auditLog.find((a) => a.action === 'DRIVER_DEPOT_DEPART')).toMatchObject({ userId: 'u-ali' });
+  });
+
+  it('an action without its depot is refused INVALID by the body check', async () => {
+    addTrip2();
+    const token = makeLink('t5');
+    const noDepot = { key: randomUUID(), type: 'DEPOT_DEPART', load: 2, at: iso(60_000) };
+    expect((await act(token, [noDepot])).body.data!.results).toEqual([expect.objectContaining({ key: noDepot.key, status: 'refused', code: 'INVALID' })]);
+    expect(departs()).toEqual([]);
+  });
+});
+
 describe('the returned-loads janitor sweep', () => {
   it('completes a load still out that reported Back at depot; a truck-day whose load is no longer DISPATCHED is dropped before any per-load work', async () => {
     const back = (truckId: string, loadNo: number, minAgo: number) => ({

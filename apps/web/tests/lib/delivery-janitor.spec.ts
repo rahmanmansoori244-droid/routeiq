@@ -15,7 +15,7 @@ vi.mock('@/lib/audit', async () => {
   return { audit: vi.fn(async (input: Record<string, unknown>) => m.fakePrisma.auditLog.create({ data: { ...input } })) };
 });
 
-import { clearIdleCasualDrivers, JANITOR_BATCH, JANITOR_MAX_BATCHES, purgeOldLocations, purgeOldPhotos, runDeliveryJanitor } from '@/lib/jobs/delivery-janitor';
+import { clearIdleCasualDrivers, JANITOR_BATCH, JANITOR_MAX_BATCHES, purgeOldAlerts, purgeOldLocations, purgeOldPhotos, runDeliveryJanitor } from '@/lib/jobs/delivery-janitor';
 import { readDevices, touchUpdate } from '@/lib/driver-link/service';
 
 const NOW = new Date('2026-10-04T08:00:00Z');
@@ -144,5 +144,42 @@ describe('idle daily drivers (spec 12.4)', () => {
     expect(first).toMatchObject({ photos: { count: 0 } });
     expect(await runDeliveryJanitor(new Date(NOW.getTime() + 60_000))).toBeNull();
     expect(await runDeliveryJanitor(new Date(NOW.getTime() + 11 * 60_000))).not.toBeNull();
+  });
+});
+
+describe('operations alerts retention (owner request 16 Oct 2026)', () => {
+  it('rows of a delivery date older than 90 days and e-mail records older than 90 days are deleted; newer ones and other companies stay', async () => {
+    tables.opsAlert = [
+      { id: 'old', tenantId: 'tA', deliveryDate: day('2026-07-05') },
+      { id: 'edge', tenantId: 'tA', deliveryDate: day('2026-07-06') },
+      { id: 'new', tenantId: 'tA', deliveryDate: day('2026-10-03') },
+      { id: 'other', tenantId: 'tB', deliveryDate: day('2026-01-01') },
+    ];
+    tables.opsAlertDigest = [
+      { id: 'd-old', tenantId: 'tA', createdAt: daysAgo(91) },
+      { id: 'd-new', tenantId: 'tA', createdAt: daysAgo(10) },
+    ];
+    // Today in Muscat is 4 Oct: the cutoff is 6 Jul.
+    expect(await purgeOldAlerts(NOW)).toEqual({ alerts: 1, digests: 1 });
+    expect(tables.opsAlert.map((a) => a.id)).toEqual(['edge', 'new', 'other']);
+    expect(tables.opsAlertDigest.map((a) => a.id)).toEqual(['d-new']);
+    // No audit row: the rows are derived.
+    expect(tables.auditLog).toEqual([]);
+    // The janitor runs it once a day with the daily drivers.
+    const r = await runDeliveryJanitor(new Date(NOW.getTime() + 60 * 60_000), { force: true });
+    expect(r).toMatchObject({ alerts: { alerts: 0, digests: 0 } });
+  });
+
+  it('review L3: a failing alert purge is logged under its own name and stops nothing after it', async () => {
+    const spy = vi.spyOn(fakePrisma.opsAlert, 'deleteMany').mockRejectedValue(new Error('db down'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const r = await runDeliveryJanitor(new Date(NOW.getTime() + 2 * 60 * 60_000), { force: true });
+      expect(r).toMatchObject({ alerts: null, casual: expect.any(Object) });
+      expect(err).toHaveBeenCalledWith('[janitor] alert retention not run', { error: 'db down' });
+    } finally {
+      spy.mockRestore();
+      err.mockRestore();
+    }
   });
 });

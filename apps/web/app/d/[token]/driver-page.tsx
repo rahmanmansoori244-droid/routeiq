@@ -1,12 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, ChevronDown, Clock, Info, Languages, MapPin, Phone, Play, Square, Truck, Warehouse } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ChevronDown, Clock, Info, Languages, LogOut, MapPin, Phone, Play, Square, Truck, Warehouse } from 'lucide-react';
 import type { DriverAction, DriverManifest, DriverResults, LinkStateCode, NotDeliveredReasonName, OutcomeName, PhotoPositionStatusName } from '@/lib/driver-link/manifest-types';
 import { deviceId, fetchManifest, photoUrl, postActions, postPhoto, safeLocalStorage, tokenFromPath } from '@/lib/driver-page/api';
 import { driverNames, helperNames, helpersLabelKey, openTripIndex, stopTitle, telHref, tripLine } from '@/lib/driver-page/format';
 import { clockTime, fmtDate, fmtHours, hhmm, LANG_TOGGLE, pickLang, statusLabel, t, type Lang } from '@/lib/driver-page/i18n';
-import { applyQueued, keyedManifest, manifestStopKey, unsentList, type OverlayLoad, type OverlayStop } from '@/lib/driver-page/overlay';
+import { applyQueued, keyedManifest, leaveOffer, manifestStopKey, unsentList, type OverlayLoad, type OverlayStop } from '@/lib/driver-page/overlay';
 import { loadKeyOfStop, parseStopKey } from '@/lib/driver-link/stop-key';
 import { betterFix, freshFix, positionStatus } from '@/lib/driver-page/photo';
 import {
@@ -33,7 +33,7 @@ import { LinkState } from './link-state';
 import { OutcomeFlow, type DraftPhoto } from './outcome-flow';
 import { ResultChip, StopSheet } from './stop-sheet';
 import { SyncBadge } from './sync-badge';
-import { posOf, useTracker } from './use-tracker';
+import { posOf, recentPosOf, useTracker } from './use-tracker';
 import { WebviewGate } from './webview-gate';
 import { WhichCustomer } from './which-customer';
 
@@ -41,7 +41,8 @@ import { WhichCustomer } from './which-customer';
  * The driver's phone page (owner request 4 Oct 2026, spec sections 6, 7, 12 and 13). One page per
  * truck-day: the trips in departure order, their stops, Navigate, the plan and the cases; on a trip
  * that is on the road the automatic stop timer, the results (Delivered / Partly / Not delivered) with
- * photos, and Back at depot.
+ * photos, Back at depot, and Leaving for next load (owner decision 16 Oct 2026: tapped when the truck
+ * leaves the depot again with its next trip; the dispatcher's alert rule R2 measures the turnaround).
  *
  * Works without signal: everything is queued on the phone (IndexedDB) and sent when there is signal,
  * each action with its own key so a retry never records twice; the last manifest is kept and shown
@@ -96,6 +97,9 @@ function buildTag(): string {
   return h.toString(36);
 }
 
+/** Leaving for next load sends the phone's position only from a fix at most this old. */
+const LEAVE_FIX_MAX_AGE_MS = 2 * 60_000;
+
 /** The truck-day's results laid into the manifest (the action and photo answers carry them). */
 function withResults(m: DriverManifest, r: DriverResults): DriverManifest {
   return {
@@ -103,6 +107,7 @@ function withResults(m: DriverManifest, r: DriverResults): DriverManifest {
     loads: m.loads.map((l) => ({
       ...l,
       backAtDepotAt: r.back[l.key] ?? l.backAtDepotAt,
+      leftDepotAt: r.left?.[l.key] ?? l.leftDepotAt ?? null,
       stops: l.stops.map((s) => ({ ...s, result: r.stops[s.key] ?? s.result })),
     })),
   };
@@ -140,6 +145,8 @@ export function DriverPage() {
   const [cameraSlow, setCameraSlow] = useState(false);
   /** The load key of the trip whose "Back at depot?" is asked. */
   const [confirmBack, setConfirmBack] = useState<string | null>(null);
+  /** The load key of the trip whose "Leaving the depot now with trip N?" is asked. */
+  const [confirmLeave, setConfirmLeave] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
 
@@ -263,9 +270,17 @@ export function DriverPage() {
       const s = store.current;
       if (s) {
         // Load keys, and the numbers for items saved before the depot was in the keys (queue.ts itemLoadKey).
-        const out = new Set(m.loads.filter((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED').flatMap((l) => [l.key, String(l.loadNo)]));
-        const released = releaseHeld(await s.items(n), out, Date.now());
-        if (released.length) await s.put(released);
+        const keysOf = (statuses: readonly string[]) => new Set(m.loads.filter((l) => statuses.includes(l.status)).flatMap((l) => [l.key, String(l.loadNo)]));
+        const all = await s.items(n);
+        const released = releaseHeld(all, keysOf(['DISPATCHED', 'COMPLETED']), Date.now());
+        // A Leaving for next load kept while its load was Planned goes out once it is Locked or Loading:
+        // the server takes it then (second review of 16 Oct 2026, finding 6).
+        const leaving = releaseHeld(
+          all.filter((i) => i.kind === 'action' && (i.body as DriverAction).type === 'DEPOT_DEPART' && !released.some((r) => r.key === i.key)),
+          keysOf(['LOCKED', 'LOADING']),
+          Date.now(),
+        );
+        if (released.length || leaving.length) await s.put([...released, ...leaving]);
       }
       await refreshItems();
       void flush();
@@ -609,6 +624,20 @@ export function DriverPage() {
     if (missing) setInfo(t(lang, 'tripClosesWhenAll'));
   };
 
+  /**
+   * Leaving for next load, kept on the phone like every action (sent when there is signal, each tap with
+   * its own key so a retry never records twice). Tapped again to correct a tap made too early: the latest
+   * one counts. The trip the truck leaves with, by its depot and number; the phone's fix only when it is
+   * at most 2 min old (the tracker may have been stopped since Back at depot).
+   */
+  const leaveDepot = (loadKey: string) => {
+    setConfirmLeave(null);
+    const l = overlay?.find((x) => x.key === loadKey);
+    if (!l || !l.depotId) return;
+    const now = Date.now();
+    void enqueue({ key: newKey(), type: 'DEPOT_DEPART', load: l.loadNo, depot: l.depotId, at: new Date(now).toISOString(), pos: recentPosOf(tracker.lastFix(), now, LEAVE_FIX_MAX_AGE_MS) }, false);
+  };
+
   // Photos of the open stop, fetched with the token in the header into blob URLs.
   const open = stopOf(openStop);
   useEffect(() => {
@@ -638,6 +667,8 @@ export function DriverPage() {
   const whenStop = stopOf(tracker.arrivedWhen);
   const linkDown = phase.kind === 'link';
   const unsent = linkDown && overlay ? unsentList(overlay, items) : [];
+  // Offered only while the company has the alerts and rule R2 on (manifest.ts leaveTapOffered).
+  const leave = overlay && manifest?.settings.leaveTap ? leaveOffer(overlay, nowTick) : null;
 
   const flow =
     entering && open && stopOf(entering.stopKey)?.stop.key === open.stop.key ? (
@@ -682,7 +713,7 @@ export function DriverPage() {
           <p className="font-bold text-red-800">{t(lang, 'notSentTitle')}</p>
           {reports.slice(-5).map((r) => (
             <p key={r.key}>
-              <span dir="auto">{(r.stopKey && stopOf(r.stopKey)?.stop.customerName) || r.type}</span>: {r.message ? r.message[lang] : r.code}
+              <span dir="auto">{(r.stopKey && stopOf(r.stopKey)?.stop.customerName) || (r.type === 'BACK_AT_DEPOT' ? t(lang, 'backAtDepot') : r.type === 'DEPOT_DEPART' ? t(lang, 'leavingNext') : r.type)}</span>: {r.message ? r.message[lang] : r.code}
             </p>
           ))}
           <button type="button" className="mt-1 min-h-10 text-sm font-semibold underline" onClick={() => setReports([])}>
@@ -743,6 +774,7 @@ export function DriverPage() {
       ) : !linkDown && manifest && overlay ? (
         <main className="space-y-3 p-3">
           <TrackingBar lang={lang} on={tracker.on} gps={tracker.gps} offered={startOffered} onStart={tracker.start} onStop={tracker.stop} />
+          {leave ? <LeaveBar lang={lang} tz={manifest.tz} from={leave.from} to={leave.to} onLeave={() => setConfirmLeave(leave.to.key)} /> : null}
           {manifest.loads.length === 0 ? (
             <p className="rounded-xl bg-white p-5 text-center text-lg" data-testid="no-trips">
               {t(lang, 'noTrips', { truck: manifest.truck.code, date: fmtDate(lang)(manifest.date) })}
@@ -784,6 +816,10 @@ export function DriverPage() {
             tracker.dismissBack();
           }}
         />
+      ) : null}
+
+      {confirmLeave !== null && overlay && leave?.to.key === confirmLeave ? (
+        <LeaveDialog lang={lang} load={leave.to} onYes={(k) => leaveDepot(k)} onNo={() => setConfirmLeave(null)} />
       ) : null}
 
       {notice && manifest ? (
@@ -934,6 +970,11 @@ function TripCard({
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <StatusChip lang={lang} status={load.status} />
             {load.status === 'DISPATCHED' || load.status === 'COMPLETED' ? <span className="text-sm font-semibold">{done}/{load.stops.length}</span> : null}
+            {load.leftAt ? (
+              <span className="text-sm" data-testid={`left-at-${load.loadNo}`}>
+                {t(lang, 'leftAt', { time: clockTime(new Date(load.leftAt).toISOString(), manifest.tz) })}
+              </span>
+            ) : null}
             {load.backAt ? <span className="text-sm">{t(lang, 'backAt', { time: clockTime(new Date(load.backAt).toISOString(), manifest.tz) })}</span> : null}
           </div>
         </div>
@@ -1001,6 +1042,52 @@ function BackAtDepotDialog({ lang, load, onYes, onNo }: { lang: Lang; load: Over
       <div className="mt-3 grid grid-cols-2 gap-2">
         <button type="button" onClick={() => onYes(load.key)} className="min-h-14 rounded-xl bg-slate-900 text-lg font-bold text-white">
           {t(lang, 'backAtDepot')}
+        </button>
+        <button type="button" onClick={onNo} className="min-h-14 rounded-xl border border-slate-400 text-lg font-semibold">
+          {t(lang, 'cancel')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * "Back at depot 10:42 (trip 1). Tap when the truck leaves with trip 2." and the Leaving for next load
+ * button; once tapped, for a while: "Left depot 10:55 with trip 2. Tapped too early? Tap again when the
+ * truck really leaves." and a smaller button (the latest tap counts).
+ */
+function LeaveBar({ lang, tz, from, to, onLeave }: { lang: Lang; tz: string; from: OverlayLoad; to: OverlayLoad; onLeave: () => void }) {
+  const back = from.backAt !== null ? clockTime(new Date(from.backAt).toISOString(), tz) : '';
+  if (to.left && to.leftAt !== null) {
+    return (
+      <div className="space-y-2 rounded-xl border border-blue-200 bg-white p-3" data-testid="leave-bar">
+        <p className="text-sm">{t(lang, 'leftRetap', { time: clockTime(new Date(to.leftAt).toISOString(), tz), m: to.loadNo })}</p>
+        <button type="button" onClick={onLeave} className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-blue-800 text-base font-semibold text-blue-900" data-testid={`leaving-next-${to.loadNo}`}>
+          <LogOut className="h-5 w-5" aria-hidden /> {t(lang, 'leavingNext')}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2 rounded-xl bg-blue-50 p-3" data-testid="leave-bar">
+      <p className="text-sm font-semibold">{t(lang, 'leavingNextFor', { time: back, n: from.loadNo, m: to.loadNo })}</p>
+      <button type="button" onClick={onLeave} className="flex min-h-14 w-full items-center justify-center gap-2 rounded-xl bg-blue-800 text-lg font-bold text-white" data-testid={`leaving-next-${to.loadNo}`}>
+        <LogOut className="h-6 w-6" aria-hidden /> {t(lang, 'leavingNext')}
+      </button>
+    </div>
+  );
+}
+
+function LeaveDialog({ lang, load, onYes, onNo }: { lang: Lang; load: OverlayLoad; onYes: (loadKey: string) => void; onNo: () => void }) {
+  return (
+    <div className="fixed inset-x-0 bottom-0 z-30 rounded-t-2xl border-t bg-white p-4 shadow-2xl" role="dialog" aria-modal="true" data-testid="leave-dialog">
+      <p className="flex items-center gap-2 text-lg font-bold">
+        <LogOut className="h-6 w-6" aria-hidden /> {t(lang, 'confirmLeaveTitle', { m: load.loadNo })}
+      </p>
+      <p className="mt-1 text-sm">{t(lang, 'tripOf', { n: load.loadNo, m: Math.max(load.trips, load.loadNo) })}</p>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button type="button" onClick={() => onYes(load.key)} className="min-h-14 rounded-xl bg-blue-800 text-lg font-bold text-white">
+          {t(lang, 'leavingNext')}
         </button>
         <button type="button" onClick={onNo} className="min-h-14 rounded-xl border border-slate-400 text-lg font-semibold">
           {t(lang, 'cancel')}

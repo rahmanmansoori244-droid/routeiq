@@ -10,6 +10,7 @@
  */
 import type { Prisma, StopVisit } from '@prisma/client';
 import { prisma } from '../db';
+import { findInParts } from '../in-parts';
 import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, localDateIso, localMinutes, zonedDayStart } from '../dispatch/time';
 import { shownTruckCode } from '../dispatch/hire';
 import { lateDispatchNotes } from '../driver-link/plan-notes';
@@ -212,17 +213,80 @@ export async function truckDaysWithLinkOrVisit(db: Db, tenantId: string, from: s
   return new Set([...links, ...visits].map((x) => `${isoOf(x.deliveryDate)}|${x.truckId}`));
 }
 
-/** Loads that reported Back at depot (`depotId|date|truckId|loadNo`). */
-export async function backAtDepot(db: Db, tenantId: string, from: string, to: string, depotId?: string | null): Promise<Map<string, Date>> {
+/** The load-level events of a kind per load (`depotId|date|truckId|loadNo`), oldest first. */
+async function loadEvents(db: Db, tenantId: string, kind: 'BACK_AT_DEPOT' | 'DEPOT_DEPART', from: string, to: string, depotId?: string | null): Promise<Map<string, Date[]>> {
   const rows = await db.stopEvent.findMany({
-    where: { tenantId, kind: 'BACK_AT_DEPOT', deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) }, ...(depotId ? { depotId } : {}) },
+    where: { tenantId, kind, deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) }, ...(depotId ? { depotId } : {}) },
     select: { depotId: true, deliveryDate: true, truckId: true, loadNo: true, at: true },
   });
-  const out = new Map<string, Date>();
+  const out = new Map<string, Date[]>();
   for (const b of rows) {
     const k = `${b.depotId}|${isoOf(b.deliveryDate)}|${b.truckId}|${b.loadNo}`;
-    const cur = out.get(k);
-    if (!cur || b.at < cur) out.set(k, b.at);
+    const list = out.get(k);
+    if (list) list.push(b.at);
+    else out.set(k, [b.at]);
+  }
+  for (const list of out.values()) list.sort((a, b) => a.getTime() - b.getTime());
+  return out;
+}
+
+/** Loads that reported Back at depot (`depotId|date|truckId|loadNo`): the earliest tap. */
+export async function backAtDepot(db: Db, tenantId: string, from: string, to: string, depotId?: string | null): Promise<Map<string, Date>> {
+  return new Map([...(await loadEvents(db, tenantId, 'BACK_AT_DEPOT', from, to, depotId))].map(([k, list]) => [k, list[0]!]));
+}
+
+/**
+ * The driver's "Leaving for next load" taps per load the truck left the depot with (StopEvent
+ * DEPOT_DEPART, owner decision 16 Oct 2026), oldest first, by the same key as backAtDepot (backKey).
+ * Every tap: the turnaround takes the latest one before the truck reached a stop (a tap made too early
+ * is corrected by tapping again; lib/delivery/turnaround.ts). A load moved back to Planned loses its
+ * taps (plan-service.ts changeStatusCore); the readers also leave out the taps of a load that is Planned now.
+ */
+export async function leftDepotTaps(db: Db, tenantId: string, from: string, to: string, depotId?: string | null): Promise<Map<string, Date[]>> {
+  return loadEvents(db, tenantId, 'DEPOT_DEPART', from, to, depotId);
+}
+
+/** At most this many earlier plan versions are followed back through carriedFromLoadId. */
+const MAX_COPY_HOPS = 60;
+
+/**
+ * Per load id: when the load first existed on the truck's plan (the createdAt of the first version it was
+ * copied from through carriedFromLoadId: a re-plan copies a frozen load with a new id) and its Dispatch
+ * press (the latest LOAD_DISPATCHED audit row of the nearest load of that chain, as the crew report
+ * reads it: completing a load overwrites statusChangedAt). Unknown values are null. A few queries: one
+ * per plan version followed back, and one for the audit rows.
+ */
+export async function loadOrigins(db: Db, tenantId: string, ids: readonly string[]): Promise<Map<string, { firstAt: Date | null; dispatchedAt: Date | null }>> {
+  const out = new Map<string, { firstAt: Date | null; dispatchedAt: Date | null }>();
+  if (!ids.length) return out;
+  const row = new Map<string, { carriedFromLoadId: string | null; createdAt: Date | null }>();
+  let frontier = [...new Set(ids)];
+  for (let i = 0; i <= MAX_COPY_HOPS && frontier.length; i++) {
+    const rows = await findInParts(frontier, (part) => db.planLoad.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, carriedFromLoadId: true, createdAt: true } }));
+    for (const r of rows) row.set(r.id, { carriedFromLoadId: r.carriedFromLoadId ?? null, createdAt: r.createdAt ?? null });
+    for (const id of frontier) if (!row.has(id)) row.set(id, { carriedFromLoadId: null, createdAt: null });
+    frontier = [...new Set(rows.map((r) => r.carriedFromLoadId).filter((x): x is string => !!x && !row.has(x)))];
+  }
+  const audits = await findInParts([...row.keys()], (part) =>
+    db.auditLog.findMany({ where: { tenantId, action: 'LOAD_DISPATCHED', entity: 'PlanLoad', entityId: { in: part } }, select: { entityId: true, createdAt: true } }),
+  );
+  const pressed = new Map<string, Date>();
+  for (const a of audits) {
+    if (!a.entityId) continue;
+    const cur = pressed.get(a.entityId);
+    if (!cur || a.createdAt > cur) pressed.set(a.entityId, a.createdAt);
+  }
+  for (const id of new Set(ids)) {
+    let firstAt: Date | null = null;
+    let dispatchedAt: Date | null = null;
+    let cur: string | null = id;
+    for (let i = 0; cur && i <= MAX_COPY_HOPS; i++) {
+      const r = row.get(cur);
+      if (!dispatchedAt) dispatchedAt = pressed.get(cur) ?? null;
+      if (r?.createdAt) firstAt = r.createdAt;
+      cur = r?.carriedFromLoadId ?? null;
+    }
+    out.set(id, { firstAt, dispatchedAt });
   }
   return out;
 }

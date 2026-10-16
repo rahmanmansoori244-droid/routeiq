@@ -26,7 +26,7 @@ import { autoTimeLimitSec, CONFIG_BOUNDS, DEPOT_BOUNDS, LARGE_DAY_STOPS, MAX_DIS
 import { COUNTRY_NAMES } from '@/lib/countries';
 import { effectivePlannerValues } from '@/lib/dispatch/planner-config';
 import { isAfterCutoff } from '@/lib/dispatch/time';
-import { SETTINGS_FIELDS } from '@/lib/settings-fields';
+import { ALERT_SETTINGS_FIELDS, SETTINGS_FIELDS } from '@/lib/settings-fields';
 
 const BASE_CFG: Record<string, any> = {
   avgSpeedKmh: 40, distanceProvider: 'OSRM', distanceMultiplier: 1.3, driverShiftMaxMinutes: 660, shiftStartMin: 360,
@@ -90,6 +90,10 @@ const CHANGED: Record<string, unknown> = {
   requireDataBeforeLoading: true, dataCollectDays: 5,
   geofenceRadiusM: 150, photoProofRequired: false, photoRetentionDays: 180, locationRetentionDays: 60, dispatcherPhone: '+968 9000 0000',
   palletFillPct: 90, dailyDriverDayRate: 12, smallTruckMaxBays: 4, windowRule: 'START',
+  // Operations alerts (owner request 16 Oct 2026): read by the alert sweep and the e-mail digest only.
+  alertsEnabled: true, alertUnloadOverMin: 45, alertLoadingOverMin: 40, alertEtaLateMin: 20, alertDepartLateMin: 20, alertSilentMin: 90,
+  alertPageNotOpenedMin: 45, alertAfterClosingMin: 0, alertPriorityMax: 1, alertDeliveredNote: false, alertProofFarM: 800, alertNotClosedMin: 60,
+  alertEmails: 'owner@ops.example', alertEmailEveryMin: 30, alertEmailMinSeverity: 'WARN', alertQuietFromMin: 1380, alertQuietToMin: 300,
 };
 /**
  * Read by the order intake, not by the optimizer request (checked against their consumer below). Also
@@ -111,6 +115,8 @@ const SMALL_TRUCK_ONLY = new Set(['smallTruckMaxBays']);
 const SMALL_TRUCK_DAY = { truck: { bays: 6 } };
 const HIRED_TODAY = { hired: true, onlyOnDate: new Date('2026-09-26T00:00:00Z'), kmPerLitre: null, costPerKm: 0 };
 const INTAKE_ONLY = new Set(['planningCutoffMin', 'dateOrder', 'requireDataBeforeLoading', 'dataCollectDays', 'geofenceRadiusM', 'photoProofRequired', 'photoRetentionDays', 'locationRetentionDays', 'dispatcherPhone']);
+/** Operations alerts (owner request 16 Oct 2026): read by the alert sweep and the e-mail digest (lib/alerts), never by a plan. */
+const ALERTS_ONLY = new Set<string>(ALERT_SETTINGS_FIELDS);
 
 beforeEach(() => {
   customers = [customer('C1', 23.6, 58.4), customer('C2', 23.55, 58.3)];
@@ -128,7 +134,7 @@ describe('Settings fields drive the planner (review F21)', () => {
       expect(CHANGED, k).toHaveProperty(k);
       expect(tenantConfigSchema.partial().safeParse({ [k]: CHANGED[k] }).success, k).toBe(true);
       const changed = await build({ ...BASE_CFG, [k]: CHANGED[k] });
-      if (INTAKE_ONLY.has(k) || HIRED_ONLY.has(k) || SMALL_TRUCK_ONLY.has(k)) expect(changed, k).toBe(base);
+      if (INTAKE_ONLY.has(k) || HIRED_ONLY.has(k) || SMALL_TRUCK_ONLY.has(k) || ALERTS_ONLY.has(k)) expect(changed, k).toBe(base);
       else expect(changed, k).not.toBe(base);
       if (HIRED_ONLY.has(k)) expect(await build({ ...BASE_CFG, [k]: CHANGED[k] }, { truck: HIRED_TODAY }), k).not.toBe(hiredBase);
       if (SMALL_TRUCK_ONLY.has(k)) {
