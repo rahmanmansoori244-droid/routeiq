@@ -87,6 +87,7 @@ from fractions import Fraction
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
+import best_of as best_of_mod
 import costing
 import feasibility as FZ
 import load_repack as LR
@@ -5729,7 +5730,8 @@ def _retime_fallback(req: DispatchRequest, solvable: list[DispatchStop], tds: li
 def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                 time_limit: int, drops: list[UnservedStop], results: dict[str, DispatchScenario], pool,
                 budget_end: float, done: set[str] | None = None, repack_cap: float | None = None,
-                pv: "_PvRun | None" = None, rechecked: set[str] | None = None) -> None:
+                pv: "_PvRun | None" = None, rechecked: set[str] | None = None,
+                extra_sources: list[tuple[str, DispatchScenario]] | tuple = (), best_of: dict | None = None) -> None:
     """Replace each OPTIMIZED scenario in ``results`` by the best candidate for its goal.
 
     Candidates = every raw scenario plan (re-timed exactly) + its repacks: whole loads
@@ -5761,7 +5763,18 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     An option rescued from no plan gets the status SECOND_SEARCH. So each option is never worse on its
     own goal than the engine alone would have chosen from the same search. A plan from it that fails
     the independent check is replaced by the engine's (a WARNING line). An option whose own search
-    found no plan (NO_SOLUTION) takes the second search's best plan for its goal."""
+    found no plan (NO_SOLUTION) takes the second search's best plan for its goal.
+
+    ``extra_sources``: best-of-N's other route searches of RECOMMENDED ("RECOMMENDED~<i>", best_of.py), each
+    one more engine source of the load re-check (its stops left out become optional as any source's; the
+    F07 extension is still granted by the options' own plans only). They only add candidates: a tie keeps
+    the option's own source, then any other engine source, then theirs, then the second search's; and a
+    candidate built from one is used only when it beats the best candidate built without any by a gain the
+    dispatcher can see (the second search's rule, _goal_gain) - then the plan's note says so
+    (_best_of_note) and the option is added to ``best_of["chosen_for"]``. ``best_of`` (the solve's
+    best-of report, SearchReport.best_of) also receives, per option, the best candidate of the other
+    searches against the best one without them (``gains``, BestOfGain: paired evidence of what they add,
+    on the re-check's own scores). Without them (one search, the default) nothing here changes."""
     done = done if done is not None else set()
     raw = {n: sc for n, sc in results.items() if sc.status == "OPTIMIZED"}
     pv_plan = pv.plan if pv is not None else None
@@ -5774,6 +5787,15 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     values, value_warnings, use_margin = ctx.values, ctx.value_warnings, ctx.use_margin
     n_stops = len(solvable)
     sources = [LR.Source(n, _timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx)) for n, sc in raw.items()]
+    # Best-of-N's other searches, after the options' own (only plans with stops planned, under their own names).
+    extras: dict[str, DispatchScenario] = {}
+    for n, sc in (extra_sources if raw else ()):
+        if not _from_extra(n) or n in extras or sc is None or sc.status != "OPTIMIZED":
+            if not _from_extra(n):
+                log.warning("post-solve run=%s: extra source %r is not another route search of RECOMMENDED; ignored", req.run_id, n)
+            continue
+        extras[n] = sc
+    sources += [LR.Source(n, _timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx), extra=True) for n, sc in extras.items()]
     carried = {src.name: {k for loads in src.plan.values() for tl in loads for k in tl.stops} for src in sources}
     left_out = set(range(n_stops)) - set.intersection(*carried.values()) if carried else set()
     optional = _repair_weights(solvable, left_out, cfg, req.trucks, req.depot) if left_out else None
@@ -5890,7 +5912,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
 
     def pick(name: str, pool_c: list[LR.Candidate], own: int) -> tuple[LR.Candidate | None, bool]:
         """The option's best candidate for its goal among ``pool_c``: service first; a tie keeps the
-        option's own source, then any engine source before the second search's (critique C7)."""
+        option's own source, then any engine source before the second search's (critique C7) - best-of-N's
+        other searches after the engine's own sources, before the second search's."""
         fits = [c for c in pool_c if c.score.service <= own]
         lost = not fits and bool(pool_c)
         if lost:
@@ -5901,7 +5924,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         if not fits:
             return None, False
         goal = _GOALS[name]
-        return min(fits, key=lambda c: (goal(c.score), c.source.split("+")[0] != name, c.source.startswith("PYVRP"))), lost
+        return min(fits, key=lambda c: (goal(c.score), c.source.split("+")[0] != name, c.source.startswith("PYVRP"),
+                                        _from_extra(c.source))), lost
 
     def served(c: LR.Candidate) -> set[int]:
         return {k for loads in c.plan.values() for tl in loads for k in tl.stops}
@@ -5909,8 +5933,9 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     # The chosen plans' rented or day-paid trucks get their day routed again (_shorter_orders, fifth and
     # sixth reviews): after the pick, so it never changes which truck carries what; each candidate once,
     # each with up to HIRE_ORDER_SEC, all of them together with up to three times that (the second
-    # search's plan and the engine's own are compared after it, so neither may starve the other).
-    orders_end = min(time.monotonic() + 3 * HIRE_ORDER_SEC, budget_end - 2)
+    # search's plan and the engine's own are compared after it, so neither may starve the other) - four
+    # times with best-of-N's other searches (the best plan without them is compared too).
+    orders_end = min(time.monotonic() + (3 + bool(extras)) * HIRE_ORDER_SEC, budget_end - 2)
     in_order: dict[int, LR.Candidate] = {}
 
     def ordered(c: LR.Candidate | None) -> LR.Candidate | None:
@@ -5929,6 +5954,23 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         # other options' plans are not offered to it, as without the second search).
         best, lost = pick(name, cands if name in raw else pvc, own)
         ref, ref_lost = pick(name, eng, own) if name in raw else (None, False)
+        ref0, gain = None, None
+        if extras and name in raw:
+            # Best-of-N: the engine's own choice (``ref``) built from another route search must beat the best
+            # candidate built without any (``ref0``) by a gain the dispatcher can see - as the second search's
+            # must - or ``ref0`` is the engine's choice. The second search is then compared with that choice,
+            # and replaced by it (critique-1 L2: never by an extra's plan that skipped this rule).
+            ref0, ref0_lost = pick(name, [c for c in eng if not _from_extra(c.source)], own)
+            ext, _ = pick(name, [c for c in eng if _from_extra(c.source)], own)
+            gain = _best_of_gain(name, ext, ref0, served)
+            if best_of is not None:
+                best_of.setdefault("gains", []).append(gain)
+            if ref is not None and ref0 is not None and _from_extra(ref.source):
+                o_ref, o_ref0 = ordered(ref), ordered(ref0)
+                if _goal_gain(name, o_ref0.score, o_ref.score, len(served(o_ref)) - len(served(o_ref0))) is None:  # type: ignore[union-attr]
+                    if best is not None and _from_extra(best.source):
+                        best, lost = ref0, ref0_lost
+                    ref, ref_lost = ref0, ref0_lost
         best, ref = ordered(best), ordered(ref)
         if (best is not None and ref is not None and best.source.startswith("PYVRP")
                 and _goal_gain(name, ref.score, best.score, len(served(best)) - len(served(ref))) is None):
@@ -5988,11 +6030,20 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         if timing_drops:
             new.warnings.append(_timing_drop_warning(cfg, len(timing_drops), len(added),
                                                      _inverted_drops(solvable, timing_drops, served_now)))
+        if _from_extra(best.source):
+            if best_of is not None:
+                best_of["chosen_for"] = [*best_of.get("chosen_for", []), name]
+            if gain is not None:
+                gain["used"] = True
         if best.source.startswith("PYVRP"):
             new.warnings.append(_second_search_note(name, name in rescue, ref, best, served(ref) if ref else set(), served_now))
             pv.report["chosen_for"] = [*pv.report.get("chosen_for", []), name]  # type: ignore[union-attr]
         elif timing_drops:
             pass
+        elif _from_extra(best.source):
+            # Not "Loads were re-assigned after the route search": that compares with the main search's plan.
+            o_ref0 = ordered(ref0)
+            new.warnings.append(_best_of_note(name, best, o_ref0, served(o_ref0) if o_ref0 else set(), served_now, best_of))
         elif "+repack" in best.source and changed:
             new.warnings.append(
                 f"Loads were re-assigned after the route search: {sc.trucks_used} -> {new.trucks_used} trucks, "
@@ -6080,6 +6131,52 @@ def _second_search_note(name: str, rescued: bool, ref: LR.Candidate | None, best
                 f"{r.operating / COST_SCALE:,.0f}" != f"{b.operating / COST_SCALE:,.0f}")]
     also = [text for key, text, changed in figures if changed and key != m[1]]
     return (f"A second route search found a better plan for this option than the main search: {m[0]}."
+            + (f" Also changed: {', '.join(also)}." if also else "") + f" {checked}")
+
+
+def _from_extra(source: str) -> bool:
+    """A load re-check candidate built from one of best-of-N's other route searches ("RECOMMENDED~2",
+    "RECOMMENDED~2+repack:RECOMMENDED"), not from the main search, an alternative or the second search."""
+    return best_of_mod.from_extra(source)
+
+
+def _best_of_gain(name: str, ext: LR.Candidate | None, ref0: LR.Candidate | None, served) -> dict:
+    """BestOfGain for option ``name``: the best candidate built from the other route searches (``ext``) against
+    the best one built without any (``ref0``), on the load re-check's own scores (before a rented truck's day
+    is routed again). Differences are "without minus with": positive = the other search's is cheaper, shorter
+    or uses fewer trucks; served_delta = stops it serves more. ``used`` is set once the option's plan is it."""
+    out: dict = {"option": name, "source": ext.source if ext is not None else None, "used": False}
+    if ext is not None and ref0 is not None:
+        r, b = ref0.score, ext.score
+        out.update(gain_omr=round((r.cost - b.cost) / COST_SCALE, 3), gain_operating_omr=round((r.operating - b.operating) / COST_SCALE, 3),
+                   gain_km=round((r.metres - b.metres) / 1000.0, 3), gain_trucks=r.trucks - b.trucks,
+                   served_delta=len(served(ext)) - len(served(ref0)))
+    return out
+
+
+def _best_of_note(name: str, best: LR.Candidate, ref0: LR.Candidate | None, ref_served: set[int], served_now: set[int],
+                  best_of: dict | None) -> str:
+    """The dispatcher's note on an option whose plan was built from one of best-of-N's other route searches, in
+    plain words, as the second search's (_second_search_note): compared with the best plan built without them
+    (``ref0``, after the same load re-check) - never with the main search's raw plan."""
+    checked = "It passed the planner's own checks, timing and costs."
+    index = best.source.split("+", 1)[0][len(best_of_mod.EXTRA_PREFIX):]
+    used = (best_of or {}).get("used")
+    which = (f"Route search {int(index) + 1} of {used}" if used and index.isdigit() else "Another route search") + \
+        " (started from another order of the stops)"
+    if ref0 is None:
+        return f"{which} found this plan: no plan of the main search could be timed exactly. {checked}"
+    m = _goal_measure(name, ref0.score, best.score, len(served_now) - len(ref_served))
+    if m is None:  # not reached: such a plan is not chosen (_post_solve)
+        return f"This plan comes from {which[0].lower()}{which[1:]}. {checked}"
+    r, b = ref0.score, best.score
+    figures = [("trucks", f"trucks {r.trucks} -> {b.trucks}", r.trucks != b.trucks),
+               ("loads", f"loads {r.loads} -> {b.loads}", r.loads != b.loads),
+               ("km", f"km {r.metres / 1000:,.1f} -> {b.metres / 1000:,.1f}", f"{r.metres / 1000:,.1f}" != f"{b.metres / 1000:,.1f}"),
+               ("operating", f"operating cost {r.operating / COST_SCALE:,.0f} -> {b.operating / COST_SCALE:,.0f} OMR",
+                f"{r.operating / COST_SCALE:,.0f}" != f"{b.operating / COST_SCALE:,.0f}")]
+    also = [text for key, text, changed in figures if changed and key != m[1]]
+    return (f"{which} found a better plan for this option than the main search: {m[0]}."
             + (f" Also changed: {', '.join(also)}." if also else "") + f" {checked}")
 
 
