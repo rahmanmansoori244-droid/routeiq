@@ -87,7 +87,7 @@ from fractions import Fraction
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
-import best_of as best_of_mod
+import best_of as BO
 import costing
 import feasibility as FZ
 import load_repack as LR
@@ -740,12 +740,17 @@ class _SearchWatch:
     Each point of the best objective over time also counts the stops that plan had not planned yet
     (``stops``: the stops' routing indices; an unplanned stop is its own successor). The objective
     holds a large penalty for each of them (1,000 OMR or more on real days), so a score in the thousands
-    is not money (skeptic review of the long-search PR). Counted on improvements only."""
+    is not money (skeptic review of the long-search PR). Counted on improvements only.
 
-    def __init__(self, routing, rule: StallRule | None, flag, stops: list[int] | None = None) -> None:
+    ``join_flag`` (best-of-N, best_of.py: only the other searches of RECOMMENDED, never the main one nor
+    an alternative): once set, the search ends at its next solution with its best plan (JOINED) - the
+    main search has ended and the solve goes on without waiting for it."""
+
+    def __init__(self, routing, rule: StallRule | None, flag, stops: list[int] | None = None, join_flag=None) -> None:
         self.routing = routing
         self.rule = rule
         self.flag = flag
+        self.join_flag = join_flag
         self.stops = list(stops or [])
         self.t0 = time.perf_counter()
         self.best: int | None = None
@@ -766,8 +771,9 @@ class _SearchWatch:
         if self.reason is not None:
             return
         stop = self.flag is not None and self.flag.is_set()
-        if stop or (self.rule is not None and self.rule.should_stop(t, self.last)):
-            self.reason, self.ended_at = ("STOPPED" if stop else "CONVERGED"), t
+        joined = not stop and self.join_flag is not None and self.join_flag.is_set()
+        if stop or joined or (self.rule is not None and self.rule.should_stop(t, self.last)):
+            self.reason, self.ended_at = ("STOPPED" if stop else BO.JOINED if joined else "CONVERGED"), t
             self.routing.solver().FinishCurrentSearch()
 
     def report(self) -> dict:
@@ -793,15 +799,17 @@ class _SearchWatch:
         }
 
 
-def _watch_search(name: str, cfg: DispatchConfig, n_stops: int, routing, manager=None) -> None:
+def _watch_search(name: str, cfg: DispatchConfig, n_stops: int, routing, manager=None, *, join: bool = False) -> None:
     """THOROUGH only - a QUICK search gets nothing attached and runs exactly as before. RECOMMENDED
     gets the stall rule (never before QUICK's time for the day); the alternatives only the stop flag.
-    ``manager``: the stops are nodes 1..n_stops (_solve_scenario), counted on each progress point."""
+    ``manager``: the stops are nodes 1..n_stops (_solve_scenario), counted on each progress point.
+    ``join``: one of RECOMMENDED's other searches (best-of-N, _variant_worker): it also ends when its
+    pool's join flag is raised (_Workers.raise_join; JOINED)."""
     if cfg.search_mode != "THOROUGH":
         return
     rule = stall_rule(cfg.time_limit_sec or auto_time_limit(n_stops)) if name == "RECOMMENDED" else None
     stops = [manager.NodeToIndex(k + 1) for k in range(n_stops)] if manager is not None else None
-    watch = _SearchWatch(routing, rule, _STOP_FLAG, stops)
+    watch = _SearchWatch(routing, rule, _STOP_FLAG, stops, join_flag=_JOIN_FLAG if join else None)
     # The callback is kept on the watch (and the watch in _WATCHES) for the whole search.
     watch.callback = watch.on_solution
     routing.AddAtSolutionCallback(watch.callback)
@@ -816,11 +824,17 @@ def _searched(args) -> tuple[DispatchScenario, dict | None]:
     return sc, (watch.report() if watch is not None else None)
 
 
-def _stop_reason(mode: str, watch: dict | None, search_sec: float, limit: int, status: str | None = None) -> str:
+def _stop_reason(mode: str, watch: dict | None, search_sec: float, limit: int, status: str | None = None, *,
+                 top: bool = True) -> str:
     """Why RECOMMENDED's search stopped (SearchReport.stop_reason). ``status``: RECOMMENDED's own.
     In either mode, no search (every stop left out before it: NOTHING_TO_PLAN) is NOT_SEARCHED and a
     search that found no plan (NO_SOLUTION) is NO_PLAN - never "stopped when it stopped improving"
-    nor QUICK's "automatic time" (skeptic review of the long-search PR)."""
+    nor QUICK's "automatic time" (skeptic review of the long-search PR).
+
+    ``top`` (SearchReport.stop_reason, a closed list): a watch's reason SearchReport does not know is
+    mapped (best_of.top_level_stop_reason: JOINED, a best-of search that replaced a failed main search, is
+    CONVERGED; anything else falls back to the rule below), so no search can fail a finished solve
+    (critique of the best-of design, HIGH-1). False: the search's own reason (SearchRunReport)."""
     if status == "NOTHING_TO_PLAN":
         return "NOT_SEARCHED"
     if status == "NO_SOLUTION":
@@ -828,7 +842,12 @@ def _stop_reason(mode: str, watch: dict | None, search_sec: float, limit: int, s
     if mode != "THOROUGH":
         return "TIME_LIMIT"
     if watch and watch.get("reason"):
-        return str(watch["reason"])
+        reason = str(watch["reason"])
+        if not top:
+            return reason
+        mapped = BO.top_level_stop_reason(reason)
+        if mapped is not None:
+            return mapped
     # Ended without the watch: on its time limit (the cap), or by itself before it.
     return "CAP" if search_sec >= limit - 1 else "CONVERGED"
 
@@ -874,6 +893,9 @@ def _search_report(mode: str, cap: int, state: dict, started: float) -> SearchRe
         solutions=(watch or {}).get("solutions"),
         pyvrp=PyvrpReport(**state["pyvrp"]) if state.get("pyvrp") else None,
         ortools_version=ortools_version(),
+        # Best-of-N (None with one search, the default): a report that does not validate is left out with
+        # a warning, never the finished plan (best_of.report_or_none).
+        best_of=BO.report_or_none(state.get("best_of")),
     )
 
 
@@ -1982,7 +2004,13 @@ def _solve_scenario(
     time_limit: int,
     pre_drops: list[UnservedStop],
     warm_start: list[PlannedLoad] | None = None,
+    *,
+    first_solution: str | None = None,
+    join: bool = False,
 ) -> DispatchScenario:
+    """One OR-Tools search of scenario ``name``. ``first_solution`` (a FirstSolutionStrategy name) and
+    ``join`` are for RECOMMENDED's other searches only (best-of-N, _variant_worker); the defaults are the
+    search as it always was: PARALLEL_CHEAPEST_INSERTION, and no join flag on its THOROUGH watch."""
     cfg = req.config
     w = SCENARIOS[name]
     use_margin = cfg.use_margin and bool(stops) and all(s.margin is not None for s in stops)
@@ -2199,11 +2227,12 @@ def _solve_scenario(
             tdim.SetCumulVarSoftUpperBound(end, bound, ot_coeff)
 
     params = pywrapcp.DefaultRoutingSearchParameters()
-    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION
+    params.first_solution_strategy = getattr(routing_enums_pb2.FirstSolutionStrategy,
+                                             first_solution or "PARALLEL_CHEAPEST_INSERTION")
     params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
     params.time_limit.seconds = max(1, int(time_limit))
     params.log_search = False
-    _watch_search(name, cfg, len(stops), routing, manager)  # THOROUGH only: stop once it stops improving
+    _watch_search(name, cfg, len(stops), routing, manager, join=join)  # THOROUGH only: stop once it stops improving
 
     assignment = None
     if warm_start:
@@ -2863,7 +2892,13 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
     # is searched inside the API process. None: SOLVER_PARALLEL=0, nothing to search, or the
     # in-process fallback allowed for development (SOLVER_ALLOW_INPROCESS_FALLBACK=1).
     workers: _Workers | None = None
+    extras: _Workers | None = None
     pv: _PvRun | None = None
+    # Best-of-N (best_of.py): RECOMMENDED's searches asked for (SOLVER_BEST_OF / SOLVER_BEST_OF_QUICK, default
+    # 1: one search, everything below as always) and run (k: fewer under the CPU gate, without workers, or
+    # when the other searches' pool cannot start - gate).
+    asked = BO.setting(cfg.search_mode)
+    k, gate = 1, None
     # CI (PR #50): every worker pool and process of this solve is closed - its processes joined, its
     # pipes and locks released - in the finally below, in this thread, whatever happens after it
     # started (the second search's start included). Nothing is left for the garbage collector.
@@ -2875,6 +2910,14 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
             # quality, never the deadline. RECOMMENDED runs first in one of them.
             workers = _start_workers(max(1, len([n for n in cfg.scenarios if n != "RECOMMENDED"])), control, req.run_id,
                                      "search")
+        if asked > 1 and solvable and "RECOMMENDED" in cfg.scenarios:
+            # The other searches' own pool (K - 1 processes), after rule 22's proof of the solve's pool and
+            # before the road matrix, so they are up when the searches start; optional, like the second search.
+            k, gate = BO.effective(cfg.search_mode, parallel=workers is not None, pyvrp_on=PV.enabled(cfg.search_mode)[0])
+            if k > 1:
+                extras = _start_extra_workers(k - 1, control, req.run_id)
+                if extras is None:
+                    k, gate = 1, "NO_WORKERS"
         # The second route search (PyVRP): its own optional process, after rule 22's proof (a machine
         # that cannot start it still solves). Not waited for here.
         pv = _pv_start(req, solvable, control, workers is not None)
@@ -2905,10 +2948,15 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
         time_limit = cfg.time_limit_sec or auto_time_limit(len(solvable))
         state: dict = {}
         scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget,
-                                   control=control, state=state, workers=workers, pv=pv)
+                                   control=control, state=state, workers=workers, pv=pv,
+                                   best_of=k, best_of_gate=gate, best_of_requested=asked, extras=extras)
+        if asked > 1 and "best_of" not in state:
+            state["best_of"] = _one_search_report(asked, gate, cfg.search_mode, state)
     finally:
         if pv is not None:
             pv.close()  # already closed by _run_scenarios when it ran; a no-op then
+        if extras is not None:
+            extras.close()  # likewise
         if workers is not None:
             workers.close()  # likewise
     # The hire suggestion's what-if: the cheapest set of rented trucks that delivers every P1-P3 stop its
@@ -3803,8 +3851,10 @@ def _hire_trial(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixRe
             workers = _start_workers(1, control, req.run_id, "hire check")
         pv = _pv_start(req, solvable, control, workers is not None)
         state: dict = {}
+        # One search per trial (best-of-N never applies here: the reduction compares many trials).
         scs = _run_scenarios(["RECOMMENDED"], req, solvable, tds, mx, time_limit, list(drops), budget_end,
-                             control=control, state=state, workers=workers, pv=pv, repair_inversions=False)
+                             control=control, state=state, workers=workers, pv=pv, best_of=1,
+                             repair_inversions=False)
         sc = scs[0] if scs else None
         return sc, sc is not None and "RECOMMENDED" in state.get("rechecked", ())
     except SolveAborted:
@@ -4358,6 +4408,10 @@ _BEACON = None
 # In the second search's worker process: set when the engine's searches have ended (QUICK: PyVRP
 # then returns its best plan within a fraction of a second, pyvrp_candidate.Stopper).
 _SEARCH_OVER = None
+# In a worker of RECOMMENDED's other searches (best-of-N, _Workers(join=True)): set once the main search
+# has ended and the solve stops waiting for them (_Workers.raise_join): a THOROUGH one ends at its next
+# solution with its best plan (JOINED), one not started yet is not run. None in every other process.
+_JOIN_FLAG = None
 
 # Linux: how readily the kernel's out-of-memory killer takes this process (-1000..1000). The second
 # search's worker sets the maximum at start (CI 30 Sep 2026: the API process vanished, killed without
@@ -4381,15 +4435,24 @@ def _prefer_as_oom_victim(score: int) -> bool:
         return False
 
 
-def _worker_init(beacon, stop_flag=None, search_over=None) -> None:
-    global _BEACON, _STOP_FLAG, _SEARCH_OVER
+def _as_flag(flag):
+    """A flag as a worker reads it: an Event as it is; a _PipeFlag's reading end (a Connection, passed in
+    a pool's initargs) behind a _FlagReader."""
+    return flag if flag is None or hasattr(flag, "is_set") else _FlagReader(flag)
+
+
+def _worker_init(beacon, stop_flag=None, search_over=None, join_flag=None) -> None:
+    global _BEACON, _STOP_FLAG, _SEARCH_OVER, _JOIN_FLAG
     # Test hook (rule 22): every worker process dies while starting, so the pool never runs a task.
     if os.environ.get("ROUTEIQ_TEST_WORKER_START_EXIT") == "1":
         os._exit(3)
     _BEACON = beacon
-    _STOP_FLAG = stop_flag
+    _STOP_FLAG = _as_flag(stop_flag)
     _SEARCH_OVER = search_over
-    if search_over is not None:  # the second search's own process (_PvProcess): optional, so taken first
+    _JOIN_FLAG = _as_flag(join_flag)
+    if search_over is not None or join_flag is not None:
+        # Optional, so taken first by the out-of-memory killer: the second search's own process (_PvProcess)
+        # and RECOMMENDED's other searches (best-of-N; critique of its design, HIGH-2: never the main search).
         _prefer_as_oom_victim(SECOND_SEARCH_OOM_SCORE_ADJ)
 
 
@@ -4465,9 +4528,16 @@ class _Workers:
     everything the pool made - its queues' pipes and locks, its worker processes, the stop flag, the
     tasks' results - is closed and released by close(), in the thread that calls it, before the solve
     returns; after close() this object holds nothing of multiprocessing, so nothing is left for the
-    garbage collector even when a traceback keeps it."""
+    garbage collector even when a traceback keeps it.
 
-    def __init__(self, size: int, control: SolveControl | None = None, *, run_id: str = "", what: str = "search"):
+    ``join`` (best-of-N: the pool of RECOMMENDED's other searches, _start_extra_workers): its workers
+    also see a join flag (raise_join; _watch_search), and both its flags are _PipeFlags - one byte in a
+    pipe, read by polling - never a multiprocessing Event, whose set() waits forever on a lock that a
+    worker killed inside is_set() left held (critique of the best-of design, MEDIUM-1; these workers are
+    the out-of-memory killer's first victims, _worker_init). Without it, everything is as it always was."""
+
+    def __init__(self, size: int, control: SolveControl | None = None, *, run_id: str = "", what: str = "search",
+                 join: bool = False):
         import multiprocessing as mp
 
         ctx = mp.get_context("spawn")
@@ -4479,16 +4549,30 @@ class _Workers:
         # Every wait on these workers also watches the control (cancelled: SolveAborted, _await_all).
         self.control = control
         self._stop_flag = None
+        self._join_flag: _PipeFlag | None = None
         self._beacon = ctx.SimpleQueue()
         try:
-            self._stop_flag = ctx.Event() if control is not None else None
-            self.pool = ctx.Pool(processes=self.size, initializer=_worker_init, initargs=(self._beacon, self._stop_flag))
+            if join:
+                self._stop_flag = _PipeFlag(ctx) if control is not None else None
+                self._join_flag = _PipeFlag(ctx)
+                # The reading ends stay open here until close(): a worker that dies is replaced with the same
+                # initargs. Each worker polls its own copy and never reads, so every one of them sees the byte.
+                initargs: tuple = (self._beacon, self._stop_flag.reader if self._stop_flag is not None else None, None,
+                                   self._join_flag.reader)
+            else:
+                self._stop_flag = ctx.Event() if control is not None else None
+                initargs = (self._beacon, self._stop_flag)
+            self.pool = ctx.Pool(processes=self.size, initializer=_worker_init, initargs=initargs)
         except BaseException as exc:
             # Nothing left behind by a failed start (rule 22; audit finding: the queue made above used
             # to stay open). Pool itself stops the worker processes it had started; the traceback is
             # cut here so that it does not keep Pool's half-made queues alive (CI, PR #50).
             self._beacon.close()
-            self._beacon = self._stop_flag = None
+            for flag in (self._stop_flag, self._join_flag):
+                if isinstance(flag, _PipeFlag):
+                    flag.close()
+            self._beacon = self._stop_flag = self._join_flag = None
+            initargs = ()
             raise exc.with_traceback(None)  # noqa: B904 - the same exception, without Pool's frames
         if self._stop_flag is not None:
             control.attach(self._stop_flag)  # type: ignore[union-attr]
@@ -4505,6 +4589,13 @@ class _Workers:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    def raise_join(self) -> None:
+        """Best-of-N (a ``join`` pool): the main search has ended - each THOROUGH search still running ends at
+        its next solution with its best plan (JOINED), and one not started yet is not run (NOT_RUN). A QUICK
+        search has nothing attached and ends on its own time limit."""
+        if self._join_flag is not None and not self._closed:
+            self._join_flag.set()
 
     def check_started(self, timeout: float) -> None:
         """Rule 22: the pool runs a task within ``timeout`` seconds, or RuntimeError. Catches a pool
@@ -4644,8 +4735,8 @@ class _Workers:
 
     def _forget(self) -> None:
         """close(): hold nothing of multiprocessing any more - the tasks' results, the start reports'
-        queue, the stop flag (detached from the solve's control, which outlives the solve in main.py)
-        and the pool itself."""
+        queue, the stop flag (detached from the solve's control, which outlives the solve in main.py),
+        a join pool's pipes (both its flags) and the pool itself."""
         for task in self._handles:
             task._ar = None
         self._handles = []
@@ -4657,7 +4748,10 @@ class _Workers:
                 pass
         if self._stop_flag is not None and self.control is not None:
             self.control.detach(self._stop_flag)
-        self._beacon = self._stop_flag = None
+        for flag in (self._stop_flag, self._join_flag):
+            if isinstance(flag, _PipeFlag):
+                flag.close()
+        self._beacon = self._stop_flag = self._join_flag = None
         self.pool = None
 
 
@@ -4812,6 +4906,23 @@ def _start_workers(size: int, control: SolveControl | None, run_id: str, what: s
     return workers
 
 
+def _start_extra_workers(size: int, control: SolveControl | None, run_id: str) -> _Workers | None:
+    """Best-of-N: the worker pool of RECOMMENDED's other searches (best_of.py), ``size`` processes, beside
+    the solve's own pool and never part of it (critique of the best-of design, HIGH-2): the main search,
+    the alternatives and the load re-check run in the solve's pool exactly as with one search, so a
+    worker of this pool that dies (its processes are the out-of-memory killer's first victims), hangs or
+    holds a queue's lock costs nothing but its own search. Optional, like the second search's process:
+    started after rule 22's proof of the solve's pool, without waiting for its first task (its searches
+    are only submitted after the road matrix); a pool that cannot start is None - one search, as before
+    (BestOfReport.gate NO_WORKERS) - with a warning, never a refused solve nor a /ready alert."""
+    try:
+        return _Workers(size, control, run_id=run_id, what="other route searches", join=True)
+    except Exception as exc:  # noqa: BLE001 - optional: the main search alone answers
+        log.warning("best-of run=%s the other route searches' workers could not start (%s: %s); one search, as without "
+                    "best-of", run_id, type(exc).__name__, exc)
+        return None
+
+
 def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline: float,
                control: SolveControl | None = None) -> dict[str, tuple[str, object]]:
     """Wait for several pool tasks (name -> (token, AsyncResult)), in completion order, until
@@ -4901,6 +5012,12 @@ def _await_worker(workers: _Workers, job: tuple[str, object], deadline: float, w
     kind, value = _await_all(workers, {what: job}, deadline)[what]
     if kind == "ok":
         return value
+    _raise_task_failure(kind, value, what)
+
+
+def _raise_task_failure(kind: str, value: object, what: str):
+    """_await_worker's answer to a required task that gave no result (_await_all's ``kind``): rule 22's
+    WorkersUnavailable (503) when the pool broke, the task's own exception, or SolveAborted (504)."""
     if kind == "broken":
         raise WorkersUnavailable(str(value))
     if kind == "error":
@@ -5238,7 +5355,8 @@ def _pv_submit(pv: _PvRun, req, solvable, tds, mx, time_limit: int, rec_limit: i
     critique C4). QUICK: until the engine's searches end (search_over), backstop the planned search
     time + ALT_GRACE_SEC; THOROUGH (D3): until the load re-check's reserve, a stop, a cancel or - once
     the engine's searches ended - its timed stall (pyvrp_candidate.STALL_FLOOR_SEC). ``n_sources``: the
-    load re-check's sources, for QUICK's reserve (_quick_stage_need; THOROUGH's tail holds its own)."""
+    load re-check's sources (3, plus best-of's other searches it re-checks), for QUICK's reserve
+    (_quick_stage_need; THOROUGH's tail holds its own)."""
     if not pv.active or pv.args is not None:
         return
     if not solvable:
@@ -5309,10 +5427,333 @@ def _pv_collect(pv: _PvRun, *, thorough: bool, stopped: bool, stage_need: float,
     pv.plan = plan
 
 
+# ---------------------------------------------------------------------------------------------
+# Best-of-N route search (best_of.py): RECOMMENDED searched K times at once. Off by default
+# (SOLVER_BEST_OF / SOLVER_BEST_OF_QUICK = 1): then none of this runs and the solve is as before.
+# ---------------------------------------------------------------------------------------------
+
+def _rank_variant(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
+                  drops: list[UnservedStop], sc: DispatchScenario) -> dict:
+    """A search's plan on the engine's own goal for RECOMMENDED (LR.GOALS: service by priority first, then
+    the cost with the customer time preferences), timed exactly as the load re-check times a raw plan
+    (LR.time_plan, one small LP per truck). A plan that cannot be timed exactly is ranked on the part of it
+    that can (LR.trim, at most best_of.TRIM_FALLBACK_SEC, as _trimmed): it serves less, so it ranks lower.
+    ``sc`` maps to ``solvable`` by stop id, whatever order its search had. Returns the rank (lower is
+    better), whether it is exact, the raw plan's signature (two searches with the same plan are one
+    source) and the figures of SearchRunReport."""
+    ctx = _stage_ctx(req, solvable, tds, mx, drops)
+    plan = LR.plan_of(_timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx))
+    timed = LR.time_plan(ctx.day, plan, ctx.rec_pricing)
+    exact = timed is not None
+    if timed is None:
+        timed = LR.trim(ctx.day, ctx.rec_pricing, plan, time.perf_counter() + BO.TRIM_FALLBACK_SEC)
+    s = LR.score(ctx.day, ctx.rec_pricing, timed)
+    served = LR.served_of(timed)
+    left = [0] * 5
+    for k, st in enumerate(solvable):
+        if k not in served:
+            left[min(max(int(st.priority), 1), 5) - 1] += 1
+    return {"rank": tuple(_GOALS["RECOMMENDED"](s)), "exact": exact, "signature": LR.plan_signature(plan),
+            "summary": {"cost_omr": round(s.cost / COST_SCALE, 2), "operating_omr": round(s.operating / COST_SCALE, 2),
+                        "km": round(s.metres / 1000.0, 1), "trucks": s.trucks, "loads": s.loads,
+                        "unserved_by_priority": left}}
+
+
+def _ranked(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
+            drops: list[UnservedStop], sc: DispatchScenario) -> dict:
+    """_rank_variant that never fails the search it ranks (critique of the best-of design, HIGH-3): a plan
+    that cannot be ranked has no rank - it is then neither the alternatives' start nor re-checked - and
+    keeps its plan. ``rank_sec``: the time it took."""
+    t0 = time.perf_counter()
+    out: dict = {"rank": None, "exact": None, "signature": None, "summary": None}
+    try:
+        out.update(_rank_variant(req, solvable, tds, mx, drops, sc))
+    except Exception as exc:  # noqa: BLE001 - a rank never costs a plan
+        log.warning("best-of run=%s: a route search's plan could not be ranked (%s: %s); it is neither the alternatives' "
+                    "start nor re-checked", req.run_id, type(exc).__name__, exc)
+    out["rank_sec"] = round(time.perf_counter() - t0, 2)
+    return out
+
+
+def _variant_worker(job) -> dict:
+    """One of RECOMMENDED's other searches (best-of-N), in the other searches' own pool (_start_extra_workers).
+    ``job`` = (best_of.SearchVariant, when it was submitted (time.monotonic), RECOMMENDED's job tuple).
+
+    The same model, weights and parameters as the main search, with the stops in the variant's order
+    (best_of.order: _submatrix re-indexes the matrix and its estimated legs alike) and its first-solution
+    strategy; THOROUGH: the same stall rule, plus the join flag (_watch_search). Its time limit is the main
+    search's less the time it waited to start, so it ends no later than the main one. Started after the
+    join flag was raised: not run (NOT_RUN). The plan comes back in the request's order (stops are ids; the
+    left-out stops in the order the main search lists them) and ranked here, in its worker (_ranked).
+
+    Test hooks, for the other searches only (the main one has _scenario_worker's): ROUTEIQ_TEST_HANG_VARIANT,
+    _FAIL_VARIANT and _KILL_VARIANT (a search that never returns, one that raises, one whose process dies),
+    and ROUTEIQ_TEST_NO_STALL_VARIANT (no stall rule: it ends only on its limit or when joined), each the
+    search's index."""
+    variant, submitted_at, (name, req, solvable, tds, mx, limit, drops) = job
+    idx = str(variant.index)
+    if os.environ.get("ROUTEIQ_TEST_HANG_VARIANT") == idx:
+        time.sleep(3600)
+    if os.environ.get("ROUTEIQ_TEST_FAIL_VARIANT") == idx:
+        raise RuntimeError("test hook: route search variant failed")
+    if os.environ.get("ROUTEIQ_TEST_KILL_VARIANT") == idx:
+        os._exit(137)
+    out: dict = {"index": variant.index, "status": "NOT_RUN", "scenario": None, "watch": None, "limit": None}
+    if variant.index and _JOIN_FLAG is not None and _JOIN_FLAG.is_set():
+        return out  # the main search has ended and the solve no longer waits: not started at all
+    delay = min(max(0.0, time.monotonic() - submitted_at), float(limit))
+    limit_v = limit if variant.index == 0 else max(1, int(limit - delay + 0.5))  # whole seconds, as OR-Tools gets them
+    if variant.order_seed:
+        stops_v, mx_v = _submatrix(solvable, BO.order(solvable, variant.order_seed), mx)
+    else:
+        stops_v, mx_v = solvable, mx
+    no_stall = os.environ.get("ROUTEIQ_TEST_NO_STALL_VARIANT") == idx
+    saved = os.environ.get("THOROUGH_STALL_SEC")
+    if no_stall:
+        os.environ["THOROUGH_STALL_SEC"] = "3600"
+    _WATCHES.pop(name, None)
+    try:
+        sc = _solve_scenario(name, req, stops_v, tds, mx_v, limit_v, drops, first_solution=variant.first_solution,
+                             join=variant.index > 0)
+    finally:
+        watch = _WATCHES.pop(name, None)
+        if no_stall:
+            if saved is None:
+                os.environ.pop("THOROUGH_STALL_SEC", None)
+            else:
+                os.environ["THOROUGH_STALL_SEC"] = saved
+    if variant.order_seed and sc.unserved:
+        # The request's order: the prefilter's drops first (as given), then the stops it left out as the
+        # main search lists them (solvable's order).
+        pos = {s.stop_id: k for k, s in enumerate(solvable)}
+        head = len(drops)
+        sc.unserved = list(sc.unserved[:head]) + sorted(sc.unserved[head:], key=lambda u: pos.get(u.stop_id, len(pos)))
+    out.update(status=sc.status, scenario=sc, watch=watch.report() if watch is not None else None, limit=limit_v)
+    if sc.status == "OPTIMIZED":
+        out.update(_ranked(req, solvable, tds, mx, drops, sc))
+    return out
+
+
+def _best_of_choice(runs: list[dict], m: int) -> tuple[dict | None, dict | None, list[dict]]:
+    """(main, warm, sources) from the searches' outcomes (``runs``: index 0 first; each with ``index``,
+    ``ok`` - it has an OPTIMIZED plan -, ``rank`` - None: not ranked - and ``signature``).
+
+    main: search 0 when it has a plan; otherwise the best-ranked other search with one (it replaces the
+    main search: BestOfReport.promoted); None when no search has a plan. warm (the alternatives' start):
+    the best-ranked plan - the main one on a tie, and always the main one when it could not be ranked.
+    sources: at most ``m`` other plans for the load re-check, best rank first, none unranked, each
+    different from the main plan and from each other (LR.plan_signature)."""
+    ok = [r for r in runs if r["ok"]]
+
+    def key(r: dict) -> tuple:
+        return (r["rank"] is None, r["rank"] or (), r["index"])
+
+    if runs and runs[0]["index"] == 0 and runs[0]["ok"]:
+        main: dict | None = runs[0]
+    else:
+        main = min((r for r in ok if r["index"] != 0), key=key, default=None)
+    if main is None:
+        return None, None, []
+    warm = main if main["rank"] is None else min(
+        (r for r in ok if r["rank"] is not None), key=lambda r: (r["rank"], r is not main, r["index"]))
+    seen = {main["signature"]}
+    sources: list[dict] = []
+    for r in sorted((r for r in ok if r is not main and r["rank"] is not None), key=key):
+        if len(sources) >= m:
+            break
+        if r["signature"] in seen:
+            continue
+        seen.add(r["signature"])
+        sources.append(r)
+    return main, warm, sources
+
+
+def _run_report(r: dict, mode: str, *, warm: bool, rechecked: bool) -> dict:
+    """One search's SearchRunReport (a dict; best_of.report_or_none validates it)."""
+    v: BO.SearchVariant = r["variant"]
+    sc: DispatchScenario | None = r["scenario"]
+    watch = r["watch"] or {}
+    out = {"index": v.index, "order_seed": v.order_seed, "first_solution": v.first_solution, "status": r["status"],
+           "stop_reason": None, "search_sec": None, "last_improvement_sec": watch.get("last_improvement_sec"),
+           "solutions": watch.get("solutions"), "rank_sec": r.get("rank_sec"), "exact": r.get("exact"),
+           "rechecked": rechecked, "warm_start": warm}
+    if sc is not None:
+        out.update(stop_reason=_stop_reason(mode, r["watch"], sc.solver_time_sec, int(r["limit"] or 0), sc.status, top=False),
+                   search_sec=sc.solver_time_sec)
+    out.update(r.get("summary") or {})
+    return out
+
+
+def _one_search_report(asked: int, gate: str | None, mode: str, state: dict) -> dict | None:
+    """SearchReport.best_of when more searches were asked for than ran - one, the main search, exactly as
+    without best-of: why (``gate``: CPU_GATE, IN_PROCESS, NO_WORKERS) and that search. None when it cannot
+    be built (never a failed solve)."""
+    try:
+        searches = []
+        if state.get("status"):
+            watch = state.get("watch") or {}
+            searches.append({"index": 0, "status": BO.run_status("ok", state["status"]),
+                             "stop_reason": _stop_reason(mode, state.get("watch"), float(state.get("search_sec") or 0.0),
+                                                         int(state.get("limit") or 0), state["status"], top=False),
+                             "search_sec": state.get("search_sec"), "last_improvement_sec": watch.get("last_improvement_sec"),
+                             "solutions": watch.get("solutions")})
+        return {"requested": asked, "used": 1, "gate": gate, "searches": searches}
+    except Exception as exc:  # noqa: BLE001 - a report never costs the plan
+        log.warning("best-of report left out (the plan is unaffected): %s", exc)
+        return None
+
+
+@dataclass
+class _BestOf:
+    """What best-of-N's RECOMMENDED phase hands back to _run_scenarios."""
+
+    scenario: DispatchScenario  # RECOMMENDED's raw plan: the main search's, or the search that replaced it
+    watch: dict | None
+    limit: int
+    warm: list[PlannedLoad] | None  # the alternatives' start: the best-ranked plan's loads
+    extra_sources: list[tuple[str, DispatchScenario]]  # the other plans for the load re-check (RECOMMENDED~i)
+    main_stuck: bool  # the main search's worker did not answer by its backstop and may still be running
+    report: dict | None  # SearchReport.best_of (a dict that _post_solve may add to), None if it could not be built
+
+
+def _recommended_best_of(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
+                         drops: list[UnservedStop], job: tuple, *, workers: _Workers, extras: _Workers, k: int, m: int,
+                         time_limit: int, tail: ThoroughTail | None, n_alt: int, n_sources: int, budget_end: float,
+                         control: SolveControl | None, pv: _PvRun, requested: int, gate: str | None) -> _BestOf:
+    """RECOMMENDED's phase with K searches (best_of.py, K > 1).
+
+    Search 0, the main one, is exactly the one-search RECOMMENDED: the same job in the solve's own pool,
+    the same backstop, the same answer when the pool breaks (WorkersUnavailable). Searches 1..K-1 run at
+    the same time in ``extras``, their own pool (critique of the design, HIGH-2), and only add plans.
+
+    When the main search has a plan: THOROUGH waits up to SOLVER_BEST_OF_JOIN_SEC more for the others,
+    never into the alternatives' and the load re-check's reserve (``tail``), then raises the join flag -
+    each still searching hands back its best plan at its next solution (JOINED) - and waits at most
+    best_of.JOIN_GRACE_SEC, again never into the reserve. QUICK waits best_of.QUICK_WAIT_SEC (they end on
+    their limit when the main one does; nothing is attached to a QUICK search, so none is joined). When it
+    has none (it failed, died, timed out or found no plan; critique HIGH-1): the others are the only plans
+    left - they search on to their own stall rule or limit, never joined early - and the best-ranked one
+    replaces it; with no plan from any, the solve fails (or keeps NO_SOLUTION) exactly as with one search.
+
+    The main plan is ranked here, in the API process, once it is in (_ranked: LPs only, as _retime; never
+    on the main search's path, critique HIGH-3); the others in their workers. The other searches' pool is
+    closed here, before the alternatives (a search still running is stopped: TIMEOUT)."""
+    mode = req.config.search_mode
+    thorough = mode == "THOROUGH"
+    rec_limit = int(job[5])
+    variants = BO.variants(k)
+    t_sub = time.monotonic()
+    deadline = min(t_sub + rec_limit * 2 + REC_GRACE_SEC, budget_end)
+    rec_job = workers.submit(_searched, job, "RECOMMENDED")
+    extra_jobs: dict[str, tuple[str, object]] = {}
+    outcome: dict[str, tuple[str, object]] = {}
+    for v in variants[1:]:
+        try:
+            extra_jobs[str(v.index)] = extras.submit(_variant_worker, (v, t_sub, job), v.source)
+        except Exception as exc:  # noqa: BLE001 - its pool broke: only this search is lost
+            outcome[str(v.index)] = ("broken", f"{type(exc).__name__}: {exc}")
+    _pv_submit(pv, req, solvable, tds, mx, time_limit, rec_limit, n_alt, tail, budget_end, n_sources)
+    kind0, value0 = _await_all(workers, {"RECOMMENDED": rec_job}, deadline)["RECOMMENDED"]
+    if kind0 == "broken":
+        raise WorkersUnavailable(str(value0))  # rule 22, as with one search: the solve's own pool broke
+    main_end = time.monotonic()
+    sc0, watch0 = value0 if kind0 == "ok" else (None, None)  # type: ignore[misc]
+    main_ok = sc0 is not None and sc0.status == "OPTIMIZED"
+    ranked0 = _ranked(req, solvable, tds, mx, drops, sc0) if main_ok else {}
+
+    now = time.monotonic()
+    natural_end = min(t_sub + rec_limit + REC_OVERHEAD_SEC, deadline)  # the others have ended on their limit by then
+    grace_cap: float | None = None  # THOROUGH: after the join flag, wait for the others until then at most
+    join_window: float | None = None
+    floor = budget_end - (tail.total if tail is not None else 0)  # THOROUGH: the alternatives' and re-check's reserve
+    if not main_ok:
+        window_end = natural_end
+        grace_cap = max(now, min(deadline, floor)) if thorough else None
+    elif thorough:
+        stopped = control is not None and control.stop_requested.is_set()
+        window_end = min(now + (0.0 if stopped else BO.join_sec()), floor - BO.JOIN_GRACE_SEC, natural_end)
+        grace_cap = max(now, floor)
+        join_window = round(max(0.0, window_end - main_end), 1)
+    else:
+        alt_need = (max(2, time_limit // 2) + ALT_GRACE_SEC) if n_alt else 0
+        window_end = min(now + BO.QUICK_WAIT_SEC, budget_end - _quick_stage_need(time_limit, n_sources) - alt_need)
+    window_end = max(now, window_end)
+    if extra_jobs:
+        outcome.update(_await_all(extras, extra_jobs, window_end))
+        late = {i: extra_jobs[i] for i in extra_jobs if outcome[i][0] == "timeout"}
+        if late and grace_cap is not None:
+            extras.raise_join()
+            outcome.update(_await_all(extras, late, max(time.monotonic(), min(time.monotonic() + BO.JOIN_GRACE_SEC, grace_cap))))
+    extras.close()  # bounded; frees its CPUs and memory before the alternatives
+
+    runs = [{"variant": variants[0], "index": 0, "kind": kind0, "status": BO.run_status(kind0, sc0.status if sc0 else None),
+             "scenario": sc0, "watch": watch0, "limit": rec_limit, "ok": main_ok, **_rank_fields(ranked0)}]
+    for v in variants[1:]:
+        kind, value = outcome.get(str(v.index), ("timeout", None))
+        res = value if kind == "ok" and isinstance(value, dict) else {}
+        sc = res.get("scenario")
+        runs.append({"variant": v, "index": v.index, "kind": kind,
+                     "status": BO.run_status(kind, res.get("status")) if kind == "ok" else BO.run_status(kind),
+                     "scenario": sc, "watch": res.get("watch"), "limit": res.get("limit"),
+                     "ok": sc is not None and sc.status == "OPTIMIZED", **_rank_fields(res)})
+    main, warm_run, picked = _best_of_choice(runs, m)
+    _log_best_of(req.run_id, runs, main, warm_run, picked, k)
+    if main is None:
+        if kind0 != "ok":
+            _raise_task_failure(kind0, value0, "recommended plan")  # no search has a plan: as with one search
+        main = runs[0]  # NO_SOLUTION, as with one search (the second search may still rescue it)
+    promoted = main["index"] if main["index"] != 0 else None
+    report: dict | None
+    try:
+        report = {"requested": requested, "used": k, "gate": gate, "join_sec": join_window,
+                  "primary_status": runs[0]["status"] if promoted is not None else None, "promoted": promoted,
+                  "chosen_for": [], "gains": [],
+                  "searches": [_run_report(r, mode, warm=r is warm_run, rechecked=any(r is p for p in picked)) for r in runs]}
+    except Exception as exc:  # noqa: BLE001 - the report never costs the plan (critique HIGH-1)
+        log.warning("best-of run=%s: its report could not be built (%s: %s); the plan is unaffected", req.run_id,
+                    type(exc).__name__, exc)
+        report = None
+    warm_sc = (warm_run or main)["scenario"]
+    return _BestOf(scenario=main["scenario"], watch=main["watch"], limit=int(main["limit"] or rec_limit),
+                   warm=warm_sc.loads or None, extra_sources=[(BO.source_name(r["index"]), r["scenario"]) for r in picked],
+                   main_stuck=kind0 == "timeout", report=report)
+
+
+def _rank_fields(res: dict) -> dict:
+    return {key: res.get(key) for key in ("rank", "exact", "signature", "summary", "rank_sec")}
+
+
+def _log_best_of(run_id: str, runs: list[dict], main: dict | None, warm: dict | None, picked: list[dict], k: int) -> None:
+    """One line per search and one for what was made of them (post-deploy checks read these). Never fails."""
+    try:
+        _log_runs(run_id, runs, main, warm, picked, k)
+    except Exception as exc:  # noqa: BLE001 - a log line never costs the plan
+        log.warning("best-of run=%s: its log lines failed (%s: %s)", run_id, type(exc).__name__, exc)
+
+
+def _log_runs(run_id: str, runs: list[dict], main: dict | None, warm: dict | None, picked: list[dict], k: int) -> None:
+    for r in runs:
+        v, sc, summ, watch = r["variant"], r["scenario"], r.get("summary") or {}, r["watch"] or {}
+        if sc is None:
+            log.info("best-of run=%s search %d of %d (order %d, %s): %s", run_id, v.index, k, v.order_seed,
+                     v.first_solution, r["status"])
+            continue
+        log.info("best-of run=%s search %d of %d (order %d, %s): %s searched=%ss stop=%s solutions=%s rank_sec=%s "
+                 "exact=%s cost=%s operating=%s trucks=%s loads=%s left_out=%s", run_id, v.index, k, v.order_seed,
+                 v.first_solution, r["status"], sc.solver_time_sec, watch.get("reason") or "-", watch.get("solutions", "-"),
+                 r.get("rank_sec"), r.get("exact"), summ.get("cost_omr"), summ.get("operating_omr"), summ.get("trucks"),
+                 summ.get("loads"), summ.get("unserved_by_priority"))
+    log.info("best-of run=%s: RECOMMENDED from search %s%s; alternatives start from search %s; re-checked: %s", run_id,
+             main["index"] if main is not None else None,
+             f" (main search {runs[0]['status']})" if main is not None and main["index"] != 0 else "",
+             warm["index"] if warm is not None else None, [BO.source_name(r["index"]) for r in picked] or "none")
+
+
 def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end: float | None = None, *,
                    control: SolveControl | None = None, state: dict | None = None,
                    workers: _Workers | None = None, pv: _PvRun | None = None,
-                   repair_inversions: bool = True) -> list[DispatchScenario]:
+                   best_of: int = 1, best_of_gate: str | None = None, best_of_requested: int | None = None,
+                   extras: _Workers | None = None, repair_inversions: bool = True) -> list[DispatchScenario]:
     """RECOMMENDED is solved first with the full time budget. Alternatives are then warm-started
     from it with half the budget. Finally the post-solve stage (_post_solve) re-assigns the
     searches' loads and picks each scenario's plan from all of them, so unless it serves more,
@@ -5353,6 +5794,14 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     chose then get the priority repair (_repair_inversions): a P1-P3 stop left out while a lower priority
     rides goes back in its place where it fits. False for the hire check's solves (_hire_trial), whose
     plans the hire check repairs itself.
+
+    Best-of-N (best_of.py; off by default): ``best_of`` searches of RECOMMENDED, the other ones in
+    ``extras`` (their own pool, _start_extra_workers; closed here) - _recommended_best_of. With one
+    (``best_of`` 1, no ``extras``, no worker pool, or no RECOMMENDED asked for) every step is as it always
+    was. ``state["best_of"]`` receives its report (SearchReport.best_of). ``best_of_requested`` and
+    ``best_of_gate``: what the setting asked for and why fewer run (the report only). The best of the
+    other searches' plans (at most best_of.sources(K), distinct) are more sources of the load re-check,
+    each with one more repack cap kept free in the budgets (n_sources).
     """
     global _STOP_FLAG
     if budget_end is None:
@@ -5369,8 +5818,14 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     if workers is None and control is not None:
         _STOP_FLAG = control.stop_requested  # in-process searches see a stop request too
     stopped = False
+    # Best-of-N: K searches of RECOMMENDED (1: as always), m of the others' plans re-checked, each one more
+    # load re-check source (n_sources, 3 with one search: every budget exactly as before).
+    k = best_of if (best_of > 1 and extras is not None and workers is not None and "RECOMMENDED" in names) else 1
+    m = BO.sources(k) if k > 1 else 0
+    n_sources = 3 + m
+    bo: _BestOf | None = None
     # THOROUGH: the alternatives' and the load re-check's times, the ones RECOMMENDED's limit keeps free.
-    tail = thorough_tail(time_limit, len(alt_names), thorough_cap_sec(req.config)) if thorough else None
+    tail = thorough_tail(time_limit, len(alt_names), thorough_cap_sec(req.config), n_sources) if thorough else None
     pv = pv if pv is not None else _PvRun(report={"status": "SKIPPED", "reason": "OFF", "chosen_for": []})
     state["pyvrp"] = pv.report
     try:
@@ -5378,11 +5833,18 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
         if "RECOMMENDED" in names:
             # A slow road matrix eats into the budget: shorten the search rather than overrun it.
             rec_limit = rec_limit_sec(mode, time_limit, budget_end - time.monotonic(), len(alt_names),
-                                      thorough_cap_sec(req.config) if thorough else None)
+                                      thorough_cap_sec(req.config) if thorough else None, n_sources)
             job = ("RECOMMENDED", req, solvable, tds, mx, rec_limit, drops)
             if workers is None:
                 results["RECOMMENDED"], watch = _searched(job)
                 _pv_submit(pv, req, solvable, tds, mx, time_limit, rec_limit, len(alt_names), tail, budget_end)
+            elif k > 1:
+                bo = _recommended_best_of(req, solvable, tds, mx, drops, job, workers=workers, extras=extras, k=k, m=m,  # type: ignore[arg-type]
+                                          time_limit=time_limit, tail=tail, n_alt=len(alt_names), n_sources=n_sources,
+                                          budget_end=budget_end, control=control, pv=pv,
+                                          requested=max(k, best_of_requested or best_of), gate=best_of_gate)
+                results["RECOMMENDED"], watch, rec_limit = bo.scenario, bo.watch, bo.limit
+                state["best_of"] = bo.report
             else:
                 deadline = min(time.monotonic() + rec_limit * 2 + REC_GRACE_SEC, budget_end)
                 rec_job = workers.submit(_searched, job, "RECOMMENDED")
@@ -5391,6 +5853,25 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             state.update(limit=rec_limit, search_sec=results["RECOMMENDED"].solver_time_sec, watch=watch,
                          status=results["RECOMMENDED"].status)
             warm = results["RECOMMENDED"].loads or None
+            if bo is not None:
+                warm = bo.warm  # the best-ranked search's plan (the main one's on a tie)
+        if bo is not None and bo.main_stuck and workers is not None:
+            # Another search replaced a main search that did not answer by its backstop: its worker may still
+            # be running, and the alternatives would queue behind it. Fresh workers, as after an alternative
+            # that overran (below); none: no alternative, the plans kept and re-timed - never searched in
+            # the API process (critique of the best-of design, MEDIUM-7).
+            workers.close()
+            workers = None
+            try:
+                workers = _start_workers(max(1, len(alt_names), len(_stage_goals(results))), control, req.run_id, "search")
+            except WorkersUnavailable:
+                workers = None
+            if workers is None:
+                skipped.extend(alt_names)
+                alt_names = []
+                no_stage_workers = True
+                log.warning("run=%s no fresh worker processes after the main route search hung; alternatives skipped, the "
+                            "plans found are kept and re-timed exactly", req.run_id)
         stopped = thorough and control is not None and control.stop_requested.is_set()
         if tail is not None:
             alt_limit = tail.alt_sec if warm else time_limit
@@ -5441,7 +5922,7 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                     log.warning("alternative %s failed (%s); skipped", j[0], exc)
         # The second search's answer, before the engine's pool may be closed below (critique C5).
         _pv_collect(pv, thorough=thorough, stopped=thorough and control is not None and control.stop_requested.is_set(),
-                    stage_need=tail.stage_sec if tail is not None else _quick_stage_need(time_limit),
+                    stage_need=tail.stage_sec if tail is not None else _quick_stage_need(time_limit, n_sources),
                     budget_end=budget_end, control=control)
         if workers is not None and (overran or workers.broken()):
             # A skipped alternative still runs in its worker (a stuck OR-Tools call does not stop
@@ -5470,6 +5951,10 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             else:
                 if pv.plan:  # the second search's plan, when there is one to judge
                     stage_kw["pv"] = pv
+                if bo is not None and bo.extra_sources:
+                    # Best-of-N: the other searches' best plans, distinct, as more sources (at most m, each with
+                    # its repack cap kept free in the budgets: n_sources); it adds what it chose to the report.
+                    stage_kw.update(extra_sources=bo.extra_sources, best_of=state.get("best_of"))
                 _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw,
                             rechecked=state.setdefault("rechecked", set()))
         except SolveAborted:
@@ -5482,6 +5967,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             _retime_fallback(req, solvable, tds, mx, drops, results, "internal error", skip=staged)
     finally:
         _STOP_FLAG = stop_flag_before
+        if extras is not None:
+            extras.close()  # best-of's other searches: closed after their phase already (a no-op then)
         if workers is not None:
             workers.close()
         pv.close()
@@ -6141,7 +6628,7 @@ def _second_search_note(name: str, rescued: bool, ref: LR.Candidate | None, best
 def _from_extra(source: str) -> bool:
     """A load re-check candidate built from one of best-of-N's other route searches ("RECOMMENDED~2",
     "RECOMMENDED~2+repack:RECOMMENDED"), not from the main search, an alternative or the second search."""
-    return best_of_mod.from_extra(source)
+    return BO.from_extra(source)
 
 
 def _best_of_gain(name: str, ext: LR.Candidate | None, ref0: LR.Candidate | None, served) -> dict:
@@ -6164,7 +6651,7 @@ def _best_of_note(name: str, best: LR.Candidate, ref0: LR.Candidate | None, ref_
     plain words, as the second search's (_second_search_note): compared with the best plan built without them
     (``ref0``, after the same load re-check) - never with the main search's raw plan."""
     checked = "It passed the planner's own checks, timing and costs."
-    index = best.source.split("+", 1)[0][len(best_of_mod.EXTRA_PREFIX):]
+    index = best.source.split("+", 1)[0][len(BO.EXTRA_PREFIX):]
     used = (best_of or {}).get("used")
     which = (f"Route search {int(index) + 1} of {used}" if used and index.isdigit() else "Another route search") + \
         " (started from another order of the stops)"

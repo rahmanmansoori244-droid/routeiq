@@ -56,6 +56,10 @@ DEFAULT_JOIN_SEC = 60.0
 MAX_JOIN_SEC = 300.0
 # After the join: how long a search may take to hand back its best plan before it counts as TIMEOUT.
 JOIN_GRACE_SEC = 10.0
+# QUICK: how long the solve waits for the other searches once the main one is in (they end on their own
+# time limit when it does - shortened by any wait to start - and nothing is attached to a QUICK search,
+# so none can be joined: a later one is TIMEOUT and its process is stopped; critique of the design #14).
+QUICK_WAIT_SEC = 5.0
 # Ranking a search's plan that cannot be timed exactly: trim it for at most this long (as _trimmed does).
 TRIM_FALLBACK_SEC = 1.5
 # main.MAX_CONCURRENT_DISPATCH's default: solves that may run at once.
@@ -71,8 +75,9 @@ STRATEGY_WHITELIST = (
 
 # SearchRunReport.status values (a plain string in the model: run_status maps every outcome to one).
 RUN_STATUSES = ("OPTIMIZED", "NO_SOLUTION", "NOTHING_TO_PLAN", "NOT_RUN", "FAILED", "LOST", "TIMEOUT")
-# BestOfReport.gate values.
-GATES = ("CPU_GATE", "IN_PROCESS")
+# BestOfReport.gate values: too few CPUs for that many searches, no worker processes (SOLVER_PARALLEL=0),
+# or the other searches' own pool could not start (dispatch_solver._start_extra_workers).
+GATES = ("CPU_GATE", "IN_PROCESS", "NO_WORKERS")
 # A search's stop reasons: SearchReport's own, plus JOINED (ended when the main search ended).
 JOINED = "JOINED"
 
