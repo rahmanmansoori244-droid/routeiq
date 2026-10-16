@@ -182,6 +182,29 @@ If you need to scale beyond one web instance, swap the inflight map for Redis-ba
 
 ---
 
+## Operations alerts (16 Oct 2026)
+
+Owner request: notify when a rule is broken (unloading 30 min over plan, loading over 40 min, ETA more than 30 min late, plus other rules). Handbook [3.20](./PROJECT_HANDBOOK.md#320-operations-alerts).
+
+- **Off by default.** Every company starts with `TenantConfig.alertsEnabled = false`: deploying changes nothing. A company admin switches it on under Settings > Operations alerts; that save stamps `alertsEnabledAt`, and nothing that began before it raises an alert (no backlog). Turning it off stops new alerts at once; the rows already raised stay listed.
+- **Kill switch.** `ROUTEIQ_DISABLE_ALERTS=1` on `web` stops the alert sweep for every company (no new alert, no alert e-mail) whatever the settings; the bell and the Alerts page keep showing what was raised. `ROUTEIQ_DISABLE_JANITOR=1` stops it too (with the rest of the janitor).
+- **E-mail needs three things:** `RESEND_API_KEY` and `RESEND_FROM` on `web` (a sender on a domain verified in Resend; unlike the password reset there is no default sender for alerts), and recipients under Settings > Operations alerts (at most 5). Without any of them alerts show in RouteIQ only, and Settings says *Email is not set up on the server*. Setting the key also turns on password-reset e-mails (`/forgot`). Check with **Send test email** (company admin, to the saved addresses; 3 per 10 min): 409 `EMAIL_NOT_CONFIGURED` / `NO_RECIPIENTS`, 502 `EMAIL_FAILED` with the provider's status (a 403 is usually an unverified sender).
+- **Volume.** At most one e-mail per company every `alertEmailEveryMin` (15 by default; 0 = never) and 40 a day, HIGH alerts only by default, none in the quiet hours (22:00-06:00 by default). Resend's free plan allows about 100 e-mails a day and 3,000 a month (check the current plan): one company at the cap uses 40 a day. Each e-mail is one `OpsAlertDigest` row (counts only, never an address); a failed one is retried with the next e-mail, 3 tries per alert. When the cap is reached the bell says so and alerts show in RouteIQ only until the next day.
+- **Logs** carry counts only (`[alerts] e-mail sent { tenantId, digestId, alerts, high, recipients }`), never an address or an alert text.
+- **Privacy.** Alert texts and e-mails name customers and may quote a shortened driver note (140 characters); runs of 6 or more digits are removed (no phone numbers). Resend is a third-party processor of what the e-mails contain. Rows are deleted 90 days after their delivery date and by Start fresh.
+- **Useful query** (one company's open alerts of a day, HIGH first; read-only):
+
+```sql
+SELECT a."lastSeenAt", a.rule, a.severity, a.tier, a."truckCode", a."loadNo", a.sequence, a.text, a."ackedAt"
+FROM "OpsAlert" a
+WHERE a."tenantId" = '<tenantId>' AND a."deliveryDate" = '2026-10-16' AND a."resolvedAt" IS NULL
+ORDER BY CASE a.severity WHEN 'HIGH' THEN 0 ELSE 1 END, a."lastSeenAt" DESC;
+```
+
+- **E-mails of a day** (counts only): `SELECT "createdAt", status, "alertCount", "highCount", "recipientCount", error FROM "OpsAlertDigest" WHERE "tenantId" = '<tenantId>' ORDER BY "createdAt" DESC LIMIT 50;`
+
+---
+
 ## Trucks to hire (the hire suggestion, 6 Oct 2026)
 
 Owner request: when the day's orders are more than the fleet can carry, RouteIQ says which trucks to RENT (*hire 1 x 10-ton + 1 x 3-ton: extra about 80 OMR*). It only knows the trucks a company admin enters. The owner's answers (6 Oct 2026): only P1-P3 orders justify renting (P4/P5 orders left out alone: *Left out: N orders, all P4/P5 - renting is not suggested for them*); a rental is for the whole day; fuel is included in the hire; the casual driver is paid a day rate (**Daily driver day rate**, below).
