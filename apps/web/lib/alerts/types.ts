@@ -69,6 +69,12 @@ export interface Evaluation {
   active: Candidate[];
   ended: Ended[];
   scopes: SweepScope[];
+  /**
+   * Subjects checked this sweep whose open row stays exactly as it is: ETA_LATE and the projected
+   * AFTER_CLOSING while DRIVER_SILENT is open for the load (the delay cannot be worked out then; closing
+   * and reopening them would page again). Never closed as NOT_IN_PLAN.
+   */
+  held?: { rule: AlertRule; subjectKey: string }[];
 }
 
 /**

@@ -121,13 +121,23 @@ export interface PinCheckRow {
   suggested: { lat: number; lng: number; mapsUrl: string } | null;
 }
 
-/** The "Pin may be wrong" list (spec section 11.2). */
-export async function pinCheckList(tenantId: string, opts: { db?: Db; now?: Date } = {}): Promise<PinCheckRow[]> {
+/**
+ * The "Pin may be wrong" list (spec section 11.2). `customerIds`: only these customers (the operations
+ * alerts' "proof far from the pin" rule asks about the few customers it would otherwise report).
+ */
+export async function pinCheckList(tenantId: string, opts: { db?: Db; now?: Date; customerIds?: readonly string[] } = {}): Promise<PinCheckRow[]> {
   const db = opts.db ?? prisma;
+  if (opts.customerIds && !opts.customerIds.length) return [];
   const cfg = await db.tenantConfig.findFirst({ where: { tenantId }, select: { timezone: true } });
   const since = addDaysIso(todayIso(cfg?.timezone || DEFAULT_TZ, opts.now ?? new Date()), -FEED_DAYS);
   const visits = await db.stopVisit.findMany({
-    where: { tenantId, deliveryDate: { gte: dateOnly(since) }, timingSuspect: false, OR: [{ outcome: { not: null } }, { photoCount: { gt: 0 } }] },
+    where: {
+      tenantId,
+      deliveryDate: { gte: dateOnly(since) },
+      timingSuspect: false,
+      OR: [{ outcome: { not: null } }, { photoCount: { gt: 0 } }],
+      ...(opts.customerIds ? { customerId: { in: [...opts.customerIds] } } : {}),
+    },
     select: {
       id: true,
       customerId: true,

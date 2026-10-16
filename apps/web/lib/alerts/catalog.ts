@@ -118,7 +118,11 @@ export interface AlertRuleSpec {
   bounds: { min: number; max: number } | null;
   /** The highest tier the rule reaches. */
   maxTier: AlertTier;
-  /** Follows the driver's phone: checked only on truck-days whose driver page was opened (else PAGE_NOT_OPENED). */
+  /**
+   * Follows the driver's phone: checked only on truck-days whose driver page was opened (else
+   * PAGE_NOT_OPENED). AFTER_CLOSING: only its projected part (an arrival actually recorded, by the phone or
+   * the office, is a fact and is always checked: critique H3).
+   */
   needsDriverPage: boolean;
 }
 
@@ -291,7 +295,7 @@ export const ALERT_RULE_SPECS: Record<AlertRule, AlertRuleSpec> = {
     no: 11,
     owner: false,
     label: 'Driver page not opened',
-    meaning: 'A truck was dispatched but its driver page was not opened N min after the planned departure. RouteIQ cannot follow that truck: unloading, running late, silent, window and not-closed alerts are not checked for it.',
+    meaning: 'A truck was dispatched but its driver page was not opened N min after the planned departure. RouteIQ cannot follow that truck: unloading, running late, silent, expected-after-the-window and not-closed alerts are not checked for it.',
     kind: 'CONDITION',
     subject: 'TRUCK_DAY',
     unit: 'min',

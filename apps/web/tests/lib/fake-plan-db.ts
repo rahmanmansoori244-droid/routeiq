@@ -257,6 +257,8 @@ const MODELS = [
   'driverLeave',
   // Helpers (owner request 13 Oct 2026): the company's helpers and the helpers on each load.
   'helper', 'planLoadHelper',
+  // Operations alerts (owner request 16 Oct 2026): Start fresh and the retention delete their rows.
+  'opsAlert', 'opsAlertDigest',
 ];
 
 export const fakePrisma: Row = {};
