@@ -29,6 +29,15 @@ def _second_search_off_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _search_upgrade_settings_at_defaults(monkeypatch):
+    """Best-of-N (best_of.py) and the priority repair start at their production defaults (off) whatever
+    the shell running the tests has set; a test that needs one sets it itself."""
+    for name in ("SOLVER_BEST_OF", "SOLVER_BEST_OF_QUICK", "SOLVER_BEST_OF_SOURCES", "SOLVER_BEST_OF_JOIN_SEC",
+                 "SOLVER_BEST_OF_STRATEGIES", "SOLVER_PRIORITY_REPAIR"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_worker_health():
     """Rule 22: /ready's worker status is process-wide, and a failure stays reported for minutes
     whatever pools start meanwhile (WORKER_ALERT_MIN_SEC): one test's broken pool must not make a

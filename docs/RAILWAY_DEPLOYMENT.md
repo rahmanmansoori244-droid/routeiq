@@ -50,7 +50,7 @@ Follow-ups:
    - Since audit P5 (each uploaded file is read in its own short-lived process): optional `UPLOAD_WORKER_MAX_HEAP_MB` (default 512), `UPLOAD_PARSE_TIMEOUT_MS` (default 15000) and `UPLOAD_PARSE_CONCURRENCY` (default 2) on web; leave them unset unless the owner decides other values. **Memory:** while files are read, the web service needs its own memory plus, for each file read at once, about the heap cap + 150 MB: with the defaults up to about 1.3 GB more (NMWC's real files need about 60-70 MB each). The web process itself also holds the rows of each file being handled: at most 200 cells a row and 2,500,000 cells per file, kept compact (since the P5 second review; the parser's 128 MB answer cap alone did not bound them). Measured: 20-26 MB for the largest legal files, well under 1 MB for NMWC's files; so with two files at once, about 50 MB more at most. This does not bound the upload request itself (P5 third review): the web process reads a whole request body before the 10 MB check, about twice its size in memory, even without a session (a 300 MB request: 500-620 MB more). Unless something in front of the web service caps request bodies (not recorded in the repo), one very large request can take the web service to its memory limit; the cap is an owner question (handbook 7.5). Before the deploy, check the web service's memory limit and its usage in Railway (web → Metrics); if the limit is lower, raise it, or set `UPLOAD_PARSE_CONCURRENCY=1`. The build also makes `apps/web/.next/upload-parser/parse.cjs` (the file reader), and the start command must run in `apps/web`, as `pnpm --filter @routeiq/web start` does. After the deploy the web log shows `[upload-parse] the file reader works (startup check)`; a `[config]` error about the upload file reader means every upload is refused: redeploy with the build command above. No migration; rollback is a redeploy of the previous commit.
    - Since review M3 (the driver sheets are made in their own short-lived process, like uploads): optional `PDF_RENDER_MAX_HEAP_MB` (default 1024), `PDF_RENDER_TIMEOUT_MS` (default 120000) and `PDF_RENDER_CONCURRENCY` (default 2) on web; leave them unset unless the owner decides other values. **Memory:** each pack being made needs about 130 MB for one load and 460-560 MB for a whole day of 300-400 stops (measured), so two whole-day packs next to two large uploads need about 2.5 GB beside the web's own; if the web service's limit is lower, raise it or set `PDF_RENDER_CONCURRENCY=1`. The build also makes `apps/web/.next/pdf-renderer/render.cjs` (`scripts/build-pdf-renderer.mjs`), found by `next start` run in `apps/web`. After the deploy the web log shows `[pdf-render] the driver sheet maker works (startup check)`; a `[config]` error about the driver sheet maker means every driver sheet is refused: redeploy with the build command above. Check one "Driver sheets (PDF)" on the plan screen: the web log shows `[pdf-render] made <n> driver sheet(s), <KB> KB, in <ms> ms, renderer peak <MB> MB (process <pid>)`, and `GET /api/health/live` keeps answering while it is made. No migration; rollback is a redeploy of the previous commit.
 3. **solver** redeploys from `main` with the new OR-Tools engine. `OSRM_URL` is already set.
-   - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools worker processes plus 1 for the PyVRP second search, more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
+   - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools worker processes plus 1 for the PyVRP second search - and K-1 more with best-of-N, `SOLVER_BEST_OF`, off by default - more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
    - Never set `SOLVER_PARALLEL` on the solver: `0` disables every deadline and the time budget (the solver logs an error at startup on Railway when it is set). The same for `SOLVER_ALLOW_INPROCESS_FALLBACK` (rule 22, see "The planner cannot start its worker processes" below).
    - Since stabilization PR4 the solver adds an optional `feasibility` report to every option. Deploy order does not matter: the web treats a missing report as "not checked by the optimizer" and blocks such a plan only on a concrete problem it finds itself.
    - Web and solver build independently. Until the new solver is live, an optimize answers "The route optimizer is being updated. Try again in a minute."
@@ -303,6 +303,25 @@ merge to `main`, a docs-only one included. The pin itself changes nothing in pro
   `"ortools": "9.15.6755"`, and the next optimization's stored response (`RunJob.responseJson`) has
   `search.ortools_version` = `"9.15.6755"`.
 - **Rollback:** revert the commit (the range comes back); the new response field is additive, an old web ignores it.
+
+## Best-of-N route search and the priority repair (16 Oct 2026, both off by default)
+
+Two solver switches ship **off**; with both at their defaults every plan is the one from before (only the timing-drop
+reason and warning texts changed, where they were untrue).
+
+- `SOLVER_BEST_OF` (THOROUGH) / `SOLVER_BEST_OF_QUICK` (QUICK): RECOMMENDED's route search runs K times at once (1-8,
+  default 1). `SOLVER_PRIORITY_REPAIR=on`: after the load re-check, a P1-P3 stop left out while a lower priority rides is
+  put back in its place where it fits. See `docs/PROJECT_HANDBOOK.md` 2.9 and 4.11.
+- **Turn one on** only after a replay of saved real requests shows a gain, with the owner's OK, and never during the
+  evening's planning: a variable change restarts the solver and cuts any running solve.
+- **Verify after the deploy or a change** (`railway logs --service solver`): the startup lines
+  `Best-of route search: off (one route search per solve; SOLVER_BEST_OF=1, SOLVER_BEST_OF_QUICK=1)` (or
+  `THOROUGH K searches, ...` with `of N asked (CPU_GATE)` when the CPUs allow fewer) and
+  `Priority repair: off (the default; ...)` (or `on (...)`). `GET /ready` (with the solver token) has `best_of`
+  (`effective_thorough`, `effective_quick`) and `priority_repair`. With best-of on, the next optimization's stored response
+  (`RunJob.responseJson`) has `search.best_of.searches` (one entry per search) and the log `best-of run=<id> search i of K ...`
+  lines; with it off, `search.best_of` is null.
+- **Rollback:** unset the variable (or set `SOLVER_BEST_OF=1`, `SOLVER_PRIORITY_REPAIR=off`); no code change.
 
 ## Private networking notes
 

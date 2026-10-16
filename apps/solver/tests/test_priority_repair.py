@@ -177,6 +177,24 @@ def test_priority_repair_setting(value, on, monkeypatch):
     assert ds.priority_repair_on() is on
 
 
+def test_ready_and_the_startup_line_name_the_priority_repair(monkeypatch):
+    """The post-deploy check (critique of the design #9): /ready's ``priority_repair`` and the startup line say
+    whether it is on; off by default. Never changes ``ok``."""
+    from fastapi.testclient import TestClient
+
+    import main
+
+    monkeypatch.setattr(main, "SOLVER_TOKEN", "unit-test-solver-token")
+    client = TestClient(main.app)
+    body = client.get("/ready", headers={"X-Solver-Token": "unit-test-solver-token"}).json()
+    assert body["ok"] is True and body["priority_repair"] == "off"
+    assert ds.priority_repair_line().startswith("Priority repair: off (the default")
+    monkeypatch.setenv(ds.PRIORITY_REPAIR_ENV, "on")
+    body = client.get("/ready", headers={"X-Solver-Token": "unit-test-solver-token"}).json()
+    assert body["ok"] is True and body["priority_repair"] == "on"
+    assert ds.priority_repair_line().startswith("Priority repair: on (SOLVER_PRIORITY_REPAIR)")
+
+
 def _search_returns(monkeypatch, r, plan):
     """The route search's RECOMMENDED plan is ``plan`` (as the search would report it: its own times); the
     load re-check has no answer at once (its repacks give none), without its longer repair (F07): the stage

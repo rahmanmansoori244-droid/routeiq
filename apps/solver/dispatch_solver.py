@@ -3639,6 +3639,14 @@ def priority_repair_on() -> bool:
     return os.environ.get(PRIORITY_REPAIR_ENV, "").strip().lower() in ("on", "1", "true", "yes")
 
 
+def priority_repair_line() -> str:
+    """The startup line (main.py; RAILWAY_DEPLOYMENT.md's check reads it, with /ready's ``priority_repair``)."""
+    if priority_repair_on():
+        return (f"Priority repair: on ({PRIORITY_REPAIR_ENV}): a P1-P3 stop left out while a lower priority rides is put "
+                "back in its place after the load re-check where it fits")
+    return f"Priority repair: off (the default; {PRIORITY_REPAIR_ENV} unset or not on)"
+
+
 def _inversions(cfg: DispatchConfig, solvable: list[DispatchStop], sc: DispatchScenario) -> set[str]:
     """The P1-P3 stops ``sc`` leaves out while a stop they outrank (_outranks) rides on its trucks."""
     stop_of = {s.stop_id: s for s in solvable}

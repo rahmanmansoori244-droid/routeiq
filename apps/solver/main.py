@@ -39,6 +39,8 @@ from dispatch_solver import (
     WorkersUnavailable,
     optimize_dispatch,
     ortools_version,
+    priority_repair_line,
+    priority_repair_on,
 )
 import best_of
 import pyvrp_candidate
@@ -148,6 +150,8 @@ log_engine_version()
 log.info(pyvrp_candidate.startup_line())
 # Best-of-N route search (best_of.py): off (the default) or how many searches per solve, and why fewer.
 log.info(best_of.startup_line())
+# The priority repair after the load re-check (SOLVER_PRIORITY_REPAIR): off (the default) or on.
+log.info(priority_repair_line())
 
 
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
@@ -222,6 +226,8 @@ def ready_endpoint(
         "ortools": ortools_version(),
         # Best-of-N route search: searches asked for and run per mode, why fewer, its settings. Never affects ok.
         "best_of": best_of.status(),
+        # The priority repair (SOLVER_PRIORITY_REPAIR, off by default; read on every solve). Never affects ok.
+        "priority_repair": "on" if priority_repair_on() else "off",
     }
 
 

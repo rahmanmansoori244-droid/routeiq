@@ -862,7 +862,8 @@ class BestOfReport(BaseModel):
     """Best-of-N route search (SOLVER_BEST_OF for THOROUGH, SOLVER_BEST_OF_QUICK for QUICK; best_of.py).
 
     requested: searches the setting asked for; used: searches run (fewer under ``gate``: CPU_GATE = not
-    enough CPUs for that many at MAX_CONCURRENT_DISPATCH solves, IN_PROCESS = no worker processes).
+    enough CPUs for that many at MAX_CONCURRENT_DISPATCH solves, IN_PROCESS = no worker processes, NO_WORKERS =
+    the other searches' own pool could not start).
     join_sec: THOROUGH, how long the other searches could go on after the main one ended. primary_status:
     the main search's outcome when it gave no plan (FAILED, LOST, TIMEOUT, NO_SOLUTION) and search
     ``promoted`` replaced it. chosen_for: the options whose plan came from another search. gains: per

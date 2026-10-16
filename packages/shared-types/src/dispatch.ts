@@ -247,7 +247,7 @@ export interface SearchReport {
 
 /**
  * Best-of-N route search (apps/solver dispatch_models.BestOfReport). requested / used: searches asked for
- * and run (fewer under gate: CPU_GATE, IN_PROCESS). primary_status / promoted: the main search gave no plan
+ * and run (fewer under gate: CPU_GATE, IN_PROCESS, NO_WORKERS). primary_status / promoted: the main search gave no plan
  * and that search replaced it. chosen_for: options whose plan came from another search. gains: per option,
  * what the other searches' best candidate gained. searches: every search, index 0 (the main one) first.
  */
