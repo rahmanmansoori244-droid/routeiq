@@ -129,12 +129,16 @@ const ROW_SELECT = {
   paymentType: true,
   // Owner request 13 Oct 2026: the list's SMALL TRUCK ONLY badge.
   smallTruckOnly: true,
+  // Owner request 16 Oct 2026: the list's LOADING INSTRUCTION badge (review M12: which branches have one).
+  loadingInstruction: true,
   active: true,
 } satisfies Prisma.CustomerSelect;
 
 type SelectedRow = Prisma.CustomerGetPayload<{ select: typeof ROW_SELECT }>;
 
-export type CustomerListRow = Omit<SelectedRow, 'customerType'> & {
+export type CustomerListRow = Omit<SelectedRow, 'customerType' | 'loadingInstruction'> & {
+  /** The loading instruction (owner request 16 Oct 2026); absent = none (a row without one is as before). */
+  loadingInstruction?: string;
   /** The priority the planner uses (review ui-rest-2): the stored one only when confirmed. */
   plannedPriority: number;
   plannedPrioritySource: AttrSource;
@@ -216,9 +220,9 @@ export async function loadCustomerList(
   const byType = new Map(profiles.map((p) => [p.customerType, p]));
   return {
     params: { ...asked, show, page },
-    rows: rows.map(({ customerType, ...r }) => {
+    rows: rows.map(({ customerType, loadingInstruction, ...r }) => {
       const eff = effectivePriority({ ...r, customerType }, byType);
-      return { ...r, plannedPriority: eff.priority, plannedPrioritySource: eff.prioritySource };
+      return { ...r, ...(loadingInstruction ? { loadingInstruction } : {}), plannedPriority: eff.priority, plannedPrioritySource: eff.prioritySource };
     }),
     total,
     all,

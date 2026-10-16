@@ -191,6 +191,21 @@ describe('buildDispatchRequest: the allowed trucks of a small-truck-only custome
       'Small truck only customer(s) today: SMALL1; but this depot has no truck with bays entered and at most 6 bays today, so their orders are left out. Hire a small truck (Check hire options), enter the bays of the small trucks under Trucks, or check Settings (Small truck = at most N bays).',
     );
   });
+
+  it("a customer's loading instruction (16 Oct 2026, lib/dispatch/loading-instruction.ts) is never sent to the optimizer: the request is the same", async () => {
+    const plain = [order('O1', customer('C1', 23.6, 58.4), 100), order('O2', customer('C2', 23.55, 58.3, { smallTruckOnly: true }), 100)];
+    wire(FLEET(), plain);
+    const before = await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW });
+    const instructed = [
+      order('O1', customer('C1', 23.6, 58.4, { loadingInstruction: 'Water at the bottom, max 5 layers' }), 100),
+      order('O2', customer('C2', 23.55, 58.3, { smallTruckOnly: true, loadingInstruction: 'Cartons on top only' }), 100),
+    ];
+    wire(FLEET(), instructed);
+    const after = await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW });
+    expect(JSON.stringify(after.request)).toBe(JSON.stringify(before.request));
+    expect(JSON.stringify(after.request)).not.toMatch(/Water at the bottom|Cartons on top|loadingInstruction/);
+    expect(after.warnings).toEqual(before.warnings);
+  });
 });
 
 describe('the hire check: only small trucks to rent are added for such stops', () => {

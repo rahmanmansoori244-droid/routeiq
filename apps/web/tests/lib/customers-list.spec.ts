@@ -287,6 +287,21 @@ describe('the page and the list show the priority the planner uses (ui-rest-2)',
     expect(plain).toMatchObject({ priority: 3, priorityConfirmed: false, plannedPriority: 3, plannedPrioritySource: 'DEFAULT' });
   });
 
+  it('the loading instruction (16 Oct 2026): a badge in the list (the text as its title) and a field on the customer page; nothing for a customer without one', async () => {
+    const WATER = 'Water at the bottom, max 5 layers';
+    db.customer!.find((r) => r.id === 'id1249')!.loadingInstruction = WATER;
+    const one = (await openPage({ q: 'C01249' })).props.initial[0];
+    expect(one.loadingInstruction).toBe(WATER);
+    expect('loadingInstruction' in (await openPage({ q: 'C00003' })).props.initial[0]).toBe(false);
+    const host = await clientFor({ q: 'C0124' });
+    const badges = byTestId(host.tree, 'customer-loading-instruction');
+    expect(badges.map((b) => [b.props['data-customer'], b.props.title, textOf(b.props.children)])).toEqual([['C01249', WATER, 'LOADING INSTRUCTION']]);
+    const page = await CustomerDetailPage({ params: { slug: 'acme', id: 'id1249' } });
+    expect(textOf(elements(page).find((e) => e.props?.['data-testid'] === 'customer-loading-instruction'))).toBe(WATER);
+    const plain = await CustomerDetailPage({ params: { slug: 'acme', id: 'id3' } });
+    expect(textOf(elements(plain).find((e) => e.props?.['data-testid'] === 'customer-loading-instruction'))).toBe('—Optional: add it in Details when the warehouse must load this customer in a specific way.');
+  });
+
   it("the customer page's Details card says which priority the planner uses", async () => {
     const tree = await CustomerDetailPage({ params: { slug: 'acme', id: 'id1249' } });
     const note = elements(tree).find((e) => e.props?.['data-testid'] === 'customer-priority-note');

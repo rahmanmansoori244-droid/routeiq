@@ -26,7 +26,7 @@ import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 import { MAX_WAITING, pdfRenderConfig, pdfRenderConfigProblems, pdfRendererStartupProblem, QUEUE_WAIT_MS, rendererEntry } from '@/lib/pdf-render/config';
 import { checkPdfRenderer, lastPdfRender, PDF_REFUSALS, pdfRenderState, renderDriverPackIsolated, setPdfRenderTestOverrides } from '@/lib/pdf-render';
 import { MAX_PDF_BYTES } from '@/lib/pdf-render/protocol';
-import { fixture, load, ORDERS, stop } from './plan-detail-fixture';
+import { fixture, instructionFixture, load, ORDERS, stop } from './plan-detail-fixture';
 import { longestStall, outcome, processGone } from './upload-parse-helpers';
 
 const WEB = path.resolve(__dirname, '../..');
@@ -145,6 +145,16 @@ describe('the pack is made in another process, and this one keeps running (revie
     const here = await renderDriverPackPdf(day);
     expect(pdfObjects(pdf).size).toBeGreaterThan(day.sheets.length);
     expect(differentObjects(pdf, here)).toEqual([]);
+  });
+
+  it('a sheet with a SPECIAL LOADING box (loading instruction, 16 Oct 2026) is made there the same: its words come in the model', async () => {
+    const d: PlanDetail = instructionFixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], loadingInstruction: 'Water at the bottom, max 5 layers' };
+    const model = driverPackModel(d, { tenantName: 'NMWC Test' });
+    expect(model.sheets[0]!.loadingInstructionsTitle).toBe('SPECIAL LOADING - load as this customer requires:');
+    const pdf = await renderDriverPackIsolated(model);
+    expect(lastPdfRender()!.pid).not.toBe(process.pid);
+    expect(differentObjects(pdf, await renderDriverPackPdf(model))).toEqual([]);
   });
 
   it('while a day is made, the event loop of this process is never blocked for long', async () => {

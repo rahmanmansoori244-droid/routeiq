@@ -47,6 +47,12 @@ function T({ style, children }: { style?: Style; children?: React.ReactNode }) {
 }
 
 const C = { ink: '#111111', mute: '#555555', line: '#9A9A9A', band: '#EEEEEE', link: '#0645AD' };
+/**
+ * The SPECIAL LOADING box (owner request 16 Oct 2026) is kept whole on one page up to this many lines: at
+ * most about 3 printed rows each (a 200-character instruction with the stop and the customer), so about
+ * 400 pt, which always fits under the warnings at the top of a sheet.
+ */
+const LOAD_BOX_WHOLE_LINES = 12;
 const BOLD = 'Helvetica-Bold';
 const s = StyleSheet.create({
   page: { paddingTop: 22, paddingBottom: 40, paddingHorizontal: 24, fontFamily: 'Helvetica', fontSize: 8.5, color: C.ink },
@@ -54,6 +60,8 @@ const s = StyleSheet.create({
   h1: { fontFamily: BOLD, fontSize: 17 },
   badge: { fontFamily: BOLD, fontSize: 8.5, borderWidth: 1, borderColor: C.ink, paddingHorizontal: 4, paddingTop: 2, paddingBottom: 1, marginRight: 6 },
   bigWarn: { fontFamily: BOLD, fontSize: 11, borderWidth: 2, borderColor: C.ink, padding: 3, marginBottom: 4, textAlign: 'center' },
+  // Owner request 16 Oct 2026: the SPECIAL LOADING box - a thick border, no shading (prints in black and white).
+  loadBox: { borderWidth: 3, borderColor: C.ink, paddingHorizontal: 5, paddingVertical: 3, marginBottom: 4 },
   facts: { flexDirection: 'row', flexWrap: 'wrap', backgroundColor: C.band, paddingHorizontal: 5, paddingVertical: 4, marginTop: 4, fontSize: 9.5 },
   fact: { marginRight: 14 },
   b: { fontFamily: BOLD },
@@ -90,6 +98,8 @@ function StopRow({ st }: { st: SheetStop }) {
         <T style={{ fontFamily: BOLD, fontSize: 9.5 }}>{st.customerName}</T>
         {/* Owner request 13 Oct 2026: the unloading area takes small trucks only (small text). */}
         {st.smallTruck ? <T style={{ fontFamily: BOLD, fontSize: 7 }}>{st.smallTruck}</T> : null}
+        {/* Owner request 16 Oct 2026: the customer's loading instruction (also in the box at the top). */}
+        {st.loadingInstruction ? <T style={{ fontFamily: BOLD, fontSize: 7.5 }}>{`LOADING: ${st.loadingInstruction}`}</T> : null}
         <T style={s.small}>{meta}</T>
         {st.address ? <T style={{ fontSize: 7.5 }}>{st.address}</T> : null}
         {/* Owner request 12 Oct 2026: the customer's phone, to call before arrival (Latin font only: the
@@ -196,6 +206,20 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
       {m.superseded ? <T style={s.bigWarn}>This plan version was replaced. Do not use this sheet - ask the dispatcher for the new one.</T> : null}
       {sh.timesNotVerified ? (
         <T style={s.bigWarn}>TIMES NOT VERIFIED - the departure or delivery times of this truck break a planning rule. Check with the dispatcher before leaving.</T>
+      ) : null}
+      {/* Owner request 16 Oct 2026: the SPECIAL LOADING box; its words come in the model (driver-pack.tsx).
+          Kept whole on one page while it has at most LOAD_BOX_WHOLE_LINES lines (it always fits under the
+          sheet's head); a longer one may continue on the next page, because a whole box taller than the
+          room left is squeezed by the layout and its lines print over each other (review of 16 Oct). */}
+      {sh.loadingInstructions?.length ? (
+        <View style={s.loadBox} wrap={sh.loadingInstructions.length > LOAD_BOX_WHOLE_LINES}>
+          <T style={{ fontFamily: BOLD, fontSize: 13 }}>{sh.loadingInstructionsTitle ?? ''}</T>
+          {sh.loadingInstructions.map((line, i) => (
+            <T key={i} style={{ fontFamily: BOLD, fontSize: 9.5 }}>
+              {line}
+            </T>
+          ))}
+        </View>
       ) : null}
       <View style={{ flexDirection: 'row' }}>
         <View style={{ width: headWidth }}>

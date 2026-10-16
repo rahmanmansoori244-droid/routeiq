@@ -263,6 +263,44 @@ export function fixture(opts: { estimated?: boolean; revenue?: boolean; noUnserv
   };
 }
 
+/**
+ * The fixture with every other mark the sheets print: a VOID (superseded) version, an order brought forward
+ * to a later day (L1 stop 1), a cancelled order (L2 stop 1), a small-truck-only customer on a big truck (L2
+ * stop 2) and a split delivery whose rest is not on a truck (L3). The loading instruction's "prints exactly
+ * as before" checks (16 Oct 2026) pin the sheets of this day and of the plain fixture.
+ */
+export function busyFixture(): PlanDetail {
+  const d = fixture();
+  d.run = { ...d.run, status: 'SUPERSEDED', supersededAt: '2026-09-25T01:00:00.000Z' };
+  d.loads[0] = { ...d.loads[0], status: 'LOCKED', carriedAway: 1, stops: [{ ...d.loads[0].stops[0], carriedTo: '2026-09-26' }, d.loads[0].stops[1]] };
+  d.loads[1] = {
+    ...d.loads[1],
+    status: 'PLANNED',
+    cancelledHere: 1,
+    stops: [{ ...d.loads[1].stops[0], cancelled: true, cancelledOrderIds: ['o3'] }, { ...d.loads[1].stops[1], smallTruckOnly: true, smallTruckBreach: true }],
+  };
+  d.loads[2].stops[0] = { ...d.loads[2].stops[0], split: { part: 1, parts: 2, restUnserved: true } };
+  return d;
+}
+
+/** The invented customers the loading-instruction tests put their instructions on (L1 stops 1 and 2). */
+export const INSTRUCTED = {
+  a: { customerId: 'c100', customerCode: 'C100', branchCode: 'B1', customerName: 'Hyper Example A' },
+  b: { customerId: 'c200', customerCode: 'C200', branchCode: null, customerName: 'Shop Example B' },
+} as const;
+
+/**
+ * The fixture with L1's two customers replaced by invented ones of their own (review of 16 Oct 2026): the
+ * loading-instruction tests never put an instruction on the fixture's other names. Everything else is as
+ * in fixture().
+ */
+export function instructionFixture(): PlanDetail {
+  const d = fixture();
+  const [s1, s2] = d.loads[0].stops;
+  d.loads[0] = { ...d.loads[0], stops: [{ ...s1, ...INSTRUCTED.a }, { ...s2, ...INSTRUCTED.b }] };
+  return d;
+}
+
 // ---------------------------------------------------------------------------------------
 // Truck capacity in pallets (owner decision 4 Oct 2026, part B)
 // ---------------------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { SMALL_TRUCK_BADGE } from '@/lib/dispatch/small-truck';
+import { instructionLine, LOADING_INSTRUCTION_BADGE, loadInstructions, stopIsLoaded } from '@/lib/dispatch/loading-instruction';
 import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstText, type RemedyLoad } from '@/lib/dispatch/feasibility-view';
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
@@ -1290,6 +1291,17 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           {CANCELLED_BADGE}
                         </Badge>
                       ) : null}
+                      {/* Owner request 16 Oct 2026: a customer of this load must be loaded in a specific way (its load sheet has a SPECIAL LOADING box). */}
+                      {loadInstructions(l.stops).length ? (
+                        <Badge
+                          variant="warning"
+                          className="ml-1"
+                          data-testid={`load-instruction-${l.truckCode}-${l.loadNo}`}
+                          title={loadInstructions(l.stops).map(instructionLine).join('\n')}
+                        >
+                          {LOADING_INSTRUCTION_BADGE}
+                        </Badge>
+                      ) : null}
                       {l.timing && !l.timing.ok ? (
                         <Badge
                           variant="destructive"
@@ -2119,6 +2131,18 @@ function LoadDetail({
                     >
                       {SMALL_TRUCK_BADGE}
                     </Badge>
+                  ) : null}
+                  {/* Owner request 16 Oct 2026: the warehouse's loading instruction, readable without hovering; only on a stop
+                      something of which is loaded, as the load's badge and the sheets (review of 16 Oct). */}
+                  {st.loadingInstruction && stopIsLoaded(st) ? (
+                    <>
+                      <Badge variant="warning" className="mt-0.5 text-[10px]" data-testid="stop-loading-instruction" title={st.loadingInstruction}>
+                        {LOADING_INSTRUCTION_BADGE}
+                      </Badge>
+                      <span className="mt-0.5 block text-xs text-amber-800" data-testid="stop-loading-instruction-text">
+                        {st.loadingInstruction}
+                      </span>
+                    </>
                   ) : null}
                   {st.carriedFrom ? (
                     <Badge variant="warning" className="mt-0.5" data-testid="stop-carried-from" title="Not delivered on the day it was due: brought forward to this day. Its priority is kept as it was.">

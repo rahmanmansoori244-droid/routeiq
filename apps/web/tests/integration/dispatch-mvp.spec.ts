@@ -546,6 +546,49 @@ describe('frozen plan facts (review F08)', () => {
     expect((await prisma.customer.findUniqueOrThrow({ where: { id: s.customerId } })).phone).toBeNull();
   });
 
+  it("27f (owner request 16 Oct 2026) a loading instruction set in Details reaches the locked load's stop and its load sheet at once: a SPECIAL LOADING box and a row tag, escaped; audited; no re-plan", async () => {
+    const p = await plan(runV2);
+    const s = p.loads.find((l: any) => l.id === lockedId).stops[0];
+    const text = 'Pallets first <b>&</b> "max 5 layers"';
+    expect((await patch(`${BASE}/api/customers/${s.customerId}`, { loadingInstruction: ` Pallets first <b>&</b>\n "max 5 layers" ` })).status).toBe(200);
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: s.customerId } })).loadingInstruction).toBe(text);
+    // The customer's UPDATE audit row has it before and after.
+    const auditRow = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: t.tenantId, entity: 'Customer', entityId: s.customerId, action: 'UPDATE' }, orderBy: { createdAt: 'desc' } });
+    expect((auditRow.beforeJson as any).loadingInstruction ?? null).toBeNull();
+    expect((auditRow.afterJson as any).loadingInstruction).toBe(text);
+    const after = await plan(runV2);
+    const st = after.loads.find((l: any) => l.id === lockedId).stops.find((x: any) => x.customerId === s.customerId);
+    expect(st.loadingInstruction).toBe(text);
+    expect(st.masterChanged.some((c: any) => c.kind !== 'LOCATION' && c.kind !== 'HOURS')).toBe(false);
+    // The warehouse load sheet of that load: the box under the title, escaped, and the tag on the customer's invoices.
+    const res = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/export/load-sheet?load=${lockedId}`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('<div class="instr-h">SPECIAL LOADING</div>');
+    expect(html).toContain('<bdi>Pallets first &lt;b&gt;&amp;&lt;/b&gt; &quot;max 5 layers&quot;</bdi>');
+    expect(html).not.toContain('<b>&</b>');
+    expect(html).toContain('<br><b>SPECIAL LOADING - see the box at the top</b>');
+    expect(html.indexOf('data-kind="loading-instruction"')).toBeLessThan(html.indexOf('<div class="head">'));
+    // The driver sheet model carries it too.
+    const pack = driverPackModel(after, { tenantName: 'NMWC', loadIds: [lockedId] }).sheets[0];
+    expect(pack.loadingInstructions!.join(' ')).toContain(text);
+    // Too long is refused (400), nothing saved.
+    expect((await patch(`${BASE}/api/customers/${s.customerId}`, { loadingInstruction: 'x'.repeat(201) })).status).toBe(400);
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: s.customerId } })).loadingInstruction).toBe(text);
+    // A value written straight to the database (line breaks, 250 characters: a bulk update by hand) still prints, folded and shortened (review M6).
+    await prisma.customer.update({ where: { id: s.customerId }, data: { loadingInstruction: `Pallets first\r\n${'then cartons '.repeat(19)}` } });
+    const raw = (await plan(runV2)).loads.find((l: any) => l.id === lockedId).stops.find((x: any) => x.customerId === s.customerId);
+    expect(raw.loadingInstruction.startsWith('Pallets first then cartons')).toBe(true);
+    expect(raw.loadingInstruction.length).toBeLessThanOrEqual(200);
+    expect(raw.loadingInstruction.endsWith('…')).toBe(true);
+    // Empty clears it and the sheet prints as before.
+    expect((await patch(`${BASE}/api/customers/${s.customerId}`, { loadingInstruction: '' })).status).toBe(200);
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: s.customerId } })).loadingInstruction).toBeNull();
+    const cleared = await (await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/export/load-sheet?load=${lockedId}`)).text();
+    expect(cleared).not.toContain('SPECIAL LOADING');
+    expect(cleared).not.toContain('.instr');
+  });
+
   it('28 a re-plan keeps identical snapshots on the carried assignments and loads', async () => {
     const before = await prisma.routeAssignment.findMany({ where: { loadId: lockedId }, orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }] });
     const beforeLoad = await prisma.planLoad.findUniqueOrThrow({ where: { id: lockedId } });

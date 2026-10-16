@@ -79,6 +79,19 @@ describe('clearable fields (audit F26)', () => {
     expect(truckPatchSchema.parse({ description: '' })).toEqual({ description: null });
     expect(truckPatchSchema.parse({ kmPerLitre: 5 })).not.toHaveProperty('description');
   });
+
+  it('the loading instruction (16 Oct 2026): left out = unchanged, "" / spaces / null = cleared, else one line of at most 200', () => {
+    expect(customerPatchSchema.parse({ loadingInstruction: '' })).toEqual({ loadingInstruction: null });
+    expect(customerPatchSchema.parse({ loadingInstruction: '   ' })).toEqual({ loadingInstruction: null });
+    expect(customerPatchSchema.parse({ loadingInstruction: null })).toEqual({ loadingInstruction: null });
+    expect(customerPatchSchema.parse({ priority: 2 })).not.toHaveProperty('loadingInstruction');
+    expect(customerPatchSchema.parse({ loadingInstruction: ' Pallets   first ' })).toEqual({ loadingInstruction: 'Pallets first' });
+    expect(customerPatchSchema.safeParse({ loadingInstruction: 'x'.repeat(201) }).success).toBe(false);
+    expect(customerPatchSchema.safeParse({ loadingInstruction: 5 }).success).toBe(false);
+    // A create: cleared = not set; left out = not set.
+    expect(customerSchema.parse({ code: 'C1', name: 'C', loadingInstruction: '' }).loadingInstruction).toBeNull();
+    expect(customerSchema.parse({ code: 'C1', name: 'C' })).not.toHaveProperty('loadingInstruction');
+  });
 });
 
 describe('region routes (audit F26)', () => {
