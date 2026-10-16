@@ -61,6 +61,8 @@ import { PhotoViewer } from './photo-viewer';
 import { CameraExceptions } from './camera-exceptions';
 import { HireSuggestionBox } from './hire-suggestion';
 import { CAMERA_ALERT_PER_DAY } from '@/lib/delivery/camera-exceptions';
+import { addDaysIso } from '@/lib/dispatch/time';
+import { LiveTrucksBar, useLiveTrucks } from './live-trucks';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -135,9 +137,14 @@ interface Props {
    * without it (the standalone plan version page) the plan's own today is used (PlanDetail.today).
    */
   today?: string;
+  /**
+   * Live trucks on the map (IVMS live link, 16 Oct 2026): the company's GPS tracking is MAP or TIMES and
+   * the user is PLANNER or above (the page decides). Off or absent: nothing is fetched or shown.
+   */
+  liveMap?: boolean;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today, liveMap = false }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -368,6 +375,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     });
     return m;
   }, [d]);
+
+  // Live trucks (IVMS live link): a plan of today or yesterday with a load out (locked, loading or on the road).
+  const liveToday = today ?? d?.today ?? null;
+  const liveDay = !!d && !!liveToday && (d.run.runDate === liveToday || d.run.runDate === addDaysIso(liveToday, -1));
+  const loadOut = !!d?.loads.some((l) => l.status === 'LOCKED' || l.status === 'LOADING' || l.status === 'DISPATCHED');
+  const live = useLiveTrucks(runId, liveMap && liveDay && loadOut);
+  const liveVehicles = useMemo(
+    () => (live.on && live.data ? live.data.vehicles.map((v) => ({ ...v, colorIdx: colorIdx.get(v.truckId) ?? 0 })) : undefined),
+    [live.on, live.data, colorIdx],
+  );
 
   const trips = useMemo(() => tripsByTruck(d?.loads ?? []), [d]);
   const clashes = useMemo(() => driverClashNotes(d?.loads ?? []), [d]);
@@ -1483,9 +1500,12 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         </CardContent>
       </Card>
 
+      {d.loads.length && liveMap && liveDay && loadOut ? <LiveTrucksBar data={live.data} on={live.on} setOn={live.setOn} tz={d.timezone || 'Asia/Muscat'} /> : null}
       {d.loads.length ? (
         <PlanMap
           runId={runId}
+          vehicles={liveVehicles}
+          tz={d.timezone || 'Asia/Muscat'}
           depot={{ lat: d.run.depot.lat, lng: d.run.depot.lng, name: d.run.depot.name }}
           selectedLoadId={selectedLoad}
           // The road shapes answer is for loads other than these (the plan changed on the server): reload.

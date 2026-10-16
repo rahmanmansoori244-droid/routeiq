@@ -5,7 +5,8 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import { Button } from '@/components/ui/button';
-import { OSM_RASTER_STYLE, truckColor } from '@/lib/maps';
+import { OSM_RASTER_STYLE, isMapPoint, truckColor } from '@/lib/maps';
+import { vehiclePopupText, type DayVehicle } from '@/lib/ivms/live-map';
 import { roadShapesCaption } from '@/lib/dispatch/map-caption';
 import { GEO_LOADING, afterFailedFetch, answerIsStale, autoRetryDue, createDrawGate, drawnShapes, linesToDraw, type DrawGate, type GeoRow, type GeoState } from '@/lib/dispatch/plan-map-state';
 
@@ -31,6 +32,14 @@ interface Props {
    * same loads, the map asks for the shapes once more.
    */
   onStale?: () => unknown;
+  /**
+   * Live trucks (IVMS live link, 16 Oct 2026): the latest GPS position of each truck with a load out,
+   * drawn on top in its own layer (never part of the route drawing or of the zoom fit, so the
+   * dispatcher's zoom is kept). Absent or empty: nothing is drawn, exactly as before.
+   */
+  vehicles?: (DayVehicle & { colorIdx: number })[];
+  /** The company's time zone for the vehicles' popups. */
+  tz?: string;
 }
 
 /** One automatic second try this long after an answer with straight lines that a retry can fix. */
@@ -44,7 +53,7 @@ const AUTO_RETRY_MS = 5_000;
  * decisions live in lib/dispatch/plan-map-state.ts (unit-tested); drawing waits for the map's style
  * (not its tiles) through the draw gate.
  */
-export function PlanMap({ runId, depot, loads, unserved, selectedLoadId, onStale }: Props) {
+export function PlanMap({ runId, depot, loads, unserved, selectedLoadId, onStale, vehicles, tz = 'Asia/Muscat' }: Props) {
   const el = useRef<HTMLDivElement | null>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const gate = useRef<DrawGate | null>(null);
@@ -218,6 +227,35 @@ export function PlanMap({ runId, depot, loads, unserved, selectedLoadId, onStale
     g.run(draw);
     return () => g.cancel();
   }, [geo, loads, unserved, selectedLoadId, depot.lat, depot.lng, depot.name, depotAt, shapeKey]);
+
+  // Live trucks: their own markers, redrawn when the positions change; the map's zoom is never touched.
+  // The map is re-created when the depot moves (the effect above runs first), hence the depot deps.
+  const vehicleMarkers = useRef<maplibregl.Marker[]>([]);
+  useEffect(() => {
+    const m = map.current;
+    if (!m) return;
+    for (const mk of vehicleMarkers.current) mk.remove();
+    vehicleMarkers.current = [];
+    for (const v of vehicles ?? []) {
+      if (!isMapPoint(v.lat, v.lng)) continue;
+      const el = document.createElement('div');
+      el.dataset.testid = v.stale ? 'live-truck-stale' : 'live-truck';
+      el.title = `${v.truckCode} (GPS)`;
+      el.style.cssText = `display:flex;align-items:center;gap:3px;font:700 11px/16px system-ui;color:#fff;background:${v.stale ? '#9ca3af' : truckColor(v.colorIdx)};border:2px solid #fff;border-radius:6px;padding:1px 5px;box-shadow:0 1px 3px rgba(0,0,0,.5);white-space:nowrap`;
+      // A heading arrow only while moving; a clock for a stale position (never shown as moving).
+      const icon = document.createElement('span');
+      icon.textContent = v.stale ? '\u{1F552}' : v.heading !== null ? '\u27A4' : '\u25A0';
+      if (!v.stale && v.heading !== null) icon.style.cssText = `display:inline-block;transform:rotate(${v.heading - 90}deg)`;
+      const label = document.createElement('span');
+      label.textContent = v.truckCode;
+      el.append(icon, label);
+      vehicleMarkers.current.push(new maplibregl.Marker({ element: el }).setLngLat([v.lng, v.lat]).setPopup(new maplibregl.Popup({ offset: 14 }).setText(vehiclePopupText(v, tz))).addTo(m));
+    }
+    return () => {
+      for (const mk of vehicleMarkers.current) mk.remove();
+      vehicleMarkers.current = [];
+    };
+  }, [vehicles, tz, depot.lat, depot.lng]);
 
   // The caption counts the lines drawn (a load on screen the answer has no row for is straight).
   const caption = roadShapesCaption(drawnShapes(geo, loads, depotAt), { retrying });

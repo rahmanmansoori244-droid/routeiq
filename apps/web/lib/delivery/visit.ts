@@ -1,8 +1,9 @@
 /**
  * One physical stop of a load that left the depot, rebuilt from its events (owner request 4 Oct 2026,
  * spec section 8.4). Pure: event-service.ts stores the events, then calls deriveVisit and writes the
- * result onto the StopVisit row. Ayun (later) writes events of source AYUN into the same table and is
- * treated like an observed automatic phone event.
+ * result onto the StopVisit row. The GPS trackers (Ayun, IVMS live link of 16 Oct 2026,
+ * lib/ivms/stop-events.ts) write ARRIVED and DEPARTED events of source AYUN into the same table: they
+ * only fill the gaps the driver and the office left (see "GPS (AYUN) events" below).
  *
  * - Result = the OUTCOME event with the latest `at` (ties: the latest received, then the dispatcher
  *   over the phone); an OUTCOME with outcome null clears it.
@@ -13,6 +14,23 @@
  *   the office entered later never ends the stop.
  * - Automatic timing only from OBSERVED automatic events: an arrival found when the page came back
  *   (observed false) or a departure after a gap never feeds measured times or the on-time KPI.
+ *
+ * GPS (AYUN) events (IVMS live link, design section 6.4 with the review's M1/M3): they build their OWN
+ * cycles, never mixed into the phone's, so a visit without AYUN events is rebuilt exactly as before
+ * (tests/lib/ivms-visit-golden.spec.ts).
+ * - Arrival: the office's newest entry; else the driver's "Arrived when?" answer or tap (the phone
+ *   cycle's arrival when it is not automatic); else, of the phone's automatic arrival and the GPS
+ *   cycle's, the OBSERVED one first, then the earlier; else the GPS arrival.
+ * - Departure: the office's Left; else the phone cycle's; else the GPS cycle's (only when that GPS
+ *   stay began at most 15 min after the chosen arrival); else (a phone result) the result time. The
+ *   15-minute rule after the result applies to a GPS departure too.
+ * - The GPS cycle is the one overlapping the chosen phone cycle (the one holding the result among
+ *   them), or with no phone cycle the GPS cycle holding the result.
+ * - GPS never writes a result, so the result and the driver facts never come from it; the
+ *   plausibility flags stay phone-only (a GPS position is never pin evidence).
+ * - A visit timed by GPS (its arrival, or its automatic end, is an AYUN event) gets no
+ *   autoServiceMinutes: GPS times never feed the measured unloading times used for planning until
+ *   replays have validated them (review M3). autoMinutes still shows the stay.
  */
 import { distanceM } from '../dispatch/snapshots';
 
@@ -127,8 +145,11 @@ export interface VisitState {
 
 const AUTO: ReadonlySet<EventSource> = new Set(['PHONE_AUTO', 'AYUN']);
 const PHONE: ReadonlySet<EventSource> = new Set(['PHONE_AUTO', 'PHONE_MANUAL']);
+/** A GPS departure counts only for a GPS stay that began at most this long after the chosen arrival. */
+export const GPS_DEPARTURE_MATCH_MIN = 15;
 
 const t = (d: Date) => d.getTime();
+const isObserved = (e: VisitEvent) => e.payload?.observed !== false;
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
 
@@ -224,14 +245,44 @@ function arrivalOf(c: Cycle): VisitEvent {
   return c.arrivals[0]!;
 }
 
+/**
+ * The GPS cycle of the stay: of the GPS (AYUN) cycles overlapping the chosen phone cycle, the one
+ * holding the result; with no phone cycle, the GPS cycle holding the result.
+ */
+function gpsCycleFor(gpsCycles: Cycle[], phone: Cycle | null, outcomeAt: number | null): Cycle | null {
+  if (!gpsCycles.length) return null;
+  if (!phone) return chooseCycle(gpsCycles, outcomeAt);
+  const end = (c: Cycle) => (c.departure ? t(c.departure.at) : Infinity);
+  const overlapping = gpsCycles.filter((g) => g.start <= end(phone) && end(g) >= phone.start);
+  return overlapping.length ? (chooseCycle(overlapping, outcomeAt) ?? overlapping[0]!) : null;
+}
+
+/** The arrival of a GPS cycle: an observed one first, then the earliest. */
+function gpsArrivalOf(c: Cycle): VisitEvent {
+  return [...c.arrivals].sort((a, b) => (isObserved(a) === isObserved(b) ? 0 : isObserved(a) ? -1 : 1) || t(a.at) - t(b.at))[0]!;
+}
+
+/**
+ * The arrival of the stay when the office entered none: the phone cycle's (arrivalOf) when it is the
+ * driver's (a tap or a "when?" answer); of two automatic arrivals (the phone's and the GPS cycle's),
+ * the observed one, then the earlier; else whichever exists. Without a GPS cycle: arrivalOf, as before.
+ */
+function chooseArrival(phone: Cycle | null, gps: Cycle | null): VisitEvent | null {
+  const p = phone ? arrivalOf(phone) : null;
+  const g = gps ? gpsArrivalOf(gps) : null;
+  if (!g) return p;
+  if (!p) return g;
+  if (p.source !== 'PHONE_AUTO') return p;
+  if (isObserved(p) !== isObserved(g)) return isObserved(p) ? p : g;
+  return t(g.at) < t(p.at) ? g : p;
+}
+
 /** The newest entry (latest received, then latest time) of the dispatcher's events of a kind: a correction replaces the one before. */
 function newestOffice(events: readonly VisitEvent[], kind: 'ARRIVED' | 'DEPARTED'): VisitEvent | null {
   const office = events.filter((e) => e.kind === kind && e.source === 'DISPATCHER');
   if (!office.length) return null;
   return [...office].sort((a, b) => t(b.receivedAt) - t(a.receivedAt) || t(b.at) - t(a.at))[0]!;
 }
-
-const isObserved = (e: VisitEvent) => e.payload?.observed !== false;
 
 /**
  * Plausibility flags of phone-reported positions (spec section 8.3). Any flag sets timingSuspect: the
@@ -269,21 +320,24 @@ export function deriveVisit(events: readonly VisitEvent[], ctx: VisitContext): V
   const rp = res?.payload ?? null;
   const outcome = res && typeof rp?.outcome === 'string' ? (rp.outcome as OutcomeName) : null;
   const outcomeAt = outcome && res ? t(res.at) : null;
-  // 2-3. Cycles of the phone (and Ayun) events, and the chosen one. The dispatcher's Arrived / Left
-  // (Record outcome) are corrections of the whole stop, not cycle members: the newest entry of each
-  // replaces the phone's (an earlier office entry included).
-  const cycle = chooseCycle(cyclesOf(evs.filter((e) => e.source !== 'DISPATCHER')), outcomeAt);
+  // 2-3. Cycles of the phone events, and the chosen one. The dispatcher's Arrived / Left (Record
+  // outcome) are corrections of the whole stop, not cycle members: the newest entry of each replaces
+  // the phone's (an earlier office entry included). The GPS (AYUN) events have their own cycles.
+  const cycle = chooseCycle(cyclesOf(evs.filter((e) => e.source !== 'DISPATCHER' && e.source !== 'AYUN')), outcomeAt);
+  const gps = gpsCycleFor(cyclesOf(evs.filter((e) => e.source === 'AYUN')), cycle, outcomeAt);
   const officeArrival = newestOffice(evs, 'ARRIVED');
   const officeDeparture = newestOffice(evs, 'DEPARTED');
   // 4. Arrival.
-  const arrival = officeArrival ?? (cycle ? arrivalOf(cycle) : null);
+  const arrival = officeArrival ?? chooseArrival(cycle, gps);
   const arrivalObserved = arrival ? !(AUTO.has(arrival.source) && !isObserved(arrival)) : true;
-  // 5. Departure: the office's Left, else the cycle's; never one at or before the arrival.
+  // 5. Departure: the office's Left, else the cycle's, else the GPS stay's (one that began near the
+  // arrival); never one at or before the arrival.
   let departedAt: number | null = null;
   let departureSource: EventSource | null = null;
   let departedAtOutcome = false;
   let departureGap = false;
-  let dep = officeDeparture ?? cycle?.departure ?? null;
+  const gpsDeparture = gps?.departure && !(arrival && gps.start > t(arrival.at) + GPS_DEPARTURE_MATCH_MIN * 60_000) ? gps.departure : null;
+  let dep = officeDeparture ?? cycle?.departure ?? gpsDeparture ?? null;
   if (dep && arrival && t(dep.at) <= t(arrival.at)) dep = null;
   if (dep && (dep.source === 'DISPATCHER' || !(outcomeAt !== null && t(dep.at) > outcomeAt + maxAfter))) {
     departedAt = t(dep.at);
@@ -311,13 +365,15 @@ export function deriveVisit(events: readonly VisitEvent[], ctx: VisitContext): V
   }
   let autoMinutes: number | null = null;
   let autoServiceMinutes: number | null = null;
+  // Timed by GPS (the arrival, or the automatic end, is an AYUN event): never a measured time (M3).
+  const gpsTimed = arrival?.source === 'AYUN' || (autoBasis === 'DEPARTURE' && dep?.source === 'AYUN');
   if (autoArrivedAt !== null && end !== null && end > autoArrivedAt) {
     autoMinutes = Math.round(minutesBetween(autoArrivedAt, end) * 10) / 10;
     const winStart = ctx.windowStartMin !== null ? t(ctx.dayStart) + ctx.windowStartMin * 60_000 : null;
     const start = winStart !== null ? Math.max(autoArrivedAt, winStart) : autoArrivedAt;
     const brk = ctx.breakMin ? { s: t(ctx.dayStart) + ctx.breakMin.startMin * 60_000, e: t(ctx.dayStart) + ctx.breakMin.endMin * 60_000 } : null;
     const overlapsBreak = !!brk && start < brk.e && end > brk.s;
-    if (end > start && !overlapsBreak) autoServiceMinutes = Math.round(minutesBetween(start, end) * 10) / 10;
+    if (end > start && !overlapsBreak && !gpsTimed) autoServiceMinutes = Math.round(minutesBetween(start, end) * 10) / 10;
   } else {
     autoBasis = null; // nothing usable ended the automatic timing (or it ended before it started)
   }

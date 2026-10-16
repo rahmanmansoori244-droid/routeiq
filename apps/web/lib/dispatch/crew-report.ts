@@ -13,6 +13,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { findInParts } from '../in-parts';
 import { backAtDepot, backKey, liveRunsInRange } from '../delivery/day-results';
+import { dispatchedAt } from './dispatched-at';
 import { shownTruckCode } from './hire';
 import { daysBetween, DEFAULT_TZ, fmtHhmm, localDateIso, localMinutes } from './time';
 import { CREW_COLUMNS, CREW_MAX_DAYS, helperTotals, NO_DRIVER_TEXT, personText, type CrewRow } from './crew-report-view';
@@ -22,53 +23,12 @@ type Db = Prisma.TransactionClient | typeof prisma;
 /** The loads that left the depot (their departure is the Dispatch time when it was recorded). */
 const LEFT = new Set(['DISPATCHED', 'COMPLETED']);
 
-/** A copied load points to the load it was copied from: at most this many versions are followed. */
-const MAX_VERSIONS = 60;
-
 /** "07:12" on the delivery day, "2026-10-12 21:40" on another day (local time of the company). */
 export function crewTimeText(at: Date, dateIso: string, tz: string): string {
   const m = localMinutes(at, tz);
   const hhmm = fmtHhmm(m);
   const day = localDateIso(at, tz);
   return day === dateIso ? hhmm : `${day} ${hhmm}`;
-}
-
-/**
- * When each load was marked Dispatched: the LOAD_DISPATCHED audit row of the load, or of the load it
- * was copied from in an earlier plan version (a re-plan copies a dispatched load; the dispatch was
- * recorded on the original). The latest row of the nearest load in the chain wins.
- */
-async function dispatchedAt(db: Db, tenantId: string, loads: readonly { id: string; carriedFromLoadId: string | null }[]): Promise<Map<string, Date>> {
-  const parent = new Map<string, string | null>(loads.map((l) => [l.id, l.carriedFromLoadId]));
-  let frontier = [...new Set(loads.map((l) => l.carriedFromLoadId).filter((x): x is string => !!x && !parent.has(x)))];
-  for (let i = 0; i < MAX_VERSIONS && frontier.length; i++) {
-    const rows = await findInParts(frontier, (part) => db.planLoad.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, carriedFromLoadId: true } }));
-    for (const r of rows) parent.set(r.id, r.carriedFromLoadId ?? null);
-    for (const id of frontier) if (!parent.has(id)) parent.set(id, null);
-    frontier = [...new Set(rows.map((r) => r.carriedFromLoadId).filter((x): x is string => !!x && !parent.has(x)))];
-  }
-  const audits = await findInParts([...parent.keys()], (part) =>
-    db.auditLog.findMany({ where: { tenantId, action: 'LOAD_DISPATCHED', entity: 'PlanLoad', entityId: { in: part } }, select: { entityId: true, createdAt: true } }),
-  );
-  const latest = new Map<string, Date>();
-  for (const a of audits) {
-    if (!a.entityId) continue;
-    const cur = latest.get(a.entityId);
-    if (!cur || a.createdAt > cur) latest.set(a.entityId, a.createdAt);
-  }
-  const out = new Map<string, Date>();
-  for (const l of loads) {
-    let id: string | null = l.id;
-    for (let i = 0; id && i <= MAX_VERSIONS; i++) {
-      const at = latest.get(id);
-      if (at) {
-        out.set(l.id, at);
-        break;
-      }
-      id = parent.get(id) ?? null;
-    }
-  }
-  return out;
 }
 
 /** The report's rows for a range (31 days at most), one depot or every depot; sorted by date, depot, truck, trip. */

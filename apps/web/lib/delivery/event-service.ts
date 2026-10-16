@@ -844,9 +844,18 @@ export async function recordDriverActions(ctx: DriverWriteContext, body: { clien
 // Back at depot and completion (spec section 8.7)
 // ---------------------------------------------------------------------------------------
 
-/** Has the load a BACK_AT_DEPOT event? */
+/**
+ * The Back at depot sources that close a trip: the driver's tap (PHONE_MANUAL) and the office's entry
+ * (DISPATCHER), the only ones applyAction writes. A GPS (AYUN) return to the depot NEVER completes a
+ * load (IVMS live link, binding review H1: a completion would refuse the driver's queued corrections
+ * as LOAD_COMPLETED); the GPS link records it only as a depot move (IvmsEvent), and a BACK_AT_DEPOT of
+ * any other source is never read here as the driver's.
+ */
+export const COMPLETING_BACK_SOURCES = ['PHONE_MANUAL', 'DISPATCHER'] as const;
+
+/** Has the load a BACK_AT_DEPOT event from the driver or the office? */
 async function isBack(db: Db, tenantId: string, depotId: string, date: string, truckId: string, loadNo: number): Promise<boolean> {
-  const n = await db.stopEvent.count({ where: { tenantId, depotId, deliveryDate: dateOnly(date), truckId, loadNo, kind: 'BACK_AT_DEPOT' } });
+  const n = await db.stopEvent.count({ where: { tenantId, depotId, deliveryDate: dateOnly(date), truckId, loadNo, kind: 'BACK_AT_DEPOT', source: { in: [...COMPLETING_BACK_SOURCES] } } });
   return n > 0;
 }
 
@@ -890,11 +899,13 @@ export async function maybeCompleteLoad(tenantId: string, truckId: string, date:
  * completed, actor "Driver link: ... (back at depot)". The usual case never reaches it: the last
  * result completes the load at once. The newest Back at depot events first (index kind, receivedAt);
  * truck-days whose load is no longer DISPATCHED are dropped in one query before any per-load work.
+ * Source-aware (IVMS live link, review H1): only the driver's or the office's Back at depot
+ * (COMPLETING_BACK_SOURCES) ever completes a load, never a GPS one.
  */
 export async function completeReturnedLoads(now: Date = new Date()): Promise<{ completed: number }> {
   const since = new Date(now.getTime() - 4 * 24 * 60 * 60_000);
   const backs = await prisma.stopEvent.findMany({
-    where: { kind: 'BACK_AT_DEPOT', receivedAt: { gte: since } },
+    where: { kind: 'BACK_AT_DEPOT', source: { in: [...COMPLETING_BACK_SOURCES] }, receivedAt: { gte: since } },
     select: { tenantId: true, depotId: true, deliveryDate: true, truckId: true, loadNo: true },
     orderBy: [{ receivedAt: 'desc' }],
     take: 2000,
@@ -1008,6 +1019,8 @@ export async function truckDayResults(db: Db, tenantId: string, truckId: string,
         late: v.outcomeLate,
         editable: (l.status === 'DISPATCHED' || (viewer === 'OFFICE' && l.status === 'COMPLETED')) && !inBasis,
         carriedTo,
+        // IVMS live link: only when the arrival is the truck's GPS (no change for any other stop).
+        ...(v.arrivalSource === 'AYUN' && v.arrivedAt ? { arrivalByGps: true as const } : {}),
       };
     }
   }
