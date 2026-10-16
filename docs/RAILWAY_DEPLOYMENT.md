@@ -254,8 +254,8 @@ never worse than the engine alone would have chosen from the same search. See `d
     with the lists modelled (a routing profile per truck class, the stops a class may not carry forbidden); `model`: on
     every solve, Quick solves and hire checks included. Its plans are judged like any day's (the mapping back, the exact
     timing and the independent check refuse a stop on a truck it may not use). It changes the plans of such days: set it
-    only with the owner's OK after a replay of saved real requests (not before the replay tool exists: see "Best-of-N
-    route search and the priority repair" below), `thorough` first, never during the evening's planning (a variable
+    only with the owner's OK after a replay of saved real requests passes (`scripts/bench_search.py`, arm `pyvrp_model`:
+    see "Best-of-N route search and the priority repair" below), `thorough` first, never during the evening's planning (a variable
     change restarts the solver).
 - **CPU and memory per solve.** One more busy process while the searches run (Quick: the whole search, about 1.5 x the day's
   search time; Thorough: while the engine searches, then until its last better plan is max(30 s, 10% of its search time)
@@ -313,11 +313,53 @@ reason and warning texts changed, where they were untrue).
 - `SOLVER_BEST_OF` (THOROUGH) / `SOLVER_BEST_OF_QUICK` (QUICK): RECOMMENDED's route search runs K times at once (1-8,
   default 1). `SOLVER_PRIORITY_REPAIR=on`: after the load re-check, a P1-P3 stop left out while a lower priority rides is
   put back in its place where it fits. See `docs/PROJECT_HANDBOOK.md` 2.9 and 4.11.
-- **Not yet: turn neither on (nor `SOLVER_PYVRP_ALLOWED`, above) until the replay tool exists.** Each needs a replay of
-  saved real requests with it on and off, judged by a rule written down before the replay runs (served by priority first,
-  then cost, every option VERIFIED, `search.used_sec` inside the cap). That tool, `scripts/bench_search.py`, is a follow-up
-  PR and does not exist yet: an ad-hoc replay is not enough. Then turn one on with the owner's OK, one at a time, and
-  never during the evening's planning: a variable change restarts the solver and cuts any running solve.
+- **Not yet: turn none on (nor `SOLVER_PYVRP_ALLOWED`, above) before its replay passes.** Each needs a replay of saved
+  real requests with it on and off through `apps/solver/scripts/bench_search.py`, judged by the rule the tool prints,
+  which was written down before any replay ran: over every pair of runs (the same request, mode and repetition, base
+  arm beside the switched one) RECOMMENDED never serves the day worse by priority; every option of every run is
+  VERIFIED; the median paired difference in RECOMMENDED's operating cost is not above 0; every run answers within its cap
+  minus 60 s; no search ends `TIMEOUT` or `LOST`, no solve fails and no worker process is left. An ad-hoc replay is not
+  enough. Then turn one on with the owner's OK, one at a time, and never during the evening's planning: a variable change
+  restarts the solver and cuts any running solve.
+- **The replay** (`scripts/bench_search.py`): never in CI and never against production; one replay at a time on a machine
+  of its own. The saved requests stay outside the repository, which is public (on the codespace, `~/ds-data`), and so
+  does the output: the tool refuses an `--out` folder inside the repository.
+
+  ```
+  cd apps/solver
+  .venv/bin/python scripts/bench_search.py ~/ds-data/day-*-request.json --dry-run
+  .venv/bin/python scripts/bench_search.py ~/ds-data/day-*-request.json --out ~/bench/run1 \
+      --arms base,best_of,pyvrp_model,repair_on,all_on --modes QUICK,THOROUGH --reps 3 --cpu-note "codespace 4 vCPU"
+  .venv/bin/python scripts/bench_search.py --summary-only --out ~/bench/run1
+  ```
+
+  - **Arms.** Presets: `base` (every switch at its default), `best_of` (`SOLVER_BEST_OF=3`, `SOLVER_BEST_OF_QUICK=3`),
+    `pyvrp_model` (`SOLVER_PYVRP_ALLOWED=model`), `repair_on` (`SOLVER_PRIORITY_REPAIR=on`), `all_on`; or your own,
+    separated by `;`: `k4=SOLVER_BEST_OF=4,SOLVER_BEST_OF_SOURCES=2`. Before each run every switch is unset and the arm's
+    own values set; the solver reads them on every solve, and each record keeps them as the solver read them. A variable
+    the solver never reads, or a value it cannot read, is refused. The arms take turns within each repetition (A B C,
+    then B C A), so the two runs of a pair ran minutes apart.
+  - **As production runs a solve:** `optimize_dispatch` in a solve thread, its searches in worker pools
+    (`SOLVER_PARALLEL=1`); `--modes QUICK,THOROUGH` (or `ASKED`, each request's own), THOROUGH with the request's own cap.
+    `MAX_CONCURRENT_DISPATCH=1` in the bench (one solve at a time), so a 4-CPU machine's CPU gate still lets best-of run
+    3 searches; the records and the summary say when the gate cut them. The road matrix is built once per request (OSRM
+    when the bench machine's `OSRM_URL` is set, else straight-line estimates; a request's own `osrm_url` is never
+    called) and every run uses that same matrix. The summary lists what is
+    not production conditions (estimated distances, fewer CPUs, the shell's own `SOLVER_*` / `THOROUGH_*` variables).
+  - **`--dry-run`** checks the requests and the arms, shows each arm's settings as the solver reads them, says whether a
+    day has small-truck-only stops that decide something and a stop that fills a truck alone (PyVRP then skips the day
+    as `FULL_TRUCK` whatever `SOLVER_PYVRP_ALLOWED` says) and the worst-case run time; it solves and writes nothing.
+  - **Output** in `--out`: `results.jsonl` (one line per run: stops and cases left out per P1-P5, trucks, loads,
+    operating cost, km, `used_sec`, stop reason, the best-of report (which search won, its gains), PyVRP's status, the
+    priority repair's actions, warnings with every id replaced by `<id>`, any error); `summary.md` (each arm's verdict
+    per mode, the paired differences per request as median [min, max], and the benefit: wins and losses, service first
+    then cost, with a sign test); `bench.json`; `solver.log` (the solver's own log, which names stop ids). Running the
+    same command again continues a stopped replay; `--stop-after-min` stops it on purpose (a codespace stops after its
+    idle timeout).
+  - **Reading it.** PASS means the switch did no harm on those days, not that it helps: the benefit column says whether
+    it does (p <= 0.10 needs at least 4 decisive pairs). NOT EXERCISED means it never took effect (best-of cut to one
+    search, no small-truck-only day, nothing to repair). Publish only differences and digests (`OPTIMIZER_BENCHMARK.md`),
+    never a real day's totals.
 - **What each one changes.** `SOLVER_BEST_OF_QUICK` changes every Quick solve: the evening's plan when it is a Quick
   one, every re-plan of the day and the hire check's main solve (its trials always search once). `SOLVER_BEST_OF` changes
   Thorough solves only; `SOLVER_PRIORITY_REPAIR` every solve but the hire check's trials. Each other search is one more
