@@ -41,7 +41,7 @@ export interface GoldenCase {
 }
 
 /** `n` seeded cases of 0 to 8 events each (no AYUN event), with varied payloads, positions and contexts. */
-export function goldenCases(n = 600, seed = 20261016): GoldenCase[] {
+export function goldenCases(n = 600, seed = 2026_10_16): GoldenCase[] {
   const r = rng(seed);
   const pick = <T>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
   const out: GoldenCase[] = [];
