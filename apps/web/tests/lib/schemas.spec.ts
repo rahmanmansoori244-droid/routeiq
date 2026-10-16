@@ -202,6 +202,24 @@ describe('tenantConfigSchema', () => {
     smallTruckMaxBays: 6,
     // The receiving-hours rule (owner request 13 Oct 2026).
     windowRule: 'FINISH',
+    // Operations alerts (owner request 16 Oct 2026): the defaults of a company that never changed them.
+    alertsEnabled: false,
+    alertUnloadOverMin: 30,
+    alertLoadingOverMin: null,
+    alertEtaLateMin: 30,
+    alertDepartLateMin: 30,
+    alertSilentMin: 120,
+    alertPageNotOpenedMin: 30,
+    alertAfterClosingMin: 15,
+    alertPriorityMax: 2,
+    alertDeliveredNote: true,
+    alertProofFarM: 500,
+    alertNotClosedMin: 120,
+    alertEmails: null,
+    alertEmailEveryMin: 15,
+    alertEmailMinSeverity: 'HIGH' as const,
+    alertQuietFromMin: 1320,
+    alertQuietToMin: 360,
   };
   it('refuses the old controls that changed nothing (strict), whole or partial', () => {
     for (const k of ['solverTimeLimitSeconds', 'labelEstimatedDistances', 'returnToDepot', 'weightObjectiveTrucks', 'costPerKmDefault']) {

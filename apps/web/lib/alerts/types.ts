@@ -1,0 +1,170 @@
+/**
+ * Operations alerts (owner request 16 Oct 2026): the types the engine, the store, the API and the screens
+ * share (lib/alerts/catalog.ts has the rules). Pure and browser-safe.
+ *
+ * Data flow: the sweep reads the facts of yesterday, today and tomorrow (facts.ts), the pure rules turn
+ * them into an Evaluation (rules.ts: Candidate rows that are true now, Ended rows whose condition ended or
+ * whose event was corrected, and the SweepScopes that were read in full), the store applies it to OpsAlert
+ * (store.ts), the e-mail digest claims what is new (notify.ts), and the API answers OpsAlertRow /
+ * AlertSummary to the bell, the day screen and the Alerts page.
+ */
+import type { OpsAlert } from '@prisma/client';
+import { isoOf } from '../dispatch/time';
+import type { AlertKind, AlertRule, AlertSeverity, AlertTier, ResolvedReason } from './catalog';
+
+/** One rule that is true now for one physical subject (rules.ts -> store.ts). */
+export interface Candidate {
+  rule: AlertRule;
+  /** The rule's kind, except AFTER_CLOSING, which is an EVENT once the arrival actually happened. */
+  kind: AlertKind;
+  /** subjectKeyOf(...): depot|date|truck[|loadNo[|sequence]]. */
+  subjectKey: string;
+  depotId: string;
+  /** The load's delivery date, YYYY-MM-DD. */
+  deliveryDate: string;
+  truckId: string;
+  /** As shown (shownTruckCode: a hired truck's plate). */
+  truckCode: string;
+  loadNo: number | null;
+  sequence: number | null;
+  customerId: string | null;
+  /** 1-3; the severity follows from it (catalog.ts severityOf). */
+  tier: AlertTier;
+  /** Minutes, metres or the priority, as the rule measures it. */
+  value: number;
+  /** The setting it was compared with. */
+  threshold: number;
+  /** Plain English (text.ts): truck code + L<n>, stop and customer where they apply; digit runs removed. */
+  text: string;
+  /** When the condition began or the event happened: no new row when before TenantConfig.alertsEnabledAt. */
+  occurredAt: Date;
+  /** Raise it already resolved, as history only (no toast, no e-mail): DEPART_LATE found after the Dispatch press. */
+  history?: boolean;
+  /** Kept as OpsAlert.factsJson for support: small, never a phone number. */
+  facts?: Record<string, unknown>;
+}
+
+/** A subject checked this sweep whose condition ended, or whose event was corrected. */
+export interface Ended {
+  rule: AlertRule;
+  subjectKey: string;
+  reason: Extract<ResolvedReason, 'ENDED' | 'CORRECTED'>;
+  /** The final words ("Loading took 52 min, 02:10-03:02"; "corrected to Delivered 15:10"). */
+  text: string;
+}
+
+/**
+ * A depot and date whose facts were read in full this sweep, and the rules that were on. In it, an open
+ * CONDITION row that is neither a Candidate nor Ended closes as NOT_IN_PLAN (its load or stop left the plan:
+ * a re-plan, another plan version, Start fresh), and one of a rule that is off closes as RULE_OFF. A date
+ * whose facts could not be read has no scope, so none of its rows closes.
+ */
+export interface SweepScope {
+  depotId: string;
+  deliveryDate: string;
+  rulesOn: AlertRule[];
+}
+
+export interface Evaluation {
+  active: Candidate[];
+  ended: Ended[];
+  scopes: SweepScope[];
+}
+
+/**
+ * Open: needs someone to look (it counts on the bell). Acked: a CONDITION still true that someone has
+ * seen, or an EVENT someone dealt with. Resolved: over (a CONDITION that ended, an EVENT corrected, or a
+ * row closed as not in the plan, expired or rule off): history, it needs no acknowledgement.
+ */
+export type AlertState = 'OPEN' | 'ACKED' | 'RESOLVED';
+
+type StateFields = Pick<OpsAlert, 'resolvedAt' | 'ackedAt'>;
+
+export function alertStateOf(row: StateFields): AlertState {
+  if (row.resolvedAt) return 'RESOLVED';
+  return row.ackedAt ? 'ACKED' : 'OPEN';
+}
+
+/** Counts on the bell: an open CONDITION or EVENT row nobody acknowledged. A higher tier clears the acknowledgement. */
+export function needsAttention(row: StateFields): boolean {
+  return alertStateOf(row) === 'OPEN';
+}
+
+/** One alert as the API sends it to the screens (never factsJson or the e-mail state). */
+export interface OpsAlertRow {
+  id: string;
+  rule: AlertRule;
+  kind: AlertKind;
+  severity: AlertSeverity;
+  tier: AlertTier;
+  state: AlertState;
+  depotId: string;
+  /** YYYY-MM-DD. */
+  deliveryDate: string;
+  truckId: string;
+  truckCode: string;
+  loadNo: number | null;
+  sequence: number | null;
+  customerId: string | null;
+  value: number;
+  threshold: number;
+  text: string;
+  /** ISO times. */
+  occurredAt: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  resolvedAt: string | null;
+  resolvedReason: ResolvedReason | null;
+  occurrences: number;
+  ackedAt: string | null;
+  /** The name of the user who acknowledged it (null: nobody, or the user was deleted). */
+  ackedByName: string | null;
+  mayToast: boolean;
+}
+
+/** GET /api/alerts/summary: the bell. */
+export interface AlertSummary {
+  /** TenantConfig.alertsEnabled: the bell hides itself when false. */
+  enabled: boolean;
+  /** Rows that need attention (needsAttention). */
+  open: number;
+  /** Of them, HIGH. */
+  high: number;
+  /** The newest rows that need attention, HIGH first (at most ALERT_LATEST_COUNT). */
+  latest: OpsAlertRow[];
+  /** Today's e-mails reached ALERT_EMAILS_PER_DAY: alerts show in RouteIQ only until tomorrow. */
+  emailCapReached: boolean;
+}
+
+const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
+
+/** An OpsAlert row (with its acknowledging user's name when read) as the API sends it. */
+export function toOpsAlertRow(row: OpsAlert & { ackedBy?: { name: string } | null }): OpsAlertRow {
+  return {
+    id: row.id,
+    rule: row.rule as AlertRule,
+    kind: row.kind as AlertKind,
+    severity: row.severity as AlertSeverity,
+    tier: row.tier as AlertTier,
+    state: alertStateOf(row),
+    depotId: row.depotId,
+    deliveryDate: isoOf(row.deliveryDate),
+    truckId: row.truckId,
+    truckCode: row.truckCode,
+    loadNo: row.loadNo,
+    sequence: row.sequence,
+    customerId: row.customerId,
+    value: row.value,
+    threshold: row.threshold,
+    text: row.text,
+    occurredAt: row.occurredAt.toISOString(),
+    firstSeenAt: row.firstSeenAt.toISOString(),
+    lastSeenAt: row.lastSeenAt.toISOString(),
+    resolvedAt: iso(row.resolvedAt),
+    resolvedReason: (row.resolvedReason as ResolvedReason | null) ?? null,
+    occurrences: row.occurrences,
+    ackedAt: iso(row.ackedAt),
+    ackedByName: row.ackedBy?.name ?? null,
+    mayToast: row.mayToast,
+  };
+}
