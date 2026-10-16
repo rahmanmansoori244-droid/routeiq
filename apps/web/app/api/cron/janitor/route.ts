@@ -31,6 +31,7 @@ import { runDeliveryJanitor } from '@/lib/jobs/delivery-janitor';
 import { failLostHireChecks, retireOneDayTrucks } from '@/lib/dispatch/hire-whatif';
 import { janitorAuthorized } from '@/lib/janitor-auth';
 import { runAlertSweep } from '@/lib/alerts/sweep';
+import { sendAlertDigest } from '@/lib/alerts/notify';
 
 export const dynamic = 'force-dynamic';
 
@@ -46,9 +47,9 @@ async function runJanitor() {
   const deliveryRetention = await runDeliveryJanitor(new Date(), { force: true });
   // The hire suggestion: what-ifs lost with their process; one-day hired trucks whose day is over.
   const hire = { lostChecks: await failLostHireChecks(), oneDayTrucksRetired: await retireOneDayTrucks() };
-  // Operations alerts (owner request 16 Oct 2026): the companies that switched them on, now (null when
-  // ROUTEIQ_DISABLE_ALERTS=1 or a sweep is still running in this process).
-  const alerts = await runAlertSweep(new Date(), { force: true });
+  // Operations alerts (owner request 16 Oct 2026): the companies that switched them on, now, each followed
+  // by its e-mail digest (null when ROUTEIQ_DISABLE_ALERTS=1 or a sweep is still running in this process).
+  const alerts = await runAlertSweep(new Date(), { force: true, notify: sendAlertDigest });
   return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts };
 }
 

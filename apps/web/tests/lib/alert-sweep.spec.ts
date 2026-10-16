@@ -137,9 +137,11 @@ describe('the hooks', () => {
   const read = (rel: string) => readFileSync(path.resolve(__dirname, '../..', rel), 'utf8');
   it('the janitor loop runs the sweep in its own try, skipped by ROUTEIQ_DISABLE_ALERTS=1; the cron route forces it and answers `alerts`', () => {
     const loop = read('lib/jobs/janitor-loop.ts');
-    expect(loop).toMatch(/if \(process\.env\.ROUTEIQ_DISABLE_ALERTS !== '1'\) \{\s+try \{\s+await runAlertSweep\(\);/);
+    expect(loop).toMatch(/if \(process\.env\.ROUTEIQ_DISABLE_ALERTS !== '1'\) \{\s+try \{\s+await runAlertSweep\(new Date\(\), \{ notify: sendAlertDigest \}\);/);
+    expect(loop).toContain("import { sendAlertDigest } from '../alerts/notify';");
     const cron = read('app/api/cron/janitor/route.ts');
-    expect(cron).toContain('const alerts = await runAlertSweep(new Date(), { force: true });');
+    expect(cron).toContain('const alerts = await runAlertSweep(new Date(), { force: true, notify: sendAlertDigest });');
+    expect(cron).toContain("import { sendAlertDigest } from '@/lib/alerts/notify';");
     expect(cron).toContain('return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts };');
   });
 
