@@ -240,3 +240,397 @@ def test_best_of_loads_neither_pyvrp_nor_numpy():
     r = subprocess.run([sys.executable, "-c", code], cwd=SOLVER_DIR, capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, r.stderr[-3000:]
     assert r.stdout.strip().endswith("LOADED="), r.stdout[-2000:]
+
+
+# ---------------------------------------------------------------------------------------------
+# The engine's use of several searches (dispatch_solver: _recommended_best_of and its helpers)
+# ---------------------------------------------------------------------------------------------
+# The solves below run in worker processes (SOLVER_PARALLEL unset), so a monkeypatch in this process
+# never reaches a search (critique of the design #3): the faults come from the ROUTEIQ_TEST_* hooks, read
+# in the workers, and the choice among plans is tested on its own (_best_of_choice). The CPU gate runs in
+# this process: PV.effective_cpus is patched so a small CI runner still runs K searches.
+
+ALL3 = ["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"]
+
+
+def _run(index: int, *, ok: bool = True, rank=None, signature=None) -> dict:
+    return {"index": index, "ok": ok, "rank": rank, "signature": signature if signature is not None else ("plan", index)}
+
+
+def test_the_choice_keeps_the_main_search_on_a_tie_and_takes_the_best_other_plans():
+    """The alternatives start from the best-ranked plan (the main one on a tie, and always when it could not
+    be ranked); the load re-check gets at most m other plans, best first, never an unranked one nor one
+    equal to the main plan or to another chosen one."""
+    main, warm, src = ds._best_of_choice([_run(0, rank=(0, 500)), _run(1, rank=(0, 500)), _run(2, rank=(0, 501))], 1)
+    assert (main["index"], warm["index"], [r["index"] for r in src]) == (0, 0, [1])
+    main, warm, src = ds._best_of_choice([_run(0, rank=(0, 500)), _run(1, rank=(0, 499)), _run(2, rank=(0, 400)),
+                                          _run(3, rank=(0, 300), signature=("plan", 2))], 2)
+    assert (main["index"], warm["index"]) == (0, 3)
+    assert [r["index"] for r in src] == [3, 1]  # search 2 has search 3's plan: one source
+    main, warm, src = ds._best_of_choice([_run(0, rank=(0, 500), signature="same"), _run(1, rank=(0, 400), signature="same"),
+                                          _run(2, rank=None), _run(3, ok=False)], 2)
+    assert (warm["index"], src) == (1, [])  # the same plan as the main one, the unranked and the failed: none
+    main, warm, src = ds._best_of_choice([_run(0, rank=None), _run(1, rank=(0, 1))], 1)
+    assert (main["index"], warm["index"], [r["index"] for r in src]) == (0, 0, [1])
+    # Service first: a plan that leaves a higher priority out never ranks better however cheap.
+    main, warm, _ = ds._best_of_choice([_run(0, rank=(0, 900)), _run(1, rank=(1, 10))], 0)
+    assert warm["index"] == 0
+
+
+def test_a_failed_main_search_is_replaced_by_the_best_ranked_other_one():
+    main, warm, src = ds._best_of_choice([_run(0, ok=False), _run(1, rank=(0, 300)), _run(2, rank=(0, 200)),
+                                          _run(3, rank=(0, 250))], 1)
+    assert (main["index"], warm["index"], [r["index"] for r in src]) == (2, 2, [3])
+    assert ds._best_of_choice([_run(0, ok=False), _run(1, ok=False)], 1) == (None, None, [])
+    main, _, _ = ds._best_of_choice([_run(0, ok=False), _run(1, rank=None), _run(2, rank=(5, 5))], 0)
+    assert main["index"] == 2  # a ranked plan before an unranked one
+
+
+class _FakeRouting:
+    """What _SearchWatch reads from OR-Tools: the objective of each accepted solution."""
+
+    def __init__(self):
+        self.value, self.finished = 100, 0
+        me = self
+
+        class _Var:
+            def Max(self):  # noqa: N802
+                return me.value
+
+        class _Solver:
+            def FinishCurrentSearch(self):  # noqa: N802
+                me.finished += 1
+
+        self._var, self._solver = _Var(), _Solver()
+
+    def CostVar(self):  # noqa: N802
+        return self._var
+
+    def solver(self):
+        return self._solver
+
+    def NextVar(self, i):  # noqa: N802
+        raise AssertionError("no stops to count")
+
+
+class _Flag:
+    def __init__(self):
+        self.on = False
+
+    def is_set(self):
+        return self.on
+
+
+def test_a_joined_search_ends_at_its_next_solution_and_a_stop_comes_first():
+    """The join flag ends one of the other searches with its best plan (JOINED); without one, or before it
+    is raised, the watch is exactly as before; a stop request at the same time is STOPPED."""
+    rule = ds.StallRule(min_sec=3600, floor_sec=3600, share=0.0)
+    for join_flag in (None, _Flag()):
+        r = _FakeRouting()
+        w = ds._SearchWatch(r, rule, _Flag(), join_flag=join_flag)
+        w.on_solution()
+        assert (w.reason, r.finished) == (None, 0)
+    r, stop, join = _FakeRouting(), _Flag(), _Flag()
+    w = ds._SearchWatch(r, rule, stop, join_flag=join)
+    join.on = True
+    r.value = 90
+    w.on_solution()
+    assert (w.reason, r.finished, w.best) == ("JOINED", 1, 90)
+    r, stop, join = _FakeRouting(), _Flag(), _Flag()
+    w = ds._SearchWatch(r, rule, stop, join_flag=join)
+    stop.on = join.on = True
+    w.on_solution()
+    assert w.reason == "STOPPED"
+
+
+def test_a_search_that_replaced_the_main_one_never_fails_the_report(caplog):
+    """SearchReport.stop_reason is a closed list: JOINED is CONVERGED there (the search's own report keeps
+    it), and a best-of report that does not validate is left out - the solve still answers."""
+    state = {"limit": 900, "search_sec": 640.0, "status": "OPTIMIZED", "watch": {"reason": "JOINED", "solutions": 5},
+             "best_of": {"requested": 3, "used": "three"}}
+    with caplog.at_level("WARNING", logger="routeiq.dispatch"):
+        rep = ds._search_report("THOROUGH", 1200, state, time.monotonic())
+    assert rep.stop_reason == "CONVERGED" and rep.best_of is None
+    assert ds._stop_reason("THOROUGH", {"reason": "JOINED"}, 640.0, 900, "OPTIMIZED", top=False) == "JOINED"
+    assert ds._stop_reason("THOROUGH", {"reason": "SOMETHING_NEW"}, 899.5, 900, "OPTIMIZED") == "CAP"
+    for reason in ("STOPPED", "CONVERGED"):  # as before
+        assert ds._stop_reason("THOROUGH", {"reason": reason}, 10.0, 900, "OPTIMIZED") == reason
+
+
+def _join_seen(_arg=None):
+    """In a worker of a join pool: are the join flag and the stop flag up?"""
+    return ds._JOIN_FLAG is not None and ds._JOIN_FLAG.is_set(), ds._STOP_FLAG is not None and ds._STOP_FLAG.is_set()
+
+
+def test_the_other_searches_pool_raises_its_flags_through_pipes_and_releases_them():
+    """Critique of the design, MEDIUM-1: the other searches' pool has no multiprocessing Event - its stop and
+    join flags are pipes, which every worker polls (one byte, never read) - and close() releases both and
+    detaches the stop flag from the solve's control."""
+    import multiprocessing as mp
+
+    control = ds.SolveControl()
+    w = ds._Workers(2, control, run_id="t", what="other route searches", join=True)
+    try:
+        assert isinstance(w._join_flag, ds._PipeFlag) and isinstance(w._stop_flag, ds._PipeFlag)
+        assert control._flags == [w._stop_flag]
+        got = ds._await_all(w, {"a": w.submit(_join_seen, None, "a")}, time.monotonic() + 120)
+        assert got["a"] == ("ok", (False, False))
+        w.raise_join()
+        control.request_stop()
+        got = ds._await_all(w, {k: w.submit(_join_seen, None, k) for k in ("b", "c")}, time.monotonic() + 60)
+        assert got == {"b": ("ok", (True, True)), "c": ("ok", (True, True))}
+    finally:
+        w.close()
+    assert w._join_flag is None and w._stop_flag is None and w.pool is None
+    assert control._flags == [] and mp.active_children() == []
+    w.raise_join()  # closed: nothing
+
+
+@pytest.fixture
+def parallel(monkeypatch):
+    """Worker processes as in production, the second search off, enough CPUs for K searches."""
+    monkeypatch.delenv("SOLVER_PARALLEL", raising=False)
+    monkeypatch.delenv("SOLVER_ALLOW_INPROCESS_FALLBACK", raising=False)
+    monkeypatch.setenv("SOLVER_PYVRP", "off")
+    monkeypatch.setattr(PV, "effective_cpus", lambda: 16)
+
+
+def _spy_pools(monkeypatch) -> tuple[list, list]:
+    pools: list = []
+    names: list = []
+    init, submit = ds._Workers.__init__, ds._Workers.submit
+
+    def spy_init(self, size, control=None, **kw):
+        pools.append((int(size), kw.get("what", "search"), bool(kw.get("join"))))
+        init(self, size, control, **kw)
+
+    def spy_submit(self, fn, arg, name):
+        names.append(name)
+        return submit(self, fn, arg, name)
+
+    monkeypatch.setattr(ds._Workers, "__init__", spy_init)
+    monkeypatch.setattr(ds._Workers, "submit", spy_submit)
+    return pools, names
+
+
+def test_best_of_is_off_by_default_and_changes_nothing(parallel, monkeypatch):
+    """Owner decision 16 Oct 2026: nothing set, the solve is the one-search solve - one pool of two
+    processes (the alternatives'), one RECOMMENDED search, no other searches' pool, search.best_of null.
+    Asked for but gated (too few CPUs): the same solve, and the report says why."""
+    from tests.test_dispatch import nmwc_day, req
+
+    pools, names = _spy_pools(monkeypatch)
+    r = req(*nmwc_day(20), scenarios=ALL3, time_limit_sec=2)
+    resp = ds.optimize_dispatch(r)
+    assert pools == [(2, "search", False)]
+    assert names.count("RECOMMENDED") == 1 and not any(n.startswith("RECOMMENDED~") for n in names)
+    assert resp.search.best_of is None and resp.search.stop_reason == "TIME_LIMIT"
+    assert all(sc.feasibility.status == "VERIFIED" for sc in resp.scenarios)
+    pools.clear()
+    names.clear()
+    monkeypatch.setenv("SOLVER_BEST_OF_QUICK", "3")
+    monkeypatch.setattr(PV, "effective_cpus", lambda: 2)  # 2 CPUs // 2 solves at once: one search
+    resp = ds.optimize_dispatch(r)
+    assert pools == [(2, "search", False)] and names.count("RECOMMENDED") == 1
+    b = resp.search.best_of
+    assert (b.requested, b.used, b.gate, b.promoted) == (3, 1, "CPU_GATE", None)
+    assert [(s.index, s.status, s.stop_reason) for s in b.searches] == [(0, "OPTIMIZED", "TIME_LIMIT")]
+
+
+def test_a_reordered_search_maps_back_to_the_request():
+    """_variant_worker in this process (no join flag here: critique L5): its plan names the request's
+    stops, the stops it leaves out come in the main search's order after the prefilter's drops, the
+    plan reconciles, and it is ranked on its exact timing."""
+    from tests.test_dispatch import assert_reconciled, nmwc_day, req
+    from tests.test_pyvrp_candidate import _prepared
+
+    stops, trucks = nmwc_day(30)
+    r = req(stops, trucks[:1], time_limit_sec=2)  # one truck: some stops are left out
+    tds, solvable, drops, mx = _prepared(r)
+    job = ("RECOMMENDED", r, solvable, tds, mx, 2, drops)
+    out = ds._variant_worker((best_of.SearchVariant(2, 2, PCI), time.monotonic(), job))
+    sc = out["scenario"]
+    assert out["status"] == sc.status == "OPTIMIZED" and out["limit"] == 2 and out["watch"] is None
+    assert_reconciled(r, sc)
+    pos = {s.stop_id: k for k, s in enumerate(solvable)}
+    left = [u.stop_id for u in sc.unserved[len(drops):]]
+    assert left and left == sorted(left, key=pos.__getitem__)
+    assert [u.stop_id for u in sc.unserved[:len(drops)]] == [d.stop_id for d in drops]
+    assert out["exact"] is True and out["rank"][0] > 0 and out["signature"]
+    assert sum(out["summary"]["unserved_by_priority"]) == len(left)
+    assert best_of.order(solvable, 2) != list(range(len(solvable)))  # it really searched another order
+
+
+def test_quick_best_of_runs_k_searches_and_reports_each(parallel, monkeypatch):
+    """SOLVER_BEST_OF_QUICK=3: three searches, each reported; nothing is attached to a QUICK search
+    (critique of the design #5: every one ends on its time limit, no watch data); the alternatives start
+    from exactly one of them; every option keeps every rule and passes the independent check."""
+    from tests.test_dispatch import nmwc_day, req
+    from tests.test_repack import assert_plan_rules
+
+    monkeypatch.setenv("SOLVER_BEST_OF_QUICK", "3")
+    pools, names = _spy_pools(monkeypatch)
+    r = req(*nmwc_day(30), scenarios=ALL3, time_limit_sec=2)
+    resp = ds.optimize_dispatch(r)
+    assert pools == [(2, "search", False), (2, "other route searches", True)]
+    assert names.count("RECOMMENDED") == 1 and {n for n in names if "~" in n} == {"RECOMMENDED~1", "RECOMMENDED~2"}
+    b = resp.search.best_of
+    assert (b.requested, b.used, b.gate, b.join_sec, b.promoted, b.primary_status) == (3, 3, None, None, None, None)
+    assert [s.index for s in b.searches] == [0, 1, 2] and [s.order_seed for s in b.searches] == [0, 1, 2]
+    for s in b.searches:
+        assert (s.status, s.stop_reason, s.solutions, s.last_improvement_sec, s.exact) == ("OPTIMIZED", "TIME_LIMIT", None, None, True)
+        assert s.trucks and s.cost_omr and len(s.unserved_by_priority) == 5 and s.rank_sec is not None
+    assert sum(s.warm_start for s in b.searches) == 1
+    assert sum(s.rechecked for s in b.searches) <= best_of.sources(3)
+    assert resp.search.stop_reason == "TIME_LIMIT" and {sc.name for sc in resp.scenarios} == set(ALL3)
+    for sc in resp.scenarios:
+        assert_plan_rules(r, sc)
+
+
+def test_failed_lost_and_hung_other_searches_cost_nothing(parallel, monkeypatch):
+    """An other search that raises (FAILED), whose process dies (LOST) or that never answers (TIMEOUT, its
+    process stopped): the main search's plan, every option, no process left."""
+    import multiprocessing as mp
+
+    from tests.test_dispatch import nmwc_day, req
+
+    for k, v in {"SOLVER_BEST_OF_QUICK": "4", "ROUTEIQ_TEST_FAIL_VARIANT": "1", "ROUTEIQ_TEST_KILL_VARIANT": "2",
+                 "ROUTEIQ_TEST_HANG_VARIANT": "3"}.items():
+        monkeypatch.setenv(k, v)
+    r = req(*nmwc_day(20), scenarios=ALL3, time_limit_sec=2)
+    resp = ds.optimize_dispatch(r)
+    b = resp.search.best_of
+    assert [(s.index, s.status) for s in b.searches] == [(0, "OPTIMIZED"), (1, "FAILED"), (2, "LOST"), (3, "TIMEOUT")]
+    assert b.searches[0].warm_start and b.promoted is None
+    assert {sc.name for sc in resp.scenarios} == set(ALL3)
+    assert all(sc.status == "OPTIMIZED" and sc.feasibility.status == "VERIFIED" for sc in resp.scenarios)
+    assert mp.active_children() == []
+
+
+def test_a_lost_main_search_is_replaced_by_the_best_other_one(parallel, monkeypatch):
+    """Critique of the design, HIGH-1: the main search's process dies (with one search: 504). The best-ranked
+    other search becomes RECOMMENDED's plan, the report says so, and SearchReport stays valid."""
+    from tests.test_dispatch import nmwc_day, req
+
+    monkeypatch.setenv("SOLVER_BEST_OF_QUICK", "3")
+    monkeypatch.setenv("ROUTEIQ_TEST_KILL_SCENARIO", "RECOMMENDED")
+    r = req(*nmwc_day(20), scenarios=ALL3, time_limit_sec=2)
+    resp = ds.optimize_dispatch(r)
+    b = resp.search.best_of
+    assert (b.primary_status, b.searches[0].status) == ("LOST", "LOST")
+    others = [s for s in b.searches[1:] if s.status == "OPTIMIZED"]
+    best = min(others, key=lambda s: (sum(s.unserved_by_priority), s.cost_omr, s.index))
+    assert b.promoted == best.index and best.warm_start
+    assert resp.search.stop_reason == "TIME_LIMIT" and resp.search.search_sec == round(best.search_sec, 1)
+    rec_sc = next(sc for sc in resp.scenarios if sc.name == "RECOMMENDED")
+    assert rec_sc.status == "OPTIMIZED" and rec_sc.feasibility.status == "VERIFIED"
+
+
+def test_thorough_other_searches_join_when_the_main_one_ends(parallel, monkeypatch):
+    """THOROUGH: the main search stops on its stall rule; another without one (test hook) is joined
+    SOLVER_BEST_OF_JOIN_SEC later and hands back its best plan (JOINED); one that ignores the join (it
+    hangs) is cut after best_of.JOIN_GRACE_SEC (TIMEOUT, its pool closed) and the alternative still runs.
+    The main search's progress (solutions, last improvement) is reported for the contention check
+    (critique of the design #4), and the request stays inside its cap (a 3 s base so that the main search
+    can converge, critique MEDIUM-4)."""
+    import multiprocessing as mp
+
+    from tests.test_dispatch import nmwc_day, req
+
+    for k, v in {"SOLVER_BEST_OF": "3", "THOROUGH_STALL_SEC": "1", "ROUTEIQ_TEST_NO_STALL_VARIANT": "1",
+                 "ROUTEIQ_TEST_HANG_VARIANT": "2", "SOLVER_BEST_OF_JOIN_SEC": "1"}.items():
+        monkeypatch.setenv(k, v)
+    cap = 120
+    r = req(*nmwc_day(20), scenarios=["RECOMMENDED", "MIN_TRUCKS"], search_mode="THOROUGH", max_search_sec=cap, time_limit_sec=3)
+    resp = ds.optimize_dispatch(r)
+    s, b = resp.search, resp.search.best_of
+    assert s.stop_reason == "CONVERGED" and s.used_sec <= cap + 5
+    assert [(x.index, x.status, x.stop_reason) for x in b.searches] == [
+        (0, "OPTIMIZED", "CONVERGED"), (1, "OPTIMIZED", "JOINED"), (2, "TIMEOUT", None)]
+    assert b.join_sec is not None and b.join_sec <= 1.0
+    assert b.searches[0].solutions and b.searches[0].solutions == s.solutions and b.searches[0].last_improvement_sec is not None
+    assert b.searches[1].solutions and b.searches[1].search_sec < s.limit_sec
+    assert [sc.name for sc in resp.scenarios] == ["RECOMMENDED", "MIN_TRUCKS"]
+    assert all(sc.feasibility.status == "VERIFIED" for sc in resp.scenarios) and mp.active_children() == []
+
+
+def test_a_stop_request_ends_every_search(parallel, monkeypatch):
+    """A supervisor's stop reaches the other searches too (their pool's stop flag): every search hands back
+    its best plan (STOPPED), the alternatives are skipped, the plan is complete."""
+    import threading
+
+    from tests.test_dispatch import nmwc_day, req
+
+    monkeypatch.setenv("SOLVER_BEST_OF", "3")
+    control = ds.SolveControl()
+    r = req(*nmwc_day(30), scenarios=ALL3, search_mode="THOROUGH", max_search_sec=120, time_limit_sec=3)
+    timer = threading.Timer(12.0, control.request_stop)  # their stall rule (300 s) never ends them first
+    timer.start()
+    try:
+        resp = ds.optimize_dispatch(r, control=control)
+    finally:
+        timer.cancel()
+    b = resp.search.best_of
+    assert [(x.index, x.stop_reason) for x in b.searches] == [(0, "STOPPED"), (1, "STOPPED"), (2, "STOPPED")]
+    assert [sc.name for sc in resp.scenarios] == ["RECOMMENDED"] and resp.search.stop_reason == "STOPPED"
+    assert any("stopped early" in w for w in resp.scenarios[0].warnings)
+    assert control._flags == []
+
+
+def test_hire_trials_search_once(monkeypatch):
+    """The hire reduction's trials compare many solves of the day: one search each, whatever is set."""
+    from tests.test_dispatch import nmwc_day, req
+    from tests.test_pyvrp_candidate import _prepared
+
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    monkeypatch.setenv("SOLVER_BEST_OF_QUICK", "4")
+    seen: list = []
+    monkeypatch.setattr(ds, "_run_scenarios", lambda *a, **kw: seen.append(kw) or [])
+    r = req(*nmwc_day(10), time_limit_sec=1)
+    tds, solvable, drops, mx = _prepared(r)
+    assert ds._hire_trial(r, solvable, mx, drops, 1, time.monotonic() + 60, None) == (None, False)
+    assert [kw.get("best_of") for kw in seen] == [1] and "extras" not in seen[0]
+
+
+def test_ready_reports_best_of_and_the_startup_line(monkeypatch):
+    """/ready names the searches asked for and run per mode and why fewer (critique of the design #9: the
+    post-deploy check); it never changes ``ok``. The startup line says the same."""
+    from fastapi.testclient import TestClient
+
+    import main
+
+    monkeypatch.setattr(main, "SOLVER_TOKEN", "unit-test-solver-token")
+    monkeypatch.setattr(PV, "effective_cpus", lambda: 24)
+    client = TestClient(main.app)
+    body = client.get("/ready", headers={"X-Solver-Token": "unit-test-solver-token"}).json()
+    assert body["ok"] is True and body["best_of"]["thorough"] == body["best_of"]["effective_thorough"] == 1
+    assert set(body["best_of"]) == {"thorough", "effective_thorough", "why_thorough", "quick", "effective_quick", "why_quick",
+                                    "sources", "join_sec", "strategies", "cpus", "max_concurrent"}
+    monkeypatch.setenv("SOLVER_BEST_OF", "4")
+    body = client.get("/ready", headers={"X-Solver-Token": "unit-test-solver-token"}).json()
+    assert body["ok"] is True and (body["best_of"]["thorough"], body["best_of"]["effective_thorough"]) == (4, 4)
+    assert best_of.startup_line().startswith("Best-of route search: THOROUGH 4 searches, QUICK 1 search")
+
+
+def test_best_of_leaves_no_process_or_handle(parallel, monkeypatch):
+    """PR #50: small solves with three searches each leave no child process, no multiprocessing object and
+    no growth in open handles (an other searches' pool or pipe flag kept open would add several each)."""
+    import gc
+    import multiprocessing as mp
+
+    from tests.test_dispatch import nmwc_day, req
+    from tests.test_worker_lifecycle import _mp_objects, _open_handles
+
+    monkeypatch.setenv("SOLVER_BEST_OF_QUICK", "3")
+    r = req(*nmwc_day(8), scenarios=["RECOMMENDED"], time_limit_sec=1)
+    ds.optimize_dispatch(r)  # warm up: imports, logging
+    gc.collect()
+    base_handles, base_objects = _open_handles(), len(_mp_objects())
+    for i in range(3):
+        resp = ds.optimize_dispatch(r)
+        assert resp.search.best_of.used == 3, i
+        assert mp.active_children() == [], i
+    gc.collect()
+    assert len(_mp_objects()) == base_objects
+    if base_handles is not None:
+        assert _open_handles() - base_handles <= 8

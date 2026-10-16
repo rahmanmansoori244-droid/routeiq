@@ -40,6 +40,7 @@ from dispatch_solver import (
     optimize_dispatch,
     ortools_version,
 )
+import best_of
 import pyvrp_candidate
 from models import OptimizeRequest, OptimizeResponse
 from providers import HaversineProvider, OSRMProvider, configured_osrm_url
@@ -71,8 +72,10 @@ def _env_int(name: str, default: int) -> int:
 
 
 # Review F16 (defence in depth): one solver process serves every company, and each dispatch solve
-# can use up to 3 OR-Tools processes for up to 540 s (QUICK) or THOROUGH_MAX_SEC (THOROUGH, 20 min
-# by default; mostly one process: RECOMMENDED's search). At most MAX_CONCURRENT_DISPATCH solves run
+# uses a pool of max(1, alternatives) = 2 OR-Tools processes (and a fresh one for the load re-check
+# when needed), the second search's process when it runs, and - with best-of-N (SOLVER_BEST_OF, off by
+# default) - K-1 more for RECOMMENDED's other searches, for up to 540 s (QUICK) or THOROUGH_MAX_SEC
+# (THOROUGH, 20 min by default; mostly RECOMMENDED's search). At most MAX_CONCURRENT_DISPATCH solves run
 # at once (default 2; size it to the solver's CPUs); another one is refused at once with 503
 # "solver busy" instead of slowing every running solve past its deadline. The web's solve
 # admission (lib/dispatch/solve-admission.ts) queues before this limit is ever reached; the 503
@@ -143,6 +146,8 @@ log_startup_warnings()
 log_engine_version()
 # The second route search (PyVRP): on or off, and why - read by RAILWAY_DEPLOYMENT.md's check.
 log.info(pyvrp_candidate.startup_line())
+# Best-of-N route search (best_of.py): off (the default) or how many searches per solve, and why fewer.
+log.info(best_of.startup_line())
 
 
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
@@ -215,6 +220,8 @@ def ready_endpoint(
         "pyvrp": pyvrp_candidate.status(),
         # The route engine's version (requirements.txt pins ORTOOLS_VERSION); None when unreadable. Never affects ok.
         "ortools": ortools_version(),
+        # Best-of-N route search: searches asked for and run per mode, why fewer, its settings. Never affects ok.
+        "best_of": best_of.status(),
     }
 
 
