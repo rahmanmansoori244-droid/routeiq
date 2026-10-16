@@ -168,9 +168,11 @@ ALTER TABLE "TenantConfig" ADD CONSTRAINT "TenantConfig_alertEmails_length" CHEC
 ALTER TABLE "TenantConfig" ADD CONSTRAINT "TenantConfig_alertEmailEveryMin_range" CHECK ("alertEmailEveryMin" BETWEEN 0 AND 240);
 ALTER TABLE "TenantConfig" ADD CONSTRAINT "TenantConfig_alertEmailMinSeverity_check" CHECK ("alertEmailMinSeverity" IN ('HIGH', 'WARN'));
 -- Quiet hours: both set (from <> to; minutes from local midnight, may pass midnight: 22:00-06:00) or both NULL.
+-- The IS NOT NULL tests matter: a CHECK whose result is NULL (one end NULL) would pass.
 ALTER TABLE "TenantConfig" ADD CONSTRAINT "TenantConfig_alertQuietHours_check" CHECK (
   ("alertQuietFromMin" IS NULL AND "alertQuietToMin" IS NULL)
-  OR ("alertQuietFromMin" BETWEEN 0 AND 1439 AND "alertQuietToMin" BETWEEN 0 AND 1439 AND "alertQuietFromMin" <> "alertQuietToMin")
+  OR ("alertQuietFromMin" IS NOT NULL AND "alertQuietToMin" IS NOT NULL
+      AND "alertQuietFromMin" BETWEEN 0 AND 1439 AND "alertQuietToMin" BETWEEN 0 AND 1439 AND "alertQuietFromMin" <> "alertQuietToMin")
 );
 ALTER TABLE "OpsAlert" ADD CONSTRAINT "OpsAlert_kind_check" CHECK ("kind" IN ('CONDITION', 'EVENT'));
 ALTER TABLE "OpsAlert" ADD CONSTRAINT "OpsAlert_severity_check" CHECK ("severity" IN ('WARN', 'HIGH'));
