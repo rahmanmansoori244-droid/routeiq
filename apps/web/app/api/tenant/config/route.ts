@@ -3,6 +3,7 @@ import { withTenantApi, ok, parseBody, fail, hasRole } from '@/lib/api';
 import { breakSaveProblem, overtimeSaveProblem, retentionSaveProblem, tenantConfigSchema, tenantSettingsSchema } from '@/lib/schemas';
 import { adminOnlyFields, DISPATCHER_SETTINGS_FIELDS } from '@/lib/settings-fields';
 import { audit } from '@/lib/audit';
+import { ivmsHoursSaveProblem } from '@/lib/ivms/settings';
 import { prisma } from '@/lib/db';
 
 // TENANT_ADMIN, like the Settings page (review F15): cost rates and the internal routing URL are
@@ -93,6 +94,9 @@ export const PATCH = withTenantApi(
       // Driver positions are never kept longer than the delivery photos (owner request 4 Oct 2026).
       const retention = retentionSaveProblem(configPatch, { ...before.config, ...configPatch });
       if (retention) return { status: 400 as const, error: retention };
+      // IVMS live link: the GPS tracking hours never cross midnight (database CHECK TenantConfig_ivmsHours_order).
+      const ivmsHours = ivmsHoursSaveProblem(configPatch, { ...before.config, ...configPatch });
+      if (ivmsHours) return { status: 400 as const, error: ivmsHours };
       if (Object.keys(tenantPatch).length) await tx.tenant.update({ where: { id: user.tenantId }, data: tenantPatch });
       if (Object.keys(configPatch).length) await tx.tenantConfig.update({ where: { tenantId: user.tenantId }, data: configPatch });
       const after = await tx.tenant.findUnique({ where: { id: user.tenantId }, include: { config: true } });

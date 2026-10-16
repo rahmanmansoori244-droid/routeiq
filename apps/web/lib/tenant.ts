@@ -55,6 +55,12 @@ const TENANT_SCOPED_MODELS = new Set([
   // Helpers (truck crew), owner request 13 Oct 2026
   'Helper',
   'PlanLoadHelper',
+  // IVMS live link (Ayun GPS trackers), 16 Oct 2026
+  'TruckPosition',
+  'TruckTrailPoint',
+  'IvmsEvent',
+  'IvmsState',
+  'IvmsTruckDay',
 ]);
 
 const SCOPED_WRITE_OPS = new Set(['create', 'createMany', 'upsert']);

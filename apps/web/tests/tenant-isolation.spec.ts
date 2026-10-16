@@ -364,6 +364,47 @@ describe('tenantDb isolation (Phase 1 scope)', () => {
     await prisma.planLoad.deleteMany({ where: { tenantId: { in: [tenantAId, tenantBId] } } });
   });
 
+  it('TruckPosition, TruckTrailPoint, IvmsEvent, IvmsState and IvmsTruckDay (IVMS live link, 16 Oct 2026) are scoped both ways: reads and writes', async () => {
+    // Invented data only: the vendor documentation's dummy IMEI in both companies, made-up coordinates.
+    const seedIvms = async (tid: string, tag: string) => {
+      const db = tenantDb(tid);
+      const depot = await db.depot.create({ data: { code: `GD-${tag}`, name: `${tag} depot`, lat: 23.6, lng: 58.4 } as Any });
+      const truck = await db.truck.create({ data: { code: `GT-${tag}`, depotId: depot.id, ivmsImei: '111111111111111' } as Any, select: { id: true } });
+      const at = new Date('2026-10-16T06:00:00Z');
+      const position = await db.truckPosition.create({ data: { truckId: truck.id, fixAt: at, receivedAt: at, lat: 23.6, lng: 58.4 } as Any });
+      const point = await db.truckTrailPoint.create({ data: { truckId: truck.id, fixAt: at, lat: 23.6, lng: 58.4 } as Any });
+      const event = await db.ivmsEvent.create({ data: { truckId: truck.id, kind: 'DEPOT_OUT', origin: 'WEBHOOK', eventAt: at, dedupeKey: 'ayun:same-key-both' } as Any });
+      const state = await db.ivmsState.create({ data: { usageDay: new Date('2026-10-16T00:00:00Z'), mapCalls: tag === 'A' ? 1 : 2 } as Any });
+      const day = await db.ivmsTruckDay.create({ data: { truckId: truck.id, deliveryDate: new Date('2026-10-16T00:00:00Z') } as Any });
+      return { truck, position, point, event, state, day };
+    };
+    const a = await seedIvms(tenantAId, 'A');
+    // The same IMEI and the same dedupe key in the other company: unique per company only.
+    const b = await seedIvms(tenantBId, 'B');
+    for (const [tid, own, other] of [
+      [tenantAId, a, b],
+      [tenantBId, b, a],
+    ] as const) {
+      const db = tenantDb(tid);
+      expect((await db.truckPosition.findMany()).map((r) => r.id)).toEqual([own.position.id]);
+      expect(await db.truckPosition.findUnique({ where: { truckId: other.truck.id } })).toBeNull();
+      expect((await db.truckTrailPoint.findMany()).map((r) => r.id)).toEqual([own.point.id]);
+      expect(await db.truckTrailPoint.findUnique({ where: { id: other.point.id } })).toBeNull();
+      expect((await db.ivmsEvent.findMany()).map((r) => r.id)).toEqual([own.event.id]);
+      expect(await db.ivmsEvent.findUnique({ where: { id: other.event.id } })).toBeNull();
+      expect((await db.ivmsState.findMany()).map((r) => r.tenantId)).toEqual([tid]);
+      expect(await db.ivmsState.findUnique({ where: { tenantId: other.state.tenantId } })).toBeNull();
+      expect((await db.ivmsTruckDay.findMany()).map((r) => r.id)).toEqual([own.day.id]);
+      expect(await db.ivmsTruckDay.findUnique({ where: { id: other.day.id } })).toBeNull();
+    }
+    await tenantDb(tenantAId).ivmsState.updateMany({ data: { mapCalls: 99 } });
+    expect((await tenantDb(tenantBId).ivmsState.findFirst())?.mapCalls).toBe(2);
+    await tenantDb(tenantAId).truckTrailPoint.deleteMany({});
+    await tenantDb(tenantAId).ivmsEvent.deleteMany({});
+    expect(await tenantDb(tenantBId).truckTrailPoint.count()).toBe(1);
+    expect(await tenantDb(tenantBId).ivmsEvent.count()).toBe(1);
+  });
+
   it('tenantDb refuses an empty tenantId', () => {
     expect(() => tenantDb('')).toThrow(/tenantId/i);
   });

@@ -27,6 +27,7 @@ import { COUNTRY_NAMES } from '@/lib/countries';
 import { effectivePlannerValues } from '@/lib/dispatch/planner-config';
 import { isAfterCutoff } from '@/lib/dispatch/time';
 import { SETTINGS_FIELDS } from '@/lib/settings-fields';
+import { IVMS_SETTINGS_FIELDS } from '@/lib/ivms/settings';
 
 const BASE_CFG: Record<string, any> = {
   avgSpeedKmh: 40, distanceProvider: 'OSRM', distanceMultiplier: 1.3, driverShiftMaxMinutes: 660, shiftStartMin: 360,
@@ -90,6 +91,8 @@ const CHANGED: Record<string, unknown> = {
   requireDataBeforeLoading: true, dataCollectDays: 5,
   geofenceRadiusM: 150, photoProofRequired: false, photoRetentionDays: 180, locationRetentionDays: 60, dispatcherPhone: '+968 9000 0000',
   palletFillPct: 90, dailyDriverDayRate: 12, smallTruckMaxBays: 4, windowRule: 'START',
+  ivmsMode: 'TIMES', ivmsPollSec: 120, ivmsRoutePullMin: 30, ivmsFromMin: 240, ivmsToMin: 1320, ivmsDailyCallBudget: 3000,
+  ivmsStopRadiusM: 150, ivmsStopDwellMin: 5, ivmsDepotRadiusM: 500, ivmsTrailDays: 3,
 };
 /**
  * Read by the order intake, not by the optimizer request (checked against their consumer below). Also
@@ -108,6 +111,11 @@ const HIRED_ONLY = new Set(['dailyDriverDayRate']);
  * stops of "small truck only" customers only: it changes the request of a day with such a customer.
  */
 const SMALL_TRUCK_ONLY = new Set(['smallTruckMaxBays']);
+/**
+ * The IVMS live link (Ayun GPS trackers, 16 Oct 2026): GPS positions and times only, never a planning
+ * input - each of its settings, OFF to TIMES included, leaves the optimizer request byte for byte the same.
+ */
+const IVMS_ONLY: Set<string> = new Set(IVMS_SETTINGS_FIELDS);
 const SMALL_TRUCK_DAY = { truck: { bays: 6 } };
 const HIRED_TODAY = { hired: true, onlyOnDate: new Date('2026-09-26T00:00:00Z'), kmPerLitre: null, costPerKm: 0 };
 const INTAKE_ONLY = new Set(['planningCutoffMin', 'dateOrder', 'requireDataBeforeLoading', 'dataCollectDays', 'geofenceRadiusM', 'photoProofRequired', 'photoRetentionDays', 'locationRetentionDays', 'dispatcherPhone']);
@@ -128,7 +136,7 @@ describe('Settings fields drive the planner (review F21)', () => {
       expect(CHANGED, k).toHaveProperty(k);
       expect(tenantConfigSchema.partial().safeParse({ [k]: CHANGED[k] }).success, k).toBe(true);
       const changed = await build({ ...BASE_CFG, [k]: CHANGED[k] });
-      if (INTAKE_ONLY.has(k) || HIRED_ONLY.has(k) || SMALL_TRUCK_ONLY.has(k)) expect(changed, k).toBe(base);
+      if (INTAKE_ONLY.has(k) || HIRED_ONLY.has(k) || SMALL_TRUCK_ONLY.has(k) || IVMS_ONLY.has(k)) expect(changed, k).toBe(base);
       else expect(changed, k).not.toBe(base);
       if (HIRED_ONLY.has(k)) expect(await build({ ...BASE_CFG, [k]: CHANGED[k] }, { truck: HIRED_TODAY }), k).not.toBe(hiredBase);
       if (SMALL_TRUCK_ONLY.has(k)) {

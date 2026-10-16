@@ -32,12 +32,13 @@
  * supersededAt unset), as driversOnOtherDepots does.
  */
 import type { Prisma } from '@prisma/client';
+import type { AppPrismaClient } from '../db';
 import type { OtherDepotTrip } from './load-state';
 import type { HelperTimeElsewhere } from './load-helpers';
 import { distanceM } from './snapshots';
 import { fmtHhmm } from './time';
 
-type Db = Pick<Prisma.TransactionClient, 'runPlan' | 'planLoad' | 'depot' | 'truck' | 'tenantConfig'>;
+type Db = Pick<Prisma.TransactionClient | AppPrismaClient, 'runPlan' | 'planLoad' | 'depot' | 'truck' | 'tenantConfig'>;
 
 const DAY_MIN = 1440;
 

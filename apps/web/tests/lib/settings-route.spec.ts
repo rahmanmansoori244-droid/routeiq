@@ -179,3 +179,38 @@ describe('PATCH /api/tenant/config as the dispatcher (PLANNER, owner decision 29
     expect(state.config.requireDataBeforeLoading).toBe(false);
   });
 });
+
+describe('PATCH /api/tenant/config: the GPS tracking settings (IVMS live link, 16 Oct 2026)', () => {
+  beforeEach(() => {
+    Object.assign(state.config, { ivmsMode: 'OFF', ivmsFromMin: 300, ivmsToMin: 1380, ivmsPollSec: 60 });
+  });
+
+  it('are company-admin only: a dispatcher or supervisor is refused whole (403) and nothing is saved', async () => {
+    for (const role of ['PLANNER', 'SUPERVISOR', 'VIEWER']) {
+      state.role = role;
+      const res = await patch({ config: { ivmsMode: 'MAP' } });
+      expect(res.status, role).toBe(403);
+      if (role !== 'VIEWER') expect((await res.json()).error, role).toMatchObject({ code: 'ADMIN_ONLY_SETTING', fields: ['ivmsMode'] });
+    }
+    expect(state.config.ivmsMode).toBe('OFF');
+    expect(state.updates).toEqual([]);
+    expect(state.audits).toEqual([]);
+  });
+
+  it('the admin switches the mode and the interval, audited field by field', async () => {
+    const res = await patch({ config: { ivmsMode: 'MAP', ivmsPollSec: 120 }, expect: { config: { ivmsMode: 'OFF', ivmsPollSec: 60 } } });
+    expect(res.status).toBe(200);
+    expect(state.updates).toEqual([{ model: 'config', data: { ivmsMode: 'MAP', ivmsPollSec: 120 } }]);
+    expect(state.audits[0]!.beforeJson).toEqual({ tenant: {}, config: { ivmsMode: 'OFF', ivmsPollSec: 60 } });
+    expect(state.audits[0]!.afterJson).toEqual({ tenant: {}, config: { ivmsMode: 'MAP', ivmsPollSec: 120 } });
+  });
+
+  it('refuses ALERTS (a later release), values outside the bounds, and hours across midnight (400, nothing saved)', async () => {
+    for (const config of [{ ivmsMode: 'ALERTS' }, { ivmsPollSec: 10 }, { ivmsDailyCallBudget: 0 }, { ivmsTrailDays: 0 }, { ivmsFromMin: 1380, ivmsToMin: 300 }, { ivmsToMin: 300 }]) {
+      expect((await patch({ config })).status, JSON.stringify(config)).toBe(400);
+    }
+    expect(state.updates).toEqual([]);
+    // Moving both ends in one save is checked on the merged hours.
+    expect((await patch({ config: { ivmsFromMin: 240, ivmsToMin: 1320 } })).status).toBe(200);
+  });
+});

@@ -18,6 +18,7 @@ import {
   isoDateSchema,
   MAX_SERVICE_MIN,
 } from '@/lib/schemas';
+import { IVMS_SETTING_DEFAULTS } from '@/lib/ivms/settings';
 
 describe('normalizeBranchKey', () => {
   it('returns __MAIN__ for null', () => {
@@ -202,6 +203,8 @@ describe('tenantConfigSchema', () => {
     smallTruckMaxBays: 6,
     // The receiving-hours rule (owner request 13 Oct 2026).
     windowRule: 'FINISH',
+    // The IVMS live link (Ayun GPS trackers, 16 Oct 2026): the defaults, mode OFF.
+    ...IVMS_SETTING_DEFAULTS,
   };
   it('refuses the old controls that changed nothing (strict), whole or partial', () => {
     for (const k of ['solverTimeLimitSeconds', 'labelEstimatedDistances', 'returnToDepot', 'weightObjectiveTrucks', 'costPerKmDefault']) {
