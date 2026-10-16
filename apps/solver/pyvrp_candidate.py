@@ -32,7 +32,10 @@ The model (all prices from the engine's own functions, in its units: 1 unit = 0.
               time, load_repack.latest_start_s), truck hours (TruckDay: frozen return, same-day
               loading, the latest return), loads per truck (max_reloads = trips_left - 1), shift
               maximum (maximum route duration; a truck-day that may need the driver break keeps its
-              length free, as the engine's search: dispatch_solver._search_day_end)
+              length free, as the engine's search: dispatch_solver._search_day_end), the trucks a
+              stop may go on (DispatchStop.allowed_truck_ids, "small truck only" customers: a
+              routing profile per truck class with the stops it may not carry forbidden, build_model;
+              only reached when SOLVER_PYVRP_ALLOWED lets the second search run on such a day)
   costs       fixed + first trip, km per rate class, trip cost on each reload, driver pay per second
               of the truck day, overtime past overtime_after_min, plan continuity per truck
   priorities  every stop optional; prize = the engine's own drop penalty (strict priorities)
@@ -53,7 +56,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import load_repack as LR
-from dispatch_models import DispatchRequest, DispatchStop, kg_units
+from dispatch_models import DAY_MIN, DispatchRequest, DispatchStop, kg_units
 
 if TYPE_CHECKING:  # numpy is imported where the model is built, in the worker process only
     import numpy as np
@@ -77,12 +80,28 @@ DEFAULT_MAX_PENALTY = 100_000.0  # pyvrp.PenaltyParams().max_penalty
 # a Quick search when too few plans are feasible, and stay low when the own fleet carries the day.
 HIRE_PENALTY_UPDATES = 100
 # Plan continuity needs one distance profile per truck; above this many MB of profiles the PyVRP
-# model leaves continuity out (the judge still prices every moved stop).
+# model leaves continuity out (the judge still prices every moved stop). The same cap holds the
+# profiles of the trucks' classes on a day with small-truck-only customers (LimitsTooLarge).
 CONTINUITY_PROFILE_MB = 64
+# pyvrp.constants.MAX_VALUE (test_pv_max_value_is_pyvrps): the largest matrix value PyVRP takes, and
+# its own "no edge" value (pyvrp.Model fills a missing edge with it). A forbidden arc costs exactly
+# this, assigned, never added (worst_case counts it apart from the allowed arcs).
+PV_MAX_VALUE = 1 << 44
+# The time a forbidden arc adds (build_model): 2 x dispatch_solver.HORIZON_S. Every client's window
+# ends by HORIZON_S, so a visit over a forbidden arc arrives at least HORIZON_S late - time warp, never
+# a feasible plan, whatever the stop's prize (test_limited_stops_split_types_and_forbid_edges).
+FORBID_S = 2 * (2 * DAY_MIN * 60)
 
 
 class ModelTooLarge(ValueError):
     """The day's worst penalised cost could pass int64 (section 7): PyVRP is skipped."""
+
+
+class LimitsTooLarge(ValueError):
+    """The routing profiles that small-truck-only customers need do not fit CONTINUITY_PROFILE_MB (or a
+    matrix value cannot be told apart from a forbidden arc): the second search is skipped with SKIPPED /
+    ALLOWED_TRUCKS, as when the limits are not modelled. Not a ModelTooLarge (MODEL_TOO_LARGE) nor a
+    NOTHING_TO_PLAN: solve_in_worker catches it first."""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -95,6 +114,26 @@ def setting() -> str:
     if v in ("0", "off", "false", "no"):
         return "off"
     return "thorough" if v == "thorough" else "on"
+
+
+ALLOWED_SETTINGS = ("skip", "model", "thorough")
+
+
+def allowed_setting() -> str:
+    """SOLVER_PYVRP_ALLOWED (16 Oct 2026): what the second search does on a day where a small-truck-only
+    customer's allowed_truck_ids leaves out a truck that can still take a load (dispatch_solver._limits_decide).
+    "skip" (the default, and any value not listed): it does not run (SKIPPED / ALLOWED_TRUCKS), as since
+    13 Oct 2026. "model": it runs with the limits modelled (build_model), on every solve - hire checks
+    included. "thorough": the same on Thorough solves only (a Quick solve and its hire checks skip). Read
+    on every solve, like SOLVER_PYVRP."""
+    v = os.environ.get("SOLVER_PYVRP_ALLOWED", "skip").strip().lower()
+    return v if v in ALLOWED_SETTINGS else "skip"
+
+
+def limits_modelled(search_mode: str) -> bool:
+    """A day where a small-truck-only limit decides something runs the second search (allowed_setting)."""
+    s = allowed_setting()
+    return s == "model" or (s == "thorough" and search_mode == "THOROUGH")
 
 
 def min_cpus() -> int:
@@ -206,11 +245,25 @@ def enabled(search_mode: str) -> tuple[bool, str | None]:
 
 
 def status() -> dict:
-    """/ready's ``pyvrp`` and the startup line: never affects ``ok``."""
+    """/ready's ``pyvrp`` and the startup line: never affects ``ok``. ``allowed``: SOLVER_PYVRP_ALLOWED
+    (allowed_setting) as the solver reads it."""
     s, cpus, need = setting(), effective_cpus(), min_cpus()
     why = "OFF" if s == "off" else ("CPU_GATE" if cpus < need else None)
     return {"enabled": why is None, "setting": s, "version": installed_version(), "effective_cpus": cpus,
-            "min_cpus": need, "why": why}
+            "min_cpus": need, "why": why, "allowed": allowed_setting()}
+
+
+def _allowed_clause(st: dict) -> str:
+    """The startup line's words for SOLVER_PYVRP_ALLOWED: nothing at the default (the line is the one it
+    was before the setting), else what the solver does and a value it did not understand."""
+    raw = os.environ.get("SOLVER_PYVRP_ALLOWED")
+    if st["allowed"] == "model":
+        return "; small-truck-only days: modelled (SOLVER_PYVRP_ALLOWED=model)"
+    if st["allowed"] == "thorough":
+        return "; small-truck-only days: modelled on Thorough solves (SOLVER_PYVRP_ALLOWED=thorough)"
+    if raw is not None and raw.strip() and raw.strip().lower() != "skip":
+        return f"; small-truck-only days: skipped (SOLVER_PYVRP_ALLOWED={raw.strip()[:20]!r} is not skip, model or thorough)"
+    return ""
 
 
 def startup_line() -> str:
@@ -218,7 +271,7 @@ def startup_line() -> str:
     if st["enabled"]:
         scope = "thorough searches only" if st["setting"] == "thorough" else "every search"
         return (f"PyVRP second search: on for {scope} (pyvrp {st['version']}, effective CPUs {st['effective_cpus']}, "
-                f"min {st['min_cpus']})")
+                f"min {st['min_cpus']})" + _allowed_clause(st))
     why = "SOLVER_PYVRP=off" if st["why"] == "OFF" else f"CPU_GATE: effective CPUs {st['effective_cpus']} < {st['min_cpus']}"
     return f"PyVRP second search: off ({why})"
 
@@ -236,7 +289,10 @@ class PvModel:
     vehicle_types: list[dict]
     coords: list[tuple[float, float]]
     dist: list[np.ndarray]
-    dur: np.ndarray
+    # One duration matrix per profile (dist[p] and dur[p]). A day without a small-truck-only limit: the
+    # same array for every profile, exactly what problem_data passed before; a profile that forbids
+    # stops (build_model) has its own copy with FORBID_S more time on every arc into them.
+    dur: list[np.ndarray]
     type_trucks: list[list[int]]  # vehicle type -> TruckDay.idx, in code order
     max_penalty: float
     penalty_mode: str  # DEFAULT or RAISED
@@ -246,31 +302,46 @@ class PvModel:
 
 
 def _local_xy(req: DispatchRequest, stops: list[DispatchStop]) -> list[tuple[float, float]]:
-    """Depot-relative metres: PyVRP uses x / y only for its geometric neighbourhood, never for cost."""
+    """Depot-relative metres, for plots and debugging only: PyVRP 0.14 prices nothing by x / y, and its
+    neighbourhood comes from the matrices (pyvrp.search.compute_neighbours, the minimum over the profiles
+    the vehicle types use: a stop forbidden in one truck class's profile keeps its neighbours from the
+    profile of the trucks it may go on, which _prefilter guarantees exist)."""
     lat0, lng0 = req.depot.lat, req.depot.lng
     kx = 111_320.0 * math.cos(math.radians(lat0))
     ky = 110_574.0
     return [(0.0, 0.0)] + [(round((s.lng - lng0) * kx, 1), round((s.lat - lat0) * ky, 1)) for s in stops]
 
 
-def worst_case(prizes_total: int, vtypes: list[dict], dist: list[np.ndarray], dur: np.ndarray, clients: list[dict],
-               depots: list[dict]) -> tuple[int, int]:
+def worst_case(prizes_total: int, vtypes: list[dict], dist: list[np.ndarray], dur: np.ndarray | list[np.ndarray],
+               clients: list[dict], depots: list[dict], n_limited: int = 0) -> tuple[int, int]:
     """(base, per unit of penalty): a conservative bound on PyVRP's penalised cost is
     base + max_penalty x per_unit (critique correction 6). Arcs: each client, reload and route end
     has one incoming arc. Time warp and route duration per route: all service, every arc at the
     longest drive, every reload at the longest turnaround, the horizon - doubled for the excess over
-    the shift maximum."""
+    the shift maximum. ``dur``: one duration matrix per profile (PvModel.dur) or a shared one.
+
+    ``n_limited``: the clients some profile forbids (build_model: small-truck-only customers). The
+    longest arc and drive are then taken over the allowed entries only (a forbidden arc is exactly
+    PV_MAX_VALUE, a forbidden drive at least FORBID_S; build_model refuses a day whose allowed values
+    reach either), and each such client adds its two forbidden arcs (in and out, PV_MAX_VALUE each,
+    counted like every arc of the bound, per vehicle) and its one forbidden drive (FORBID_S, inside the
+    doubled time). Without limits the bound is exactly what it was."""
+    durs = list(dur) if isinstance(dur, (list, tuple)) else [dur]
     n_veh = sum(v["num_available"] for v in vtypes)
     reloads = sum(v["num_available"] * v["max_reloads"] for v in vtypes)
     n_cl = len(clients)
     arcs = n_cl + reloads + n_veh
-    max_arc = max(int(m.max()) for m in dist) if dist else 0
-    max_drive = int(dur.max()) if dur.size else 0
+    if n_limited:
+        max_arc = max((int(m[m < PV_MAX_VALUE].max(initial=0)) for m in dist), default=0)
+        max_drive = max((int(t[t < FORBID_S].max(initial=0)) for t in durs), default=0)
+    else:
+        max_arc = max(int(m.max()) for m in dist) if dist else 0
+        max_drive = max((int(t.max()) for t in durs if t.size), default=0)
     max_turn = max((d["service"] for d in depots), default=0)
     service = sum(c["service"] for c in clients)
     horizon = max((v["tw_late"] for v in vtypes), default=0)
-    tw = 2 * (service + arcs * max_drive + reloads * max_turn + n_veh * horizon)
-    base = prizes_total + max_arc * arcs * n_veh
+    tw = 2 * (service + arcs * max_drive + n_limited * FORBID_S + reloads * max_turn + n_veh * horizon)
+    base = prizes_total + (max_arc * arcs + 2 * n_limited * PV_MAX_VALUE) * n_veh
     base += sum(v["num_available"] * (v["fixed_cost"] + (v["unit_duration_cost"] + v["unit_overtime_cost"]) * tw)
                 for v in vtypes)
     load = sum(sum(c["delivery"]) for c in clients)
@@ -280,7 +351,21 @@ def worst_case(prizes_total: int, vtypes: list[dict], dist: list[np.ndarray], du
 def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, mx) -> PvModel:
     """``solvable`` / ``mx``: exactly what the engine's search sees (mx node 0 = depot, node k + 1 =
     solvable[k]); ``tds``: every TruckDay (only the usable ones become vehicles). Raises ValueError
-    with nothing to model and ModelTooLarge past the 64-bit bound."""
+    with nothing to model, ModelTooLarge past the 64-bit bound and LimitsTooLarge when the profiles of
+    small-truck-only limits pass CONTINUITY_PROFILE_MB.
+
+    Small-truck-only customers (DispatchStop.allowed_truck_ids, owner request 13 Oct 2026; modelled since
+    16 Oct 2026). PyVRP 0.14 has no allowed vehicles per client. A truck's vehicle type and routing
+    profile carry the stops it may NOT carry (``forb``, as the repack splits identical trucks:
+    load_repack._identical_trucks), so plan_of's "first truck of the type" never hands a stop to a truck
+    it may not use. In a profile that forbids stops, every arc into and out of them is PV_MAX_VALUE
+    (PyVRP's own convention, pyvrp.read) and every arc into them takes FORBID_S more time: a visit there
+    arrives after its window, so a plan with one has time warp and is never feasible, whatever the stop's
+    prize (the distance alone is not enough: with prizes of 1e14 PyVRP called a plan with four forbidden
+    visits feasible). Reload depots and the depot are never forbidden. Penalties are then raised and
+    start low (the rule of a day with trucks to rent): with PyVRP's default ceiling a day short of small
+    trucks found no feasible plan. A day where no stop's list leaves out a usable truck builds exactly
+    the model it built before (test_days_without_trucks_to_rent_keep_exactly_the_same_model_and_penalties)."""
     import numpy as np  # noqa: PLC0415 - never in the API process (see the module's docstring)
 
     import dispatch_solver as ds  # noqa: PLC0415 - dispatch_solver imports this module
@@ -343,6 +428,11 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     ot_coeff = int(round(cfg.overtime_cost_per_hour * ds.COST_SCALE / 3600.0)) if cfg.overtime_after_min is not None else 0
     shift_s = cfg.shift_max_min * 60
     no_kg = sum(kg_dem) + 1  # a truck without a payload: the engine's own "unlimited"
+    # The stops each truck may not carry (see the docstring); frozenset() on a day without such a stop.
+    limited = [k for k, s in enumerate(solvable) if s.allowed_truck_ids is not None]
+    forb_of = {td.idx: frozenset(k for k in limited if not ds.truck_allowed(solvable[k], td.truck)) for td in vehicles}
+    forbidden = frozenset().union(*forb_of.values())
+    n_limited = len(forbidden)
     groups: dict[tuple, list] = {}
     for td in vehicles:
         t = td.truck
@@ -365,16 +455,24 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
         # its shift (span and latest return); the exact timing places the break afterwards.
         end_s, span_s = ds._search_day_end(td, first, shift_s)
         key = (tuple(space), kg_cap, km_key, trip_units, fixed_u, min(first, td.latest_return_s),
-               end_s, td.trips_left, td.shift_anchor_s, td.frozen_return_s, gap, span_s, t.id if continuity else None, by_day)
+               end_s, td.trips_left, td.shift_anchor_s, td.frozen_return_s, gap, span_s, t.id if continuity else None, by_day,
+               forb_of[td.idx])
         groups.setdefault(key, []).append(td)
 
+    if n_limited:
+        # The profiles' memory (distance and duration, 16 bytes a cell), capped as continuity's above (which,
+        # when on, already holds one profile per truck): over it, the second search is skipped as before.
+        n_prof = len({(k[2], k[3], k[12], k[14]) for k in groups})
+        if n_prof * L * L * 16 > CONTINUITY_PROFILE_MB * 1_000_000:
+            raise LimitsTooLarge(f"profiles over {CONTINUITY_PROFILE_MB} MB: {n_prof} truck classes x {L} locations")
     prof_of: dict[tuple, int] = {}
+    prof_forb: list[frozenset[int]] = []
     dist: list[np.ndarray] = []
     vtypes: list[dict] = []
     type_trucks: list[list[int]] = []
     for key, members in groups.items():
-        space, kg_cap, km_key, trip_units, fixed_u, tw_e, tw_l, trips_left, anchor, _frozen_ret, gap, span_s, cont_id, by_day = key
-        pkey = (km_key, trip_units, cont_id)
+        space, kg_cap, km_key, trip_units, fixed_u, tw_e, tw_l, trips_left, anchor, _frozen_ret, gap, span_s, cont_id, by_day, forb = key
+        pkey = (km_key, trip_units, cont_id, forb)
         if pkey not in prof_of:
             M = np.rint(D * km_key / 1000.0).astype(np.int64)  # the engine: int(round(d * key / 1000)) per arc
             full = M[np.ix_(loc_node, loc_node)].copy()
@@ -385,8 +483,17 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
                     if s.previous_truck_id and s.previous_truck_id != cont_id:
                         full[:, 1 + R + k] += change_units
             np.fill_diagonal(full, 0)
+            if n_limited and int(full.max()) >= PV_MAX_VALUE:  # never on a real day: a cost of 176 million OMR
+                raise LimitsTooLarge("an arc's cost reaches PyVRP's largest value: forbidden arcs cannot be told apart")
+            if forb:
+                # Assigned after the trip and continuity charges, never added: exactly PV_MAX_VALUE.
+                cols = [1 + R + k for k in sorted(forb)]
+                full[:, cols] = PV_MAX_VALUE
+                full[cols, :] = PV_MAX_VALUE
+                np.fill_diagonal(full, 0)
             prof_of[pkey] = len(dist)
             dist.append(full)
+            prof_forb.append(forb)
         if anchor is None:  # the longest route: the shift maximum (less a DUE truck's break)
             if ot_coeff and not by_day and cfg.overtime_after_min is not None and cfg.overtime_after_min * 60 < span_s:
                 nominal, max_ot = cfg.overtime_after_min * 60, span_s - cfg.overtime_after_min * 60
@@ -418,6 +525,21 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
         Tf[0, r] = Tf[r, 0] = 0
         for r2 in range(1, R + 1):
             Tf[r, r2] = 0
+    base_dur = Tf.astype(np.int64)
+    if not n_limited:
+        durs = [base_dur] * len(dist)  # one array for every profile: what problem_data passed before
+    else:
+        if int(base_dur.max(initial=0)) >= FORBID_S:  # never on a real day: a drive of four days
+            raise LimitsTooLarge("a drive reaches the forbidden arcs' time: forbidden arcs cannot be told apart")
+        durs = []
+        for forb in prof_forb:
+            if not forb:
+                durs.append(base_dur)
+                continue
+            Tp = base_dur.copy()
+            Tp[:, [1 + R + k for k in sorted(forb)]] += FORBID_S  # into a forbidden stop: always late (time warp)
+            np.fill_diagonal(Tp, 0)
+            durs.append(Tp)
     earliest = min(v["tw_early"] for v in vtypes)
     latest = max(v["tw_late"] for v in vtypes)
     depots = [dict(tw_early=int(earliest), tw_late=int(latest), service=0)]
@@ -437,27 +559,38 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     # STARTS its search where its defaults start (start_low, HIRE_PENALTY_UPDATES; review: starting at the
     # raised ceiling's midpoint kept 2-4 rented trucks on a 150-stop day the own fleet carries, where main
     # rented none). A day without trucks to rent keeps exactly the rule above.
+    # Small-truck-only limits (n_limited): the same raised ceiling as a shortage day, started low as on a
+    # day with trucks to rent (16 Oct 2026 prototype, 86 stops, 11 limited, 1 small truck: PyVRP's default
+    # ceiling found no feasible plan in 3 of 3 runs; raised and started low, a feasible plan with no stop
+    # on a truck it may not use in 6 of 6). A day with trucks to rent keeps its own rule (also started low).
     short_space, short_kg = ds._fleet_shortage(solvable, tds)
-    base, per_unit = worst_case(int(sum(prizes)), vtypes, dist, Tf, clients, depots)
+    base, per_unit = worst_case(int(sum(prizes)), vtypes, dist, durs, clients, depots, n_limited=n_limited)
     safe = (INT62 - base) // max(1, per_unit)
     if tier:
         scale = max(max(prizes), max(v["fixed_cost"] for v in vtypes))
         max_penalty, mode = float(min(10 * scale, safe)), "RAISED"
         if max_penalty < 10 * scale:
             log.info("pyvrp model: penalty ceiling %.3g clamped below 10 x the hire scale %.3g (64-bit bound)", max_penalty, scale)
+    elif n_limited:
+        max_penalty, mode = float(min(10 * max(prizes), safe)), "RAISED"
+        if max_penalty < 10 * max(prizes):
+            log.info("pyvrp model: penalty ceiling %.3g clamped below 10 x the largest prize %.3g (64-bit bound)", max_penalty,
+                     max(prizes))
     elif short_space or short_kg:
         max_penalty, mode = float(min(10 * max(prizes), safe)), "RAISED"
     else:
         max_penalty, mode = DEFAULT_MAX_PENALTY, "DEFAULT"
     if max_penalty < 1 or base + int(max_penalty) * per_unit >= INT62:
         raise ModelTooLarge(f"worst penalised cost {base + int(max(1, max_penalty)) * per_unit:.3g} >= 2^62")
+    start_low = bool(tier) or bool(n_limited)
     summary = dict(clients=n, types=len(vtypes), profiles=len(dist), reload_depots=R, kg="on" if kg_active else "off",
                    pallets="on" if pal_active else "off",
                    prefhard=n_tight, shortage="yes" if (short_space or short_kg) else "no", continuity=bool(continuity),
                    penalty=mode if mode == "DEFAULT" else f"RAISED {max_penalty:.2g}",
-                   prizes=f"{min(prizes):.1e}..{max(prizes):.1e}", **({"penalty_start": "default"} if tier else {}))
-    return PvModel(depots=depots, clients=clients, vehicle_types=vtypes, coords=coords, dist=dist, dur=Tf.astype(np.int64),
-                   type_trucks=type_trucks, max_penalty=max_penalty, penalty_mode=mode, summary=summary, start_low=bool(tier))
+                   prizes=f"{min(prizes):.1e}..{max(prizes):.1e}", **({"penalty_start": "default"} if start_low else {}),
+                   **({"limits": n_limited} if n_limited else {}))
+    return PvModel(depots=depots, clients=clients, vehicle_types=vtypes, coords=coords, dist=dist, dur=durs,
+                   type_trucks=type_trucks, max_penalty=max_penalty, penalty_mode=mode, summary=summary, start_low=start_low)
 
 
 def problem_data(m: PvModel):
@@ -476,7 +609,7 @@ def problem_data(m: PvModel):
                              unit_duration_cost=v["unit_duration_cost"], unit_overtime_cost=v["unit_overtime_cost"],
                              profile=v["profile"], reload_depots=v["reload_depots"], max_reloads=v["max_reloads"])
            for v in m.vehicle_types]
-    return pyvrp.ProblemData(locs, clients, depots, vts, m.dist, [m.dur] * len(m.dist))
+    return pyvrp.ProblemData(locs, clients, depots, vts, m.dist, m.dur)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -631,6 +764,8 @@ def solve_in_worker(job) -> dict:
         return dict(base, status="FAILED", reason="IMPORT_FAILED", error=str(exc))
     try:
         model = build_model(req, solvable, tds, mx)
+    except LimitsTooLarge as exc:  # before ValueError (critique L5): skipped as when the limits are not modelled
+        return dict(base, status="SKIPPED", reason="ALLOWED_TRUCKS", error=str(exc))
     except ModelTooLarge as exc:
         return dict(base, status="SKIPPED", reason="MODEL_TOO_LARGE", error=str(exc))
     except ValueError as exc:
@@ -661,8 +796,11 @@ def plan_of(result: dict, tds: list, solvable: list[DispatchStop]) -> tuple[LR.P
     """PyVRP's answer -> {truck idx: [load, ...]} (a vehicle type's routes take its trucks in code
     order: they are interchangeable, and the repack relabels identical trucks anyway), validated so
     that a PyVRP bug can never reach _assert_reconciled: client indices in range and each at most
-    once, loads per truck <= trips_left, every load within the truck's pallet units (a truck with
-    bays) or cases and its 0.1 kg units. (None, INVALID_PLAN) otherwise."""
+    once, loads per truck <= trips_left, every stop on a truck it may go on (allowed_truck_ids: the
+    model forbids the others, build_model; refused here too, before any timing), every load within the
+    truck's pallet units (a truck with bays) or cases and its 0.1 kg units. (None, INVALID_PLAN) otherwise."""
+    import dispatch_solver as ds  # noqa: PLC0415 - dispatch_solver imports this module
+
     by_idx = {td.idx: td for td in tds if td.usable}
     plan: LR.Plan = {}
     try:
@@ -681,6 +819,8 @@ def plan_of(result: dict, tds: list, solvable: list[DispatchStop]) -> tuple[LR.P
                 return None, "INVALID_PLAN"
             for load in loads:
                 if any(k < 0 or k >= len(solvable) or k in seen for k in load) or len(set(load)) != len(load):
+                    return None, "INVALID_PLAN"
+                if any(not ds.truck_allowed(solvable[k], td.truck) for k in load):
                     return None, "INVALID_PLAN"
                 seen.update(load)
                 if td.by_pallets:
