@@ -1,16 +1,20 @@
 /**
  * Loading instruction per customer (owner request 16 Oct 2026: some customers need their order loaded on
- * the truck in a specific way, and an order was cancelled because it was not; the dispatcher and the
- * warehouse must see it at the top of the load sheet). lib/dispatch/loading-instruction.ts:
- * - the rule: one line, at most 200 characters, '' = none; what the sheets print (a longer value written
- *   to the database by hand is shortened, never dropped: review M6);
+ * the truck in a specific way; the dispatcher and the warehouse must see it at the top of the load
+ * sheet). lib/dispatch/loading-instruction.ts:
+ * - the rule: one line, at most 200 characters, '' = none, invisible and direction characters dropped;
+ *   what the sheets print (a longer value written to the database by hand is shortened, never dropped:
+ *   review M6);
  * - one entry per customer of a load, with its stops; a stop nothing of which is loaded (every order
  *   cancelled or brought forward) is left out, a stop with one order brought forward is not (review L1);
+ *   each load on its own (trip 2 of a truck, another truck), a stop brought forward from an earlier day
+ *   kept;
+ * - POST /api/customers (the Customers page's create) stores it by the same rule;
  * - on the in-memory database (fake-plan-db.ts): getPlanDetail reads it live (a change after LOCK reaches
  *   the plan, the load sheet and the driver sheet, and is never "changed after planning"), it never stops
  *   LOCK, and a stop without one is exactly as before;
  * - the day screen (the REAL PlanView through the hook host): a LOADING INSTRUCTION badge on the load, and
- *   on the stop with its text.
+ *   on the stop with its text, only where something of the stop is loaded.
  * The sheets' layout is in warehouse-sheets.spec.ts, driver-pack.spec.ts and dispatch-workbook.spec.ts;
  * the Details dialog and the PATCH in dispatch-customer-details.spec.ts; the real-PostgreSQL path in
  * tests/integration/dispatch-mvp.spec.ts (27f). Every name here is invented.
@@ -18,7 +22,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetDb, row, tables } from './fake-plan-db';
 import { Host, elements, textOf, typeName } from './hook-host';
-import { fixture } from './plan-detail-fixture';
+import { fixture, INSTRUCTED, instructionFixture } from './plan-detail-fixture';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
@@ -29,6 +33,12 @@ vi.mock('@/lib/tenant', async () => {
 vi.mock('@/lib/audit', async () => {
   const m = await import('./fake-plan-db');
   return { audit: vi.fn(async (input: Record<string, unknown>) => m.fakePrisma.auditLog.create({ data: { ...input } })) };
+});
+// POST /api/customers (as customer-code.spec.ts): a dispatcher's session and the default service area.
+vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: 'u1', tenantId: 'tA', role: 'PLANNER', name: 'Planner One', email: 'one@example.com' } })) }));
+vi.mock('@/lib/dispatch/service-area', async () => {
+  const { DEFAULT_SERVICE_AREA } = await import('@/lib/dispatch/location-input');
+  return { tenantServiceArea: async () => DEFAULT_SERVICE_AREA };
 });
 // The plan screen through the hook host (as dispatch-one-way-moves.spec.ts): only api(), the toasts and the maps replaced.
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
@@ -51,6 +61,7 @@ vi.mock('next/dynamic', () => ({ default: () => function DynamicStub() { return 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace() {}, refresh() {}, push() {} }) }));
 
 import {
+  foldLoadingInstruction,
   instructionLine,
   LOADING_INSTRUCTION_BADGE,
   LOADING_INSTRUCTION_FIELD_LABEL,
@@ -70,6 +81,7 @@ import { driverPackModel } from '@/lib/dispatch/driver-pack';
 import { loadSheetModel } from '@/lib/dispatch/warehouse-sheets';
 import { renderLoadSheetHtml } from '@/lib/dispatch/warehouse-sheets-html';
 import { PlanView } from '@/app/t/[slug]/dispatch/plan-view';
+import { POST as createCustomer } from '@/app/api/customers/route';
 
 const WATER = 'Water at the bottom, max 5 layers';
 
@@ -96,6 +108,22 @@ describe('the rule (loading-instruction.ts)', () => {
     expect(readLoadingInstruction(5)).toEqual({ ok: false, error: 'Loading instruction: text only.' });
     // Arabic is kept as it is (the HTML load sheet prints it; the driver PDF says it cannot).
     expect(readLoadingInstruction(' الماء في الأسفل ')).toEqual({ ok: true, text: 'الماء في الأسفل' });
+  });
+
+  it('invisible and direction characters are dropped, so a hidden right-to-left override cannot reverse the joined lines; joiners alone are none (review of 16 Oct)', () => {
+    // A right-to-left override, a zero-width space, an isolate, a mark and a byte-order mark, all invisible.
+    expect(readLoadingInstruction('Water\u202E at the bottom\u200B,\u2066 max 5 layers\u2069\u200F\uFEFF')).toEqual({ ok: true, text: WATER });
+    for (const none of ['\u200B', '\u202E \u2069', '\uFEFF', '\u200D', ' \u200C\u200D ', '\u061C\u2060']) {
+      expect(readLoadingInstruction(none), JSON.stringify(none)).toEqual({ ok: true, text: null });
+      expect(loadingInstructionText(none), JSON.stringify(none)).toBeNull();
+    }
+    // The joiners between letters are kept (they shape Arabic letters and emoji).
+    expect(readLoadingInstruction('a\u200Db\u200Cc')).toEqual({ ok: true, text: 'a\u200Db\u200Cc' });
+    // Counted without them: 200 letters and two marks are 200 characters.
+    expect(readLoadingInstruction(`${'x'.repeat(200)}\u200F\u200F`)).toEqual({ ok: true, text: 'x'.repeat(200) });
+    expect(loadingInstructionText('\u202EPallets first\u202C')).toBe('Pallets first');
+    expect(foldLoadingInstruction(' Water\n at\u200B the bottom ')).toBe('Water at the bottom');
+    expect(foldLoadingInstruction('x'.repeat(250))).toBe('x'.repeat(250));
   });
 
   it('as printed: a value written to the database by hand is folded and shortened with "…", never dropped (review M6)', () => {
@@ -344,14 +372,14 @@ describe('the day screen (plan-view.tsx)', () => {
   }
 
   it('a LOADING INSTRUCTION badge on the load (its lines in the title) and on the stop, with the text readable without hovering', async () => {
-    const d = fixture();
+    const d = instructionFixture();
     d.loads[0].stops[1] = { ...d.loads[0].stops[1], loadingInstruction: WATER };
     const host = await mountPlan(d);
     const [badge, ...others] = byTestId(host, 'load-instruction-T01-1');
     expect(others).toEqual([]);
     expect(textOf(badge.props.children)).toBe('LOADING INSTRUCTION');
     expect(badge.props.variant).toBe('warning');
-    expect(badge.props.title).toBe(`Stop 2 ${d.loads[0].stops[1].customerName} (C002): ${WATER}`);
+    expect(badge.props.title).toBe(`Stop 2 ${INSTRUCTED.b.customerName} (C200): ${WATER}`);
     expect(byTestId(host, 'load-instruction-T01-2')).toEqual([]);
     const sub = await stopRows(host, 0);
     const stopBadges = elements(sub.tree).filter((e) => e.props?.['data-testid'] === 'stop-loading-instruction');
@@ -361,10 +389,89 @@ describe('the day screen (plan-view.tsx)', () => {
     expect(texts.map((e) => textOf(e.props.children))).toEqual([WATER]);
   });
 
+  it('a stop nothing of which is loaded (every order cancelled, or brought forward) has no badge and no text, like its load and the sheets (review of 16 Oct)', async () => {
+    const d = instructionFixture();
+    d.loads[0] = {
+      ...d.loads[0],
+      stops: [
+        { ...d.loads[0].stops[0], loadingInstruction: WATER, carriedTo: '2026-09-26', carriedOrderIds: ['o1'] },
+        { ...d.loads[0].stops[1], loadingInstruction: 'Cartons on top only', cancelled: true, cancelledOrderIds: ['o2'] },
+      ],
+    };
+    const host = await mountPlan(d);
+    expect(byTestId(host, 'load-instruction-T01-1')).toEqual([]);
+    const sub = await stopRows(host, 0);
+    expect(elements(sub.tree).some((e) => String(e.props?.['data-testid'] ?? '').startsWith('stop-loading-instruction'))).toBe(false);
+    // One order of the stop still due: the badge and the text are back on that stop.
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], orderIds: ['o1', 'o1b'] };
+    const again = await stopRows(await mountPlan(d), 0);
+    expect(elements(again.tree).filter((e) => e.props?.['data-testid'] === 'stop-loading-instruction-text').map((e) => textOf(e.props.children))).toEqual([WATER]);
+  });
+
   it('a plan without instructions shows no such badge', async () => {
     const host = await mountPlan(fixture());
     expect(elements(host.tree).some((e) => String(e.props?.['data-testid'] ?? '').startsWith('load-instruction-'))).toBe(false);
     const sub = await stopRows(host, 0);
     expect(elements(sub.tree).some((e) => String(e.props?.['data-testid'] ?? '').startsWith('stop-loading-instruction'))).toBe(false);
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+// Each load on its own (design section 11, review of 16 Oct)
+// ------------------------------------------------------------------------------------------------
+
+describe('each load has its own box (the fixture with invented customers)', () => {
+  const OPTS = { tenantName: 'Example Co' };
+  const A = { ...INSTRUCTED.a, loadingInstruction: WATER };
+
+  it('the same customer on trip 2 of the truck and on another truck: every load sheet and driver sheet has its own box with its own stop', () => {
+    const d = instructionFixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], loadingInstruction: WATER };
+    // T01 trip 2, stop 2, and the other truck's stop 1 (a split of the same customer).
+    d.loads[1].stops[1] = { ...d.loads[1].stops[1], ...A };
+    d.loads[2].stops[0] = { ...d.loads[2].stops[0], ...A, split: { part: 2, parts: 2, restUnserved: false } };
+    const line = (stop: number) => `Stop ${stop} Hyper Example A (C100 / B1): ${WATER}`;
+    // ?truck=T01 prints that truck's loads (lib/exports/warehouse-export.ts): each with its own box.
+    const t01 = loadSheetModel(d, { ...OPTS, loadIds: ['L1', 'L2'] }).sheets;
+    expect(t01.map((s) => [s.loadId, s.loadingInstructions!.map(instructionLine)])).toEqual([
+      ['L1', [line(1)]],
+      ['L2', [line(2)]],
+    ]);
+    expect(loadSheetModel(d, { ...OPTS, loadIds: ['L3'] }).sheets.map((s) => s.loadingInstructions!.map(instructionLine))).toEqual([[line(1)]]);
+    const pack = new Map(driverPackModel(d, OPTS).sheets.map((s) => [s.loadId, s.loadingInstructions]));
+    expect(Object.fromEntries(pack)).toEqual({ L1: [line(1)], L2: [line(2)], L3: [line(1)] });
+  });
+
+  it('a stop brought forward from an earlier day keeps its box and the tag on its invoice', () => {
+    const d = instructionFixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], loadingInstruction: WATER, carriedFrom: '2026-09-23' };
+    const s = loadSheetModel(d, OPTS).sheets[0]!;
+    expect(s.loadingInstructions!.map((i) => i.stops)).toEqual([[1]]);
+    expect(s.invoices.filter((i) => i.loadingInstruction).map((i) => i.stop)).toEqual([1]);
+    expect(driverPackModel(d, OPTS).sheets.find((x) => x.loadId === 'L1')!.loadingInstructions).toEqual([`Stop 1 Hyper Example A (C100 / B1): ${WATER}`]);
+  });
+});
+
+describe('POST /api/customers (the Customers page create)', () => {
+  const create = (body: Record<string, unknown>) =>
+    createCustomer(new Request('http://x/api/customers', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Hyper Example A', ...body }) }));
+  beforeEach(() => {
+    tables.tenantConfig = [{ id: 'cfg', tenantId: T, timezone: 'Asia/Muscat' }];
+    tables.customer = [];
+  });
+
+  it('stores it by the same rule (one line, trimmed); empty or left out = none; over 200 characters = 400 with the reason, nothing created', async () => {
+    expect((await create({ code: 'C100', loadingInstruction: ' Water at the bottom,\r\n max 5 layers ' })).status).toBe(201);
+    expect((await create({ code: 'C200', loadingInstruction: '  ' })).status).toBe(201);
+    expect((await create({ code: 'C300' })).status).toBe(201);
+    expect(tables.customer.map((c) => [c.code, c.loadingInstruction ?? null])).toEqual([
+      ['C100', WATER],
+      ['C200', null],
+      ['C300', null],
+    ]);
+    const bad = await create({ code: 'C400', loadingInstruction: 'x'.repeat(201) });
+    expect(bad.status).toBe(400);
+    expect(JSON.stringify(await bad.json())).toContain('Loading instruction: at most 200 characters (201 typed).');
+    expect(tables.customer).toHaveLength(3);
   });
 });

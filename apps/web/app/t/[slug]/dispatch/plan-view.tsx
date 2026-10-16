@@ -11,7 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { SMALL_TRUCK_BADGE } from '@/lib/dispatch/small-truck';
-import { instructionLine, LOADING_INSTRUCTION_BADGE, loadInstructions } from '@/lib/dispatch/loading-instruction';
+import { instructionLine, LOADING_INSTRUCTION_BADGE, loadInstructions, stopIsLoaded } from '@/lib/dispatch/loading-instruction';
 import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstText, type RemedyLoad } from '@/lib/dispatch/feasibility-view';
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
@@ -2132,8 +2132,9 @@ function LoadDetail({
                       {SMALL_TRUCK_BADGE}
                     </Badge>
                   ) : null}
-                  {/* Owner request 16 Oct 2026: the warehouse's loading instruction, readable without hovering. */}
-                  {st.loadingInstruction ? (
+                  {/* Owner request 16 Oct 2026: the warehouse's loading instruction, readable without hovering; only on a stop
+                      something of which is loaded, as the load's badge and the sheets (review of 16 Oct). */}
+                  {st.loadingInstruction && stopIsLoaded(st) ? (
                     <>
                       <Badge variant="warning" className="mt-0.5 text-[10px]" data-testid="stop-loading-instruction" title={st.loadingInstruction}>
                         {LOADING_INSTRUCTION_BADGE}

@@ -47,6 +47,12 @@ function T({ style, children }: { style?: Style; children?: React.ReactNode }) {
 }
 
 const C = { ink: '#111111', mute: '#555555', line: '#9A9A9A', band: '#EEEEEE', link: '#0645AD' };
+/**
+ * The SPECIAL LOADING box (owner request 16 Oct 2026) is kept whole on one page up to this many lines: at
+ * most about 3 printed rows each (a 200-character instruction with the stop and the customer), so about
+ * 400 pt, which always fits under the warnings at the top of a sheet.
+ */
+const LOAD_BOX_WHOLE_LINES = 12;
 const BOLD = 'Helvetica-Bold';
 const s = StyleSheet.create({
   page: { paddingTop: 22, paddingBottom: 40, paddingHorizontal: 24, fontFamily: 'Helvetica', fontSize: 8.5, color: C.ink },
@@ -201,9 +207,12 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
       {sh.timesNotVerified ? (
         <T style={s.bigWarn}>TIMES NOT VERIFIED - the departure or delivery times of this truck break a planning rule. Check with the dispatcher before leaving.</T>
       ) : null}
-      {/* Owner request 16 Oct 2026: the SPECIAL LOADING box; its words come in the model (driver-pack.tsx). */}
+      {/* Owner request 16 Oct 2026: the SPECIAL LOADING box; its words come in the model (driver-pack.tsx).
+          Kept whole on one page while it has at most LOAD_BOX_WHOLE_LINES lines (it always fits under the
+          sheet's head); a longer one may continue on the next page, because a whole box taller than the
+          room left is squeezed by the layout and its lines print over each other (review of 16 Oct). */}
       {sh.loadingInstructions?.length ? (
-        <View style={s.loadBox} wrap={false}>
+        <View style={s.loadBox} wrap={sh.loadingInstructions.length > LOAD_BOX_WHOLE_LINES}>
           <T style={{ fontFamily: BOLD, fontSize: 13 }}>{sh.loadingInstructionsTitle ?? ''}</T>
           {sh.loadingInstructions.map((line, i) => (
             <T key={i} style={{ fontFamily: BOLD, fontSize: 9.5 }}>

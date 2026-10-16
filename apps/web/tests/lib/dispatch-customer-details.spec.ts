@@ -448,7 +448,9 @@ describe('the loading instruction for the warehouse (owner request 16 Oct 2026)'
   const send = (body: unknown) =>
     PATCH(new Request('http://localhost/api/customers/c1', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }), { params: { id: 'c1' } });
   const WATER = 'Water at the bottom, max 5 layers';
-  const WITH_ONE = { ...UNCONFIRMED, loadingInstruction: WATER };
+  /** An invented customer of its own (review of 16 Oct: the instruction is never put on the shared fixture's names). */
+  const PLAIN: typeof UNCONFIRMED = { ...UNCONFIRMED, code: 'C100', name: 'Hyper Example A' };
+  const WITH_ONE = { ...PLAIN, loadingInstruction: WATER };
 
   it('opens with the saved text and sends it only when it changed, as the server stores it (one line)', () => {
     const f = detailsFormOf(WITH_ONE);
@@ -459,7 +461,7 @@ describe('the loading instruction for the warehouse (owner request 16 Oct 2026)'
     expect(detailsPatch(f, { ...f, loadingInstruction: 'Pallets first\nthen cartons' })).toEqual({ ok: true, patch: { loadingInstruction: 'Pallets first then cartons' } });
     expect(detailsPatch(f, { ...f, loadingInstruction: '' })).toEqual({ ok: true, patch: { loadingInstruction: null } });
     expect(detailsPatch(f, { ...f, loadingInstruction: '   ' })).toEqual({ ok: true, patch: { loadingInstruction: null } });
-    const none = detailsFormOf(UNCONFIRMED);
+    const none = detailsFormOf(PLAIN);
     expect(none.loadingInstruction).toBe('');
     expect(detailsPatch(none, { ...none, loadingInstruction: WATER })).toEqual({ ok: true, patch: { loadingInstruction: WATER } });
     // With "Open all day" (which returns early) it is still sent.
@@ -470,16 +472,34 @@ describe('the loading instruction for the warehouse (owner request 16 Oct 2026)'
   });
 
   it('more than 200 characters is refused with the reason: nothing is sent', () => {
-    const f = detailsFormOf(UNCONFIRMED);
+    const f = detailsFormOf(PLAIN);
     expect(detailsPatch(f, { ...f, hardEnd: '11:00', loadingInstruction: 'x'.repeat(201) })).toEqual({ ok: false, error: 'Loading instruction: at most 200 characters (201 typed).' });
     expect(detailsPatch(f, { ...f, loadingInstruction: 'x'.repeat(200) })).toEqual({ ok: true, patch: { loadingInstruction: 'x'.repeat(200) } });
   });
 
-  it('the dialog has the field (2 rows, at most 200, a counter, the hint); a typed text is saved alone; emptied = none', () => {
-    const t = setup();
+  it('a stored text over 200 characters (written to the database by hand) never stops a save of the other fields; changed, it is checked (review of 16 Oct)', () => {
+    const long = `Pallets first ${'then cartons '.repeat(17)}`.trim();
+    expect(long.length).toBeGreaterThan(200);
+    const f = detailsFormOf({ ...PLAIN, loadingInstruction: long });
+    // Receiving hours confirmed (what LOCK needs): saved, and the instruction is neither checked nor sent.
+    expect(detailsPatch(f, { ...f, confirmHours: true })).toEqual({
+      ok: true,
+      patch: { hardWindowStartMin: 360, hardWindowEndMin: 600, prefWindowStartMin: null, prefWindowEndMin: null, windowConfirmed: true },
+    });
+    // The same text with other line breaks or spaces is no change either.
+    expect(detailsPatch(f, { ...f, loadingInstruction: `  ${long.replace(/ /g, '\n')} ` })).toEqual({ ok: true, patch: {} });
+    // Edited and still too long: refused with the count. Shortened: sent. Emptied: none.
+    expect(detailsPatch(f, { ...f, loadingInstruction: `${long} more` })).toEqual({ ok: false, error: `Loading instruction: at most 200 characters (${long.length + 5} typed).` });
+    expect(detailsPatch(f, { ...f, loadingInstruction: 'Pallets first' })).toEqual({ ok: true, patch: { loadingInstruction: 'Pallets first' } });
+    expect(detailsPatch(f, { ...f, loadingInstruction: '' })).toEqual({ ok: true, patch: { loadingInstruction: null } });
+  });
+
+  it('the dialog has the field (2 rows, a counter, the hint); a typed text is saved alone; emptied = none', () => {
+    const t = setup(PLAIN);
     const box = t.field('cd-loading');
     expect(box.props.value).toBe('');
-    expect(box.props.maxLength).toBe(200);
+    // No browser limit: a longer paste is never cut without a word (the counter and Save say so, below).
+    expect(box.props.maxLength).toBeUndefined();
     expect(box.props.rows).toBe(2);
     expect(box.props['data-testid']).toBe('loading-instruction');
     t.type('cd-loading', WATER);
@@ -496,9 +516,27 @@ describe('the loading instruction for the warehouse (owner request 16 Oct 2026)'
     expect(calls.at(-1)!.init.json).toEqual({ loadingInstruction: null });
   });
 
+  it('a paste over 200 characters is kept whole: the counter (as saved, one line) turns red and Save refuses it with the count (review of 16 Oct)', () => {
+    const t = setup(PLAIN);
+    const pasted = `Load these cases last,\n${'at the back door, '.repeat(12)}max 5 layers`;
+    const folded = pasted.replace(/\s+/g, ' ').trim();
+    expect(folded.length).toBeGreaterThan(200);
+    t.type('cd-loading', pasted);
+    expect(t.field('cd-loading').props.value).toBe(pasted);
+    const count = elements(t.host.tree).find((e) => e.props?.['data-testid'] === 'loading-instruction-count');
+    expect(textOf(count)).toBe(`${folded.length}/200`);
+    expect(String(count.props.className)).toContain('text-destructive');
+    t.save();
+    expect(t.patches()).toEqual([]);
+    expect(toasts.at(-1)).toBe(`error: Loading instruction: at most 200 characters (${folded.length} typed).`);
+    // Within the limit the counter is grey again.
+    t.type('cd-loading', WATER);
+    expect(String(elements(t.host.tree).find((e) => e.props?.['data-testid'] === 'loading-instruction-count').props.className)).not.toContain('text-destructive');
+  });
+
   it('PATCH stores it as the dialog shows it and audits it like the other fields; empty clears it; 201 characters is 400; a VIEWER gets 403', async () => {
     route.before = {
-      id: 'c1', code: 'C001', branchKey: '__MAIN__', active: true, avgServiceTimeMin: 10, serviceTimeConfirmed: false, priority: 3, priorityConfirmed: false,
+      id: 'c1', code: 'C100', branchKey: '__MAIN__', active: true, avgServiceTimeMin: 10, serviceTimeConfirmed: false, priority: 3, priorityConfirmed: false,
       hardWindowStartMin: 360, hardWindowEndMin: 600, prefWindowStartMin: null, prefWindowEndMin: null, phone: null, loadingInstruction: null,
     };
     route.updates = [];

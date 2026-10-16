@@ -13,7 +13,7 @@ import type { CustomerDeliveryStats } from '@/lib/delivery/customer-stats';
 import { measuredServiceValue } from '@/lib/delivery/measured';
 import { CUSTOMER_PHONE_RULE } from '@/lib/dispatch/customer-phone';
 import { SMALL_TRUCK_FIELD_LABEL } from '@/lib/dispatch/small-truck';
-import { LOADING_INSTRUCTION_FIELD_LABEL, LOADING_INSTRUCTION_MAX } from '@/lib/dispatch/loading-instruction';
+import { foldLoadingInstruction, LOADING_INSTRUCTION_FIELD_LABEL, LOADING_INSTRUCTION_MAX } from '@/lib/dispatch/loading-instruction';
 import { detailsFormOf, detailsPatch, EMPTY_DETAILS, type DetailsCustomer, type DetailsForm } from './customer-details';
 
 export interface EditableCustomer extends DetailsCustomer {
@@ -84,6 +84,8 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
 
   const set = (key: keyof DetailsForm) => (value: string) => setForm((f) => ({ ...f, [key]: value }));
   const tick = (key: 'openAllDay' | 'confirmHours' | 'smallTruckOnly') => (value: boolean) => setForm((f) => ({ ...f, [key]: value }));
+  // The instruction's length as it is saved (one line, trimmed), for the N/200 counter.
+  const instructionLength = foldLoadingInstruction(form.loadingInstruction ?? '').length;
   const hoursShown = !!(form.hardStart.trim() || form.hardEnd.trim() || form.prefStart.trim() || form.prefEnd.trim());
   const confirmedText = customer?.windowConfirmed
     ? `Receiving hours confirmed${customer.windowConfirmedBy ? ` by ${customer.windowConfirmedBy}` : ''}${customer.windowConfirmedAt ? ` on ${fmtDayMonth(customer.windowConfirmedAt.slice(0, 10))}` : ''}.`
@@ -239,14 +241,19 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
           <div className="col-span-2 space-y-1">
             <div className="flex items-baseline justify-between gap-2">
               <Label htmlFor="cd-loading">{LOADING_INSTRUCTION_FIELD_LABEL}</Label>
-              <span className="text-xs text-muted-foreground" data-testid="loading-instruction-count">
-                {(form.loadingInstruction ?? '').length}/{LOADING_INSTRUCTION_MAX}
+              {/* Counted as it is saved (one line, trimmed). No maxLength on the box: the browser would cut a longer
+                  paste without a word, and the printed instruction could end mid-sentence; Save refuses it with the
+                  count instead (review of 16 Oct). */}
+              <span
+                className={instructionLength > LOADING_INSTRUCTION_MAX ? 'text-xs font-semibold text-destructive' : 'text-xs text-muted-foreground'}
+                data-testid="loading-instruction-count"
+              >
+                {instructionLength}/{LOADING_INSTRUCTION_MAX}
               </span>
             </div>
             <Textarea
               id="cd-loading"
               rows={2}
-              maxLength={LOADING_INSTRUCTION_MAX}
               className="min-h-0"
               placeholder="e.g. Load this customer's cases last, at the back door; at most 5 layers"
               value={form.loadingInstruction ?? ''}

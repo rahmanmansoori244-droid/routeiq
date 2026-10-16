@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 import { buildDispatchWorkbook, kgCheck, loadSheetName, planRules, SHEETS, solverRules, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
-import { busyFixture, fixture, LONG_TRUCK } from './plan-detail-fixture';
+import { busyFixture, fixture, INSTRUCTED, instructionFixture, LONG_TRUCK } from './plan-detail-fixture';
 
 const META: WorkbookMeta = {
   tenantName: 'NMWC Test',
@@ -651,8 +651,8 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
 describe('the loading instruction on the Excel load sheet (owner request 16 Oct 2026)', () => {
   const sha = (s: string) => createHash('sha256').update(s).digest('hex');
   const WATER = 'Water at the bottom, max 5 layers';
-  /** The fixture's (invented) customer names of L1 stops 1 and 2. */
-  const [C1, C2] = fixture().loads[0].stops.map((s) => s.customerName);
+  /** The invented customers of L1 stops 1 and 2 (instructionFixture). */
+  const [C1, C2] = [INSTRUCTED.a.customerName, INSTRUCTED.b.customerName];
   /** Every sheet's cells (value, font, alignment, format), row heights and merged ranges, as one text. */
   async function dump(d: PlanDetail): Promise<string> {
     const wb = await render(d, { tenantName: 'NMWC Test', currency: 'OMR', generatedAt: new Date('2026-09-24T13:05:00.000Z'), generatedBy: 'Planner One', assumptions: { Timezone: 'Asia/Muscat' } });
@@ -678,17 +678,17 @@ describe('the loading instruction on the Excel load sheet (owner request 16 Oct 
   });
 
   it('one boxed SPECIAL LOADING row above LOADING MANIFEST, and "Loading: ..." in the stop notes; the rest of the sheet moves down one row', async () => {
-    const d = fixture();
+    const d = instructionFixture();
     d.loads[0].stops[1] = { ...d.loads[0].stops[1], loadingInstruction: WATER };
     const ws = sheet(await render(d), 'T01 - L1');
-    const plainWs = sheet(await render(fixture()), 'T01 - L1');
+    const plainWs = sheet(await render(instructionFixture()), 'T01 - L1');
     const manifest = find(ws, (t) => t === 'LOADING MANIFEST', 1)!;
     const plainManifest = find(plainWs, (t) => t === 'LOADING MANIFEST', 1)!;
     expect(manifest.row).toBe(plainManifest.row + 1);
     const r = manifest.row - 1;
     expect(text(ws.getCell(r, 1))).toBe('SPECIAL LOADING');
     expect(ws.getCell(r, 1).font).toMatchObject({ bold: true, size: 14 });
-    expect(text(ws.getCell(r, 4))).toBe(`Stop 2 ${C2} (C002): ${WATER}`);
+    expect(text(ws.getCell(r, 4))).toBe(`Stop 2 ${C2} (C200): ${WATER}`);
     expect(ws.getCell(r, 4).font).toMatchObject({ bold: true, size: 12 });
     expect(ws.getCell(r, 4).alignment).toMatchObject({ wrapText: true });
     // A thick black box around the row (it prints in black and white).
@@ -710,12 +710,12 @@ describe('the loading instruction on the Excel load sheet (owner request 16 Oct 
   });
 
   it('two customers with instructions: one row, both lines; a stop with every order cancelled is left out', async () => {
-    const d = fixture();
+    const d = instructionFixture();
     d.loads[0].stops = d.loads[0].stops.map((s) => ({ ...s, loadingInstruction: s.sequence === 1 ? 'Pallets first' : WATER }));
     let ws = sheet(await render(d), 'T01 - L1');
-    expect(find(ws, (t) => t.startsWith('Stop 1 '), 4)!.text).toBe(`Stop 1 ${C1} (C001 / B1): Pallets first | Stop 2 ${C2} (C002): ${WATER}`);
+    expect(find(ws, (t) => t.startsWith('Stop 1 '), 4)!.text).toBe(`Stop 1 ${C1} (C100 / B1): Pallets first | Stop 2 ${C2} (C200): ${WATER}`);
     d.loads[0].stops[0] = { ...d.loads[0].stops[0], cancelled: true, cancelledOrderIds: ['o1'] };
     ws = sheet(await render(d), 'T01 - L1');
-    expect(find(ws, (t) => t.startsWith('Stop'), 4)!.text).toBe(`Stop 2 ${C2} (C002): ${WATER}`);
+    expect(find(ws, (t) => t.startsWith('Stop'), 4)!.text).toBe(`Stop 2 ${C2} (C200): ${WATER}`);
   });
 });

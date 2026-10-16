@@ -1,7 +1,7 @@
 /**
  * Loading instruction per customer (owner request 16 Oct 2026: some customers need their order loaded on
- * the truck in a specific way - an order was cancelled because it was not - so the dispatcher and the
- * warehouse must see it at the top of the load sheet). Customer.loadingInstruction, one short text per
+ * the truck in a specific way, so the dispatcher and the warehouse must see it at the top of the load
+ * sheet). Customer.loadingInstruction, one short text per
  * customer row (a branch is its own row), set in the Details dialog; NULL = none. The text itself is data,
  * entered by the company: no customer or chain is named in the code.
  *
@@ -48,10 +48,28 @@ export type LoadingInstructionRead = { ok: true; text: string | null } | { ok: f
 // Control characters (C0 except the whitespace ones, DEL, C1) are dropped; every run of whitespace
 // (line breaks and tabs included) becomes one space, so the instruction is always one line.
 const CONTROL = /[\u0000-\u0008\u000E-\u001F\u007F-\u009F]/g;
+// Invisible format characters are dropped too (review of 16 Oct): the zero-width space, the direction marks
+// and the direction embeddings, overrides and isolates (U+061C, U+200E-200F, U+202A-202E, U+2066-2069),
+// the word joiner and the invisible operators (U+2060-2064) and the byte-order mark. A right-to-left
+// override hidden in one customer's text would reverse what follows it where the lines are joined (the
+// Excel box cell, the plan screen's badge title); the load sheet isolates each text (<bdi>), so Arabic
+// prints the same without them. The zero-width joiners (U+200C, U+200D) are kept: they shape letters.
+const INVISIBLE = /[\u061C\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+// A text made only of joiners and spaces prints nothing visible: none.
+const JOINERS_ONLY = /^[\s\u200C\u200D]*$/;
 
-/** The text as it is stored and printed: no control characters, one line, trimmed ('' = none). */
+/** The text as it is stored and printed: no control or invisible characters, one line, trimmed ('' = none). */
 function clean(raw: string): string {
-  return raw.replace(CONTROL, '').replace(/\s+/g, ' ').trim();
+  const text = raw.replace(CONTROL, '').replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();
+  return JOINERS_ONLY.test(text) ? '' : text;
+}
+
+/**
+ * The text as it would be stored, without the length rule ('' = none): what the Details dialog compares, to
+ * tell a change from the same text typed differently, and counts for its N/200 counter.
+ */
+export function foldLoadingInstruction(raw: string): string {
+  return clean(raw);
 }
 
 /**

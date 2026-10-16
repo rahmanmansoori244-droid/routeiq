@@ -283,6 +283,24 @@ export function busyFixture(): PlanDetail {
   return d;
 }
 
+/** The invented customers the loading-instruction tests put their instructions on (L1 stops 1 and 2). */
+export const INSTRUCTED = {
+  a: { customerId: 'c100', customerCode: 'C100', branchCode: 'B1', customerName: 'Hyper Example A' },
+  b: { customerId: 'c200', customerCode: 'C200', branchCode: null, customerName: 'Shop Example B' },
+} as const;
+
+/**
+ * The fixture with L1's two customers replaced by invented ones of their own (review of 16 Oct 2026): the
+ * loading-instruction tests never put an instruction on the fixture's other names. Everything else is as
+ * in fixture().
+ */
+export function instructionFixture(): PlanDetail {
+  const d = fixture();
+  const [s1, s2] = d.loads[0].stops;
+  d.loads[0] = { ...d.loads[0], stops: [{ ...s1, ...INSTRUCTED.a }, { ...s2, ...INSTRUCTED.b }] };
+  return d;
+}
+
 // ---------------------------------------------------------------------------------------
 // Truck capacity in pallets (owner decision 4 Oct 2026, part B)
 // ---------------------------------------------------------------------------------------

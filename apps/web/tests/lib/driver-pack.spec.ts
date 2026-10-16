@@ -29,7 +29,7 @@ import {
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
 import type { DriverChangeNote } from '@/lib/dispatch/summary';
 import { pdfSafe, UNPRINTABLE } from '@/lib/dispatch/pdf-text';
-import { busyFixture, fixture, LONG_TRUCK, ORDERS, load, stop } from './plan-detail-fixture';
+import { busyFixture, fixture, INSTRUCTED, instructionFixture, LONG_TRUCK, ORDERS, load, stop } from './plan-detail-fixture';
 
 const OPTS = { tenantName: 'NMWC Test' };
 
@@ -694,9 +694,9 @@ describe('the driver link on the sheets and in WhatsApp (owner request 4 Oct 202
 describe('the loading instruction on the driver sheet (owner request 16 Oct 2026)', () => {
   const sha = (s: string) => createHash('sha256').update(s).digest('hex');
   const WATER = 'Water at the bottom, max 5 layers';
-  /** The fixture's (invented) customer name of L1 stop 1. */
-  const C1 = fixture().loads[0].stops[0].customerName;
-  const withInstruction = (text: string, d: PlanDetail = fixture()): PlanDetail => {
+  /** The invented customer of L1 stop 1 (instructionFixture). */
+  const C1 = INSTRUCTED.a.customerName;
+  const withInstruction = (text: string, d: PlanDetail = instructionFixture()): PlanDetail => {
     d.loads[0].stops[0] = { ...d.loads[0].stops[0], loadingInstruction: text };
     return d;
   };
@@ -721,7 +721,7 @@ describe('the loading instruction on the driver sheet (owner request 16 Oct 2026
   it('the model: one line per customer at the top, and the text on its stop, through pdfSafe', () => {
     const m = driverPackModel(withInstruction(`${WATER} → “stack ≤ 5”`), OPTS);
     const [s1, s2, s3] = m.sheets;
-    expect(s1.loadingInstructions).toEqual([`Stop 1 ${C1} (C001 / B1): ${WATER} -> “stack <= 5”`]);
+    expect(s1.loadingInstructions).toEqual([`Stop 1 ${C1} (C100 / B1): ${WATER} -> “stack <= 5”`]);
     expect(s1.stops.map((s) => s.loadingInstruction ?? null)).toEqual([`${WATER} -> “stack <= 5”`, null]);
     expect(s1.unprintable).toBe(false);
     // The box's title travels in the model too: the renderer process cannot import loading-instruction.ts.
@@ -732,7 +732,7 @@ describe('the loading instruction on the driver sheet (owner request 16 Oct 2026
 
   it('Arabic cannot print on the driver sheet: [?] and the sheet says so', () => {
     const s = driverPackModel(withInstruction('الماء في الأسفل'), OPTS).sheets[0];
-    expect(s.loadingInstructions).toEqual([`Stop 1 ${C1} (C001 / B1): ${UNPRINTABLE}`]);
+    expect(s.loadingInstructions).toEqual([`Stop 1 ${C1} (C100 / B1): ${UNPRINTABLE}`]);
     expect(s.stops[0].loadingInstruction).toBe(UNPRINTABLE);
     expect(s.unprintable).toBe(true);
   });
@@ -750,10 +750,34 @@ describe('the loading instruction on the driver sheet (owner request 16 Oct 2026
     const [first, ...rest] = pageTexts(await renderDriverPackPdf(driverPackModel(d, { ...OPTS, loadIds: ['L1', 'L2'] })));
     const box = first.indexOf(sq('SPECIAL LOADING - load as this customer requires:'));
     expect(box).toBeGreaterThanOrEqual(0);
-    expect(first).toContain(sq(`Stop 1 ${C1} (C001 / B1): ${WATER}`));
+    expect(first).toContain(sq(`Stop 1 ${C1} (C100 / B1): ${WATER}`));
     // Above the stops; the stop itself says it too, right under the customer's name.
     const stopText = first.indexOf(sq(`${C1} LOADING: ${WATER}`));
     expect(stopText).toBeGreaterThan(box);
     for (const t of rest) expect(t).not.toContain(sq('SPECIAL LOADING'));
+  });
+
+  it('a box of many customers continues on the next page instead of being squeezed onto one; a short one stays whole (review of 16 Oct)', async () => {
+    // `n` invented customers on one load, each with a long instruction (the box line is about 3 rows).
+    const many = (n: number): PlanDetail => {
+      const d = longLoad(n);
+      d.loads[0].stops = d.loads[0].stops.map((s, i) => ({
+        ...s,
+        customerId: `cx${i}`,
+        customerName: `Shop Example ${i}`,
+        loadingInstruction: `${'Keep these cases upright and away from the door, '.repeat(4).slice(0, 180)} end ${i}`,
+      }));
+      return d;
+    };
+    const boxLine = (i: number) => sq(`Stop ${i + 1} Shop Example ${i} (`);
+    // Before: the whole box was kept on page 1 and its 40 lines were printed over each other there.
+    const pages = pageTexts(await renderDriverPackPdf(driverPackModel(many(40), OPTS)));
+    const pageOf = (i: number) => pages.findIndex((t) => t.includes(boxLine(i)));
+    expect(pageOf(0)).toBe(0);
+    expect(pageOf(39)).toBe(1);
+    expect(Array.from({ length: 40 }, (_, i) => pageOf(i)).every((p, i, all) => p >= 0 && p >= (all[i - 1] ?? 0))).toBe(true);
+    // 12 lines: kept whole on the first page.
+    const short = pageTexts(await renderDriverPackPdf(driverPackModel(many(12), OPTS)));
+    for (let i = 0; i < 12; i++) expect(short[0]).toContain(boxLine(i));
   });
 });

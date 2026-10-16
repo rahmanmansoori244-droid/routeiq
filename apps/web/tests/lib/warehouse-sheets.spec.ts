@@ -9,7 +9,7 @@ import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 import type { OutcomeOverlay, OverlayStop } from '@/lib/delivery/outcome-view';
 import { loadSheetModel, NO_INVOICE, returnNoteModel, stopInvoices } from '@/lib/dispatch/warehouse-sheets';
 import { esc, PRINT_SCRIPT_HASH, renderLoadSheetHtml, renderReturnNoteHtml, SHEET_CSP } from '@/lib/dispatch/warehouse-sheets-html';
-import { busyFixture, fixture, LONG_TRUCK } from './plan-detail-fixture';
+import { busyFixture, fixture, INSTRUCTED, instructionFixture, LONG_TRUCK } from './plan-detail-fixture';
 
 const OPTS = { tenantName: 'NMWC Test' };
 
@@ -282,11 +282,11 @@ describe('the printable page', () => {
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const WATER = 'Water at the bottom, max 5 layers';
-/** The fixture's (invented) customer names of L1 stops 1 and 2. */
-const [C1, C2] = fixture().loads[0].stops.map((s) => s.customerName);
+/** The invented customers of L1 stops 1 and 2 (instructionFixture). */
+const [C1, C2] = [INSTRUCTED.a.customerName, INSTRUCTED.b.customerName];
 
-/** The fixture's L1 with its customers' instructions: C001 / B1 (stop 1) and C002 (stop 2). */
-function withInstructions(texts: Record<number, string>, d: PlanDetail = fixture()): PlanDetail {
+/** The fixture's L1 with its customers' instructions: C100 / B1 (stop 1) and C200 (stop 2). */
+function withInstructions(texts: Record<number, string>, d: PlanDetail = instructionFixture()): PlanDetail {
   d.loads[0] = { ...d.loads[0], stops: d.loads[0].stops.map((s) => (texts[s.sequence] ? { ...s, loadingInstruction: texts[s.sequence] } : s)) };
   return d;
 }
@@ -319,7 +319,7 @@ describe('loading instruction on the load sheet (owner request 16 Oct 2026)', ()
     const first = d.loads[0].stops[0];
     d.loads[0].stops.push({ ...first, sequence: 3, orderIds: ['o1b'], orderLines: first.orderLines.map((l) => ({ ...l, orderId: 'o1b', salesOrderNo: 'SO-1001B' })) });
     const s = loadSheetModel(d, OPTS).sheets[0];
-    expect(s.loadingInstructions).toEqual([{ stops: [1, 3], customerId: 'c1', customerName: C1, customerCode: 'C001', branchCode: 'B1', text: WATER }]);
+    expect(s.loadingInstructions).toEqual([{ stops: [1, 3], customerId: 'c100', customerName: C1, customerCode: 'C100', branchCode: 'B1', text: WATER }]);
     expect(s.invoices.map((i) => [i.stop, i.invoiceNo, i.loadingInstruction ?? null])).toEqual([
       [1, 'SO-1001', WATER],
       [2, 'SO-1002', null],
@@ -352,9 +352,9 @@ describe('loading instruction on the load sheet (owner request 16 Oct 2026)', ()
     expect(head).toBeGreaterThan(box);
     expect(sheet1).toContain('<div class="instr-h">SPECIAL LOADING</div><div class="instr-sub">Load this truck as these customers require:</div>');
     expect(sheet1).toContain(
-      `<li><span class="instr-stop">Stop 1</span> <bdi>${C1}</bdi> (C001 / B1): <bdi>&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;x&quot;</bdi></li>`,
+      `<li><span class="instr-stop">Stop 1</span> <bdi>${C1}</bdi> (C100 / B1): <bdi>&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;x&quot;</bdi></li>`,
     );
-    expect(sheet1).toContain('<li><span class="instr-stop">Stop 2</span> <bdi>هايبر مثال</bdi> (C002): <bdi>الماء في الأسفل</bdi></li>');
+    expect(sheet1).toContain('<li><span class="instr-stop">Stop 2</span> <bdi>هايبر مثال</bdi> (C200): <bdi>الماء في الأسفل</bdi></li>');
     expect(html).not.toContain('<script>alert(1)');
     // The tag on each of the customers' invoice rows.
     expect(sheet1.match(/<br><b>SPECIAL LOADING - see the box at the top<\/b>/g)).toHaveLength(2);
@@ -374,7 +374,7 @@ describe('loading instruction on the load sheet (owner request 16 Oct 2026)', ()
     const instrCss = html.slice(html.indexOf('.instr {'), html.indexOf('</style>'));
     expect(instrCss).not.toMatch(/background/);
     expect(html).toContain('<div class="instr-sub">Load this truck as this customer requires:</div>');
-    expect(html).toContain(`<span class="instr-stop">Stop 1</span> <bdi>${C1}</bdi> (C001 / B1): <bdi>${WATER}</bdi>`);
+    expect(html).toContain(`<span class="instr-stop">Stop 1</span> <bdi>${C1}</bdi> (C100 / B1): <bdi>${WATER}</bdi>`);
     expect(renderLoadSheetHtml(loadSheetModel(fixture(), OPTS))).not.toContain('.instr');
   });
 
