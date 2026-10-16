@@ -277,8 +277,8 @@ const MODELS = [
   'driverLeave',
   // Helpers (owner request 13 Oct 2026): the company's helpers and the helpers on each load.
   'helper', 'planLoadHelper',
-  // IVMS live link (16 Oct 2026): the GPS trail, depot moves, per-company state and truck-days, live positions.
-  'truckTrailPoint', 'ivmsEvent', 'ivmsState', 'ivmsTruckDay', 'truckPosition',
+  // IVMS live link (16 Oct 2026): Start fresh removes the GPS tracking rows in scope and keeps ivmsState.
+  'truckTrailPoint', 'truckPosition', 'ivmsEvent', 'ivmsTruckDay', 'ivmsState',
 ];
 
 export const fakePrisma: Row = {};

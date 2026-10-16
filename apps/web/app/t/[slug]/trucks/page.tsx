@@ -8,6 +8,9 @@ import { Button } from '@/components/ui/button';
 import { TrucksTable } from './trucks-table';
 import { AddTruckButton } from './add-truck-button';
 import { HireOptionsCard } from './hire-options';
+import { GpsTrackersCard } from './gps-trackers-card';
+import { ivmsApiReady, readIvmsEnv } from '@/lib/ivms/env';
+import { ivmsModeAtLeast, ivmsModeOf } from '@/lib/ivms/settings';
 
 export const metadata = { title: 'Trucks — RouteIQ' };
 export const dynamic = 'force-dynamic';
@@ -26,6 +29,20 @@ export default async function TrucksPage({ params }: { params: { slug: string } 
     // Helpers (owner request 13 Oct 2026): the Default helper list.
     db.helper.findMany({ orderBy: [{ active: 'desc' }, { name: 'asc' }], select: { id: true, code: true, name: true, active: true } }),
   ]);
+
+  // GPS trackers (IVMS live link, 16 Oct 2026): the company admin only. The IMEIs are read here by name
+  // (every other truck read omits them: lib/db.ts PRISMA_GLOBAL_OMIT); never for a one-day hired truck.
+  const trackers = canManage
+    ? await db.truck.findMany({ where: { active: true, onlyOnDate: null }, orderBy: { code: 'asc' }, select: { id: true, code: true, ivmsImei: true } })
+    : [];
+  const ivmsCfg = canManage ? await db.tenantConfig.findFirst({ select: { ivmsMode: true } }) : null;
+  const ivmsEnv = readIvmsEnv();
+  const ivmsMode = ivmsEnv.disabled ? 'OFF' : ivmsModeOf(ivmsCfg);
+  const canSuggest = ivmsModeAtLeast(ivmsMode, 'MAP') && ivmsApiReady(ivmsEnv) && ivmsEnv.tenantSlug === tenant.slug.toLowerCase();
+  const modeText =
+    ivmsMode === 'OFF'
+      ? 'GPS tracking is OFF (Settings): nothing is read from Ayun, so these numbers are only stored.'
+      : `GPS tracking is ${ivmsMode === 'MAP' ? 'MAP (live trucks on the day screen)' : 'TIMES (live trucks and GPS arrival and departure times)'}.`;
 
   if (depots.length === 0) {
     return (
@@ -60,6 +77,11 @@ export default async function TrucksPage({ params }: { params: { slug: string } 
       ) : (
         <TrucksTable initial={trucks} depots={depots} drivers={drivers} helpers={helpers} canManage={canManage} primaryUnit={tenant.primaryUnit} currency={tenant.currency} />
       )}
+      {canManage && trackers.length ? (
+        <div className="mt-6">
+          <GpsTrackersCard trucks={trackers} canSuggest={canSuggest} modeText={modeText} />
+        </div>
+      ) : null}
       {/* The hire suggestion (owner request 6 Oct 2026): the trucks each depot can rent for a day. */}
       <div className="mt-6">
         <HireOptionsCard depots={depots} canManage={canManage} currency={tenant.currency} />

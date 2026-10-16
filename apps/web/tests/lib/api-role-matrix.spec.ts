@@ -243,6 +243,11 @@ const EXPECTED: Record<string, string> = {
   'PATCH /api/runs/[id]/loads/[loadId]': 'PLANNER',
   'POST /api/runs/[id]/optimize': 'PLANNER',
   'GET /api/runs/[id]/outcomes': 'ANY',
+  // IVMS live link (16 Oct 2026): the day screen's live trucks are positions of people at work (PLANNER and
+  // up, VIEWER 403); the tracker mapping and the Ayun tracker suggestions are the company admin's.
+  'GET /api/runs/[id]/vehicles': 'PLANNER',
+  'POST /api/ivms/objects': 'TENANT_ADMIN',
+  'PUT /api/ivms/trucks/[id]/tracker': 'TENANT_ADMIN',
   'GET /api/runs/[id]/plan': 'ANY',
   'POST /api/runs/[id]/replan': 'PLANNER',
   'POST /api/runs/[id]/reset-stuck': 'PLANNER',
