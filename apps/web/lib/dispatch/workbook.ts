@@ -28,6 +28,7 @@ import { searchAssumptions, searchOptionOf, searchResultText, type SearchOption,
 import { loadPallets, manifestPalletTotals, manifestTotalText, palletLimitText, palletsExact, palletsOverBays, palletText, type LoadPallets } from './pallets';
 import { helpersText } from './load-helpers';
 import { windowRuleText, type WindowRule } from './window-rule';
+import { instructionLine, loadInstructions, SPECIAL_LOADING_HEADING, stopIsLoaded } from './loading-instruction';
 
 /** The SUMMARY row with the invoices (distinct sales orders) of the day. */
 export const INVOICES_LABEL = 'Invoices (sales orders)';
@@ -194,6 +195,8 @@ const FMT_PALLETS = '0.0';
 
 const THIN: Partial<ExcelJS.Border> = { style: 'thin', color: { argb: 'FFBFBFBF' } };
 const BOX: Partial<ExcelJS.Borders> = { top: THIN, bottom: THIN, left: THIN, right: THIN };
+/** The SPECIAL LOADING box's edge (owner request 16 Oct 2026): thick black, it prints in black and white. */
+const SPECIAL_EDGE: Partial<ExcelJS.Border> = { style: 'thick', color: { argb: 'FF000000' } };
 // Light grey only - prints cleanly on a black-and-white warehouse printer.
 const HEAD_FILL: ExcelJS.FillPattern = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEDEDED' } };
 const GREY: Partial<ExcelJS.Font> = { color: { argb: 'FF595959' } };
@@ -773,6 +776,32 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
 
   // LOADING MANIFEST - what the warehouse puts on the truck.
   let r = 11;
+  // Owner request 16 Oct 2026: SPECIAL LOADING above the manifest (this sheet may be the warehouse's paper),
+  // a thick box, the customers' lines in one wrapped cell D:U. No instruction: no row, the sheet as before.
+  const instructions = loadInstructions(l.stops);
+  if (instructions.length) {
+    const text = instructions.map(instructionLine).join(' | ');
+    const last = ROUTE_WIDTHS.length;
+    put(ws, r, 1, SPECIAL_LOADING_HEADING).font = { bold: true, size: 14 };
+    ws.mergeCells(r, 1, r, 3);
+    ws.mergeCells(r, 4, r, last);
+    const c = put(ws, r, 4, text);
+    c.font = { bold: true, size: 12 };
+    c.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+    ws.getCell(r, 1).alignment = { vertical: 'top' };
+    // Each cell its own style object: merged cells share their first cell's, and the edges differ per cell.
+    for (let col = 1; col <= last; col++) {
+      const cell = ws.getCell(r, col);
+      cell.style = {
+        ...cell.style,
+        border: { top: SPECIAL_EDGE, bottom: SPECIAL_EDGE, ...(col === 1 ? { left: SPECIAL_EDGE } : {}), ...(col === last ? { right: SPECIAL_EDGE } : {}) },
+      };
+    }
+    // About 1.1 characters per width unit at 12 pt bold; one line is 18 pt tall.
+    const chars = Math.floor(ROUTE_WIDTHS.slice(3).reduce((a, w) => a + w, 0) / 1.1);
+    ws.getRow(r).height = 18 * Math.max(1, Math.ceil(text.length / chars));
+    r++;
+  }
   section(ws, r, 'LOADING MANIFEST');
   put(ws, r, 4, `Load exactly these cases; tick each line when loaded.${
     l.break?.where === 'DEPOT' ? ` The driver's break is ${breakTimes(l.break)} at the depot; loading continues meanwhile.` : ''
@@ -859,6 +888,8 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
       // What the PDF driver sheet prints too: the customer's access / receiving notes and the
       // notes on the orders of this stop (scenario test S01: the Excel sheet had flags only).
       s.accessNotes?.trim() ? `Access: ${s.accessNotes.trim()}` : null,
+      // Owner request 16 Oct 2026: the customer's loading instruction (also in SPECIAL LOADING at the top).
+      s.loadingInstruction && stopIsLoaded(s) ? `Loading: ${s.loadingInstruction}` : null,
       ...s.notes.map((n) => n.trim()).filter(Boolean).map((n) => `Note: ${n}`),
     ].filter(Boolean);
     tableRow(

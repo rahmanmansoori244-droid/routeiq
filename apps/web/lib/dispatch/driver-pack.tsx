@@ -27,6 +27,7 @@ import { breakLine, breakTimes } from './break-text';
 import { loadPallets, palletsOverBays, palletText } from './pallets';
 import { SMALL_TRUCK_BADGE } from './small-truck';
 import { helpersText } from './load-helpers';
+import { instructionLine, loadInstructions, specialLoadingTitle, stopIsLoaded } from './loading-instruction';
 
 // ---------------------------------------------------------------------------------------
 // Model (pure)
@@ -52,6 +53,11 @@ export interface SheetStop {
    * the renderer process bundles only its own modules. Absent = nothing printed.
    */
   smallTruck?: string;
+  /**
+   * The customer's loading instruction (owner request 16 Oct 2026), printed "LOADING: <text>" in bold under
+   * the customer; live, like accessNotes, made PDF-safe in the model. Absent = none (nothing printed).
+   */
+  loadingInstruction?: string;
   notes: string[];
   /** Split delivery: this stop is part `part` of `parts`; `others` says where the other parts go. */
   split: { part: number; parts: number; others: string[]; restUnserved: boolean } | null;
@@ -123,6 +129,18 @@ export interface DriverSheet {
   unprintable: boolean;
   /** Review F04: this truck-day's times did not pass the timetable check. */
   timesNotVerified: boolean;
+  /**
+   * The SPECIAL LOADING box at the top of the sheet (owner request 16 Oct 2026): one line per customer of
+   * the load with a loading instruction, "Stop 3 Shop Example A (C100): ..." (loading-instruction.ts), made
+   * PDF-safe here. Absent when there is none.
+   */
+  loadingInstructions?: string[];
+  /**
+   * The box's first line, "SPECIAL LOADING - load as this customer requires:"; set with loadingInstructions.
+   * The words travel in the model: the renderer process bundles only its own modules
+   * (scripts/pdf-renderer-build.cjs refuses any other, loading-instruction.ts included).
+   */
+  loadingInstructionsTitle?: string;
   /**
    * The QR codes printed at the top right, in print order (owner request 4 Oct 2026): the driver
    * link first (76 pt), then at most 2 route codes; without any driver-link line, up to 3 route codes
@@ -238,6 +256,8 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
     // sheet never trusts that): Latin only.
     phone: t.maybe(s.customerPhone)?.trim() || null,
     ...(s.smallTruckOnly ? { smallTruck: SMALL_TRUCK_BADGE } : {}),
+    // Owner request 16 Oct 2026: on a stop something of which is loaded (as the warehouse load sheet).
+    ...(s.loadingInstruction && stopIsLoaded(s) ? { loadingInstruction: t.text(s.loadingInstruction) } : {}),
     notes: s.notes.map((n) => t.text(n)).filter(Boolean),
     split,
     late: s.late,
@@ -284,6 +304,8 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
       const stops = [...l.stops].sort((a, b) => a.sequence - b.sequence);
       const total = l.manifest.reduce((a, m) => a + m.cases, 0);
       const route = routeLinks(l.origin ?? d.run.depot, stops);
+      // Owner request 16 Oct 2026: the SPECIAL LOADING lines (one per customer), PDF-safe.
+      const instructions = loadInstructions(stops).map((i) => t.text(instructionLine(i)));
       // The driver link of this truck-day (owner request 4 Oct 2026): see DriverPackOptions.driverLinks.
       const link: SheetDriverLink | null = !opts.driverLinks
         ? { kind: 'ASK' }
@@ -335,6 +357,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
             ? ` - load trip ${next.loadNo} (${next.break?.where === 'DEPOT' ? `driver break ${breakTimes(next.break)} at the depot, ` : ''}planned departure ${fmtHhmm(next.departMin)}).`
             : ' - last trip of the day.'),
         footerText: `${truckCode} trip ${l.loadNo} of ${n} · delivery ${d.run.runDate} · plan v${v} - this sheet is void if a newer plan version is issued`,
+        ...(instructions.length ? { loadingInstructions: instructions, loadingInstructionsTitle: specialLoadingTitle(instructions.length) } : {}),
       };
       return { ...sheet, unprintable: head.lost || t.lost, timesNotVerified: !!l.timing && !l.timing.ok };
     });

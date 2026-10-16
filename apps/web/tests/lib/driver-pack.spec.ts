@@ -2,6 +2,7 @@
  * Driver sheets - pure (no DB). The model is checked field by field; the PDF is rendered and read
  * back (page objects + the text of each page) to check the page rules the drivers rely on.
  */
+import { createHash } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import type { DetailStop, PlanDetail } from '@/lib/dispatch/plan-detail';
@@ -28,7 +29,7 @@ import {
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
 import type { DriverChangeNote } from '@/lib/dispatch/summary';
 import { pdfSafe, UNPRINTABLE } from '@/lib/dispatch/pdf-text';
-import { fixture, LONG_TRUCK, ORDERS, load, stop } from './plan-detail-fixture';
+import { busyFixture, fixture, LONG_TRUCK, ORDERS, load, stop } from './plan-detail-fixture';
 
 const OPTS = { tenantName: 'NMWC Test' };
 
@@ -687,5 +688,72 @@ describe('the driver link on the sheets and in WhatsApp (owner request 4 Oct 202
     for (const none of [null, undefined, '']) {
       expect(whatsappText(d.run, d.loads[0], 2, { tenantName: 'NMWC', driverLinkUrl: none })).not.toContain(DRIVER_LINK_LINE);
     }
+  });
+});
+
+describe('the loading instruction on the driver sheet (owner request 16 Oct 2026)', () => {
+  const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+  const WATER = 'Water at the bottom, max 5 layers';
+  /** The fixture's (invented) customer name of L1 stop 1. */
+  const C1 = fixture().loads[0].stops[0].customerName;
+  const withInstruction = (text: string, d: PlanDetail = fixture()): PlanDetail => {
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], loadingInstruction: text };
+    return d;
+  };
+
+  it('a day without instructions: the model and the printed text are what they were before the feature (pinned at 76fcb57)', async () => {
+    // SHA-256 of the model and of the text of every page as main made them on 16 Oct 2026 before this feature
+    // (warehouse-sheets.spec.ts pins the load sheet the same way). If a later change alters the sheet on
+    // purpose, replace the hash with the one the failure shows.
+    const plain = driverPackModel(fixture(), OPTS);
+    expect(sha(JSON.stringify(plain))).toBe('b113c08b83790e363d026309fdbfe4ece7fdfb9a96f0ba5e1081c42e0e08568d');
+    expect(sha(JSON.stringify(pageTexts(await renderDriverPackPdf(plain))))).toBe('d38a8ebba61252e929e9eee2b47652b393e15077c6f5d602de88f1bee3d473f1');
+    const busy = driverPackModel(busyFixture(), OPTS);
+    expect(sha(JSON.stringify(busy))).toBe('f39a4b963e6cf411cc10ee467f0859318c99e4576b4be0795cfa694926999f39');
+    expect(sha(JSON.stringify(pageTexts(await renderDriverPackPdf(busy))))).toBe('9f1e33825b2fb127ef4f4f3be2778c770235a4a072b62a1e0c4fb84858c2465a');
+    for (const s of [...plain.sheets, ...busy.sheets]) {
+      expect('loadingInstructions' in s).toBe(false);
+      expect('loadingInstructionsTitle' in s).toBe(false);
+      expect(s.stops.some((x) => 'loadingInstruction' in x)).toBe(false);
+    }
+  });
+
+  it('the model: one line per customer at the top, and the text on its stop, through pdfSafe', () => {
+    const m = driverPackModel(withInstruction(`${WATER} → “stack ≤ 5”`), OPTS);
+    const [s1, s2, s3] = m.sheets;
+    expect(s1.loadingInstructions).toEqual([`Stop 1 ${C1} (C001 / B1): ${WATER} -> “stack <= 5”`]);
+    expect(s1.stops.map((s) => s.loadingInstruction ?? null)).toEqual([`${WATER} -> “stack <= 5”`, null]);
+    expect(s1.unprintable).toBe(false);
+    // The box's title travels in the model too: the renderer process cannot import loading-instruction.ts.
+    expect(s1.loadingInstructionsTitle).toBe('SPECIAL LOADING - load as this customer requires:');
+    expect('loadingInstructions' in s2).toBe(false);
+    expect('loadingInstructions' in s3).toBe(false);
+  });
+
+  it('Arabic cannot print on the driver sheet: [?] and the sheet says so', () => {
+    const s = driverPackModel(withInstruction('الماء في الأسفل'), OPTS).sheets[0];
+    expect(s.loadingInstructions).toEqual([`Stop 1 ${C1} (C001 / B1): ${UNPRINTABLE}`]);
+    expect(s.stops[0].loadingInstruction).toBe(UNPRINTABLE);
+    expect(s.unprintable).toBe(true);
+  });
+
+  it('a stop all of whose orders are cancelled has no line and no stop text', () => {
+    const d = withInstruction(WATER);
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], cancelled: true, cancelledOrderIds: ['o1'] };
+    const s = driverPackModel(d, OPTS).sheets[0];
+    expect('loadingInstructions' in s).toBe(false);
+    expect('loadingInstruction' in s.stops[0]).toBe(false);
+  });
+
+  it('the PDF prints SPECIAL LOADING at the top of the sheet and "LOADING: ..." on the stop', async () => {
+    const d = withInstruction(WATER);
+    const [first, ...rest] = pageTexts(await renderDriverPackPdf(driverPackModel(d, { ...OPTS, loadIds: ['L1', 'L2'] })));
+    const box = first.indexOf(sq('SPECIAL LOADING - load as this customer requires:'));
+    expect(box).toBeGreaterThanOrEqual(0);
+    expect(first).toContain(sq(`Stop 1 ${C1} (C001 / B1): ${WATER}`));
+    // Above the stops; the stop itself says it too, right under the customer's name.
+    const stopText = first.indexOf(sq(`${C1} LOADING: ${WATER}`));
+    expect(stopText).toBeGreaterThan(box);
+    for (const t of rest) expect(t).not.toContain(sq('SPECIAL LOADING'));
   });
 });

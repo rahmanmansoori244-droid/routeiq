@@ -748,6 +748,13 @@ model Customer {
   /// DISPATCH refused on a bigger truck (409 SMALL_TRUCK_ONLY), "SMALL TRUCK ONLY" on the sheets. Read
   /// live: a customer marked after planning is caught by the gate. Audited like the other fields.
   smallTruckOnly    Boolean     @default(false)
+  /// Owner request 16 Oct 2026: a short loading instruction the warehouse must follow for this customer's
+  /// orders (lib/dispatch/loading-instruction.ts; at most 200 characters on one line, checked by the app).
+  /// Printed in a "SPECIAL LOADING" box at the top of every warehouse load sheet, driver sheet and Excel load
+  /// sheet whose load has the customer, tagged on its rows, a badge on the plan screen. Read live like
+  /// accessNotes (a change reaches sheets already printed when they are printed again; no re-plan). NULL =
+  /// none. Audited by the customer UPDATE row. Never sent to the optimizer, never in a plan snapshot.
+  loadingInstruction String?
   active            Boolean     @default(true)
   orders            Order[]
 

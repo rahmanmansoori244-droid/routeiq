@@ -147,6 +147,16 @@ describe('the pack is made in another process, and this one keeps running (revie
     expect(differentObjects(pdf, here)).toEqual([]);
   });
 
+  it('a sheet with a SPECIAL LOADING box (loading instruction, 16 Oct 2026) is made there the same: its words come in the model', async () => {
+    const d: PlanDetail = fixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], loadingInstruction: 'Water at the bottom, max 5 layers' };
+    const model = driverPackModel(d, { tenantName: 'NMWC Test' });
+    expect(model.sheets[0]!.loadingInstructionsTitle).toBe('SPECIAL LOADING - load as this customer requires:');
+    const pdf = await renderDriverPackIsolated(model);
+    expect(lastPdfRender()!.pid).not.toBe(process.pid);
+    expect(differentObjects(pdf, await renderDriverPackPdf(model))).toEqual([]);
+  });
+
   it('while a day is made, the event loop of this process is never blocked for long', async () => {
     // In the web process (before) the loop was blocked for seconds at a time (review M3).
     const { result, stallMs, elapsedMs } = await longestStall(() => outcome(renderDriverPackIsolated(day)));

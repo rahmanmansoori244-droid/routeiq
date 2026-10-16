@@ -25,6 +25,7 @@ import { OUTCOME_LABEL, reasonText } from '../delivery/office-text';
 import { carriedStopText, carriedToDays } from './carry-view';
 import { CANCELLED_STOP_TEXT } from './order-cancel-rules';
 import { SMALL_TRUCK_BADGE } from './small-truck';
+import { loadInstructions, type LoadInstruction } from './loading-instruction';
 
 /** The loads that have left: only these have delivery results. */
 export const RETURN_NOTE_STATUSES: ReadonlySet<string> = new Set(['DISPATCHED', 'COMPLETED']);
@@ -73,6 +74,12 @@ export interface LoadSheetInvoice {
    * so the warehouse sees it before loading (live, as the plan screen); null otherwise.
    */
   smallTruck?: string | null;
+  /**
+   * The customer's loading instruction (owner request 16 Oct 2026), on an invoice with an order that is
+   * loaded (not cancelled, not brought forward to a later day): the row says "see the box at the top".
+   * Absent = none.
+   */
+  loadingInstruction?: string;
   lines: ProductCases[];
   cases: number;
 }
@@ -114,6 +121,12 @@ export interface LoadSheet {
    * so the sheet says so in a banner and marks their invoices CANCELLED.
    */
   cancelledHere: number;
+  /**
+   * The SPECIAL LOADING box at the top (owner request 16 Oct 2026): one entry per customer of the load
+   * with a loading instruction, with its stops (lib/dispatch/loading-instruction.ts loadInstructions).
+   * Absent when there is none: the sheet is then exactly what it was before.
+   */
+  loadingInstructions?: LoadInstruction[];
   footer: string;
 }
 
@@ -218,16 +231,20 @@ function splitText(s: DetailStop): string | null {
  */
 export function stopInvoices(s: DetailStop): LoadSheetInvoice[] {
   const gone = new Set(s.cancelledOrderIds ?? []);
-  const by = new Map<string, { invoiceNo: string; cancelled: boolean; rows: ProductCases[] }>();
+  // Owner request 16 Oct 2026: the instruction's row tag, only on an invoice with an order that is loaded
+  // (not cancelled, not brought forward to a later day).
+  const carriedAway = new Set(s.carriedOrderIds ?? []);
+  const by = new Map<string, { invoiceNo: string; cancelled: boolean; rows: ProductCases[]; loaded: boolean }>();
   for (const ln of s.orderLines) {
     const invoiceNo = ln.salesOrderNo?.trim() || NO_INVOICE;
     const cancelled = gone.has(ln.orderId);
     const key = `${invoiceNo}|${cancelled ? 'C' : ''}`;
-    const g = by.get(key) ?? { invoiceNo, cancelled, rows: [] };
+    const g = by.get(key) ?? { invoiceNo, cancelled, rows: [], loaded: false };
     g.rows.push({ productCode: ln.productCode, productName: ln.productName, cases: ln.cases });
+    g.loaded ||= !cancelled && !carriedAway.has(ln.orderId);
     by.set(key, g);
   }
-  return [...by.values()].map(({ invoiceNo, cancelled, rows }) => {
+  return [...by.values()].map(({ invoiceNo, cancelled, rows, loaded }) => {
     const lines = sumByProduct(rows);
     return {
       stop: s.sequence,
@@ -238,6 +255,7 @@ export function stopInvoices(s: DetailStop): LoadSheetInvoice[] {
       split: splitText(s),
       carried: cancelled ? CANCELLED_STOP_TEXT : carriedStopText({ carriedFrom: s.carriedFrom, carriedTo: s.carriedTo }),
       smallTruck: s.smallTruckOnly ? SMALL_TRUCK_BADGE : null,
+      ...(s.loadingInstruction && loaded ? { loadingInstruction: s.loadingInstruction } : {}),
       lines,
       cases: lines.reduce((a, l) => a + l.cases, 0),
     };
@@ -263,6 +281,7 @@ export function loadSheetModel(d: PlanDetail, opts: { tenantName: string; loadId
     const products = sumByProduct(l.manifest.map((m) => ({ productCode: m.productCode, productName: m.productName, cases: m.cases })));
     const totalCases = products.reduce((a, p) => a + p.cases, 0);
     const p = loadPallets(l);
+    const instructions = loadInstructions(stops);
     return {
       loadId: l.id,
       truckCode: l.truckCode,
@@ -283,6 +302,7 @@ export function loadSheetModel(d: PlanDetail, opts: { tenantName: string; loadId
       carriedAway: l.carriedAway,
       cancelledHere: l.cancelledHere ?? 0,
       carriedToDays: carriedToDays(stops.map((s) => s.carriedTo).filter((x): x is string => !!x)),
+      ...(instructions.length ? { loadingInstructions: instructions } : {}),
       footer: footer(l, n, d, 'Load sheet'),
     };
   });

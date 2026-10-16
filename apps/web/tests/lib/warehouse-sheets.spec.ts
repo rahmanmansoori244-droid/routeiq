@@ -9,7 +9,7 @@ import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 import type { OutcomeOverlay, OverlayStop } from '@/lib/delivery/outcome-view';
 import { loadSheetModel, NO_INVOICE, returnNoteModel, stopInvoices } from '@/lib/dispatch/warehouse-sheets';
 import { esc, PRINT_SCRIPT_HASH, renderLoadSheetHtml, renderReturnNoteHtml, SHEET_CSP } from '@/lib/dispatch/warehouse-sheets-html';
-import { fixture, LONG_TRUCK } from './plan-detail-fixture';
+import { busyFixture, fixture, LONG_TRUCK } from './plan-detail-fixture';
 
 const OPTS = { tenantName: 'NMWC Test' };
 
@@ -273,5 +273,129 @@ describe('the printable page', () => {
     expect(html.match(/<section class="sheet">/g)).toHaveLength(3);
     expect(html).toContain('LOAD SHEET · T01 · trip 1 of 2');
     expect(html).toContain('Invoice in truck');
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Loading instruction (owner request 16 Oct 2026, lib/dispatch/loading-instruction.ts)
+// ---------------------------------------------------------------------------------------
+
+const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+const WATER = 'Water at the bottom, max 5 layers';
+/** The fixture's (invented) customer names of L1 stops 1 and 2. */
+const [C1, C2] = fixture().loads[0].stops.map((s) => s.customerName);
+
+/** The fixture's L1 with its customers' instructions: C001 / B1 (stop 1) and C002 (stop 2). */
+function withInstructions(texts: Record<number, string>, d: PlanDetail = fixture()): PlanDetail {
+  d.loads[0] = { ...d.loads[0], stops: d.loads[0].stops.map((s) => (texts[s.sequence] ? { ...s, loadingInstruction: texts[s.sequence] } : s)) };
+  return d;
+}
+
+describe('loading instruction on the load sheet (owner request 16 Oct 2026)', () => {
+  it('a day without instructions prints byte for byte what it printed before the feature (pinned at 76fcb57)', () => {
+    // SHA-256 of the models and pages as main printed them on 16 Oct 2026 before this feature, for the plain
+    // fixture and for one with every other mark of the sheet (VOID, brought forward, cancelled, small truck,
+    // split). If a later change alters the sheets on purpose, replace the hash with the one the failure shows.
+    const plain = loadSheetModel(fixture(), OPTS);
+    expect(sha(JSON.stringify(plain))).toBe('426f250d089e305d6a8bd6409803c31a8517dd6c1893cdca72bea724a50cbf9a');
+    expect(sha(renderLoadSheetHtml(plain))).toBe('296fb821ecc123ad18b68ff211aa8a0aa180fed5f0230d725ed7e8d0491e28c4');
+    const busy = loadSheetModel(busyFixture(), OPTS);
+    expect(sha(JSON.stringify(busy))).toBe('5fbb93b7c5a014147a898a4482d0a770503b928e7ac5eb70df232d1f2fd2f0e8');
+    expect(sha(renderLoadSheetHtml(busy))).toBe('a2096b46b6c469bd173aec18f72ffe88a1e9e22da9d1a1806d557a3d8ca006f5');
+    // The return note shares the page and its style: unchanged too.
+    const d = fixture();
+    d.loads[0] = { ...d.loads[0], status: 'DISPATCHED' };
+    const none = { runId: 'r', date: '2026-09-25', depotId: 'd', tz: 'Asia/Muscat', loads: {}, stops: {}, summary: {}, noOutcome: [], copyConflicts: {}, lockWarnings: {}, cameraExceptions: [], cameraAlerts: [] };
+    expect(sha(renderReturnNoteHtml(returnNoteModel(d, none as unknown as OutcomeOverlay, OPTS)))).toBe('aeca18967bc4bcebc51367ef8d5cffc27f95fe00769c5a587ac7094dfd9ac72f');
+    for (const s of [...plain.sheets, ...busy.sheets]) {
+      expect('loadingInstructions' in s).toBe(false);
+      expect(s.invoices.some((i) => 'loadingInstruction' in i)).toBe(false);
+    }
+  });
+
+  it('the model: one line per customer with its stops; the tag on its invoices', () => {
+    const d = withInstructions({ 1: WATER });
+    // The same customer again on stop 3 of this load (a second visit): one line, both stops.
+    const first = d.loads[0].stops[0];
+    d.loads[0].stops.push({ ...first, sequence: 3, orderIds: ['o1b'], orderLines: first.orderLines.map((l) => ({ ...l, orderId: 'o1b', salesOrderNo: 'SO-1001B' })) });
+    const s = loadSheetModel(d, OPTS).sheets[0];
+    expect(s.loadingInstructions).toEqual([{ stops: [1, 3], customerId: 'c1', customerName: C1, customerCode: 'C001', branchCode: 'B1', text: WATER }]);
+    expect(s.invoices.map((i) => [i.stop, i.invoiceNo, i.loadingInstruction ?? null])).toEqual([
+      [1, 'SO-1001', WATER],
+      [2, 'SO-1002', null],
+      [3, 'SO-1001B', WATER],
+    ]);
+    // The other loads have none.
+    expect(loadSheetModel(d, OPTS).sheets.slice(1).map((x) => 'loadingInstructions' in x)).toEqual([false, false]);
+  });
+
+  it('a stop whose orders are all cancelled or brought forward is not listed and its invoices have no tag', () => {
+    const d = withInstructions({ 1: WATER, 2: 'Cartons on top only' });
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], cancelled: true, cancelledOrderIds: ['o1'] };
+    d.loads[0].stops[1] = { ...d.loads[0].stops[1], carriedTo: '2026-09-26', carriedOrderIds: ['o2'] };
+    const s = loadSheetModel(d, OPTS).sheets[0];
+    expect('loadingInstructions' in s).toBe(false);
+    expect(s.invoices.some((i) => i.loadingInstruction)).toBe(false);
+    expect(renderLoadSheetHtml(loadSheetModel(d, OPTS))).not.toContain('SPECIAL LOADING');
+  });
+
+  it('the page: a SPECIAL LOADING box between the title and the head box, every value escaped, names and texts isolated', () => {
+    const d = withInstructions({ 1: '<script>alert(1)</script> & "x"', 2: 'الماء في الأسفل' });
+    d.loads[0].stops[1] = { ...d.loads[0].stops[1], customerName: 'هايبر مثال' };
+    const html = renderLoadSheetHtml(loadSheetModel(d, OPTS));
+    const sheet1 = html.slice(html.indexOf('<section class="sheet">'), html.indexOf('</section>'));
+    const h1 = sheet1.indexOf('<h1>');
+    const box = sheet1.indexOf('<div class="instr" data-kind="loading-instruction">');
+    const head = sheet1.indexOf('<div class="head">');
+    expect(h1).toBeGreaterThanOrEqual(0);
+    expect(box).toBeGreaterThan(h1);
+    expect(head).toBeGreaterThan(box);
+    expect(sheet1).toContain('<div class="instr-h">SPECIAL LOADING</div><div class="instr-sub">Load this truck as these customers require:</div>');
+    expect(sheet1).toContain(
+      `<li><span class="instr-stop">Stop 1</span> <bdi>${C1}</bdi> (C001 / B1): <bdi>&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;x&quot;</bdi></li>`,
+    );
+    expect(sheet1).toContain('<li><span class="instr-stop">Stop 2</span> <bdi>هايبر مثال</bdi> (C002): <bdi>الماء في الأسفل</bdi></li>');
+    expect(html).not.toContain('<script>alert(1)');
+    // The tag on each of the customers' invoice rows.
+    expect(sheet1.match(/<br><b>SPECIAL LOADING - see the box at the top<\/b>/g)).toHaveLength(2);
+    // Only the first load has a box; the others print as before.
+    expect(html.match(/data-kind="loading-instruction"/g)).toHaveLength(1);
+    // Still only the Print script, allowed by its hash: the CSP does not change.
+    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    expect(scripts).toHaveLength(1);
+    expect(`sha256-${createHash('sha256').update(scripts[0]).digest('base64')}`).toBe(PRINT_SCRIPT_HASH);
+  });
+
+  it('prints in black and white: a thick border and large bold text, no shading; kept on one page; style only on pages with a box', () => {
+    const html = renderLoadSheetHtml(loadSheetModel(withInstructions({ 1: WATER }), OPTS));
+    expect(html).toContain('.instr { border: 4px solid #000;');
+    expect(html).toContain('.instr-h { font-size: 22pt; font-weight: 700;');
+    expect(html).toContain('@media print { .instr { break-inside: avoid; } }');
+    const instrCss = html.slice(html.indexOf('.instr {'), html.indexOf('</style>'));
+    expect(instrCss).not.toMatch(/background/);
+    expect(html).toContain('<div class="instr-sub">Load this truck as this customer requires:</div>');
+    expect(html).toContain(`<span class="instr-stop">Stop 1</span> <bdi>${C1}</bdi> (C001 / B1): <bdi>${WATER}</bdi>`);
+    expect(renderLoadSheetHtml(loadSheetModel(fixture(), OPTS))).not.toContain('.instr');
+  });
+
+  it('on a VOID paper the box comes after the VOID banner, so "do not load" is read first (review L3); NOT LOCKED keeps its place', () => {
+    const d = withInstructions({ 1: WATER });
+    d.run = { ...d.run, status: 'SUPERSEDED', supersededAt: '2026-09-25T01:00:00.000Z' };
+    d.loads[0] = { ...d.loads[0], status: 'PLANNED' };
+    const html = renderLoadSheetHtml(loadSheetModel(d, OPTS));
+    const sheet1 = html.slice(html.indexOf('<section class="sheet">'), html.indexOf('</section>'));
+    const head = sheet1.indexOf('<div class="head">');
+    const voidAt = sheet1.indexOf('VOID: a newer plan version exists');
+    const box = sheet1.indexOf('data-kind="loading-instruction"');
+    const notLocked = sheet1.indexOf('NOT LOCKED: this load may still change');
+    expect(head).toBeLessThan(voidAt);
+    expect(voidAt).toBeLessThan(box);
+    expect(box).toBeLessThan(notLocked);
+  });
+
+  it('a 200-character instruction without spaces wraps inside the box (overflow-wrap)', () => {
+    const html = renderLoadSheetHtml(loadSheetModel(withInstructions({ 1: 'X'.repeat(200) }), OPTS));
+    expect(html).toContain('overflow-wrap: anywhere');
+    expect(html).toContain(`<bdi>${'X'.repeat(200)}</bdi>`);
   });
 });

@@ -21,6 +21,9 @@
  * Small truck only (owner request 13 Oct 2026): a customer marked "Small truck only (3-ton)", or the
  * company's "small truck" bays lowered, after planning, while it sits on a PLANNED load whose truck is not
  * small (`outdated.smallTruckBlocked`): LOCK refuses that load (SMALL_TRUCK_ONLY), so RE-PLAN is offered.
+ *
+ * Loading instruction (owner request 16 Oct 2026): the day's customer carries it for the Details dialog only
+ * when it has one, and it never makes the plan out of date (no re-plan is needed for it).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { addDaysIso, todayIso } from '@/lib/dispatch/time';
@@ -423,5 +426,20 @@ describe('day overview: a small-truck-only customer on a PLANNED load whose truc
     expect((await day()).outdated.smallTruckBlocked).toBe(0);
     state.assignments = [on('PLANNED', 5)];
     expect((await day()).outdated).toEqual(UP_TO_DATE);
+  });
+});
+
+describe("day overview: a customer's loading instruction (owner request 16 Oct 2026)", () => {
+  const withText = (loadingInstruction: string | null) => ({ ...order(10, 10000), customer: { ...customer, loadingInstruction } });
+  const on = (status: string) => ({ orderId: 'O1', portionLinesJson: null, portionWeightKg: 10000, stopSnapshotJson: null, load: { status, truck: { bays: 12 } } });
+
+  it('the Details dialog opens with it (only when set: the day reads as before without one); it never makes the plan out of date', async () => {
+    state.orders = [withText('Water at the bottom, max 5 layers')];
+    state.assignments = [on('PLANNED')];
+    const d = await day();
+    expect(d.customers.map((c) => c.loadingInstruction)).toEqual(['Water at the bottom, max 5 layers']);
+    expect(d.outdated).toEqual(UP_TO_DATE);
+    state.orders = [withText(null)];
+    expect((await day()).customers.every((c) => !('loadingInstruction' in c))).toBe(true);
   });
 });

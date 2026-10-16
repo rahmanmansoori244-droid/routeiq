@@ -99,6 +99,8 @@ export const POST = withTenantApi(
         phone: input.phone,
         // Owner request 13 Oct 2026: small trucks only (3-ton); lib/dispatch/small-truck.ts.
         smallTruckOnly: input.smallTruckOnly ?? false,
+        // Owner request 16 Oct 2026: the warehouse's loading instruction (checked by the schema, loading-instruction.ts).
+        loadingInstruction: input.loadingInstruction,
         active: input.active ?? true,
       },
     });

@@ -9,6 +9,7 @@
  */
 import { createHash } from 'node:crypto';
 import type { LoadSheet, LoadSheetModel, ReturnNote, ReturnNoteModel, SheetHead } from './warehouse-sheets';
+import { customerRef, SPECIAL_LOADING_HEADING, SPECIAL_LOADING_ROW_TAG, specialLoadingLead, stopsText } from './loading-instruction';
 
 export function esc(s: string | number | null | undefined): string {
   return String(s ?? '')
@@ -59,7 +60,22 @@ bdi { unicode-bidi: isolate; }
 }
 `;
 
-function page(title: string, body: string, count: string): string {
+/**
+ * The SPECIAL LOADING box (owner request 16 Oct 2026): it must stand out on a black-and-white print with
+ * "background graphics" off, so it uses a thick border and large bold text, never shading. Added to the
+ * page only when a sheet has such a box: a page without one is exactly what it was before.
+ */
+const INSTRUCTION_CSS = `
+.instr { border: 4px solid #000; padding: 6px 10px 8px; margin: 6px 0 8px; overflow-wrap: anywhere; }
+.instr-h { font-size: 22pt; font-weight: 700; letter-spacing: 0.06em; line-height: 1.15; }
+.instr-sub { font-size: 10.5pt; font-weight: 700; }
+.instr ul { margin: 4px 0 0 20px; padding: 0; }
+.instr li { font-size: 13pt; font-weight: 700; margin-top: 4px; }
+.instr-stop { border: 2px solid #000; padding: 0 4px; white-space: nowrap; }
+@media print { .instr { break-inside: avoid; } }
+`;
+
+function page(title: string, body: string, count: string, extraCss = ''): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -67,7 +83,7 @@ function page(title: string, body: string, count: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>${esc(title)}</title>
-<style>${CSS}</style>
+<style>${CSS}${extraCss}</style>
 </head>
 <body>
 <div class="bar"><button type="button" id="print">Print</button><span>${esc(count)} · A4 portrait · one page per truck load</span></div>
@@ -93,6 +109,16 @@ function headCells(h: SheetHead, rows: [string, string][]): string {
 const voidBanner = (h: SheetHead) =>
   h.superseded ? `<div class="banner">VOID: a newer plan version exists. Do not load or check from this paper - print it again from the plan in use.</div>` : '';
 
+/** The SPECIAL LOADING box of one load sheet; '' without instructions. Every value escaped, names and texts isolated (<bdi>). */
+function instructionBox(s: LoadSheet): string {
+  const list = s.loadingInstructions ?? [];
+  if (!list.length) return '';
+  const items = list
+    .map((i) => `<li><span class="instr-stop">${esc(stopsText(i.stops))}</span> <bdi>${esc(i.customerName)}</bdi> (${esc(customerRef(i))}): <bdi>${esc(i.text)}</bdi></li>`)
+    .join('');
+  return `<div class="instr" data-kind="loading-instruction"><div class="instr-h">${esc(SPECIAL_LOADING_HEADING)}</div><div class="instr-sub">${esc(specialLoadingLead(list.length))}</div><ul>${items}</ul></div>\n`;
+}
+
 function loadSheetHtml(h: SheetHead, s: LoadSheet): string {
   const products = s.products
     .map((p) => `<tr><td>${esc(p.productCode)}</td><td>${esc(p.productName)}</td><td class="n">${p.cases}</td><td class="box"></td></tr>`)
@@ -102,12 +128,15 @@ function loadSheetHtml(h: SheetHead, s: LoadSheet): string {
       (i) =>
         `<tr><td class="n">${i.stop}</td><td><b>${esc(i.invoiceNo)}</b></td><td>${customer(i.customerName, i.customerCode, i.branchCode)}${
           i.split ? `<br><span class="muted">split delivery: ${esc(i.split)}</span>` : ''
-        }${i.smallTruck ? `<br><small><b>${esc(i.smallTruck)}</b></small>` : ''}${i.carried ? `<br><b>${esc(i.carried)}</b>` : ''}</td><td>${i.lines.map((l) => `${esc(l.productCode)} × ${l.cases}`).join('<br>')}</td><td class="n">${i.cases}</td><td class="box"></td></tr>`,
+        }${i.smallTruck ? `<br><small><b>${esc(i.smallTruck)}</b></small>` : ''}${i.loadingInstruction ? `<br><b>${esc(SPECIAL_LOADING_ROW_TAG)}</b>` : ''}${i.carried ? `<br><b>${esc(i.carried)}</b>` : ''}</td><td>${i.lines.map((l) => `${esc(l.productCode)} × ${l.cases}`).join('<br>')}</td><td class="n">${i.cases}</td><td class="box"></td></tr>`,
     )
     .join('');
+  // Owner request 16 Oct 2026: the SPECIAL LOADING box right under the title; on a VOID paper after the
+  // VOID banner, so what is read first there is still "do not load from this paper" (review L3).
+  const box = instructionBox(s);
   return `<section class="sheet">
 <h1>LOAD SHEET · ${esc(s.truckCode)} · trip ${s.trip} of ${s.trips}</h1>
-${headCells(h, [
+${h.superseded ? '' : box}${headCells(h, [
   ['Status', s.statusText],
   ['Driver', s.driverName ?? 'not set'],
   ['Helper(s)', s.helpers ?? 'none'],
@@ -118,7 +147,7 @@ ${headCells(h, [
   ['Invoices', String(s.invoices.length)],
 ])}
 ${voidBanner(h)}
-${s.notLocked ? `<div class="banner">NOT LOCKED: this load may still change. Load only after the plan is locked.</div>` : ''}
+${h.superseded ? box : ''}${s.notLocked ? `<div class="banner">NOT LOCKED: this load may still change. Load only after the plan is locked.</div>` : ''}
 ${s.matches ? '' : `<div class="banner">The product total and the invoice total differ: ask the dispatcher before loading.</div>`}
 ${
   s.carriedAway > 0
@@ -144,7 +173,8 @@ ${
 
 export function renderLoadSheetHtml(m: LoadSheetModel): string {
   const body = m.sheets.map((s) => loadSheetHtml(m, s)).join('\n');
-  return page(m.title, body, `${m.sheets.length} load sheet${m.sheets.length === 1 ? '' : 's'}`);
+  const boxes = m.sheets.some((s) => s.loadingInstructions?.length);
+  return page(m.title, body, `${m.sheets.length} load sheet${m.sheets.length === 1 ? '' : 's'}`, boxes ? INSTRUCTION_CSS : '');
 }
 
 function returnNoteHtml(h: SheetHead, r: ReturnNote): string {

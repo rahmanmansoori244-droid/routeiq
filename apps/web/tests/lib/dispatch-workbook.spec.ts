@@ -3,11 +3,12 @@
  * fixture (plan-detail-fixture.ts), loads it back with exceljs and checks what the warehouse and
  * dispatcher rely on.
  */
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 import { buildDispatchWorkbook, kgCheck, loadSheetName, planRules, SHEETS, solverRules, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
-import { fixture, LONG_TRUCK } from './plan-detail-fixture';
+import { busyFixture, fixture, LONG_TRUCK } from './plan-detail-fixture';
 
 const META: WorkbookMeta = {
   tenantName: 'NMWC Test',
@@ -644,5 +645,77 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     expect(text(td.getCell(row.row, 6))).toBe('day rate');
     const noteCol = find(td, (t) => t === 'Note')!.col;
     expect(text(td.getCell(row.row, noteCol))).toContain('driver at the day rate of 10 OMR (paid with its first load; no hours, no overtime)');
+  });
+});
+
+describe('the loading instruction on the Excel load sheet (owner request 16 Oct 2026)', () => {
+  const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+  const WATER = 'Water at the bottom, max 5 layers';
+  /** The fixture's (invented) customer names of L1 stops 1 and 2. */
+  const [C1, C2] = fixture().loads[0].stops.map((s) => s.customerName);
+  /** Every sheet's cells (value, font, alignment, format), row heights and merged ranges, as one text. */
+  async function dump(d: PlanDetail): Promise<string> {
+    const wb = await render(d, { tenantName: 'NMWC Test', currency: 'OMR', generatedAt: new Date('2026-09-24T13:05:00.000Z'), generatedBy: 'Planner One', assumptions: { Timezone: 'Asia/Muscat' } });
+    return JSON.stringify(
+      wb.worksheets.map((ws) => {
+        const rows: unknown[] = [];
+        ws.eachRow({ includeEmpty: true }, (row, r) => {
+          const cs: unknown[] = [];
+          row.eachCell({ includeEmpty: false }, (c, col) => cs.push([col, c.value, c.font ?? null, c.alignment ?? null, c.numFmt ?? null]));
+          rows.push([r, row.height ?? null, cs]);
+        });
+        return { name: ws.name, merges: (ws.model as { merges?: string[] }).merges ?? [], rows };
+      }),
+    );
+  }
+
+  it('a day without instructions: every sheet of the workbook is what it was before the feature (pinned at 76fcb57)', async () => {
+    // SHA-256 of every cell, row height and merge as main wrote them on 16 Oct 2026 before this feature, for
+    // the plain fixture and one with every other mark (VOID, brought forward, cancelled, small truck, split).
+    // If a later change alters the workbook on purpose, replace the hash with the one the failure shows.
+    expect(sha(await dump(fixture()))).toBe('6164bc30f0d18d544c97e0760afd0c7e18b4cfe6fe8cfbb5268a30b85c0cbfbe');
+    expect(sha(await dump(busyFixture()))).toBe('d133ebe191e00e5a7cae772029152ba091087d6c8ae4a2bdd57a5ef1229b6a63');
+  });
+
+  it('one boxed SPECIAL LOADING row above LOADING MANIFEST, and "Loading: ..." in the stop notes; the rest of the sheet moves down one row', async () => {
+    const d = fixture();
+    d.loads[0].stops[1] = { ...d.loads[0].stops[1], loadingInstruction: WATER };
+    const ws = sheet(await render(d), 'T01 - L1');
+    const plainWs = sheet(await render(fixture()), 'T01 - L1');
+    const manifest = find(ws, (t) => t === 'LOADING MANIFEST', 1)!;
+    const plainManifest = find(plainWs, (t) => t === 'LOADING MANIFEST', 1)!;
+    expect(manifest.row).toBe(plainManifest.row + 1);
+    const r = manifest.row - 1;
+    expect(text(ws.getCell(r, 1))).toBe('SPECIAL LOADING');
+    expect(ws.getCell(r, 1).font).toMatchObject({ bold: true, size: 14 });
+    expect(text(ws.getCell(r, 4))).toBe(`Stop 2 ${C2} (C002): ${WATER}`);
+    expect(ws.getCell(r, 4).font).toMatchObject({ bold: true, size: 12 });
+    expect(ws.getCell(r, 4).alignment).toMatchObject({ wrapText: true });
+    // A thick black box around the row (it prints in black and white).
+    expect(ws.getCell(r, 1).border).toMatchObject({ top: { style: 'thick' }, bottom: { style: 'thick' }, left: { style: 'thick' } });
+    expect(ws.getCell(r, 21).border).toMatchObject({ top: { style: 'thick' }, right: { style: 'thick' } });
+    expect((ws.model as { merges?: string[] }).merges).toEqual(expect.arrayContaining([`A${r}:C${r}`, `D${r}:U${r}`]));
+    // The stop's notes say it too; the stop without one does not.
+    const route = find(ws, (t) => t === 'DELIVERY ROUTE', 1)!;
+    const notesCol = 19;
+    expect(text(ws.getCell(route.row + 1, notesCol))).toBe('Notes');
+    // Rows after the heading: the depot, stop 1, stop 2.
+    expect(text(ws.getCell(route.row + 4, notesCol))).toContain(`Loading: ${WATER}`);
+    expect(text(ws.getCell(route.row + 3, notesCol))).not.toContain('Loading:');
+    // Everything below the new row is the same as before, one row lower (the notes aside, checked above).
+    const below = (w: ExcelJS.Worksheet, from: number) => cells(w).filter((c) => c.row >= from && c.col !== notesCol).map((c) => [c.row - from, c.col, c.text]);
+    expect(below(ws, manifest.row)).toEqual(below(plainWs, plainManifest.row));
+    // The other load sheets have no such row.
+    expect(find(sheet(await render(d), 'T01 - L2'), (t) => t === 'SPECIAL LOADING')).toBeUndefined();
+  });
+
+  it('two customers with instructions: one row, both lines; a stop with every order cancelled is left out', async () => {
+    const d = fixture();
+    d.loads[0].stops = d.loads[0].stops.map((s) => ({ ...s, loadingInstruction: s.sequence === 1 ? 'Pallets first' : WATER }));
+    let ws = sheet(await render(d), 'T01 - L1');
+    expect(find(ws, (t) => t.startsWith('Stop 1 '), 4)!.text).toBe(`Stop 1 ${C1} (C001 / B1): Pallets first | Stop 2 ${C2} (C002): ${WATER}`);
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], cancelled: true, cancelledOrderIds: ['o1'] };
+    ws = sheet(await render(d), 'T01 - L1');
+    expect(find(ws, (t) => t.startsWith('Stop'), 4)!.text).toBe(`Stop 2 ${C2} (C002): ${WATER}`);
   });
 });

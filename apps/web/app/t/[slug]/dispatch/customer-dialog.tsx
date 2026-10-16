@@ -6,12 +6,14 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { api, CUSTOMER_TYPES } from './client-api';
 import type { CustomerDeliveryStats } from '@/lib/delivery/customer-stats';
 import { measuredServiceValue } from '@/lib/delivery/measured';
 import { CUSTOMER_PHONE_RULE } from '@/lib/dispatch/customer-phone';
 import { SMALL_TRUCK_FIELD_LABEL } from '@/lib/dispatch/small-truck';
+import { LOADING_INSTRUCTION_FIELD_LABEL, LOADING_INSTRUCTION_MAX } from '@/lib/dispatch/loading-instruction';
 import { detailsFormOf, detailsPatch, EMPTY_DETAILS, type DetailsCustomer, type DetailsForm } from './customer-details';
 
 export interface EditableCustomer extends DetailsCustomer {
@@ -38,7 +40,8 @@ const SERVICE_DEFAULT_TEXT: Record<string, string> = { TYPE: 'customer type defa
 
 /**
  * Confirm priority / type / service time / receiving hours, and the phone the driver calls before
- * arrival (owner request 12 Oct 2026). Saved on the customer master.
+ * arrival (owner request 12 Oct 2026), and the warehouse's loading instruction (owner request 16 Oct
+ * 2026). Saved on the customer master.
  *
  * Audit F07 (owner decision 9, customer-details.ts): times are checked strictly (HH:MM), unloading
  * time is whole minutes or blank (= the default, not confirmed), and Save sends only what the
@@ -230,6 +233,29 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
             </label>
             <p className="text-xs text-muted-foreground">
               The unloading area takes small trucks only: the planner sends only trucks with at most the bays set in Settings (Small truck = at most N bays), and LOCK refuses this customer on a bigger truck. Re-plan after changing it.
+            </p>
+          </div>
+          {/* Owner request 16 Oct 2026: how the warehouse must load this customer's orders (lib/dispatch/loading-instruction.ts). */}
+          <div className="col-span-2 space-y-1">
+            <div className="flex items-baseline justify-between gap-2">
+              <Label htmlFor="cd-loading">{LOADING_INSTRUCTION_FIELD_LABEL}</Label>
+              <span className="text-xs text-muted-foreground" data-testid="loading-instruction-count">
+                {(form.loadingInstruction ?? '').length}/{LOADING_INSTRUCTION_MAX}
+              </span>
+            </div>
+            <Textarea
+              id="cd-loading"
+              rows={2}
+              maxLength={LOADING_INSTRUCTION_MAX}
+              className="min-h-0"
+              placeholder="e.g. Load this customer's cases last, at the back door; at most 5 layers"
+              value={form.loadingInstruction ?? ''}
+              onChange={(e) => set('loadingInstruction')(e.target.value)}
+              data-testid="loading-instruction"
+            />
+            <p className="text-xs text-muted-foreground">
+              Printed in a SPECIAL LOADING box at the top of the warehouse load sheet, the driver sheet and the Excel load sheet of every load with this customer, and shown on the plan screen.
+              Keep it short. English prints on every sheet (the driver sheet cannot print Arabic letters). Empty = none. No re-plan needed: print the sheets again after a change.
             </p>
           </div>
         </div>
