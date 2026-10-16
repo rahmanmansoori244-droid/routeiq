@@ -294,11 +294,14 @@ def _rental_day():
 
 
 def _model_digest(m) -> str:
-    """Everything PyVRP prices (prizes, vehicle types, depots, matrices) and its penalty bounds."""
+    """Everything PyVRP prices (prizes, vehicle types, depots, matrices) and its penalty bounds. The
+    duration matrices (PvModel.dur, one per profile since 16 Oct 2026) of a day without small-truck-only
+    limits are one array for every profile, exactly what problem_data passed before: digested once."""
     import hashlib
 
+    assert len(m.dur) == len(m.dist) and all(x is m.dur[0] for x in m.dur)
     d = dict(clients=m.clients, vtypes=m.vehicle_types, depots=m.depots, max_penalty=m.max_penalty, mode=m.penalty_mode,
-             dist=[x.tolist() for x in m.dist], dur=m.dur.tolist())
+             dist=[x.tolist() for x in m.dist], dur=m.dur[0].tolist())
     return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -378,6 +381,194 @@ def test_days_without_trucks_to_rent_keep_exactly_the_same_model_and_penalties(d
     tds, solvable, _, mx = _prepared(r)
     m = PV.build_model(r, solvable, tds, mx)
     assert (m.penalty_mode, m.max_penalty, _model_digest(m)) == _NO_RENTAL_MODELS[day]
+
+
+# ---------------------------------------------------------------------------------------------
+# Small-truck-only customers (allowed_truck_ids): one profile per truck class, forbidden arcs
+# ---------------------------------------------------------------------------------------------
+
+def _limited_day(allowed=("SM1",), every=4, **kw):
+    """nmwc_day(20)'s stops with every ``every``-th one for ``allowed`` only (a small-truck-only customer),
+    two big trucks alike and two small trucks alike in everything but what they may carry. Without the
+    lists the cheaper big trucks carry those stops (test_allowed_trucks: the second search on such a day)."""
+    stops, _ = nmwc_day(20)
+    stops = [s.model_copy(update={"allowed_truck_ids": list(allowed), "allowed_trucks_label": "a small truck"}) if k % every == 0
+             else s for k, s in enumerate(stops)]
+    trucks = [truck("BIG1", cap=800, cost_per_km=0.10), truck("BIG2", cap=800, cost_per_km=0.10),
+              truck("SM1", cap=300, cost_per_km=0.15, max_trips=3), truck("SM2", cap=300, cost_per_km=0.15, max_trips=3)]
+    return req(stops, trucks, **kw)
+
+
+def _without_lists(r):
+    return r.model_copy(update={"stops": [s.model_copy(update={"allowed_truck_ids": None, "allowed_trucks_label": None})
+                                          for s in r.stops]})
+
+
+def _assert_same_model(a, b) -> None:
+    """Field by field: what PyVRP gets and what the mapping back uses."""
+    assert (a.clients, a.vehicle_types, a.type_trucks, a.depots, a.coords) == (b.clients, b.vehicle_types, b.type_trucks, b.depots,
+                                                                               b.coords)
+    assert (a.max_penalty, a.penalty_mode, a.start_low, a.summary) == (b.max_penalty, b.penalty_mode, b.start_low, b.summary)
+    assert len(a.dist) == len(b.dist) == len(a.dur) == len(b.dur)
+    assert all(np.array_equal(x, y) for x, y in zip(a.dist, b.dist))
+    assert all(np.array_equal(x, y) for x, y in zip(a.dur, b.dur))
+    assert all(x is a.dur[0] for x in a.dur)  # one shared duration matrix, as problem_data passed before
+
+
+def test_pv_max_value_is_pyvrps():
+    """The forbidden arc is PyVRP's own "no edge" value (pyvrp.Model fills a missing edge with it), the
+    largest a matrix may hold; the forbidden drive is twice the horizon every client's window ends by."""
+    import pyvrp.constants
+
+    assert PV.PV_MAX_VALUE == pyvrp.constants.MAX_VALUE == 2**44
+    assert PV.FORBID_S == 2 * ds.HORIZON_S
+
+
+def test_a_day_without_limits_builds_the_same_model():
+    """A list that decides nothing - every truck of the day on it, or one that leaves out only a truck with
+    no load left today - builds exactly the model of the same day without lists: no profile, type or
+    penalty changes (the golden digests above guard the days without any list)."""
+    every = _limited_day(allowed=("BIG1", "BIG2", "SM1", "SM2"))
+    tds, solvable, _, mx = _prepared(every)
+    free = _without_lists(every)
+    ftds, fsolvable, _, fmx = _prepared(free)
+    _assert_same_model(PV.build_model(every, solvable, tds, mx), PV.build_model(free, fsolvable, ftds, fmx))
+    # Leaves out only BIG2, whose one load is out (frozen): no usable truck is left out.
+    gone = truck("BIG2", cap=800, cost_per_km=0.10, max_trips=1,
+                 frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("07:00"), return_min=hm("09:30"), cases=90)])
+    spent = _limited_day(allowed=("BIG1", "SM1", "SM2"))
+    spent = spent.model_copy(update={"trucks": [gone if t.id == "BIG2" else t for t in spent.trucks]})
+    tds, solvable, _, mx = _prepared(spent)
+    assert not ds._limits_decide(spent, solvable)
+    m = PV.build_model(spent, solvable, tds, mx)
+    free = _without_lists(spent)
+    ftds, fsolvable, _, fmx = _prepared(free)
+    _assert_same_model(m, PV.build_model(free, fsolvable, ftds, fmx))
+    assert "limits" not in m.summary and m.penalty_mode == "DEFAULT"
+
+
+def test_limited_stops_split_types_and_forbid_edges():
+    """Every 4th stop for SM1 only. The trucks that may not carry them (BIG1 and BIG2 alike, SM2) get a
+    profile in which every arc into and out of those stops is PV_MAX_VALUE and every drive into them
+    FORBID_S longer; SM1 keeps the plain profile. SM2 is no longer interchangeable with SM1 (its own vehicle
+    type), so plan_of's "first truck of the type" can never hand such a stop to it. Every other matrix
+    entry, client and vehicle field is the day's model without lists; penalties raised and started low."""
+    r = _limited_day()
+    tds, solvable, _, mx = _prepared(r)
+    m = PV.build_model(r, solvable, tds, mx)
+    free = _without_lists(r)
+    ftds, fsolvable, _, fmx = _prepared(free)
+    f = PV.build_model(free, fsolvable, ftds, fmx)
+    limited = [k for k, s in enumerate(solvable) if s.allowed_truck_ids is not None]
+    assert limited == [0, 4, 8, 12, 16] and [s.stop_id for s in solvable] == [s.stop_id for s in fsolvable]
+    ids = lambda ts: [tds[i].truck.id for i in ts]  # noqa: E731
+    assert [ids(ts) for ts in m.type_trucks] == [["BIG1", "BIG2"], ["SM1"], ["SM2"]]
+    assert [ids(ts) for ts in f.type_trucks] == [["BIG1", "BIG2"], ["SM1", "SM2"]]
+    assert m.summary["limits"] == 5 and m.summary["profiles"] == 3 and f.summary["profiles"] == 2
+    assert m.clients == f.clients and m.depots == f.depots and m.coords == f.coords
+    assert all(set(v) == set(f.vehicle_types[0]) for v in m.vehicle_types)  # no new vehicle field
+    R = len(m.depots) - 1
+    F = [1 + R + k for k in limited]
+    others = [i for i in range(1 + R + len(solvable)) if i not in F]
+    plain = {ids(ts)[0]: (f.dist[v["profile"]], f.dur[v["profile"]]) for v, ts in zip(f.vehicle_types, f.type_trucks)}
+    plain["SM2"] = plain["SM1"]
+    for v, ts in zip(m.vehicle_types, m.type_trucks):
+        D, T = m.dist[v["profile"]], m.dur[v["profile"]]
+        D0, T0 = plain[ids(ts)[0]]
+        if ids(ts) == ["SM1"]:
+            assert np.array_equal(D, D0) and np.array_equal(T, T0)
+            continue
+        assert np.array_equal(D[np.ix_(others, others)], D0[np.ix_(others, others)])
+        assert np.array_equal(T[:, others], T0[:, others])
+        for c in F:
+            assert (np.delete(D[:, c], c) == PV.PV_MAX_VALUE).all() and (np.delete(D[c, :], c) == PV.PV_MAX_VALUE).all()
+            assert D[c, c] == 0 and T[c, c] == 0
+            assert np.array_equal(np.delete(T[:, c], c), np.delete(T0[:, c], c) + PV.FORBID_S)
+    # A visit over a forbidden drive arrives at FORBID_S at the earliest: at least the horizon after every
+    # client's window has ended (time warp: never feasible, whatever the stop's prize).
+    assert PV.FORBID_S >= max(c["tw_late"] for c in m.clients) + ds.HORIZON_S
+    assert (m.penalty_mode, m.start_low) == ("RAISED", True) and m.max_penalty == 10 * max(c["prize"] for c in m.clients)
+    assert m.summary["penalty_start"] == "default" and PV.penalty_params(m).solutions_between_updates == PV.HIRE_PENALTY_UPDATES
+    # The same day with continuity: one profile per truck already, the limits add none.
+    prev = r.model_copy(update={"stops": [s.model_copy(update={"previous_truck_id": "BIG1"}) for s in r.stops],
+                                "config": r.config.model_copy(update={"change_penalty_per_stop": 3.0})})
+    tds, solvable, _, mx = _prepared(prev)
+    mc = PV.build_model(prev, solvable, tds, mx)
+    assert mc.summary["continuity"] is True and mc.summary["profiles"] == len(mc.vehicle_types) == 4
+
+
+def test_the_ceiling_stays_below_2_62_with_limits(monkeypatch):
+    """worst_case counts each forbidden stop's two PV_MAX_VALUE arcs and its FORBID_S drive apart from the
+    allowed maxima: the bound holds a real worst plan - every stop on one big truck's route, over all its
+    forbidden arcs, overloaded and late, priced by PyVRP itself at the ceiling - and stays below 2^62; a
+    scale that cannot fit is ModelTooLarge, as on any day."""
+    import pyvrp
+
+    r = _limited_day()
+    tds, solvable, _, mx = _prepared(r)
+    m = PV.build_model(r, solvable, tds, mx)
+    n_lim = m.summary["limits"]
+    base, per_unit = PV.worst_case(sum(c["prize"] for c in m.clients), m.vehicle_types, m.dist, m.dur, m.clients, m.depots,
+                                   n_limited=n_lim)
+    bound = base + int(m.max_penalty) * per_unit
+    assert bound < 2**62
+    data = PV.problem_data(m)
+    big = next(i for i, ts in enumerate(m.type_trucks) if tds[ts[0]].truck.id == "BIG1")
+    worst = pyvrp.Solution(data, [pyvrp.Route(data, list(range(len(solvable))), big)])
+    assert not worst.is_feasible() and worst.time_warp() >= ds.HORIZON_S and worst.distance() >= 2 * n_lim * PV.PV_MAX_VALUE
+    ce = pyvrp.CostEvaluator([m.max_penalty] * len(m.clients[0]["delivery"]), m.max_penalty, 0)
+    assert 0 < ce.penalised_cost(worst) < bound
+    # The allowed maxima: the forbidden values never set them (the plain day's bound, plus the limits' terms).
+    free = _without_lists(r)
+    ftds, fsolvable, _, fmx = _prepared(free)
+    f = PV.build_model(free, fsolvable, ftds, fmx)
+    fb, fp = PV.worst_case(sum(c["prize"] for c in f.clients), m.vehicle_types, f.dist, f.dur, f.clients, f.depots)
+    n_veh = sum(v["num_available"] for v in m.vehicle_types)
+    assert per_unit == fp + 2 * n_lim * PV.FORBID_S
+    tw = per_unit - sum(sum(c["delivery"]) for c in m.clients)
+    extra_time = sum(v["num_available"] * (v["unit_duration_cost"] + v["unit_overtime_cost"]) * 2 * n_lim * PV.FORBID_S
+                     for v in m.vehicle_types)
+    assert tw > 0 and base == fb + 2 * n_lim * PV.PV_MAX_VALUE * n_veh + extra_time
+    monkeypatch.setattr(ds, "_drop_penalties", lambda values, w: [2**61] * len(values))
+    with pytest.raises(PV.ModelTooLarge):
+        PV.build_model(r, solvable, tds, mx)
+
+
+def test_plan_of_refuses_a_limited_stop_on_a_forbidden_truck():
+    """Defence in depth: whatever PyVRP answers (its routes by vehicle type, or a test plan), a stop on a
+    truck its list leaves out is INVALID_PLAN before any timing; on an allowed truck it maps back."""
+    r = _limited_day()
+    tds, solvable, _, mx = _prepared(r)
+    idx = {td.truck.id: td.idx for td in tds}
+    k = 4
+    assert solvable[k].allowed_truck_ids == ["SM1"] and solvable[1].allowed_truck_ids is None
+    assert PV.plan_of({"plan": {idx["SM1"]: [[k, 1]]}}, tds, solvable) == ({idx["SM1"]: [(k, 1)]}, None)
+    for truck_id in ("BIG1", "BIG2", "SM2"):
+        assert PV.plan_of({"plan": {idx[truck_id]: [[1, k]]}}, tds, solvable) == (None, "INVALID_PLAN"), truck_id
+    m = PV.build_model(r, solvable, tds, mx)
+    vt = {tds[ts[0]].truck.id: i for i, ts in enumerate(m.type_trucks)}
+    answer = dict(type_trucks=m.type_trucks, routes=[dict(vt=vt["BIG1"], trips=[[1], [k]])])
+    assert PV.plan_of(answer, tds, solvable) == (None, "INVALID_PLAN")
+    answer["routes"] = [dict(vt=vt["SM1"], trips=[[k]]), dict(vt=vt["BIG1"], trips=[[1]])]
+    plan, why = PV.plan_of(answer, tds, solvable)
+    assert why is None and plan == {idx["SM1"]: [(k,)], idx["BIG1"]: [(1,)]}
+
+
+def test_limits_over_the_profile_memory_cap_skip_the_second_search(monkeypatch):
+    """The profiles of the trucks' classes are capped like continuity's (CONTINUITY_PROFILE_MB): over it the
+    second search is SKIPPED / ALLOWED_TRUCKS, as when the limits are not modelled - not NOTHING_TO_PLAN nor
+    MODEL_TOO_LARGE (critique L5: LimitsTooLarge is caught first). A day without limits never hits it."""
+    monkeypatch.setattr(PV, "CONTINUITY_PROFILE_MB", 0)
+    r = _limited_day()
+    tds, solvable, _, mx = _prepared(r)
+    with pytest.raises(PV.LimitsTooLarge, match="profiles over 0 MB"):
+        PV.build_model(r, solvable, tds, mx)
+    assert not issubclass(PV.LimitsTooLarge, PV.ModelTooLarge)
+    out = PV.solve_in_worker((r, solvable, tds, mx, _settings()))
+    assert (out["status"], out["reason"]) == ("SKIPPED", "ALLOWED_TRUCKS") and "profiles over" in out["error"]
+    free = _without_lists(r)
+    ftds, fsolvable, _, fmx = _prepared(free)
+    assert PV.build_model(free, fsolvable, ftds, fmx).summary["profiles"] == 2
 
 
 # ---------------------------------------------------------------------------------------------
@@ -967,11 +1158,24 @@ def test_ready_and_the_startup_line(monkeypatch):
     monkeypatch.setattr(main, "SOLVER_TOKEN", "t")
     monkeypatch.setattr(PV, "effective_cpus", lambda: 4)
     monkeypatch.setenv("SOLVER_PYVRP", "on")
+    monkeypatch.delenv("SOLVER_PYVRP_ALLOWED", raising=False)
     from fastapi.testclient import TestClient
 
-    body = TestClient(main.app).get("/ready", headers={"X-Solver-Token": "t"}).json()
-    assert body["pyvrp"] == {"enabled": True, "setting": "on", "version": "0.14.0", "effective_cpus": 4, "min_cpus": 2, "why": None}
-    assert PV.startup_line() == "PyVRP second search: on for every search (pyvrp 0.14.0, effective CPUs 4, min 2)"
+    client = TestClient(main.app)
+    body = client.get("/ready", headers={"X-Solver-Token": "t"}).json()
+    assert body["pyvrp"] == {"enabled": True, "setting": "on", "version": "0.14.0", "effective_cpus": 4, "min_cpus": 2, "why": None,
+                             "allowed": "skip"}
+    # The default (skip) keeps the line it was before SOLVER_PYVRP_ALLOWED; another value says what it does.
+    line = "PyVRP second search: on for every search (pyvrp 0.14.0, effective CPUs 4, min 2)"
+    assert PV.startup_line() == line
+    for value, allowed, tail in (
+            ("model", "model", "; small-truck-only days: modelled (SOLVER_PYVRP_ALLOWED=model)"),
+            (" Thorough ", "thorough", "; small-truck-only days: modelled on Thorough solves (SOLVER_PYVRP_ALLOWED=thorough)"),
+            ("yes", "skip", "; small-truck-only days: skipped (SOLVER_PYVRP_ALLOWED='yes' is not skip, model or thorough)"),
+            ("SKIP", "skip", ""), ("", "skip", "")):
+        monkeypatch.setenv("SOLVER_PYVRP_ALLOWED", value)
+        assert PV.startup_line() == line + tail, value
+        assert client.get("/ready", headers={"X-Solver-Token": "t"}).json()["pyvrp"]["allowed"] == allowed
     monkeypatch.setattr(PV, "effective_cpus", lambda: 1)
     assert PV.startup_line() == "PyVRP second search: off (CPU_GATE: effective CPUs 1 < 2)"
 

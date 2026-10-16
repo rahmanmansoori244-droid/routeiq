@@ -248,6 +248,14 @@ never worse than the engine alone would have chosen from the same search. See `d
   - `SOLVER_PYVRP_MIN_CPUS` (default 2): the CPU gate. Below it the second search switches itself off (`CPU_GATE`).
   - Optional: `SOLVER_PYVRP_SEED` (1), `SOLVER_PYVRP_STOP_GRACE_SEC` (10). Never set `SOLVER_PYVRP_MAX_ITERS` or
     `SOLVER_PYVRP_STALL_SEC` / `SOLVER_PYVRP_STALL_SHARE` on Railway (tests and development only).
+  - `SOLVER_PYVRP_ALLOWED` (16 Oct 2026; default `skip`): a day with a small-truck-only customer whose list leaves out a
+    truck that can still load. `skip` (unset, or any value other than the two below): the second search does not run on
+    such a day (`pyvrp run=<id> skipped: ALLOWED_TRUCKS`), as since 13 Oct 2026. `thorough`: it runs on Thorough solves,
+    with the lists modelled (a routing profile per truck class, the stops a class may not carry forbidden); `model`: on
+    every solve, Quick solves and hire checks included. Its plans are judged like any day's (the mapping back, the exact
+    timing and the independent check refuse a stop on a truck it may not use). It changes the plans of such days: set it
+    only with the owner's OK after a replay of saved real requests, `thorough` first, never during the evening's planning
+    (a variable change restarts the solver).
 - **CPU and memory per solve.** One more busy process while the searches run (Quick: the whole search, about 1.5 x the day's
   search time; Thorough: while the engine searches, then until its last better plan is max(30 s, 10% of its search time)
   old, at most until the load re-check's reserve), and its own load re-check job
@@ -270,8 +278,15 @@ never worse than the engine alone would have chosen from the same search. See `d
   passes on only `ok`, `workers` and `routing`) has `"pyvrp": {"enabled": true, "version": "0.14.0", "effective_cpus": N, ...}`, and N is the vCPU count the
   container really gets. One Quick optimization of a normal day: the solver log shows `pyvrp run=<id> done: stop=SEARCH_END ...`
   and, when its plan was used, the option carries the note *"A second route search found a better plan for this option ..."*.
+  With `SOLVER_PYVRP_ALLOWED` set, the startup line ends `; small-truck-only days: modelled (SOLVER_PYVRP_ALLOWED=model)`
+  (or `modelled on Thorough solves (...=thorough)`; a value it does not understand: `skipped (... is not skip, model or
+  thorough)`), `/ready` has `"pyvrp": {..., "allowed": "model"}`, and the next solve of a day with such a customer logs
+  `pyvrp run=<id> model: ... limits=N` instead of `skipped: ALLOWED_TRUCKS`. A day that also has a stop filling a truck
+  alone under the one-customer rule still logs `skipped: FULL_TRUCK` (checked after the lists; not modelled yet): check
+  how many real days that is on the saved requests (`dispatch_solver._full_truck_day`) before counting on the change.
 - **Rollback:** set `SOLVER_PYVRP=off` (no code change). A full rollback to the previous solver image also works: the web
-  treats a missing `search.pyvrp` as "no second search".
+  treats a missing `search.pyvrp` as "no second search". For small-truck-only days only: set `SOLVER_PYVRP_ALLOWED=skip`
+  (or delete it).
 
 ## The route engine version: OR-Tools pinned (16 Oct 2026)
 

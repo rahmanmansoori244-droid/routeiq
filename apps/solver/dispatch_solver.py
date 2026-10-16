@@ -5195,10 +5195,14 @@ def _pv_start(req: DispatchRequest, solvable: list[DispatchStop], control: Solve
         pv.fail("SKIPPED", why or "OFF", detail)
     elif not solvable:
         pv.fail("SKIPPED", "NOTHING_TO_PLAN")
-    elif _limits_decide(req, solvable):
-        # Owner request 13 Oct 2026: the second search has no per-stop truck limit (PyVRP 0.14 has no allowed
-        # vehicles per client), so a day where one decides something is planned by the engine's own search
-        # alone (SearchReport.pyvrp: SKIPPED / ALLOWED_TRUCKS). The engine and its checks keep the limit.
+    elif _limits_decide(req, solvable) and not PV.limits_modelled(req.config.search_mode):
+        # Owner request 13 Oct 2026: a day where a stop's allowed trucks decide something is planned by the
+        # engine's own search alone (SearchReport.pyvrp: SKIPPED / ALLOWED_TRUCKS) - the default
+        # (SOLVER_PYVRP_ALLOWED=skip). PyVRP 0.14 has no allowed vehicles per client; since 16 Oct 2026 the
+        # second search can model them (pyvrp_candidate.build_model: a routing profile per truck class with
+        # the stops it may not carry forbidden), with SOLVER_PYVRP_ALLOWED=model, or =thorough on Thorough
+        # solves only; its plan is then judged like any day's (plan_of, load_repack.fits_truck, the
+        # independent check's TRUCK_NOT_ALLOWED). The engine and its checks keep the limit either way.
         # Only the trucks that can still take a load count (as in _limited elsewhere): a limit that leaves
         # out only a truck with no trip or hours left today decides nothing, and the second search runs.
         pv.fail("SKIPPED", "ALLOWED_TRUCKS")
