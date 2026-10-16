@@ -183,4 +183,11 @@ export const LIMITS = {
   /** Bursts only: the daily cap per link (3 x the truck-day's stops + 10) is checked by the photo route. */
   driverPhotoBurst: { limit: 60, windowMs: 10 * 60_000 },
   driverPhotoGet: { limit: 120, windowMs: 60_000 },
+  /**
+   * The Ayun webhook (IVMS live link, 16 Oct 2026; lib/ivms/webhook.ts): a wrong path secret is counted
+   * per IP (never an internal or unknown one), and the company's calls per minute are capped (Ayun sends
+   * up to 150 a run). Both answer 429 with Retry-After.
+   */
+  ivmsBadSecret: { limit: 20, windowMs: 10 * 60_000 },
+  ivmsWebhook: { limit: 300, windowMs: 60_000 },
 } as const;

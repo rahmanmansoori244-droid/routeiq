@@ -219,6 +219,21 @@ SELECT d.name, l."fromDate", l."untilDate", c.name AS cover, l.note
 
 ---
 
+## GPS tracking (Ayun, IVMS live link, 16 Oct 2026)
+
+OFF by default: while a company's **GPS tracking mode** (`ivmsMode`, Settings, company admin) is OFF, RouteIQ makes no call to Ayun, writes nothing and shows nothing new; `ROUTEIQ_DISABLE_IVMS=1` stops all of it whatever the setting (the webhook then answers 200 and stores nothing). The code is `apps/web/lib/ivms/`.
+
+- **Set the variables** in Railway (web service; never in the repo, a chat or an e-mail): `AYUN_BASE_URL` (`https://` and the provider's host only), `AYUN_API_KEY` (copied from the Ayun account as plain text), `AYUN_TENANT_SLUG` (the company the Ayun account belongs to), `AYUN_WEBHOOK_SECRET` (32-128 characters of `A-Z a-z 0-9 _ -`, for example `openssl rand -base64 48 | tr '+/' '-_' | tr -d '='`). Optional: `AYUN_API_TIME_OFFSET_MIN` / `AYUN_WEBHOOK_TIME_OFFSET_MIN` when Ayun does not send UTC (Muscat local time: `-240`). Redeploy; the startup log names any variable that is not usable (never its value). Without the first three no call is ever made and the timer does not even start.
+- **Give Ayun the webhook address** `https://<RouteIQ host>/api/ivms/ayun/<AYUN_WEBHOOK_SECRET>`, for the events **Depot IN** and **Depot OUT** only. A wrong or missing secret answers 404. The secret is visible in the platform's HTTP logs and Ayun's panel (the same accepted risk as the driver links); Sentry never sees it.
+- **Switch it on** in steps: MAP (live positions of the trucks with a load out, for the map), then TIMES (history pulls per truck for GPS times). Calls run on their own 15 s timer inside the web process and only for trucks with a tracker (IMEI) and a load LOCKED, LOADING or DISPATCHED on yesterday's or today's plan, between the operating hours (05:00-23:00 by default; after them only while a load is DISPATCHED).
+- **The daily allowance** (`ivmsDailyCallBudget`, today Ayun's 100 a day) is counted per UTC day (04:00 in Muscat) in the database, per class: the map, the history pulls (TIMES), the backstop for missed webhooks (only from 1,000 a day with the webhook set) and the admin's pickers each have their own share, so none can starve another and RouteIQ never makes more calls than the allowance (failed calls count, as Ayun counts them). At 100 a day the map moves about every 11 minutes (MAP) or 19 minutes (TIMES); ask Ayun for more (3,000 a day gives 60 s).
+- **Read the status** at `/api/health` (field `ivms`, only while the link is in use): calls of the day per class and the allowance, webhooks received / ignored / refused for their time, `lastError` (a code), `status`. `LIMIT`: the allowance is used up - no calls until 04:01 Muscat; ask Ayun to raise it. `AUTH`: the key is wrong or revoked - calls pause an hour; set the key again. Other errors back off from a minute up to 15 minutes. `skewSec` near +14400: Ayun sends local time - set the offset (-240). `webhooks.badTime` growing: the webhook offset is wrong.
+- **Rotate the key**: Ayun issues a new key, set `AYUN_API_KEY`, redeploy, Ayun revokes the old one. **Rotate the webhook secret**: set `AYUN_WEBHOOK_SECRET_PREVIOUS` to the old value and a new `AYUN_WEBHOOK_SECRET`, redeploy, give Ayun the new address, then remove `..._PREVIOUS`.
+- **Retention**: the trail is deleted after `ivmsTrailDays` (default 2), a live position as soon as its truck has no load out (all of them when the mode is OFF), the depot moves' positions after the trail days and the moves after the driver-position time. Start fresh removes the GPS rows of the days it removes and keeps the day's call counter.
+- **Turn it off**: mode OFF (immediate), or `ROUTEIQ_DISABLE_IVMS=1` and redeploy.
+
+---
+
 ## Tenant isolation contract
 
 CLAUDE.md §3, §13: every business table has `tenantId`, every query goes through `tenantDb(tenantId)`. The Vitest suite at `apps/web/tests/tenant-isolation.spec.ts` runs on every PR; merge is blocked if it fails.
@@ -241,6 +256,7 @@ If you add a new tenant-scoped model:
 | `/api/products/import` | 60/hr/user | `LIMITS.ordersUpload` (withTenantApi `rateLimitKey: products-import`) |
 | `/api/runs/{id}/baseline` | 60/hr/user | `LIMITS.ordersUpload` |
 | Every optimization start: `/api/dispatch/plan` (optimize), `/api/runs/{id}/replan`, `/api/runs/{id}/optimize` | 15/hr/user and 30/hr/company (429); `SOLVER_MAX_CONCURRENT` (2) at once in total and one less per company; at most 2 waiting per company (then 429 for that company); a full shared queue of 10 answers 503 only to a company that already has one waiting; 200 waiting at most (503) | Solve admission, `lib/dispatch/solve-admission.ts` (stabilization PR3; replaces `LIMITS.optimize`) |
+| `/api/ivms/ayun/{secret}` (Ayun's webhook) | a wrong secret: 20 per 10 min per public IP (404, then 429); 300 calls a minute per company (429) | `LIMITS.ivmsBadSecret`, `LIMITS.ivmsWebhook` |
 | Other authenticated endpoints | none | |
 
 The IP is the proxy-appended one (`TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER`, `lib/client-ip.ts`). Buckets live in memory (one web replica), are swept when they expire and capped in number. `RATE_LIMITS_DISABLED=1` is for test servers only: it is ignored on Railway. Moving to a shared store (Redis) is needed before running more than one web replica.

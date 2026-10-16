@@ -1,0 +1,23 @@
+[
+  {
+    "imei": "111111111111111",
+    "protocol": "example",
+    "active": "true",
+    "name": "Example object A",
+    "plate_number": "0001 EX",
+    "group_name": "Example group",
+    "dt_server": "2026-10-16 06:04:50",
+    "dt_tracker": "2026-10-16 06:04:45",
+    "lat": "10.512345",
+    "lng": "20.523456",
+    "sim_number": "example",
+    "driver_name": "Example driver"
+  },
+  {
+    "imei": "222222222222222",
+    "name": "Example object B",
+    "plate_number": "",
+    "dt_tracker": "0000-00-00 00:00:00"
+  },
+  { "imei": "not-an-imei", "name": "Example object C" }
+]

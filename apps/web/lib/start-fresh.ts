@@ -8,7 +8,8 @@
  * order files, orders and their lines (late orders, Bring forward copies and per-order delivery
  * times are orders too), plan versions with their options, optimization jobs, loads, stops and
  * unserved rows, driver links, delivery results (stops, events, photos), manual comparison
- * baselines, the retired driver app's shifts / positions / proofs, the one-day hired trucks of the
+ * baselines, the retired driver app's shifts / positions / proofs, the GPS tracking rows of the trucks'
+ * trackers (IVMS live link: positions, trail, depot moves; listed only when there are some), the one-day hired trucks of the
  * days in scope (the hire suggestion's "Use this plan", Truck.onlyOnDate: deleted, or retired when a
  * row that stays still names one - review of the hire branch: left behind, they were planned on their
  * date as fleet nobody rented and counted against the option's max per day), and daily (casual)
@@ -16,7 +17,8 @@
  * a leave period - his own or as the cover - stays; leave is never removed). Before a date, an order
  * file without orders goes only when every delivery date in it is before that day.
  * Kept: customers (locations, confirmed hours), products, trucks (own; one-day ones of days that
- * stay), regular drivers, driver leave, depots, regions, users, settings, customer type defaults and
+ * stay; their GPS tracker mapping too), regular drivers, driver leave, depots, regions, users, settings (and
+ * the IVMS call counter of the day), customer type defaults and
  * hire options, and the audit log, which is never deleted: the run adds one TEST_DATA_CLEARED row with
  * the counts and who did it.
  *
@@ -88,6 +90,11 @@ export const START_FRESH_DELETE_ORDER = [
   'stopEvent',
   'stopVisit',
   'driverLink',
+  // IVMS live link (16 Oct 2026): the GPS tracking rows in scope (IvmsState and the tracker mapping stay).
+  'truckTrailPoint',
+  'truckPosition',
+  'ivmsEvent',
+  'ivmsTruckDay',
   'driver',
 ] as const;
 
@@ -440,6 +447,33 @@ async function blockersOf(db: Db, s: Scope, sets: Sets): Promise<StartFreshBlock
   return out;
 }
 
+/**
+ * IVMS live link (16 Oct 2026): the GPS tracking rows in scope. Everything: every row of the company.
+ * Before a date: the trail and the depot moves before that day's local start, the truck-days before it, and
+ * live positions last read before it. IvmsState (the provider's call counter of the day) and the trucks'
+ * tracker mapping are kept: deleting the counter could make RouteIQ go over the provider's allowance.
+ */
+function gpsWhereOf(s: Scope) {
+  const t = s.tenantId;
+  if (!s.beforeDate || !s.dayStart) return { trail: { tenantId: t }, position: { tenantId: t }, event: { tenantId: t }, day: { tenantId: t } };
+  return {
+    trail: { tenantId: t, fixAt: { lt: s.dayStart } },
+    position: { tenantId: t, receivedAt: { lt: s.dayStart } },
+    event: { tenantId: t, eventAt: { lt: s.dayStart } },
+    day: { tenantId: t, deliveryDate: { lt: s.beforeDate } },
+  };
+}
+
+async function gpsRowsInScope(db: Db, s: Scope): Promise<number> {
+  const w = gpsWhereOf(s);
+  return (
+    (await db.truckTrailPoint.count({ where: w.trail })) +
+    (await db.truckPosition.count({ where: w.position })) +
+    (await db.ivmsEvent.count({ where: w.event })) +
+    (await db.ivmsTruckDay.count({ where: w.day }))
+  );
+}
+
 /** What would be removed and kept, read with `db` (inside the run: under its locks). */
 async function collect(db: Db, s: Scope): Promise<{ sets: Sets; report: StartFreshReport }> {
   const t = s.tenantId;
@@ -475,6 +509,7 @@ async function collect(db: Db, s: Scope): Promise<{ sets: Sets; report: StartFre
   const hiredTruckIds = await oneDayTrucksOf(db, s);
   const sets: Sets = { runIds, scenarioIds, orderIds, batchIds, shiftIds, baselineIds, casualIds: casual.removable, hiredTruckIds };
 
+  const gps = await gpsRowsInScope(db, s);
   const removed: StartFreshRemoved = {
     uploadBatches: batchIds.length,
     orders: orderIds.length,
@@ -499,6 +534,7 @@ async function collect(db: Db, s: Scope): Promise<{ sets: Sets; report: StartFre
       shiftIds.length +
       (await countIn(shiftIds, (part) => db.truckLocation.count({ where: { tenantId: t, shiftId: { in: part } } }))) +
       (await countIn(shiftIds, (part) => db.deliveryProof.count({ where: { tenantId: t, shiftId: { in: part } } }))),
+    ...(gps > 0 ? { gpsTracking: gps } : {}),
   };
   const kept: StartFreshKept = {
     customers: await db.customer.count({ where: { tenantId: t } }),
@@ -584,6 +620,13 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<Partial<StartFre
   events += await deleteIn(visitIds, (part) => tx.stopEvent.deleteMany({ where: { tenantId: t, visitId: { in: part } } }));
   const visits = (await tx.stopVisit.deleteMany({ where: dayWhere })).count;
   const links = (await tx.driverLink.deleteMany({ where: dayWhere })).count;
+  // The GPS tracking rows in scope (IVMS live link): none for a company that never used it.
+  const gw = gpsWhereOf(s);
+  const gps =
+    (await tx.truckTrailPoint.deleteMany({ where: gw.trail })).count +
+    (await tx.truckPosition.deleteMany({ where: gw.position })).count +
+    (await tx.ivmsEvent.deleteMany({ where: gw.event })).count +
+    (await tx.ivmsTruckDay.deleteMany({ where: gw.day })).count;
 
   // 4. One-day hired trucks of the days in scope, read again here (a truck rented since the check
   // goes too): deleted, or retired while a row that stays names one.
@@ -611,6 +654,7 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<Partial<StartFre
     hiredTrucks: hired.deleted + hired.retired,
     baselines,
     oldDriverApp: shifts + positions + proofs,
+    ...(gps > 0 ? { gpsTracking: gps } : {}),
   };
 }
 
@@ -662,6 +706,8 @@ export async function runStartFresh(
       }
       const done = await removeAll(tx, s, sets);
       const result: StartFreshReport = { ...report, removed: { ...report.removed, ...done } };
+      // The preview counted GPS rows and the run found none left (the janitor's retention got there first).
+      if (result.removed.gpsTracking !== undefined && done.gpsTracking === undefined) result.removed.gpsTracking = 0;
       await audit(
         {
           tenantId,

@@ -203,6 +203,10 @@ const EXPECTED: Record<string, string> = {
   'POST /api/hire-options': 'TENANT_ADMIN',
   'PATCH /api/hire-options/[id]': 'TENANT_ADMIN',
   'DELETE /api/hire-options/[id]': 'TENANT_ADMIN',
+  // IVMS live link (16 Oct 2026): the Ayun webhook, authenticated by the secret in its path
+  // (lib/ivms/webhook-auth.ts); 404 while no secret is set, 200 and nothing stored while the mode is OFF.
+  'GET /api/ivms/ayun/[secret]': 'TOKEN',
+  'POST /api/ivms/ayun/[secret]': 'TOKEN',
   'POST /api/locations/parse': 'PLANNER',
   'GET /api/orders': 'ANY',
   'GET /api/orders/[batchId]': 'ANY',

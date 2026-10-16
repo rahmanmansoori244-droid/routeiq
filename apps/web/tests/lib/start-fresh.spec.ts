@@ -229,6 +229,8 @@ function seedCompany(tenantId: string, p: string) {
   push('customerTypeProfile', [{ id: `${p}ctp` }]);
   // The hire suggestion: no check running (a running one refuses the run).
   tables.hireSuggestion ??= [];
+  // IVMS live link (16 Oct 2026): the GPS tracking tables exist, empty (a company that never used the link).
+  for (const m of ['truckTrailPoint', 'truckPosition', 'ivmsEvent', 'ivmsTruckDay']) tables[m] ??= [];
 }
 
 const MASTERS = ['tenant', 'tenantConfig', 'user', 'depot', 'region', 'customer', 'product', 'truck', 'customerTypeProfile'];
@@ -691,5 +693,58 @@ describe('run: only before a date', () => {
     // Everything removes them all.
     await run(null);
     expect(idsOf('uploadBatch', 'a')).toEqual([]);
+  });
+});
+
+describe('GPS tracking rows (IVMS live link, 16 Oct 2026)', () => {
+  /** Trail points, a live position, depot moves and truck-days of one company: before and after 4 Oct (Muscat). */
+  function gps(tenantId: string, p: string) {
+    const add = (m: string, rows: Row[]) => (tables[m] = [...(tables[m] ?? []), ...rows.map((r) => ({ tenantId, truckId: `${p}gt`, ...r }))]);
+    add('truckTrailPoint', [
+      { id: `${p}tp3`, fixAt: new Date('2026-10-03T05:00:00Z') },
+      { id: `${p}tp5`, fixAt: new Date('2026-10-05T05:00:00Z') },
+    ]);
+    add('truckPosition', [{ id: `${p}pos`, receivedAt: new Date('2026-10-05T05:00:00Z') }]);
+    add('ivmsEvent', [
+      { id: `${p}ev3`, eventAt: new Date('2026-10-03T05:00:00Z') },
+      { id: `${p}ev5`, eventAt: new Date('2026-10-05T05:00:00Z') },
+    ]);
+    add('ivmsTruckDay', [
+      { id: `${p}td3`, deliveryDate: day('2026-10-03') },
+      { id: `${p}td5`, deliveryDate: day('2026-10-05') },
+    ]);
+    tables.ivmsState = [...(tables.ivmsState ?? []), { id: `${p}st`, tenantId, mapCalls: 7 }];
+  }
+  const gpsIds = (p: string) => ['truckTrailPoint', 'truckPosition', 'ivmsEvent', 'ivmsTruckDay', 'ivmsState'].flatMap((m) => idsOf(m, p)).sort();
+
+  it('a company that never used the link: preview, summary and audit row exactly as before (no GPS line)', async () => {
+    const p = await preview(null);
+    expect(p.removed).not.toHaveProperty('gpsTracking');
+    const r = await run(null);
+    expect(r.removed).not.toHaveProperty('gpsTracking');
+    expect(tables.auditLog!.filter((a) => a.tenantId === 'tA').at(-1)!.afterJson.removed).not.toHaveProperty('gpsTracking');
+  });
+
+  it('everything: every GPS row of the company goes and is counted; the call counter of the day and the other company stay', async () => {
+    gps('tA', 'a');
+    gps('tB', 'b');
+    const p = await preview(null);
+    expect(p.removed.gpsTracking).toBe(7);
+    expect(startFreshTotal(p.removed)).toBe(startFreshTotal({ ...p.removed, gpsTracking: 0 }) + 7);
+    const r = await run(null, { shown: startFreshShown(p) });
+    expect(r.removed.gpsTracking).toBe(7);
+    expect(gpsIds('a')).toEqual(['ast']);
+    expect(gpsIds('b')).toEqual(['bev3', 'bev5', 'bpos', 'bst', 'btd3', 'btd5', 'btp3', 'btp5']);
+    expect(tables.auditLog!.filter((a) => a.tenantId === 'tA').at(-1)!.afterJson.removed.gpsTracking).toBe(7);
+  });
+
+  it('before a date: only the rows before that day\'s start; more GPS rows since the check never refuse the run (PREVIEW_STALE)', async () => {
+    gps('tA', 'a');
+    const p = await preview('2026-10-04');
+    expect(p.removed.gpsTracking).toBe(3); // the trail point, the move and the truck-day of the 3rd
+    tables.truckTrailPoint!.push({ id: 'atp3b', tenantId: 'tA', truckId: 'agt', fixAt: new Date('2026-10-03T06:00:00Z') });
+    const r = await run('2026-10-04', { shown: startFreshShown(p) });
+    expect(r.removed.gpsTracking).toBe(4);
+    expect(gpsIds('a')).toEqual(['aev5', 'apos', 'ast', 'atd5', 'atp5']);
   });
 });

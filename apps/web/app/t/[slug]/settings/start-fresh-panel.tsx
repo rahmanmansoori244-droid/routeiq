@@ -15,6 +15,7 @@ import {
   START_FRESH_KEPT,
   START_FRESH_LIVE_TICK,
   START_FRESH_PREVIEW_MAX_AGE_MS,
+  START_FRESH_GPS_LABEL,
   START_FRESH_REMOVED,
   startFreshConfirmMatches,
   startFreshHasLive,
@@ -22,6 +23,7 @@ import {
   startFreshScopeText,
   startFreshShown,
   startFreshTotal,
+  type StartFreshRemoved,
   type StartFreshReport,
 } from '@/lib/start-fresh-text';
 
@@ -214,7 +216,7 @@ export function StartFreshPanel({ slug }: { slug: string }) {
               </p>
             ) : null}
             <div className="grid gap-4 md:grid-cols-2">
-              <CountTable title="Will be removed" rows={START_FRESH_REMOVED.map((r) => ({ label: r.label, value: preview.removed[r.key], sub: 'sub' in r && r.sub }))} tone="remove" />
+              <CountTable title="Will be removed" rows={removedRows(preview.removed)} tone="remove" />
               <CountTable title="Kept" rows={keptRows(preview)} tone="keep" note={START_FRESH_ALSO_KEPT} />
             </div>
 
@@ -266,12 +268,18 @@ export function StartFreshPanel({ slug }: { slug: string }) {
               fresh)&quot; row.
             </p>
             {doneLive ? <p className="font-medium text-destructive">{doneLive}</p> : null}
-            <CountTable title="Removed" rows={START_FRESH_REMOVED.map((r) => ({ label: r.label, value: done.removed[r.key], sub: 'sub' in r && r.sub }))} tone="remove" hideZero />
+            <CountTable title="Removed" rows={removedRows(done.removed)} tone="remove" hideZero />
           </div>
         ) : null}
       </CardContent>
     </Card>
   );
+}
+
+/** The removed counts as the panel lists them; the GPS tracking line only when the report has one (IVMS live link). */
+function removedRows(removed: StartFreshRemoved): { label: string; value: number; sub?: boolean }[] {
+  const rows = START_FRESH_REMOVED.map((r) => ({ label: r.label, value: removed[r.key], sub: 'sub' in r && r.sub }));
+  return removed.gpsTracking === undefined ? rows : [...rows, { label: START_FRESH_GPS_LABEL, value: removed.gpsTracking }];
 }
 
 function CountTable({

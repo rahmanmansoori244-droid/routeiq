@@ -30,6 +30,8 @@ import { completeReturnedLoads } from '@/lib/delivery/event-service';
 import { runDeliveryJanitor } from '@/lib/jobs/delivery-janitor';
 import { failLostHireChecks, retireOneDayTrucks } from '@/lib/dispatch/hire-whatif';
 import { janitorAuthorized } from '@/lib/janitor-auth';
+import { runIvmsTick } from '@/lib/ivms/poll';
+import { runIvmsRetention } from '@/lib/ivms/retention';
 
 export const dynamic = 'force-dynamic';
 
@@ -45,7 +47,14 @@ async function runJanitor() {
   const deliveryRetention = await runDeliveryJanitor(new Date(), { force: true });
   // The hire suggestion: what-ifs lost with their process; one-day hired trucks whose day is over.
   const hire = { lostChecks: await failLostHireChecks(), oneDayTrucksRetired: await retireOneDayTrucks() };
-  return { jobs, shifts, returnedLoads, deliveryRetention, hire };
+  // IVMS live link (16 Oct 2026): one tick now (`force` skips the wait only while the allowance is ample)
+  // and the GPS retention. Both null - and the answer exactly as before - while the link is not in use
+  // (no AYUN_* variables, the kill switch, ivmsMode OFF, no GPS data).
+  const now = new Date();
+  const ivmsTick = await runIvmsTick(now, { force: true });
+  const ivmsRetention = await runIvmsRetention(now, { force: true });
+  const ivms = ivmsTick || ivmsRetention ? { tick: ivmsTick, retention: ivmsRetention } : null;
+  return { jobs, shifts, returnedLoads, deliveryRetention, hire, ...(ivms ? { ivms } : {}) };
 }
 
 export async function POST(req: Request) {

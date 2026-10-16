@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { emailDeliveryConfigured } from '@/lib/password-reset';
 import { checkDispatchReadiness, overallReadiness, solverField } from '@/lib/health';
+import { ivmsHealth } from '@/lib/ivms/status';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -33,8 +34,17 @@ async function checkDb(): Promise<'up' | 'down'> {
  * routing.status !== 'up' instead; without email, tenant admins reset passwords on the Users
  * screen ("Reset password", POST /api/users/:id/reset-password).
  */
+/** The IVMS live link's counters: null (and no field) while the link is not in use. Never changes the status. */
+async function ivmsField() {
+  try {
+    return await ivmsHealth();
+  } catch {
+    return null;
+  }
+}
+
 export async function GET() {
-  const [db, dispatch] = await Promise.all([checkDb(), checkDispatchReadiness()]);
+  const [db, dispatch, ivms] = await Promise.all([checkDb(), checkDispatchReadiness(), ivmsField()]);
   const { status, httpStatus } = overallReadiness(db, dispatch);
   const email = emailDeliveryConfigured() ? 'configured' : 'not_configured';
   return NextResponse.json(
@@ -46,6 +56,9 @@ export async function GET() {
       dispatch: { status: dispatch.status, reason: dispatch.reason, message: dispatch.message },
       routing: dispatch.routing,
       email,
+      // IVMS live link (16 Oct 2026): calls and webhooks of the provider's day, the last error's kind;
+      // only while the link is in use (AYUN_* variables set and the company's ivmsMode not OFF).
+      ...(ivms ? { ivms } : {}),
     },
     { status: httpStatus, headers: { 'Cache-Control': 'no-store' } },
   );

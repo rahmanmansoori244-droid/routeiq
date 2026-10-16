@@ -13,8 +13,31 @@
 
 /** /d/<token> -> /d/[token]; /api/d/... is left alone (those paths carry no token). */
 export function scrubDriverToken(text: string): string {
-  if (typeof text !== 'string' || !text.includes('/d/')) return text;
-  return text.replace(/(\/api)?\/d\/([A-Za-z0-9_-]+)/g, (m: string, api: string | undefined) => (api ? m : '/d/[token]'));
+  if (typeof text !== 'string') return text;
+  const t = scrubIvmsSecrets(text);
+  if (!t.includes('/d/')) return t;
+  return t.replace(/(\/api)?\/d\/([A-Za-z0-9_-]+)/g, (m: string, api: string | undefined) => (api ? m : '/d/[token]'));
+}
+
+/**
+ * IVMS live link (16 Oct 2026): the Ayun webhook's path secret (/api/ivms/ayun/<secret> ->
+ * /api/ivms/ayun/[secret]) and the Ayun API key in the provider's query string (an api.php address, or a
+ * query string with api=user: key=<key> -> key=[redacted]; Sentry's own fetch breadcrumbs and spans would
+ * carry it). Only strings with those markers change.
+ */
+export function scrubIvmsSecrets(text: string): string {
+  if (typeof text !== 'string') return text;
+  let t = text;
+  if (t.includes('/api/ivms/ayun/')) t = t.replace(/\/api\/ivms\/ayun\/[^/?#\s"'<>]+/g, '/api/ivms/ayun/[secret]');
+  // A span may carry the query string alone ("api=user&key=...&cmd=..."), without the address.
+  if (t.includes('api.php') || t.includes('api=user')) t = t.replace(/((?:^|[?&]|&amp;)key=)[^&#\s"'<>]*/gi, '$1[redacted]');
+  return t;
+}
+
+/** The Ayun webhook path (its secret is in it): never traced, like the driver paths. */
+export function isIvmsWebhookPath(s: string | null | undefined): boolean {
+  if (!s) return false;
+  return /^\/api\/ivms\/ayun(\/|$)/.test(pathOf(s));
 }
 
 /** The path of a URL, a "GET /d/x" transaction name or a bare path. */
@@ -65,7 +88,7 @@ export function driverTracesSampler(rate: number) {
       ctx.location?.pathname,
       (globalThis as { location?: { pathname?: string } }).location?.pathname,
     ];
-    return candidates.some((c) => typeof c === 'string' && isDriverPath(c)) ? 0 : rate;
+    return candidates.some((c) => typeof c === 'string' && (isDriverPath(c) || isIvmsWebhookPath(c))) ? 0 : rate;
   };
 }
 
