@@ -325,7 +325,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
         departedAt: iso(v.departedAt),
         departureGap,
         departedAtOutcome: v.departedAtOutcome,
-        departureNote: departureNote(v.departedAtOutcome, departureGap),
+        departureNote: departureNote(v.departedAtOutcome, departureGap, v.departureSource),
         actualMin: actual.min,
         actualLabel: actual.label,
         plannedMin: v.plannedServiceMin ?? s.plannedServiceMin,

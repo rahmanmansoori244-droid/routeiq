@@ -1726,6 +1726,10 @@ model IvmsTruckDay {
   suppressedAt   DateTime? @db.Timestamptz(3)
   /// lib/ivms/types.ts IVMS_SUPPRESS_REASONS: UNDO | MISMATCH | REMAP (database CHECK).
   suppressReason String?
+  /// What the stop detector saw but must not write by itself (lib/ivms/stops.ts StopAmbiguity and
+  /// notes, review H4): a fact for the office, never a time. A JSON array, at most 8 KB (CHECK);
+  /// rewritten by each detector run (migration 20261016210000_ivms_gps_facts).
+  gpsFactsJson   Json?
 
   @@unique([tenantId, truckId, deliveryDate])
   @@index([tenantId, deliveryDate])

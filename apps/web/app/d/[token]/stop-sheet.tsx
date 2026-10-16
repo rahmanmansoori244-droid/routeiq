@@ -130,7 +130,11 @@ export function StopSheet({
               <p className="flex items-center gap-2 text-lg font-bold" data-testid="timer-running">
                 <Timer className="h-6 w-6 text-blue-700" aria-hidden /> {t(lang, 'arrivedTimer', { time: time(v.arrivedAt), mm: minutesSince(v.arrivedAt, now) })}
               </p>
-              {!v.arrivalObserved ? <p className="text-sm text-slate-600">{t(lang, 'arrivedFound', { time: time(v.arrivedAt) })}</p> : null}
+              {v.arrivalByGps ? (
+                <p className="text-sm text-slate-600">{t(lang, 'arrivedGps')}</p>
+              ) : !v.arrivalObserved ? (
+                <p className="text-sm text-slate-600">{t(lang, 'arrivedFound', { time: time(v.arrivedAt) })}</p>
+              ) : null}
               <p className="text-sm text-slate-600">{t(lang, 'keepOpen')}</p>
             </>
           ) : (

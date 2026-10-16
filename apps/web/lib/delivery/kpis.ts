@@ -9,8 +9,9 @@
  * - A stop is a dispatched stop (a stop of a DISPATCHED or COMPLETED load of the plan in use); a stop
  *   without a result counts as delivered elsewhere (Bring forward) but is "no result" here.
  * - On time: only arrivals that were OBSERVED (an automatic arrival the page saw, a manual or office
- *   arrival, Ayun later) and not flagged as unverified timing, at a stop with a window; an early
- *   arrival that waits for the window counts as inside; an open end is unbounded.
+ *   arrival, an observed GPS arrival at a stop with a Delivered or Partly result) and not flagged as
+ *   unverified timing, at a stop with a window; an early arrival that waits for the window counts as
+ *   inside; an open end is unbounded.
  * - Results saved without a photo (owner decision 2, 5 Oct 2026): the driver's own Delivered / Partly
  *   saved with "Camera not working" or whose named photo never arrived, counted from the driver's facts
  *   (an office correction keeps them), their share of the delivered results, and the truck-days
@@ -92,10 +93,15 @@ export function inOutcomeScope(dateIso: string, sinceLocalDate: string | null, t
 
 const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 1000) / 10 : null);
 
-/** Arrival source kinds whose time the office can trust as "when the truck was there". */
-export function arrivalIsObserved(v: Pick<KpiVisit, 'arrivedAt' | 'arrivalSource' | 'arrivalObserved' | 'timingSuspect'>): boolean {
+/**
+ * Arrival source kinds whose time the office can trust as "when the truck was there". A GPS arrival
+ * (AYUN, IVMS live link) only at a stop where goods were handed over (Delivered or Partly): a truck
+ * stopped near a shop it never served must not count as on time (review M3).
+ */
+export function arrivalIsObserved(v: Pick<KpiVisit, 'arrivedAt' | 'arrivalSource' | 'arrivalObserved' | 'timingSuspect'> & { outcome?: string | null }): boolean {
   if (!v.arrivedAt || !v.arrivalSource || v.timingSuspect) return false;
-  if (v.arrivalSource === 'PHONE_AUTO' || v.arrivalSource === 'AYUN') return v.arrivalObserved;
+  if (v.arrivalSource === 'AYUN') return v.arrivalObserved && (v.outcome === 'DELIVERED' || v.outcome === 'PARTLY_DELIVERED');
+  if (v.arrivalSource === 'PHONE_AUTO') return v.arrivalObserved;
   return v.arrivalSource === 'PHONE_MANUAL' || v.arrivalSource === 'DISPATCHER';
 }
 

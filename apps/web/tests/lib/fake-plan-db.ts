@@ -240,7 +240,27 @@ function delegate(model: string) {
       tables[model] = keep;
       return { count: n };
     },
+    // A compound unique key (tenantId_truckId_deliveryDate: {...}) is read as its fields.
+    upsert: async (a: Row) => {
+      const where = uniqueWhere(a.where);
+      const r = t().find((x) => match(x, where));
+      if (r) {
+        Object.assign(r, a.update);
+        return { ...r };
+      }
+      return { ...create({ ...where, ...a.create }) };
+    },
   };
+}
+
+/** A `where` with a compound unique key (`a_b: { a, b }`) flattened to its fields. */
+function uniqueWhere(where: Row): Row {
+  const out: Row = {};
+  for (const [k, v] of Object.entries(where ?? {})) {
+    if (k.includes('_') && v !== null && typeof v === 'object' && !(v instanceof Date)) Object.assign(out, v);
+    else out[k] = v;
+  }
+  return out;
 }
 
 const MODELS = [
@@ -257,6 +277,8 @@ const MODELS = [
   'driverLeave',
   // Helpers (owner request 13 Oct 2026): the company's helpers and the helpers on each load.
   'helper', 'planLoadHelper',
+  // IVMS live link (16 Oct 2026): the GPS trail, depot moves, per-company state and truck-days, live positions.
+  'truckTrailPoint', 'ivmsEvent', 'ivmsState', 'ivmsTruckDay', 'truckPosition',
 ];
 
 export const fakePrisma: Row = {};

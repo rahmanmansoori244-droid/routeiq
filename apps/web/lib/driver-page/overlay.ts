@@ -43,6 +43,8 @@ export interface StopView {
   editable: boolean;
   carriedTo: string | null;
   by: 'DRIVER' | 'OFFICE' | null;
+  /** The arrival shown is the truck's GPS tracker's (IVMS live link); absent otherwise. */
+  arrivalByGps?: true;
 }
 
 export type OverlayStop = ManifestStop & { view: StopView };
@@ -154,8 +156,11 @@ function stopView(s: ManifestStop, l: ManifestLoad, mine: QueueItem[], localPhot
     editable: r ? r.editable : l.status === 'DISPATCHED',
     carriedTo: r?.carriedTo ?? null,
     by: r?.by ?? null,
+    ...(r?.arrivalByGps === true && r.arrivedAt ? { arrivalByGps: true as const } : {}),
   };
-  if (firstArrival && base.arrivedAt === null) {
+  // The phone's own unsent arrival replaces a GPS one (the driver's arrival wins over the tracker's).
+  if (firstArrival && (base.arrivedAt === null || base.arrivalByGps)) {
+    delete base.arrivalByGps;
     base.arrivedAt = ms(firstArrival.at);
     base.arrivalObserved = firstArrival.observed !== false;
     base.state = base.outcome ? 'DONE' : 'ARRIVED';
@@ -177,10 +182,14 @@ function stopView(s: ManifestStop, l: ManifestLoad, mine: QueueItem[], localPhot
   return base;
 }
 
-/** The stop in progress for restoreTracker: a server ARRIVED stop or an unsent arrival without a result. */
+/**
+ * The stop in progress for restoreTracker: a server ARRIVED stop or an unsent arrival without a result.
+ * Never a stop whose only arrival is the truck's GPS tracker's (IVMS live link, review M4): the phone's
+ * timer keeps looking for the stop itself, so its own (more precise) arrival is not suppressed.
+ */
 export function stopInProgress(loads: readonly OverlayLoad[], loadKey: string): { key: string; arrivedAt: number; observed: boolean } | null {
   const l = loads.find((x) => x.key === loadKey);
-  const s = l?.stops.find((x) => x.view.state === 'ARRIVED' && x.view.arrivedAt !== null && x.view.doneAt === null);
+  const s = l?.stops.find((x) => x.view.state === 'ARRIVED' && x.view.arrivedAt !== null && x.view.doneAt === null && !x.view.arrivalByGps);
   return s ? { key: s.key, arrivedAt: s.view.arrivedAt!, observed: s.view.arrivalObserved } : null;
 }
 
