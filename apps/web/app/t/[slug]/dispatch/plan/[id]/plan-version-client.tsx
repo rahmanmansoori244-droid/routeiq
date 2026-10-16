@@ -12,6 +12,7 @@ export function PlanVersionClient({
   canEditProducts,
   phoneCountryCode,
   dayHref,
+  loadedAction = false,
 }: {
   slug: string;
   runId: string;
@@ -20,6 +21,8 @@ export function PlanVersionClient({
   canEditProducts: boolean;
   phoneCountryCode: string | null;
   dayHref: string;
+  /** Operations alerts on with the loading rule (R2): offer Loaded next to Dispatch. */
+  loadedAction?: boolean;
 }) {
   const router = useRouter();
   return (
@@ -35,6 +38,7 @@ export function PlanVersionClient({
         canResetStuck={canDispatch}
         canEditProducts={canEditProducts}
         phoneCountryCode={phoneCountryCode}
+        loadedAction={loadedAction}
         onChanged={(newRunId) => {
           if (newRunId && newRunId !== runId) router.push(`/t/${slug}/dispatch/plan/${newRunId}`);
         }}

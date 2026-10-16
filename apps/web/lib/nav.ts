@@ -14,6 +14,7 @@ import {
   UserCog,
   LifeBuoy,
   Route,
+  Bell,
   type LucideIcon,
 } from 'lucide-react';
 import type { Role } from '@prisma/client';
@@ -33,6 +34,8 @@ const DISPATCHER_UP: Role[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'PLA
 
 export const NAV_ITEMS: NavItem[] = [
   { href: (s) => `/t/${s}/dispatch`, label: 'Daily dispatch', icon: Route, rolesAllowed: ALL_ROLES },
+  // Operations alerts (owner request 16 Oct 2026): every role reads them; the dispatcher and up acknowledge.
+  { href: (s) => `/t/${s}/alerts`, label: 'Alerts', icon: Bell, rolesAllowed: ALL_ROLES },
   { href: (s) => `/t/${s}`, label: 'Dashboard', icon: LayoutDashboard, rolesAllowed: ALL_ROLES, exact: true },
   { href: (s) => `/t/${s}/depots`, label: 'Depots', icon: Warehouse, rolesAllowed: ALL_ROLES },
   { href: (s) => `/t/${s}/trucks`, label: 'Trucks', icon: Truck, rolesAllowed: ALL_ROLES },

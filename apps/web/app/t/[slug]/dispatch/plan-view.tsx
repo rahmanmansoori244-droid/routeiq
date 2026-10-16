@@ -22,7 +22,8 @@ import { fuelKpi } from '@/lib/dispatch/summary';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { CANCELLED_BADGE, cancelledLoadText } from '@/lib/dispatch/order-cancel-rules';
-import { fmtDayMonth } from '@/lib/dispatch/time';
+import { DEFAULT_TZ, fmtDayMonth, fmtHhmm, localMinutes } from '@/lib/dispatch/time';
+import { canMarkLoaded, LOADED_PATCH } from '@/lib/alerts/view';
 import { hiredLoadBadgeTitle } from '@/lib/dispatch/hire';
 import { casualDriverPlan, casualDriverToast } from '@/lib/dispatch/casual-driver-words';
 import { breakLine, breakTimes } from '@/lib/dispatch/break-text';
@@ -135,9 +136,15 @@ interface Props {
    * without it (the standalone plan version page) the plan's own today is used (PlanDetail.today).
    */
   today?: string;
+  /**
+   * Operations alerts (16 Oct 2026): offer **Loaded** next to Dispatch on a Loading load. Only while the
+   * company has alerts on with the loading rule (R2) on: otherwise nothing reads it and the day screen
+   * stays as it was (lib/alerts/view.ts loadedActionOn).
+   */
+  loadedAction?: boolean;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today, loadedAction = false }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -413,6 +420,28 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
         await load();
         await onChanged?.();
+      },
+      failed,
+    );
+  }
+
+  /**
+   * Operations alerts (owner request 16 Oct 2026, rule R2 "loading over N min"): the warehouse finished
+   * loading this truck. Not a status: the load stays Loading until Dispatch. Pressing Loading is the start.
+   */
+  function markLoaded(l: DetailLoad) {
+    return runPlanAction(
+      lock,
+      l.id,
+      async () => {
+        const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: LOADED_PATCH });
+        if (!r.ok) {
+          toast.error(r.error ?? 'Could not mark the load as loaded.');
+          await load();
+          return;
+        }
+        toast.success(`${l.truckCode} Load ${l.loadNo}: loaded`);
+        await load();
       },
       failed,
     );
@@ -1264,6 +1293,12 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                       <Badge variant={STATUS_VARIANT[l.status] ?? 'outline'} data-testid={`load-status-${l.truckCode}-${l.loadNo}`}>
                         {l.status}
                       </Badge>
+                      {/* Operations alerts (16 Oct 2026): the warehouse pressed Loaded (the end of loading, rule R2). */}
+                      {l.status === 'LOADING' && l.loadedAt ? (
+                        <Badge variant="success" className="ml-1" data-testid={`load-loaded-${l.truckCode}-${l.loadNo}`} title="The warehouse pressed Loaded: loading this truck is finished">
+                          Loaded {fmtHhmm(localMinutes(new Date(l.loadedAt), d.timezone || DEFAULT_TZ))}
+                        </Badge>
+                      ) : null}
                       {l.carried ? <span className="ml-1 text-xs text-muted-foreground">kept</span> : null}
                       {l.carriedAway ? (
                         <Badge
@@ -1373,6 +1408,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           timingBlocked={gateOn && !!l.timing && !l.timing.ok}
                           noDriver={!l.driverId}
                           onStatus={(st) => setStatus(l, st)}
+                          onLoaded={loadedAction ? () => markLoaded(l) : undefined}
                         />
                       ) : null}
                     </td>
@@ -1818,8 +1854,11 @@ function LoadActions({
   timingBlocked,
   noDriver = false,
   onStatus,
+  onLoaded,
 }: {
   l: DetailLoad;
+  /** Operations alerts (rule R2): the warehouse pressed Loaded (PATCH { loaded: true }); absent = no button. */
+  onLoaded?: () => void;
   /** Owner rule 20: Dispatch is off until the load has a driver (the server refuses it too: 409 DRIVER_REQUIRED). */
   noDriver?: boolean;
   busy: boolean;
@@ -1859,6 +1898,23 @@ function LoadActions({
     out.push(b('Loading', 'LOADING', <PackageCheck className="mr-1 h-3 w-3" />, canFreeze, timingTitle));
   }
   if (l.status === 'LOADING' && canPlan) out.push(b('Back to locked', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
+  if (onLoaded && canMarkLoaded(l, canPlan)) {
+    out.push(
+      <Button
+        key="LOADED"
+        size="sm"
+        variant="outline"
+        className="h-7 px-2 text-xs"
+        disabled={busy}
+        title="The warehouse finished loading this truck (the Loading press was the start). The load stays Loading until Dispatch."
+        onClick={onLoaded}
+        data-testid={`act-LOADED-${l.truckCode}-${l.loadNo}`}
+      >
+        <CheckCircle2 className="mr-1 h-3 w-3" />
+        Loaded
+      </Button>,
+    );
+  }
   if ((l.status === 'LOCKED' || l.status === 'LOADING') && canDispatch) {
     out.push(b('Dispatch', 'DISPATCHED', <Send className="mr-1 h-3 w-3" />, canFreeze && !noDriver, timingTitle ?? (noDriver ? DISPATCH_NEEDS_DRIVER : undefined)));
   }

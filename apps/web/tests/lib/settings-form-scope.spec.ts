@@ -11,7 +11,7 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: () => {}, push:
 vi.mock('sonner', () => ({ toast: { success: () => {}, error: () => {} } }));
 
 import { SettingsForm } from '@/app/t/[slug]/settings/settings-form';
-import { DISPATCHER_SETTINGS_FIELDS, SETTINGS_FIELDS, withFirstDeparture, type EditableConfig } from '@/lib/settings-fields';
+import { ALERT_DETAIL_FIELDS, ALERT_SETTINGS_FIELDS, DISPATCHER_SETTINGS_FIELDS, SETTINGS_FIELDS, withFirstDeparture, type EditableConfig } from '@/lib/settings-fields';
 
 const config = {
   shiftStartMin: 420, driverShiftMaxMinutes: 660, overtimeAfterMin: 540, driverBreakMinutes: 60, driverBreakFromMin: 720,
@@ -72,5 +72,64 @@ describe('Settings as the dispatcher', () => {
     expect(card(on)).toMatch(/Only a company admin can switch this rule/);
     expect(card(on)).not.toMatch(/The dispatcher can change these/);
     expect(render('DISPATCHER')).toMatch(/data-testid="data-rule-state"[^>]*>[^<]*Off/);
+  });
+});
+
+describe('Settings > Operations alerts (owner request 16 Oct 2026)', () => {
+  const alertConfig = (on: boolean) =>
+    ({
+      ...config,
+      alertsEnabled: on,
+      alertUnloadOverMin: 30,
+      alertLoadingOverMin: null,
+      alertEtaLateMin: 30,
+      alertDepartLateMin: 30,
+      alertSilentMin: 120,
+      alertPageNotOpenedMin: 30,
+      alertAfterClosingMin: 15,
+      alertPriorityMax: 2,
+      alertDeliveredNote: true,
+      alertProofFarM: 500,
+      alertNotClosedMin: 120,
+      alertEmails: null,
+      alertEmailEveryMin: 15,
+      alertEmailMinSeverity: 'HIGH',
+      alertQuietFromMin: 1320,
+      alertQuietToMin: 360,
+    }) as unknown as EditableConfig;
+  const renderAlerts = (scope: 'ADMIN' | 'DISPATCHER', on: boolean, emailConfigured = false) =>
+    renderToStaticMarkup(
+      createElement(SettingsForm, {
+        initial: { tenant: { name: 'T', country: 'Oman', currency: 'OMR', primaryUnit: 'CASES' }, config: alertConfig(on) } as never,
+        effective: [],
+        profiles: [],
+        scope,
+        emailConfigured,
+      }),
+    );
+
+  it('the dispatcher sees none of it (the API refuses every alert field: ADMIN_ONLY_SETTING)', () => {
+    const html = renderAlerts('DISPATCHER', true);
+    for (const k of ALERT_SETTINGS_FIELDS) expect(html, k).not.toContain(`id="${k}"`);
+    expect(html).not.toContain('data-testid="alert-settings"');
+  });
+
+  it('the admin: the master switch; the rules and the e-mail only while it is on', () => {
+    const off = renderAlerts('ADMIN', false);
+    expect(off).toContain('id="alertsEnabled"');
+    for (const k of ALERT_DETAIL_FIELDS) expect(off, k).not.toContain(`id="${k}"`);
+    const on = renderAlerts('ADMIN', true);
+    for (const k of ALERT_DETAIL_FIELDS) expect(on, k).toContain(`id="${k}"`);
+    // Loading (R2) is off by default: its number is empty and disabled, the others hold their defaults.
+    expect(on).toMatch(/id="alertLoadingOverMin"[^>]*disabled=""[^>]*value=""|disabled=""[^>]*id="alertLoadingOverMin"/);
+    expect(on).toMatch(/id="alertUnloadOverMin"[^>]*value="30"|value="30"[^>]*id="alertUnloadOverMin"/);
+  });
+
+  it('says when the server cannot send e-mail, and offers the test e-mail only with saved recipients', () => {
+    expect(renderAlerts('ADMIN', true, false)).toContain('Email is not set up on the server (RESEND_API_KEY and RESEND_FROM): alerts show in RouteIQ only.');
+    const ready = renderAlerts('ADMIN', true, true);
+    expect(ready).not.toContain('data-testid="alert-email-not-configured"');
+    expect(ready).toMatch(/<button[^>]*disabled=""[^>]*data-testid="alert-test-email"/);
+    expect(ready).toContain('Save at least one recipient first.');
   });
 });

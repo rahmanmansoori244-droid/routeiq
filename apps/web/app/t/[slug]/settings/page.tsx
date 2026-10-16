@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db';
 import { PageShell } from '@/components/page-shell';
 import { effectivePlannerValues } from '@/lib/dispatch/planner-config';
 import { DISPATCHER_SETTINGS_FIELDS, SETTINGS_FIELDS, type EditableConfig } from '@/lib/settings-fields';
+import { plainEmailConfigured } from '@/lib/email';
 import { SettingsForm } from './settings-form';
 import { StartFreshPanel } from './start-fresh-panel';
 
@@ -44,6 +45,8 @@ export default async function SettingsPage({ params }: { params: { slug: string 
       <SettingsForm
         scope={admin ? 'ADMIN' : 'DISPATCHER'}
         dataRuleOn={cfg.requireDataBeforeLoading}
+        // Operations alerts: the "Email is not set up on the server" note and the test e-mail button.
+        emailConfigured={admin && plainEmailConfigured()}
         initial={{
           tenant: {
             name: tenant.name,
