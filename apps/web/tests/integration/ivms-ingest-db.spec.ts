@@ -35,7 +35,8 @@ let depotId = '';
 let truckA = '';
 let truckB = '';
 let otherTruck = '';
-const env = () => ivmsTestEnv({ AYUN_TENANT_SLUG: slug });
+/** The poller's variables, without a webhook secret: no backstop call joins the ones under test. */
+const env = () => ivmsTestEnv({ AYUN_TENANT_SLUG: slug, AYUN_WEBHOOK_SECRET: undefined });
 
 beforeAll(async () => {
   tenantId = (await prisma.tenant.create({ data: { slug, name: `IVMS ingest ${slug}`, country: 'Oman' } })).id;
