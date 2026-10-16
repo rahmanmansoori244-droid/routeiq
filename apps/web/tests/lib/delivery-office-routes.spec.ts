@@ -200,6 +200,35 @@ describe('POST /api/dispatch/outcomes: the dispatcher records a result', () => {
 describe('GET /api/runs/<id>/outcomes: the results on the plan', () => {
   beforeEach(() => seed());
 
+  describe('the turnaround at the depot before a later trip (owner decision 16 Oct 2026: rule R2 from the driver taps)', () => {
+    const local = (hhmm: string) => new Date(zonedDayStart(D, TZ).getTime() + (Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3))) * 60_000);
+    const loadEvent = (kind: string, loadNo: number, hhmm: string) => ({
+      id: `${kind}-${loadNo}-${hhmm}`, tenantId: T, depotId: 'DA', deliveryDate: day(D), truckId: 'T5', loadNo, sequence: null, visitId: null, kind, source: 'PHONE_MANUAL', at: local(hhmm), receivedAt: local(hhmm), idempotencyKey: `dl:${kind}-${loadNo}-${hhmm}`,
+    });
+    const trip2 = (over: Record<string, unknown> = {}) =>
+      tables.planLoad.push({ id: 'L2', tenantId: T, runId: 'P1', truckId: 'T5', loadNo: 2, status: 'LOADING', departMin: 900, returnMin: 1100, driverId: 'dr1', breakJson: null, statusChangedAt: local('13:30'), ...over });
+
+    it('Back at depot of L1 to the Leaving for next load tap on L2: on L2 only, with both times and the minutes', async () => {
+      trip2();
+      tables.stopEvent.push(loadEvent('BACK_AT_DEPOT', 1, '13:20'), loadEvent('DEPOT_DEPART', 2, '14:08'));
+      const o = await overlay();
+      expect(Object.keys(o.turnarounds)).toEqual(['L2']);
+      expect(o.turnarounds.L2).toEqual({ afterLoadNo: 1, backAt: local('13:20').toISOString(), leftAt: local('14:08').toISOString(), how: 'TAP', tapLate: false, minutes: 48, final: true, line: 'back 13:20, left 14:08, 48 min' });
+    });
+
+    it('no tap: the Dispatch press after Back at depot stands in (named); still at the depot: the minutes so far; no Back at depot: nothing', async () => {
+      trip2({ status: 'DISPATCHED', statusChangedAt: local('14:15') });
+      tables.stopEvent.push(loadEvent('BACK_AT_DEPOT', 1, '13:20'));
+      expect((await overlay()).turnarounds.L2).toMatchObject({ how: 'DISPATCH', minutes: 55, final: true, line: 'back 13:20, left 14:15 (Dispatch press), 55 min' });
+      row('planLoad', 'L2').status = 'LOCKED';
+      const waiting = (await overlay()).turnarounds.L2;
+      expect(waiting).toMatchObject({ leftAt: null, how: null, final: false });
+      expect(waiting.line).toMatch(/^back 13:20, not left yet, \d+ h( \d\d min)? so far$/);
+      tables.stopEvent = [];
+      expect((await overlay()).turnarounds).toEqual({});
+    });
+  });
+
   it('progress, the result with its notes, unloading planned / actual, the no-result list of a load that is back', async () => {
     await post(record({ arrivedAt: '08:10', departedAt: '08:35' }));
     const o = await overlay();

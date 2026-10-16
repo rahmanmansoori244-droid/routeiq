@@ -68,6 +68,7 @@ function overlay(stops: Record<string, OverlayStop>, loads: Record<string, strin
     lockWarnings: {},
     cameraExceptions: [],
     cameraAlerts: [],
+    turnarounds: {},
   };
 }
 

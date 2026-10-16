@@ -23,6 +23,7 @@ const net = vi.hoisted(() => ({
   summaries: [] as unknown[],
   list: null as unknown,
   plan: null as unknown,
+  outcomes: null as unknown,
   ack: { acked: 1 } as unknown,
 }));
 vi.mock('@/app/t/[slug]/dispatch/client-api', async (importActual) => {
@@ -37,7 +38,7 @@ vi.mock('@/app/t/[slug]/dispatch/client-api', async (importActual) => {
       if (url.startsWith('/api/alerts?')) return ok(structuredClone(net.list));
       if (url.endsWith('/plan')) return ok(structuredClone(net.plan));
       if (url === '/api/drivers' || url === '/api/helpers') return ok([]);
-      if (url.endsWith('/outcomes')) return ok(null);
+      if (url.endsWith('/outcomes')) return ok(structuredClone(net.outcomes));
       return ok({});
     },
   };
@@ -113,6 +114,7 @@ beforeEach(() => {
   net.summaries = [];
   net.list = null;
   net.plan = null;
+  net.outcomes = null;
   net.ack = { acked: 1 };
   toasts.error = [];
   toasts.success = [];
@@ -316,6 +318,51 @@ describe('no warehouse Loaded button (owner decision of 16 Oct 2026: R2 is measu
     expect(byTestId(host.tree, 'load-loaded-T01-1')).toEqual([]);
     const locked = await mountPlan(() => {});
     expect(buttonsOf(locked, 'T01', 1).map((b) => b.label)).toEqual(['Unlock', 'Loading', 'Dispatch']);
+  });
+});
+
+describe('the turnaround on the load row (owner decision 16 Oct 2026: rule R2 from the driver taps)', () => {
+  const overlayWith = (turnarounds: Record<string, unknown>) => ({
+    runId: 'run1', date: '2026-10-16', depotId: 'dep1', tz: 'Asia/Muscat', loads: {}, stops: {}, summary: {}, noOutcome: [], copyConflicts: {}, lockWarnings: {}, cameraExceptions: [], cameraAlerts: [], turnarounds,
+  });
+  async function mount(turnarounds: Record<string, unknown>) {
+    const d = fixture() as any;
+    d.loads[0].status = 'COMPLETED';
+    d.loads[1].status = 'LOADING';
+    net.plan = d;
+    net.outcomes = overlayWith(turnarounds);
+    const host: Host<any> = new Host(PlanView as any, { slug: 'example', runId: 'run1', canPlan: true, canDispatch: true, phoneCountryCode: '968', reloadSignal: 0, onBusyChange: () => {}, onChanged: async () => {} });
+    host.render();
+    await host.settle();
+    // The results are read after the plan: let that answer arrive too.
+    await host.settle();
+    return host;
+  }
+
+  /** The rendered line of a load row (TurnaroundLine rendered on its own host), or null without one. */
+  function lineOf(host: Host<any>, tag: string) {
+    const el = elements(host.tree).find((e) => typeName(e) === 'TurnaroundLine' && e.props.tag === tag);
+    if (!el) return null;
+    const sub: Host<any> = new Host(el.type, el.props);
+    sub.render();
+    return elements(sub.tree).find((e) => e.props?.['data-testid'] === `load-turnaround-${tag}`) ?? null;
+  }
+
+  it('the trip after the first shows back, left and the minutes when known; a fallback is named; none on the first trip', async () => {
+    const host = await mount({ L2: { afterLoadNo: 1, backAt: '2026-10-16T07:20:00.000Z', leftAt: '2026-10-16T08:08:00.000Z', how: 'TAP', tapLate: false, minutes: 48, final: true, line: 'back 11:20, left 12:08, 48 min' } });
+    const el = lineOf(host, 'T01-2')!;
+    expect(textOf(el)).toBe('After L1: back 11:20, left 12:08, 48 min');
+    expect(el.props.title).toBe("Time at the depot between L1 and this trip: from the driver's Back at depot to the driver's Leaving for next load.");
+    expect(lineOf(host, 'T01-1')).toBeNull();
+    const fallback = await mount({ L2: { afterLoadNo: 1, backAt: '2026-10-16T07:20:00.000Z', leftAt: '2026-10-16T08:25:00.000Z', how: 'DISPATCH', tapLate: false, minutes: 65, final: true, line: 'back 11:20, left 12:25 (Dispatch press), 1 h 05 min' } });
+    expect(lineOf(fallback, 'T01-2')!.props.title).toContain('the Dispatch press (the driver did not tap Leaving for next load)');
+  });
+
+  it('while the truck is still at the depot: the minutes so far; nothing when the server knows no turnaround', async () => {
+    const waiting = await mount({ L2: { afterLoadNo: 1, backAt: '2026-10-16T07:20:00.000Z', leftAt: null, how: null, tapLate: false, minutes: 25, final: false, line: 'back 11:20, not left yet, 25 min so far' } });
+    expect(textOf(lineOf(waiting, 'T01-2'))).toBe('After L1: back 11:20, not left yet, 25 min so far');
+    const none = await mount({});
+    expect(lineOf(none, 'T01-2')).toBeNull();
   });
 });
 

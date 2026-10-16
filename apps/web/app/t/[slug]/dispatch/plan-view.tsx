@@ -54,7 +54,7 @@ import { CasualDriverDialog, type CasualDriverAnswer, type CasualDriverBody } fr
 import { LoadHelpersCell, type HelperOption } from './load-helpers-picker';
 import { helperClashes, helpersText } from '@/lib/dispatch/load-helpers';
 import type { ApiResult } from './client-api';
-import type { OutcomeOverlay, OverlayPhoto, OverlayStop } from '@/lib/delivery/outcome-view';
+import type { LoadTurnaround, OutcomeOverlay, OverlayPhoto, OverlayStop } from '@/lib/delivery/outcome-view';
 import { officeTimesPrefill } from '@/lib/delivery/office-text';
 import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
 import { PhotoViewer } from './photo-viewer';
@@ -1323,6 +1323,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         </Badge>
                       ) : null}
                       {ON_ROAD.has(l.status) && overlay?.loads[l.id] ? <LoadProgress o={overlay.loads[l.id]!} tag={`${l.truckCode}-${l.loadNo}`} tz={overlay.tz} /> : null}
+                      {overlay?.turnarounds?.[l.id] ? <TurnaroundLine t={overlay.turnarounds[l.id]!} tag={`${l.truckCode}-${l.loadNo}`} /> : null}
                       {lateNotes.find((n) => n.loadId === l.id) ? (
                         <span className="mt-1 block text-xs text-amber-700" data-testid={`load-late-dispatch-${l.truckCode}-${l.loadNo}`}>
                           {lateNotes.find((n) => n.loadId === l.id)!.text}
@@ -1897,6 +1898,29 @@ function LoadProgress({ o, tag, tz }: { o: NonNullable<OutcomeOverlay['loads'][s
         </Badge>
       ) : null}
       {back ? <span className="text-xs text-muted-foreground">Back {back}</span> : null}
+    </span>
+  );
+}
+
+/**
+ * The turnaround at the depot before this trip (owner decision of 16 Oct 2026, alert rule R2): "After L1:
+ * back 11:20, left 12:08, 48 min" from the driver's Back at depot and Leaving for next load; a fallback
+ * (the Dispatch press, the first arrival) is named; "not left yet, 25 min so far" while the truck waits.
+ */
+function TurnaroundLine({ t, tag }: { t: LoadTurnaround; tag: string }) {
+  const how =
+    t.how === 'TAP'
+      ? "the driver's Leaving for next load"
+      : t.how === 'DISPATCH'
+        ? 'the Dispatch press (the driver did not tap Leaving for next load)'
+        : t.how === 'ARRIVAL'
+          ? t.tapLate
+            ? 'the arrival at the first customer (Leaving for next load was tapped after it)'
+            : 'the arrival at the first customer (the driver did not tap Leaving for next load)'
+          : 'now: the truck has not left yet';
+  return (
+    <span className="mt-1 block text-xs text-muted-foreground" data-testid={`load-turnaround-${tag}`} title={`Time at the depot between L${t.afterLoadNo} and this trip: from the driver's Back at depot to ${how}.`}>
+      After L{t.afterLoadNo}: {t.line}
     </span>
   );
 }
