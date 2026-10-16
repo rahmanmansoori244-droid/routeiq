@@ -7,7 +7,7 @@
  * pin.
  */
 import { describe, expect, it } from 'vitest';
-import { deriveVisit, type VisitContext, type VisitEvent } from '@/lib/delivery/visit';
+import { deriveVisit, withoutGpsTimes, type VisitContext, type VisitEvent, type VisitTimes } from '@/lib/delivery/visit';
 import { actualMinutes, arrivalByText, arrivalNote, departureNote, sourceWord, timedByText } from '@/lib/delivery/office-text';
 import { arrivalIsObserved, arrivedInsideWindow, type KpiVisit } from '@/lib/delivery/kpis';
 import { eligibleForMeasured } from '@/lib/delivery/measured';
@@ -284,5 +284,57 @@ describe("the driver page: a GPS-only arrival is never the driver's (M4, first r
     expect('gpsArrivedAt' in l!.stops[0]!.view).toBe(false);
     expect(l!.stops[0]!.view).toMatchObject({ state: 'ARRIVED', arrivedAt: T0 });
     expect(stopInProgress([l!], 'D1:1')).toEqual({ key: 'D1:1:1', arrivedAt: T0, observed: true });
+  });
+});
+
+describe('the operations alerts read the visit without its GPS times (merge review of 17 Oct 2026, finding 1)', () => {
+  const TIMES = ['arrivedAt', 'arrivalSource', 'arrivalDistanceM', 'arrivalAccuracyM', 'arrivalObserved', 'departedAt', 'departureSource', 'departedAtOutcome', 'outcome', 'outcomeAt', 'outcomeSource'] as const;
+  const timesOf = (v: VisitTimes) => Object.fromEntries(TIMES.map((k) => [k, v[k]]));
+
+  it('withoutGpsTimes on the stored visit is the visit the driver and the office made (the link off), for every mix of events', () => {
+    // GPS stays (one near the arrival, one late, one unobserved), the phone's taps and automatic timing, its
+    // results, the office's entries: every subset of them, rebuilt with and without the AYUN events.
+    const pool = [
+      gpsIn('10:00'),
+      gpsOut('10:28'),
+      gpsIn('11:10', false),
+      gpsOut('11:40', true),
+      tap('10:04'),
+      autoIn('10:03'),
+      autoOut('10:24'),
+      result('10:20'),
+      result('10:22', 'NOT_DELIVERED', 'DISPATCHER'),
+      office('ARRIVED', '10:01'),
+      office('DEPARTED', '10:35'),
+      result('11:20', 'PARTLY_DELIVERED'),
+    ];
+    let gpsChanged = 0;
+    for (let mask = 1; mask < 1 << pool.length; mask++) {
+      const events = pool.filter((_, i) => mask & (1 << i));
+      const stored = deriveVisit(events, CTX);
+      const own = deriveVisit(
+        events.filter((e) => e.source !== 'AYUN'),
+        CTX,
+      );
+      if (JSON.stringify(timesOf(stored)) !== JSON.stringify(timesOf(own))) gpsChanged++;
+      expect(timesOf(withoutGpsTimes(stored)), events.map((e) => `${e.kind}/${e.source}@${e.at.toISOString().slice(11, 16)}`).join(' ')).toEqual(timesOf(own));
+    }
+    // The pool really exercises what GPS fills: arrivals, departures and the result standing in for one.
+    expect(gpsChanged).toBeGreaterThan(500);
+  });
+
+  it('a GPS arrival and the driver result: for the alerts no arrival and no departure, as on the driver page; the result stays', () => {
+    const stored = deriveVisit([gpsIn('10:00'), gpsOut('10:28'), result('10:20')], CTX);
+    expect(stored).toMatchObject({ arrivalSource: 'AYUN', departureSource: 'AYUN' });
+    expect(withoutGpsTimes(stored)).toMatchObject({ arrivedAt: null, arrivalSource: null, departedAt: null, departureSource: null, departedAtOutcome: false, outcome: 'DELIVERED', outcomeAt: L('10:20') });
+    // The driver's arrival and a GPS departure: for the alerts the result ends the stop again.
+    const tapped = deriveVisit([tap('10:04'), gpsIn('10:00'), gpsOut('10:28'), result('10:20')], CTX);
+    expect(tapped).toMatchObject({ arrivalSource: 'PHONE_MANUAL', departureSource: 'AYUN', departedAt: L('10:28') });
+    expect(withoutGpsTimes(tapped)).toMatchObject({ arrivedAt: L('10:04'), departedAt: L('10:20'), departureSource: 'PHONE_MANUAL', departedAtOutcome: true });
+  });
+
+  it('a visit without GPS times is returned as it is (the same object)', () => {
+    const v = deriveVisit([tap('10:04'), result('10:20')], CTX);
+    expect(withoutGpsTimes(v)).toBe(v);
   });
 });

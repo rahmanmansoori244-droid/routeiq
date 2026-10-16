@@ -9,6 +9,7 @@
  *  3. for the loads that left (DISPATCHED / COMPLETED): the planned stops (stopsOfLoads), their orders'
  *     priority, whether each customer's pin is verified and whether it moved since the visit was planned
  *     (PIN_MOVED_M), the visits, their photos (source, old photo and time too: R9 and the projection);
+ *     a visit without the GPS times of the IVMS live link (alertVisitRow);
  *  4. Back at depot per load (backAtDepot) and the driver's Leaving for next load taps (leftDepotTaps: rule
  *     R2; none on a load that is Planned now), and for the trips after one with Back at depot their Dispatch
  *     press and when they were planned (loadOrigins: completing a load overwrites its status time);
@@ -29,6 +30,7 @@ import { parseLoadBreak, readTruckSnapshot } from '../dispatch/snapshots';
 import { backAtDepot, backKey, keyOfVisit, leftDepotTaps, liveRunsInRange, loadOrigins, loadsOfRuns, stopsOfLoads, visitKey, visitsInRange } from '../delivery/day-results';
 import { previousTrip } from '../delivery/turnaround';
 import { PIN_FAR_M } from '../delivery/pin-check';
+import { withoutGpsTimes } from '../delivery/visit';
 import { distanceM, PIN_MOVED_M } from '../dispatch/snapshots';
 import { pinCheckList } from '../delivery/customer-stats';
 import { ALERT_DAYS_AHEAD, ALERT_DAYS_BACK, type AlertRule } from './catalog';
@@ -170,7 +172,8 @@ export async function readAlertFacts(
           const at = own.filter((r) => r.sequenceInTruck === s.sequence);
           const first = at[0];
           const prios = at.map((r) => priorityOf.get(r.orderId)).filter((p): p is number => typeof p === 'number');
-          const v = visitOf.get(visitKey({ depotId: l.depotId, date: l.date, truckId: l.truckId, loadNo: l.loadNo, sequence: s.sequence }));
+          const row = visitOf.get(visitKey({ depotId: l.depotId, date: l.date, truckId: l.truckId, loadNo: l.loadNo, sequence: s.sequence }));
+          const v = row ? alertVisitRow(row, photosOf.get(row.id) ?? []) : null;
           return {
             sequence: s.sequence,
             customerId: s.customerId,
@@ -238,6 +241,18 @@ export async function readAlertFacts(
 export function pinMovedSince(v: { plannedLat: number | null; plannedLng: number | null } | null, now: { lat: number | null; lng: number | null } | null): boolean {
   if (!v || !now || v.plannedLat === null || v.plannedLng === null || now.lat === null || now.lng === null) return false;
   return distanceM({ lat: v.plannedLat, lng: v.plannedLng }, { lat: now.lat, lng: now.lng }) > PIN_MOVED_M;
+}
+
+/**
+ * The visit as the alerts read it (merge review of 17 Oct 2026, finding 1): without the GPS times of the
+ * IVMS live link (lib/delivery/visit.ts withoutGpsTimes: the driver's and the office's times only, as with
+ * the link off; GPS feeds the alerts only with the later ivmsMode ALERTS step), and none at all when GPS
+ * made it alone (no time, result or photo of its own: before the link there was no row).
+ */
+function alertVisitRow(row: StopVisit, photos: readonly FactPhoto[]): StopVisit | null {
+  const own = withoutGpsTimes(row);
+  if (own !== row && !own.arrivedAt && !own.departedAt && !own.outcome && !photos.length) return null;
+  return own;
 }
 
 function factVisit(v: StopVisit, photos: FactPhoto[]): FactVisit {

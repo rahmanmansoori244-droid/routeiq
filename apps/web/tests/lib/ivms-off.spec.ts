@@ -2,7 +2,9 @@
  * IVMS live link (16 Oct 2026): with the link not in use, nothing existing changes - proved on the real
  * route handlers with their dependencies faked (no database, no solver, no call to Ayun):
  * - the cron route's answer and /api/health's answer are byte-identical with and without the AYUN_*
- *   variables while the company's ivmsMode is OFF; only the setting (and one EXISTS) is read;
+ *   variables while the company's ivmsMode is OFF; only the setting (and one EXISTS) is read; in the
+ *   production default (the alert sweep running, no company with alerts on) too, but for the sweep's own
+ *   duration (`alerts.ms`);
  * - with the link in use the health answer gains an `ivms` block (counts and kind codes only) and never
  *   changes its status; the cron answer gains `ivms`;
  * - the in-process janitor starts the IVMS timer only after its own off switch, and every IVMS step has
@@ -82,6 +84,7 @@ beforeEach(() => {
   for (const k of [...Object.keys(AYUN), 'ROUTEIQ_DISABLE_IVMS', 'SOLVER_URL', 'SOLVER_TOKEN']) vi.stubEnv(k, '');
   // The operations-alert sweep (main, merged 16 Oct 2026) has its own spec (alert-sweep.spec.ts): off here, so
   // the cron answer stays the same bytes (the sweep's report carries its duration). `alerts` is then null.
+  // One case below turns it back on (the production default) and compares all but that duration.
   vi.stubEnv('ROUTEIQ_DISABLE_ALERTS', '1');
 });
 afterEach(() => {
@@ -109,6 +112,43 @@ describe('OFF: the existing answers are byte-identical', () => {
     const after = await (await cronGet(req('/api/cron/janitor'))).text();
     expect(after).toBe(before);
     expect(db.calls).toEqual(['tenant', 'exists']);
+  });
+
+  it("merge review of 17 Oct 2026, finding 3: the production default too (the alert sweep running, no company with alerts on): the same answers apart from the sweep's own timing", async () => {
+    vi.stubEnv('ROUTEIQ_DISABLE_ALERTS', '');
+    const split = (text: string) => {
+      const { data, ...rest } = JSON.parse(text) as { data: Record<string, unknown> };
+      const { alerts, ...others } = data;
+      return { body: { ...rest, data: others }, alerts: { ...(alerts as Record<string, unknown>), ms: 0 } };
+    };
+    try {
+      const before = split(await (await cronGet(req('/api/cron/janitor'))).text());
+      expect(before.body).toEqual({
+        data: {
+          jobs: { reaped: 0, repaired: 0 },
+          shifts: { reaped: 0 },
+          returnedLoads: { completed: 0, checked: 2 },
+          deliveryRetention: { photos: { count: 0 }, locations: { events: 0, visits: 0, photos: 0, links: 0 }, casual: null },
+          hire: { lostChecks: 0, oneDayTrucksRetired: 0 },
+        },
+        error: null,
+      });
+      expect(before.alerts).toMatchObject({ tenants: 0, busy: 0, failed: 0, ruleFailures: 0, raised: 0 });
+      expect(db.calls).toEqual(['exists']);
+      const h0 = await healthGet();
+      const health0 = await h0.text();
+      setAyun();
+      db.calls = [];
+      const h1 = await healthGet();
+      expect(h1.status).toBe(h0.status);
+      expect(await h1.text()).toBe(health0);
+      expect(JSON.parse(health0)).not.toHaveProperty('ivms');
+      const after = split(await (await cronGet(req('/api/cron/janitor'))).text());
+      expect(after).toEqual(before);
+      expect(db.calls).toEqual(['tenant', 'exists']);
+    } finally {
+      resetAlertSweepClock();
+    }
   });
 
   it('/api/health: the same status and bytes with the variables set while ivmsMode is OFF', async () => {

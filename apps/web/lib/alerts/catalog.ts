@@ -175,7 +175,7 @@ export const ALERT_RULE_SPECS: Record<AlertRule, AlertRuleSpec> = {
     no: 3,
     owner: true,
     label: 'Running late',
-    meaning: 'The expected arrival at the next stop is more than N min after its planned time (worked out from the driver\'s taps and the plan; there is no GPS).',
+    meaning: 'The expected arrival at the next stop is more than N min after its planned time (worked out from the driver\'s taps and the plan; GPS tracking is not used).',
     kind: 'CONDITION',
     subject: 'LOAD',
     unit: 'min',

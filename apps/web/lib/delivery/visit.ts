@@ -32,6 +32,7 @@
  *   arrival to departure as a non-automatic timing.
  * - GPS never writes a result, so the result and the driver facts never come from it; the
  *   plausibility flags stay phone-only (a GPS position is never pin evidence).
+ * - The operations alerts read the visit without its GPS times (withoutGpsTimes), until ivmsMode ALERTS.
  */
 import { distanceM } from '../dispatch/snapshots';
 
@@ -346,6 +347,60 @@ function withGps(v: VisitState, gpsEvents: readonly VisitEvent[], ctx: VisitCont
     }
   }
   out.state = out.outcome ? 'DONE' : out.arrivedAt && out.departedAt === null ? 'ARRIVED' : 'PENDING';
+  return out;
+}
+
+/** The times withGps may fill, as a stored visit (StopVisit) or a rebuilt one (VisitState) carries them. */
+export interface VisitTimes {
+  arrivedAt: Date | null;
+  arrivalSource: string | null;
+  arrivalDistanceM: number | null;
+  arrivalAccuracyM: number | null;
+  arrivalObserved: boolean;
+  departedAt: Date | null;
+  departureSource: string | null;
+  departedAtOutcome: boolean;
+  outcome: string | null;
+  outcomeAt: Date | null;
+  outcomeSource: string | null;
+}
+
+/**
+ * A visit's times as the driver's and the office's events alone made them, i.e. as with the IVMS link off:
+ * withGps undone, from the stored row alone (merge review of 17 Oct 2026, finding 1). The operations alerts
+ * read visits through it (lib/alerts/facts.ts, and the load row's time at the depot in outcome-view.ts; the
+ * replay leaves the AYUN events out): GPS times are not an alert input until the ivmsMode ALERTS step
+ * (lib/ivms/types.ts), so an alert never says "since arrival 10:02" about a stop the driver's phone shows as
+ * not arrived. Exact, because withGps only ever fills:
+ * - a GPS arrival (arrivalSource AYUN): the stop had no arrival, so no result stood in for its departure;
+ *   a departure the office or the phone gave stays, a GPS one or the result ending the GPS arrival goes;
+ * - a GPS departure after the driver's or the office's arrival: the stop had none, or the result stood in
+ *   for it (a result from the phone; one the office recorded never ends a stop).
+ * Everything else (the result, the automatic timing, the flags, the rest of the row) is the driver's and
+ * the office's already. The same object back when GPS gave neither time.
+ */
+export function withoutGpsTimes<V extends VisitTimes>(v: V): V {
+  const gpsArrival = v.arrivalSource === 'AYUN';
+  if (!gpsArrival && v.departureSource !== 'AYUN') return v;
+  const out: V = { ...v };
+  const o: VisitTimes = out;
+  if (gpsArrival) {
+    o.arrivedAt = null;
+    o.arrivalSource = null;
+    o.arrivalDistanceM = null;
+    o.arrivalAccuracyM = null;
+    o.arrivalObserved = true;
+    if (v.departureSource === 'AYUN' || v.departedAtOutcome) {
+      o.departedAt = null;
+      o.departureSource = null;
+      o.departedAtOutcome = false;
+    }
+    return out;
+  }
+  const standIn = v.outcome !== null && v.outcomeAt !== null && v.outcomeSource !== 'DISPATCHER';
+  o.departedAt = standIn ? v.outcomeAt : null;
+  o.departureSource = standIn ? v.outcomeSource : null;
+  o.departedAtOutcome = standIn;
   return out;
 }
 

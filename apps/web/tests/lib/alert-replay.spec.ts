@@ -140,6 +140,25 @@ describe('the state as of a time', () => {
     expect(pages.find((t) => t.truckId === 'TR7')).toMatchObject({ pageOpened: false, linkSeenAt: null });
     expect(factsAsOf(day(), new Date(iso('07:30')), []).truckDays.find((t) => t.truckId === 'TR5')!.pageOpened).toBe(false);
   });
+
+  it('merge review of 17 Oct 2026, finding 1: the GPS (AYUN) events of the IVMS live link are left out, as the live facts leave out their times', () => {
+    const gps = (kind: string, hhmm: string) => ev(kind, hhmm, { source: 'AYUN', payload: { observed: true, detector: 'ivms-v1' } });
+    const withGps = day();
+    const [s1, s2, s3] = withGps.loads[0]!.stops;
+    // Stop 1: a GPS departure after the result (it would replace the result standing in for the departure).
+    s1!.visit!.events.push(gps('ARRIVED', '08:04'), gps('DEPARTED', '08:30'));
+    // Stop 2: the tracker saw the truck leave at 10:10 (it would end the 70 min of unloading the driver left open).
+    s2!.visit!.events.push(gps('ARRIVED', '09:35'), gps('DEPARTED', '10:10'));
+    // Stop 3: only the tracker saw the truck there (a visit only GPS made).
+    s3!.visit = visitOf([gps('ARRIVED', '10:30'), gps('DEPARTED', '10:50')]);
+    const noon = factsAsOf(withGps, new Date(iso('12:00')), []).loads.find((l) => l.truckCode === 'T05')!;
+    expect(noon.stops[0]!.visit).toMatchObject({ arrivalSource: 'PHONE_MANUAL', departedAt: new Date(iso('08:20')), departedAtOutcome: true });
+    expect(noon.stops[2]!.visit).toBeNull();
+    const at1030 = factsAsOf(withGps, new Date(iso('10:30')), []).loads.find((l) => l.truckCode === 'T05')!;
+    expect(at1030.stops[1]!.visit).toMatchObject({ arrivedAt: new Date(iso('09:40')), departedAt: null, outcome: null });
+    // The whole day replays exactly as without them.
+    expect(replayDay(withGps)).toEqual(replayDay(day()));
+  });
 });
 
 describe('replayDay', () => {

@@ -69,8 +69,9 @@ async function runJanitor() {
   const ivms = ivmsTick || ivmsRetention ? { tick: ivmsTick, retention: ivmsRetention } : null;
   // Operations alerts (owner request 16 Oct 2026): the companies that switched them on, now, each followed
   // by its e-mail digest (null when ROUTEIQ_DISABLE_ALERTS=1 or a sweep is still running in this process).
-  // After the IVMS tick, so the sweep sees the GPS times it just wrote; its own try as well (merge of
-  // 16 Oct 2026: a database error in one feature never hides the other's answer or turns it into a 500).
+  // Its own try as well (merge of 16 Oct 2026: a database error in one feature never hides the other's
+  // answer or turns it into a 500; a monitor watches /api/health `alerts` for a failing sweep). The sweep
+  // never reads the GPS times the tick writes (lib/alerts/facts.ts alertVisitRow).
   const alerts = await step('alerts', () => runAlertSweep(new Date(), { force: true, notify: sendAlertDigest }));
   return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts, ...(ivms ? { ivms } : {}) };
 }

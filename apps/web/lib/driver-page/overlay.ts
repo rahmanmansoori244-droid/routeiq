@@ -221,7 +221,10 @@ export const LEAVE_RETAP_MIN = 30;
  * second review of 16 Oct 2026, finding 5) and name its depot (the action needs it). Once tapped it is
  * offered again for LEAVE_RETAP_MIN after the tap (`now`; without it, not again): a tap made too early is
  * corrected by tapping again, the latest one counts (finding 2). `from`: the trip the truck came back
- * from; `to`: the one it leaves with.
+ * from; `to`: the one it leaves with. A stop whose only arrival is the GPS tracker's (IVMS live link) is
+ * not arrived here (stopView) and is no sign for rule R2 either (the alerts read visits without GPS
+ * times: lib/delivery/visit.ts withoutGpsTimes), so the offer stays and the tap counts (merge review of
+ * 17 Oct 2026, finding 2).
  */
 export function leaveOffer(loads: readonly OverlayLoad[], now?: number): { from: OverlayLoad; to: OverlayLoad } | null {
   for (let i = loads.length - 2; i >= 0; i--) {

@@ -354,6 +354,17 @@ describe('Leaving for next load (owner decision 16 Oct 2026: R2 is measured from
     expect(offerOf(backDay({ leftDepotAt: at(330) }), [arrived], ms(346))).toBeNull();
   });
 
+  it('merge review of 17 Oct 2026, finding 2: a GPS-only arrival at a stop of the next trip does not take the offer away (rule R2 ignores GPS times, so the tap still counts)', () => {
+    const gpsOnly = serverResult({ state: 'ARRIVED', arrivedAt: at(350), arrivalByGps: true, outcome: null, outcomeAt: null, casesDelivered: null, by: null });
+    const next = trip(2, { stops: [{ ...stop(1, 'SHOP2', gpsOnly), key: 'D1:2:1' }] });
+    const [, l2] = applyQueued(day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300) }), next), []);
+    expect(l2!.stops[0]!.view).toMatchObject({ arrivedAt: null, doneAt: null, gpsArrivedAt: T0 + 350 * 60_000 });
+    expect(offerOf(day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300) }), next))).toEqual({ from: 1, to: 2 });
+    // The driver's own arrival there still takes it away.
+    const arrived = item({ key: newKey(), type: 'ARRIVE', stop: 'D1:2:1', at: at(355), mode: 'MANUAL' });
+    expect(offerOf(day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300) }), next), [arrived])).toBeNull();
+  });
+
   it('review finding 5: never when the next trip is at another depot (nothing is measured across two depots)', () => {
     const m = day(trip(1, { status: 'COMPLETED', backAtDepotAt: at(300) }), trip(1, { key: 'D2:1', depotId: 'D2', departMin: 800, stops: [{ ...stop(1, 'SHOPX'), key: 'D2:1:1' }] }));
     expect(offerOf(m)).toBeNull();

@@ -18,6 +18,20 @@ async function checkDb(): Promise<'up' | 'down'> {
 }
 
 /**
+ * The IVMS live link's counters. The route stays public; only a caller with the janitor token gets this
+ * block (first review LOW: the public answer never shows the GPS link's mode, counts, errors or clock,
+ * and reads nothing for it: lib/ivms/status.ts ivmsHealthForCaller); null (and no field) while the link
+ * is not in use. Never changes the status.
+ */
+async function ivmsField(req?: Request) {
+  try {
+    return await ivmsHealthForCaller(req);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * GET /api/health - READINESS, Railway's deploy health check (audit F15, owner decision 5; the
  * process-only liveness is GET /api/health/live). See lib/health.ts:
  * - 503 `not_ready`: the database is down, or dispatch is misconfigured (SOLVER_URL / SOLVER_TOKEN
@@ -37,20 +51,6 @@ async function checkDb(): Promise<'up' | 'down'> {
  * operations-alert sweep last ran in this process and how many companies' last sweep failed or is
  * overdue (counts only, never a company; review of 16 Oct 2026, M2).
  */
-/**
- * The IVMS live link's counters. The route stays public; only a caller with the janitor token gets this
- * block (first review LOW: the public answer never shows the GPS link's mode, counts, errors or clock,
- * and reads nothing for it: lib/ivms/status.ts ivmsHealthForCaller); null (and no field) while the link
- * is not in use. Never changes the status.
- */
-async function ivmsField(req?: Request) {
-  try {
-    return await ivmsHealthForCaller(req);
-  } catch {
-    return null;
-  }
-}
-
 export async function GET(req?: Request) {
   const [db, dispatch, ivms] = await Promise.all([checkDb(), checkDispatchReadiness(), ivmsField(req)]);
   const { status, httpStatus } = overallReadiness(db, dispatch);
