@@ -8,7 +8,9 @@
  *    quarter hour at or after the planned arrival).
  *  - the model: one row per customer of a route (only that route's lines), split customers one line per
  *    part, cancelled orders left out, orders on no stop listed under the table (left out, moved to another
- *    day, added after the plan), "Route not given" last, routes in natural order; per-route customers,
+ *    day, added after the plan) once however many unserved rows they have, a split order's rest on no
+ *    truck listed line by line under each line's own route (review of 17 Oct 2026), "Route not given"
+ *    last, routes in natural order; per-route customers,
  *    invoices, cases, pallets ("+" when a product has no cases per pallet), distinct trucks and loads; the
  *    day's totals (trucks and loads counted once in the Total row).
  *  - the page: every text escaped, the one Print script under the load sheets' policy, the summary first
@@ -50,7 +52,25 @@ vi.mock('@/lib/tenant', () => ({
 vi.mock('@/lib/dispatch/legacy-runs', () => ({ isDispatchPlan: async () => world.isDispatch, isDispatchPlanShape: () => true }));
 vi.mock('@/lib/dispatch/plan-detail', () => ({ getPlanDetail: async (tenantId: string) => (tenantId === 'tA' ? world.detail : null) }));
 
-import { etaPalletsText, etaSlot, hhmmRange, loadSalesmanEtaFacts, longDayText, salesmanEtaModel, stopWindow, ARRIVAL_NOTE, NOT_LOCKED_NOTE, PALLETS_FOOTNOTE, type EtaDb, type SalesmanEtaFacts } from '@/lib/exports/salesman-eta';
+import {
+  etaPalletsText,
+  etaSlot,
+  hhmmRange,
+  loadSalesmanEtaFacts,
+  longDayText,
+  salesmanEtaModel,
+  stopWindow,
+  ARRIVAL_NOTE,
+  LEFT_OUT_WHY,
+  NOT_LOCKED_NOTE,
+  PALLETS_FOOTNOTE,
+  REST_LEFT_OUT_WHY,
+  REST_NOT_PLANNED_NOTE,
+  type EtaDb,
+  type EtaLineFacts,
+  type EtaOrderFacts,
+  type SalesmanEtaFacts,
+} from '@/lib/exports/salesman-eta';
 import { renderSalesmanEtaHtml } from '@/lib/exports/salesman-eta-html';
 import { PRINT_SCRIPT, PRINT_SCRIPT_HASH, SHEET_CSP } from '@/lib/dispatch/warehouse-sheets-html';
 import { GET } from '@/app/api/runs/[id]/export/salesman-eta/route';
@@ -426,10 +446,82 @@ describe('salesmanEtaModel: one page per sales route', () => {
     expect(NOT_LOCKED_NOTE).toBe('Not locked yet: times can change if the day is re-planned');
   });
 
-  it('a split customer whose rest is on no truck says so on its row', () => {
+  // Review of 17 Oct 2026: a split order's rest that is on no truck. TST0011's order o11 has INV-11 (R1,
+  // 20 cases: 12 on TRK-1, 8 in the rest) and INV-12 (R2, 7 cases, all in the rest); the plan keeps one
+  // unserved row per reason for the rest's parts (two rows for o11).
+  const S11 = { orderId: 'o11', lineId: 'o11-l1', so: 'INV-11', product: 'PRD-A', cases: 12, route: 'R1' } satisfies Ln;
+  function splitRest(onTruck = 12, orders: [string, EtaOrderFacts][] = []) {
+    const d = plan();
+    d.loads[0]!.stops.push(stop({ seq: 3, customerId: 'c11', code: 'TST0011', eta: hm(11), lines: [{ ...S11, cases: onTruck }], split: { part: 1, parts: 1, restUnserved: true } }));
+    d.unserved.push(
+      unserved('o11', 'c11', 'TST0011', 8, { partial: true, salesOrders: ['INV-11'] }),
+      unserved('o11', 'c11', 'TST0011', 7, { partial: true, salesOrders: ['INV-12'], reasonCode: 'SHIFT_TIME_LIMIT' }),
+    );
+    const f = facts();
+    const lines: [string, EtaLineFacts][] = [
+      ['o11-l1', { orderId: 'o11', salesRoute: 'R1', casesPerPallet: 50, cases: 20, salesOrderNo: 'INV-11' }],
+      ['o11-l2', { orderId: 'o11', salesRoute: 'R2', casesPerPallet: 50, cases: 7, salesOrderNo: 'INV-12' }],
+    ];
+    return model(d, { ...f, lines: new Map([...f.lines, ...lines]), orders: new Map([...f.orders, ...orders]) });
+  }
+  const sec = (m: ReturnType<typeof model>, route: string | null) => m.sections.find((s) => s.route === route)!;
+
+  it('a split order\'s rest on no truck: each line\'s rest under its own route, once; the note only on the rows of those routes', () => {
+    const m = splitRest();
+    const r1 = sec(m, 'R1');
+    expect(r1.rows.find((r) => r.customerCode === 'TST0011')).toMatchObject({ cases: 12, invoices: ['INV-11'], note: REST_NOT_PLANNED_NOTE });
+    // The other customers of R1 (TST0003 split over two trucks, nothing left over) have no note.
+    expect(r1.rows.filter((r) => r.customerCode !== 'TST0011').map((r) => r.note)).toEqual([null, null]);
+    expect(r1.notPlanned.find((n) => n.customerCode === 'TST0011')).toEqual({
+      customerName: 'Example Mart TST0011',
+      customerCode: 'TST0011',
+      branchCode: null,
+      invoices: ['INV-11'],
+      cases: 8,
+      why: REST_LEFT_OUT_WHY,
+    });
+    // INV-12 is all in the rest: the R2 salesman is told, under his table (he has no row for TST0011).
+    const r2 = sec(m, 'R2');
+    expect(r2.rows).toEqual([]);
+    expect(r2.notPlanned.map((n) => [n.customerCode, n.invoices, n.cases, n.why])).toEqual([
+      ['TST0006', ['INV-6'], 9, LEFT_OUT_WHY],
+      ['TST0011', ['INV-12'], 7, REST_LEFT_OUT_WHY],
+    ]);
+    const html = renderSalesmanEtaHtml(m);
+    expect(html).toContain(REST_LEFT_OUT_WHY);
+    expect(html).toContain(REST_NOT_PLANNED_NOTE.replace(/'/g, '&#39;'));
+  });
+
+  it('a rest that holds only another route\'s lines puts no note on the route on the truck', () => {
+    const m = splitRest(20);
+    const r1 = sec(m, 'R1');
+    expect(r1.rows.find((r) => r.customerCode === 'TST0011')).toMatchObject({ cases: 20, note: null });
+    expect(r1.notPlanned.map((n) => n.customerCode)).not.toContain('TST0011');
+    expect(sec(m, 'R2').notPlanned.find((n) => n.customerCode === 'TST0011')).toMatchObject({ invoices: ['INV-12'], cases: 7, why: REST_LEFT_OUT_WHY });
+  });
+
+  it('a split order brought forward to another day: its part on a load that never left and its rest are one "moved to" entry per route', () => {
+    const m = splitRest(12, [['o11', { cancelled: false, carriedTo: '2026-10-20' }]]);
+    expect(sec(m, 'R1').rows.map((r) => r.customerCode)).not.toContain('TST0011');
+    expect(sec(m, 'R1').notPlanned.find((n) => n.customerCode === 'TST0011')).toMatchObject({ invoices: ['INV-11'], cases: 20, why: 'moved to 20 Oct' });
+    expect(sec(m, 'R2').notPlanned.find((n) => n.customerCode === 'TST0011')).toMatchObject({ invoices: ['INV-12'], cases: 7, why: 'moved to 20 Oct' });
+  });
+
+  it('a split order\'s rest is left out when the order is cancelled', () => {
+    const m = splitRest(12, [['o11', { cancelled: true, carriedTo: null }]]);
+    expect(JSON.stringify(m)).not.toMatch(/TST0011|INV-11|INV-12/);
+  });
+
+  it('an order on the unserved list twice (one row per reason) is listed once, with its cases once', () => {
+    const d = plan();
+    d.unserved.push(unserved('o6', 'c6', 'TST0006', 4, { reasonCode: 'SHIFT_TIME_LIMIT' }));
+    expect(sec(model(d), 'R2').notPlanned).toEqual([{ customerName: 'Example Mart TST0006', customerCode: 'TST0006', branchCode: null, invoices: ['INV-6'], cases: 9, why: LEFT_OUT_WHY }]);
+  });
+
+  it('a stop that says its customer has a rest somewhere is not enough for the note: the rest\'s lines decide', () => {
     const d = plan();
     d.loads[2]!.stops[0]!.split = { part: 1, parts: 2, restUnserved: true };
-    expect(model(d).sections[0]!.rows[0]!.note).toMatch(/not on a truck on this day/);
+    expect(model(d).sections[0]!.rows[0]!.note).toBeNull();
   });
 });
 

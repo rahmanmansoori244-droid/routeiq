@@ -18,8 +18,9 @@
  *  - one page per route: its customers sorted by the first expected arrival, each with its invoices, its
  *    cases of THAT route only, a map link of the stop's pin and its receiving hours; a customer the plan
  *    splits over several stops has one arrival line per part. Orders of the route that are on no stop of
- *    the plan (left out, brought forward to another day, or added after the plan was made) are listed
- *    under the table; cancelled orders are left out. Lines without a route form the "Route not given" page.
+ *    the plan (left out, brought forward to another day, or added after the plan was made), and the
+ *    route's lines in a split delivery's rest that is on no truck, are listed under the table; cancelled
+ *    orders are left out. Lines without a route form the "Route not given" page.
  */
 import type { tenantDb } from '../tenant';
 import type { DetailLoad, DetailStop, PlanDetail } from '../dispatch/plan-detail';
@@ -203,7 +204,11 @@ export interface EtaRow {
   hours: string | null;
   /** "this order: 10:00-11:00" when an order of the stop has its own delivery time; else null. */
   orderTime: string | null;
-  /** More of the customer's cases are on no truck today (a split delivery's rest); else null. */
+  /**
+   * More of the customer's cases OF THIS ROUTE are on no truck today (a split delivery's rest, listed
+   * under the table); else null. Only on the routes whose lines are in that rest: a rest of another
+   * salesman's invoice is his to tell, not this one's (review of 17 Oct 2026).
+   */
   note: string | null;
 }
 
@@ -214,7 +219,7 @@ export interface EtaNotPlanned {
   branchCode: string | null;
   invoices: string[];
   cases: number;
-  /** "left out of the plan", "moved to 19 Oct", "added after this plan was made". */
+  /** "left out of the plan", "rest of a split delivery, not on a truck", "moved to 19 Oct", "added after this plan was made". */
   why: string;
 }
 
@@ -288,6 +293,8 @@ export const ARRIVAL_NOTE =
   'Expected arrival = the window in which the truck should reach the customer (planned time minus 15 minutes to plus 45 minutes, within the receiving hours). Traffic and waiting at earlier customers can make it later. Please inform each customer and make sure someone is there to receive and sign the invoice.';
 export const PALLETS_FOOTNOTE = '+ = some products have no cases per pallet under Products: their cases are not counted in the pallets shown.';
 export const REST_NOT_PLANNED_NOTE = 'More of this customer\'s cases are not on a truck on this day (the office will advise).';
+export const LEFT_OUT_WHY = 'left out of the plan';
+export const REST_LEFT_OUT_WHY = 'rest of a split delivery, not on a truck';
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -359,11 +366,11 @@ export function salesmanEtaModel(d: PlanDetail, facts: SalesmanEtaFacts, opts: {
       a.notPlanned.set(key, e);
     }
   };
-  const linesByOrder = new Map<string, EtaLineFacts[]>();
-  for (const l of facts.lines.values()) {
+  const linesByOrder = new Map<string, (EtaLineFacts & { lineId: string })[]>();
+  for (const [lineId, l] of facts.lines) {
     const list = linesByOrder.get(l.orderId);
-    if (list) list.push(l);
-    else linesByOrder.set(l.orderId, [l]);
+    if (list) list.push({ ...l, lineId });
+    else linesByOrder.set(l.orderId, [{ ...l, lineId }]);
   }
   const linesOfOrder = (orderId: string) => linesByOrder.get(orderId) ?? [];
 
@@ -414,11 +421,38 @@ export function salesmanEtaModel(d: PlanDetail, facts: SalesmanEtaFacts, opts: {
     }
   }
 
-  // Orders the plan left out (unserved) and that are on no stop; cancelled ones are left out.
+  // Orders the plan left out (unserved); cancelled ones are left out. Review of 17 Oct 2026:
+  //  - the plan keeps one unserved row per order AND reason for the parts of a split order (plan-service:
+  //    some parts dropped for the shift's time, others for no truck), so an order can be on the list
+  //    twice: it is listed once, with its lines once (its cases were counted twice before).
+  //  - an order on no stop is left out whole: every line under its own route.
+  //  - an order also on a stop is a split delivery whose rest is on no truck. Split parts are cut line
+  //    by line, so the rest can be a whole invoice of ANOTHER salesman: each line's rest (its cases less
+  //    the cases of that line on every stop of the plan) is listed under its own route, and only the
+  //    rows of those routes say "more of this customer's cases are not on a truck". Before, the rest was
+  //    never listed and the note went to the routes whose lines WERE on the truck, so the salesman of the
+  //    rest was never told his invoice is not delivered.
+  const onTruckCases = new Map<string, number>();
+  for (const load of d.loads) for (const stop of load.stops) for (const ln of stop.orderLines) onTruckCases.set(ln.lineId, (onTruckCases.get(ln.lineId) ?? 0) + ln.cases);
+  const restKeys = new Set<string>();
+  const unservedSeen = new Set<string>();
   for (const u of d.unserved) {
-    if (u.cancelled || stopOrderIds.has(u.orderId) || facts.orders.get(u.orderId)?.cancelled) continue;
+    if (unservedSeen.has(u.orderId)) continue;
+    unservedSeen.add(u.orderId);
+    if (u.cancelled || facts.orders.get(u.orderId)?.cancelled) continue;
     const carriedTo = u.carriedTo ?? facts.orders.get(u.orderId)?.carriedTo ?? null;
-    listNotPlanned(u.orderId, u, linesOfOrder(u.orderId), carriedTo ? `moved to ${fmtDayMonth(carriedTo)}` : 'left out of the plan');
+    const moved = carriedTo ? `moved to ${fmtDayMonth(carriedTo)}` : null;
+    if (!stopOrderIds.has(u.orderId)) {
+      listNotPlanned(u.orderId, u, linesOfOrder(u.orderId), moved ?? LEFT_OUT_WHY);
+      continue;
+    }
+    const rest = linesOfOrder(u.orderId)
+      .map((ln) => ({ ...ln, cases: ln.cases - (onTruckCases.get(ln.lineId) ?? 0) }))
+      .filter((ln) => ln.cases > 0);
+    // Brought forward to another day: the same entry as its parts on a load that never left (one
+    // "moved to" line per order and route with all its cases).
+    listNotPlanned(u.orderId, u, rest, moved ?? REST_LEFT_OUT_WHY);
+    for (const ln of rest) restKeys.add(`${u.customerId}|${ln.salesRoute ?? ''}`);
   }
   // Orders of the day added after the plan was made (the plan screen's "pending" orders).
   for (const p of facts.pending) {
@@ -434,7 +468,7 @@ export function salesmanEtaModel(d: PlanDetail, facts: SalesmanEtaFacts, opts: {
   const allInvoices = new Set<string>();
   for (const route of order) {
     const a = routes.get(route)!;
-    const rows = [...a.rows.values()].map((r) => buildRow(r));
+    const rows = [...a.rows.values()].map((r) => buildRow(r, restKeys.has(`${r.customerId}|${route ?? ''}`)));
     rows.sort(
       (x, y) =>
         (x.firstEta ?? Number.POSITIVE_INFINITY) - (y.firstEta ?? Number.POSITIVE_INFINITY) ||
@@ -504,8 +538,11 @@ export function salesmanEtaModel(d: PlanDetail, facts: SalesmanEtaFacts, opts: {
   };
 }
 
-/** A customer's row of one route: its deliveries in arrival order, each with its window. */
-function buildRow(r: RowAcc): { row: Omit<EtaRow, 'no'>; firstEta: number | null } {
+/**
+ * A customer's row of one route: its deliveries in arrival order, each with its window. `restOff`: some
+ * of this route's cases of the customer are in a split delivery's rest that is on no truck.
+ */
+function buildRow(r: RowAcc, restOff: boolean): { row: Omit<EtaRow, 'no'>; firstEta: number | null } {
   const parts = [...r.parts].sort(
     (a, b) =>
       (a.stop.etaMin ?? Number.POSITIVE_INFINITY) - (b.stop.etaMin ?? Number.POSITIVE_INFINITY) ||
@@ -540,7 +577,9 @@ function buildRow(r: RowAcc): { row: Omit<EtaRow, 'no'>; firstEta: number | null
       // order's own line is printed then; "any time" when there are no hours and no time of the order.
       hours: hard && hard !== orderTime ? hard : orderTime ? null : 'any time',
       orderTime: orderTime ? `this order: ${orderTime}` : null,
-      note: parts.some((p) => p.stop.split?.restUnserved) ? REST_NOT_PLANNED_NOTE : null,
+      // Not the stop's split.restUnserved: that says the customer has a rest somewhere, whichever
+      // salesman's lines it holds (review of 17 Oct 2026).
+      note: restOff ? REST_NOT_PLANNED_NOTE : null,
     },
   };
 }
