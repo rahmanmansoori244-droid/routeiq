@@ -436,7 +436,9 @@ describe('tenantDb isolation (Phase 1 scope)', () => {
       expect((await db.ivmsEvent.findMany()).map((r) => r.id)).toEqual([own.event.id]);
       expect(await db.ivmsEvent.findUnique({ where: { id: other.event.id } })).toBeNull();
       expect((await db.ivmsState.findMany()).map((r) => r.tenantId)).toEqual([tid]);
-      expect(await db.ivmsState.findUnique({ where: { tenantId: other.state.tenantId } })).toBeNull();
+      // IvmsState's key IS the company: the wrapper replaces it with the caller's own, so asking for the other
+      // company's row returns the caller's own row - never the other company's.
+      expect((await db.ivmsState.findUnique({ where: { tenantId: other.state.tenantId } }))?.tenantId).toBe(tid);
       expect((await db.ivmsTruckDay.findMany()).map((r) => r.id)).toEqual([own.day.id]);
       expect(await db.ivmsTruckDay.findUnique({ where: { id: other.day.id } })).toBeNull();
     }
