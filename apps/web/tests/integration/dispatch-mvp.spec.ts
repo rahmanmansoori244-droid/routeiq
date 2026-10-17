@@ -589,6 +589,37 @@ describe('frozen plan facts (review F08)', () => {
     expect(cleared).not.toContain('.instr');
   });
 
+  it('27g (owner request 17 Oct 2026) Salesman ETA: the column is stored, and the export prints the day and one page per sales route, without driver names', async () => {
+    // The column exists after the migrations (nullable, no default): the file of this test has no route column.
+    const p = await plan(runV2);
+    // The lines of stops delivered on this day (not cancelled, not brought forward), each once.
+    const lineIds: string[] = [
+      ...new Set<string>(
+        p.loads.flatMap((l: any) =>
+          l.stops.filter((s: any) => !s.cancelled && !s.carriedTo).flatMap((s: any) => s.orderLines.map((ln: any) => ln.lineId as string)),
+        ),
+      ),
+    ];
+    expect(lineIds.length).toBeGreaterThan(1);
+    const before = await prisma.orderLine.findMany({ where: { id: { in: lineIds } }, select: { salesRoute: true } });
+    expect(before.every((l) => l.salesRoute === null)).toBe(true);
+    // Invented routes on the plan's lines: the first line R2X, the others R1.
+    await prisma.orderLine.updateMany({ where: { id: { in: lineIds.slice(1) } }, data: { salesRoute: 'R1' } });
+    await prisma.orderLine.update({ where: { id: lineIds[0] }, data: { salesRoute: 'R2X' } });
+    const res = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/export/salesman-eta`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-security-policy')).toContain("script-src 'sha256-");
+    const html = await res.text();
+    expect(html).toContain('data-kind="summary"');
+    expect(html).toContain('data-route="R1"');
+    expect(html).toContain('data-route="R2X"');
+    expect(html.indexOf('data-route="R1"')).toBeLessThan(html.indexOf('data-route="R2X"'));
+    for (const l of p.loads) if (l.driverName) expect(html).not.toContain(l.driverName);
+    // A run id of no plan of this company: 404, as the load sheets answer.
+    expect((await fetchWith(t.cookieJar, `${BASE}/api/runs/no-such-run/export/salesman-eta`)).status).toBe(404);
+    await prisma.orderLine.updateMany({ where: { id: { in: lineIds } }, data: { salesRoute: null } });
+  });
+
   it('28 a re-plan keeps identical snapshots on the carried assignments and loads', async () => {
     const before = await prisma.routeAssignment.findMany({ where: { loadId: lockedId }, orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }] });
     const beforeLoad = await prisma.planLoad.findUniqueOrThrow({ where: { id: lockedId } });

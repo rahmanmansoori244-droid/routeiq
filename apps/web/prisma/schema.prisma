@@ -1042,6 +1042,12 @@ model OrderLine {
   marginValue        Float?
   sourceRow          Int?
   notes              String?
+  /// The salesman's route that sold this invoice line (owner request 17 Oct 2026, "Salesman ETA"): the
+  /// order file's "route" column, trimmed, inner spaces collapsed, upper-case, at most 40 characters
+  /// (lib/dispatch/sales-route.ts). Null = the file had no route (or the line was added before it was
+  /// kept). A label for the Salesman ETA export only: never part of a duplicate or intake key, never read
+  /// by planning. Copied with the line when an order is brought forward or postponed.
+  salesRoute         String?
   intakeKey          IntakeLineKey?
 
   @@index([orderId])

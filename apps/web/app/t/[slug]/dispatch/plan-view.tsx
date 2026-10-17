@@ -3,7 +3,7 @@
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, FileText, History, Lock, Truck, Unlock, PackageCheck, Send, Flag, RefreshCw, Plus } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, FileText, History, Lock, Truck, Unlock, PackageCheck, Send, Flag, RefreshCw, Plus, Clock } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -764,6 +764,22 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             <Button asChild variant="outline" size="sm">
               <a href={`/api/runs/${runId}/export/load-sheet`} target="_blank" rel="noreferrer" data-testid="export-load-sheets" title="One printable page per truck load, for the warehouse: the products to load and the invoices to put in the truck">
                 <PackageCheck className="mr-1 h-4 w-4" /> Load sheets
+              </a>
+            </Button>
+          ) : null}
+          {/* Salesman ETA (owner request 17 Oct 2026): printed every evening after planning, one page per
+              sales route (the order file's "route" column) for the salesmen to tell their customers when
+              the truck comes. No driver names or phones on it. */}
+          {d.loads.length ? (
+            <Button asChild variant="outline" size="sm">
+              <a
+                href={`/api/runs/${runId}/export/salesman-eta`}
+                target="_blank"
+                rel="noreferrer"
+                data-testid="export-salesman-eta"
+                title="One printable page per sales route: each salesman's customers and expected arrival times (Print or Save as PDF)"
+              >
+                <Clock className="mr-1 h-4 w-4" /> Salesman ETA
               </a>
             </Button>
           ) : null}

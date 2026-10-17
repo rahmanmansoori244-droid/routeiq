@@ -28,6 +28,7 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
   const [priority, setPriority] = useState<number | null>(null);
   const [reason, setReason] = useState('');
   const [so, setSo] = useState('');
+  const [route, setRoute] = useState('');
   const [lines, setLines] = useState([{ productCode: '', cases: '' }]);
   const [busy, setBusy] = useState(false);
 
@@ -52,6 +53,8 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
         customerName: name.trim() || undefined,
         // Only a priority the dispatcher picked; it can only raise the customer's own (plan-service.ts).
         ...(priority !== null ? { priority } : {}),
+        // Only a route typed in: the order is then on that salesman's Salesman ETA page.
+        ...(route.trim() ? { salesRoute: route.trim() } : {}),
         reason: reason.trim(),
         lines: parsed,
       },
@@ -68,6 +71,7 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
     setPriority(null);
     setReason('');
     setSo('');
+    setRoute('');
     setLines([{ productCode: '', cases: '' }]);
     onOpenChange(false);
     onSaved(r.data);
@@ -118,7 +122,11 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
             <Label htmlFor="lo-so">Sales order no. (optional)</Label>
             <Input id="lo-so" value={so} onChange={(e) => setSo(e.target.value)} />
           </div>
-          <div />
+          {/* Salesman ETA (owner request 17 Oct 2026): the salesman's route, like the order file's "route" column. */}
+          <div className="space-y-1">
+            <Label htmlFor="lo-route">Sales route (optional)</Label>
+            <Input id="lo-route" value={route} placeholder="e.g. R2X" onChange={(e) => setRoute(e.target.value)} />
+          </div>
           <div className="col-span-2 space-y-1">
             <Label>Products</Label>
             {lines.map((l, i) => (
