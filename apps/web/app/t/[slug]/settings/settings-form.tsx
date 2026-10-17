@@ -20,6 +20,9 @@ import { COUNTRY_NAMES, countryRoutingNote, isListedCountry } from '@/lib/countr
 import { DATA_COLLECT_DAYS_MAX } from '@/lib/dispatch/data-collection';
 import { preferredEndText, WINDOW_RULE_CHOICES, WINDOW_RULES, windowRuleOf } from '@/lib/dispatch/window-rule';
 import { AlertSettingsCard, alertSettingsProblem } from './alert-settings-card';
+import { IVMS_SETTING_BOUNDS, ivmsHoursSaveProblem, ivmsModeOf, type IvmsNumberSetting } from '@/lib/ivms/settings';
+import { classShares } from '@/lib/ivms/budget';
+import { IVMS_MODES, type IvmsMode } from '@/lib/ivms/types';
 
 interface TenantFields {
   name: string;
@@ -43,6 +46,57 @@ interface TypeProfileRow {
   prefWindowEndMin: number | null;
 }
 
+/** GPS tracking (IVMS live link, 16 Oct 2026): the words of the Settings card. */
+const GPS_MODE_TEXT: Record<IvmsMode, { label: string; hint: string }> = {
+  OFF: { label: 'OFF', hint: 'RouteIQ never contacts Ayun and nothing changes on any screen.' },
+  MAP: { label: 'Live map', hint: 'The day screen shows where the trucks with a load out are (dispatchers and up). Nothing else changes.' },
+  TIMES: {
+    label: 'Live map and GPS times',
+    hint: "Also arrival and departure times from the trackers' history where the drivers' phones left gaps (marked GPS (Ayun) on the screens and in the Excel).",
+  },
+};
+const IVMS_LABELS: Record<IvmsNumberSetting, string> = {
+  ivmsPollSec: 'Live positions at most every',
+  ivmsRoutePullMin: 'History of a truck on the road every',
+  ivmsFromMin: 'GPS tracking hours from',
+  ivmsToMin: 'GPS tracking hours until',
+  ivmsDailyCallBudget: "Ayun's daily allowance",
+  ivmsStopRadiusM: 'Stop radius around the customer pin',
+  ivmsStopDwellMin: 'Stopped at least',
+  ivmsDepotRadiusM: 'Depot radius',
+  ivmsTrailDays: "Keep the trucks' GPS history",
+};
+const IVMS_UNITS: Partial<Record<IvmsNumberSetting, string>> = {
+  ivmsPollSec: 's',
+  ivmsRoutePullMin: 'min',
+  ivmsDailyCallBudget: 'calls a day',
+  ivmsStopRadiusM: 'm',
+  ivmsStopDwellMin: 'min',
+  ivmsDepotRadiusM: 'm',
+  ivmsTrailDays: 'days',
+};
+const IVMS_HINTS: Partial<Record<IvmsNumberSetting, string>> = {
+  ivmsDailyCallBudget: 'The calls a day Ayun allows RouteIQ (ask Ayun to raise it). RouteIQ never makes more; failed calls count too.',
+  ivmsPollSec: 'Wanted interval while a truck has a load out; a small allowance stretches it.',
+  ivmsRoutePullMin: 'GPS times come from this history, plus one pull over the whole day after the last trip.',
+  ivmsStopRadiusM: 'GPS counts the truck at a customer when it stops this close to the pin.',
+  ivmsStopDwellMin: 'Minutes stopped before GPS gives an arrival (a stop out of sequence needs 6).',
+  ivmsDepotRadiusM: 'Leaving and coming back split the day into trips; a customer this close to the depot never gets a GPS time.',
+  ivmsTrailDays: 'Kept only while a truck has a load out, and deleted after this.',
+};
+
+/** How often positions and history come at the allowance shown (an estimate over the GPS tracking hours). */
+function gpsPaceText(c: { ivmsMode: string; ivmsDailyCallBudget: number; ivmsPollSec: number; ivmsRoutePullMin: number; ivmsFromMin: number; ivmsToMin: number }): string {
+  const mode = ivmsModeOf(c);
+  const budget = Number.isFinite(c.ivmsDailyCallBudget) ? c.ivmsDailyCallBudget : 0;
+  const shares = classShares(budget, mode, false);
+  const hoursSec = Math.max(60, (c.ivmsToMin - c.ivmsFromMin) * 60);
+  const mapSec = shares.MAP > 0 ? Math.max(c.ivmsPollSec, Math.ceil(hoursSec / shares.MAP)) : null;
+  const pos = mapSec === null ? 'no live positions' : mapSec >= 120 ? `live positions about every ${Math.round(mapSec / 60)} min` : `live positions about every ${mapSec} s`;
+  const times = mode === 'TIMES' ? `; ${shares.ROUTE} history pulls a day (every ${c.ivmsRoutePullMin} min per truck on the road, plus one at the end of each truck-day)` : '';
+  return `At ${budget} calls a day: ${pos} while a truck has a load out${times}. A position older than 5 minutes shows grey and is never used for times.`;
+}
+
 const SOURCE_TEXT: Record<EffectiveRow['source'], string> = {
   SETTING: 'Setting',
   PLANNER: 'Planner rule',
@@ -60,11 +114,14 @@ export function SettingsForm({
   profiles,
   scope = 'ADMIN',
   dataRuleOn = false,
+  gpsStatus = null,
   emailConfigured = false,
 }: {
   initial: Initial;
   effective: EffectiveRow[];
   profiles: TypeProfileRow[];
+  /** IVMS live link: the Ayun link's state for the company admin (lib/ivms/status.ts gpsStatusText); null while it is not in use. */
+  gpsStatus?: { text: string; warn: boolean } | null;
   /** DISPATCHER: only the driver shift card (the API refuses every other field for that role). */
   scope?: 'ADMIN' | 'DISPATCHER';
   /** DISPATCHER: whether the loading rule is on (shown, not editable: only a company admin switches it). */
@@ -123,6 +180,19 @@ export function SettingsForm({
       toast.error(retention);
       return;
     }
+    // GPS tracking (IVMS live link): whole numbers within the database CHECKs, hours that do not cross midnight.
+    for (const k of Object.keys(IVMS_SETTING_BOUNDS) as IvmsNumberSetting[]) {
+      const b = IVMS_SETTING_BOUNDS[k];
+      if (k in configDiff.changes && !(Number.isInteger(c[k]) && c[k] >= b.min && c[k] <= b.max)) {
+        toast.error(`${IVMS_LABELS[k]} must be a whole number from ${b.min} to ${b.max}.`);
+        return;
+      }
+    }
+    const gpsHours = ivmsHoursSaveProblem(configDiff.changes, c);
+    if (gpsHours) {
+      toast.error(gpsHours);
+      return;
+    }
     // Operations alerts (owner request 16 Oct 2026): thresholds within their bounds, the recipients, the
     // e-mail interval, and quiet hours with both ends or none - as the API checks them.
     const alertProblem = admin ? alertSettingsProblem(configDiff.changes, c) : null;
@@ -168,6 +238,21 @@ export function SettingsForm({
       router.refresh();
     });
   }
+
+  const gpsNum = (k: IvmsNumberSetting) => (
+    <NumField
+      key={k}
+      id={k}
+      label={IVMS_LABELS[k]}
+      unit={IVMS_UNITS[k]}
+      value={c[k]}
+      onChange={(v) => setC({ ...c, [k]: v })}
+      step={1}
+      bound={{ solver: null, int: true, ...IVMS_SETTING_BOUNDS[k] }}
+      hint={IVMS_HINTS[k]}
+      changed={k in configDiff.changes}
+    />
+  );
 
   const num = (k: ConfigBoundKey & keyof EditableConfig, label: string, opts: { step?: number; unit?: string; hint?: string } = {}) => (
     <NumField
@@ -535,6 +620,62 @@ export function SettingsForm({
               The driver page&apos;s Call dispatcher button calls the number of the truck&apos;s depot (Depots page); this company number is used when the depot has no number of its own. Neither: the button is hidden.
             </p>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card data-testid="gps-tracking-settings">
+        <CardHeader>
+          <CardTitle className="text-base">GPS tracking (Ayun)</CardTitle>
+          <CardDescription>
+            The trucks&apos; GPS trackers at Ayun (set each truck&apos;s tracker on the Trucks page). The driver&apos;s and the office&apos;s entries always
+            win: GPS never records a result, never closes a trip and is never used for measured unloading times. Tell the drivers before switching it on.
+            Only a company admin changes these; every change is in the audit log.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <fieldset id="ivmsMode" className="space-y-1.5 rounded-md border px-3 py-2 md:col-span-2" data-testid="gps-mode">
+            <legend className="px-1 text-sm font-medium">
+              GPS tracking
+              {'ivmsMode' in configDiff.changes ? <span className="ml-1 text-xs text-blue-700">changed</span> : null}
+            </legend>
+            {IVMS_MODES.map((m) => (
+              <label key={m} className="flex items-start gap-2 text-sm">
+                <input type="radio" name="ivmsMode" value={m} className="mt-1" checked={ivmsModeOf(c) === m} onChange={() => setC({ ...c, ivmsMode: m })} />
+                <span>
+                  {GPS_MODE_TEXT[m].label}
+                  <span className="block text-xs text-muted-foreground">{GPS_MODE_TEXT[m].hint}</span>
+                </span>
+              </label>
+            ))}
+            {ivmsModeOf(c) !== 'OFF' ? (
+              <p className="text-xs text-muted-foreground" data-testid="gps-pace">
+                {gpsPaceText(c)}
+              </p>
+            ) : null}
+            {gpsStatus ? (
+              <p className={gpsStatus.warn ? 'rounded-md bg-amber-50 p-2 text-xs text-amber-900' : 'text-xs text-muted-foreground'} data-testid="gps-status">
+                {gpsStatus.text}
+              </p>
+            ) : null}
+          </fieldset>
+          {(['ivmsDailyCallBudget', 'ivmsPollSec', 'ivmsRoutePullMin'] as const).map((k) => gpsNum(k))}
+          <TimeField
+            id="ivmsFromMin"
+            label={IVMS_LABELS.ivmsFromMin}
+            value={c.ivmsFromMin}
+            onChange={(v) => setC({ ...c, ivmsFromMin: v })}
+            hint="No call to Ayun before this time (local)."
+            changed={'ivmsFromMin' in configDiff.changes}
+          />
+          <TimeField
+            id="ivmsToMin"
+            label={IVMS_LABELS.ivmsToMin}
+            value={Math.min(c.ivmsToMin, 1439)}
+            onChange={(v) => setC({ ...c, ivmsToMin: v })}
+            hint="After this only trucks still on the road are asked about. Must be after the start (not across midnight)."
+            changed={'ivmsToMin' in configDiff.changes}
+          />
+          {(['ivmsStopRadiusM', 'ivmsStopDwellMin', 'ivmsDepotRadiusM', 'ivmsTrailDays'] as const).map((k) => gpsNum(k))}
         </CardContent>
       </Card>
 

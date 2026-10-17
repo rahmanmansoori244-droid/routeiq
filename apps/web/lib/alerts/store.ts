@@ -34,6 +34,7 @@
  *    state, unless it comes back at a higher tier (review L3).
  */
 import type { Prisma } from '@prisma/client';
+import type { AppPrismaClient } from '../db';
 import { dateOnly, isoOf } from '../dispatch/time';
 import {
   ALERT_REOPEN_KEEP_MS,
@@ -470,8 +471,9 @@ export const STORED_SELECT = { id: true, rule: true, subjectKey: true, kind: tru
 /**
  * Rows of a delivery date before `cutoffIso` (the company's today - ALERT_RETENTION_DAYS) and e-mail
  * digests older than `digestCutoff` are deleted (they hold customer names and shortened driver notes).
+ * `db`: a transaction or the app's client (lib/db.ts, with the IVMS link's global omit; the retention janitor).
  */
-export async function purgeOldAlertRows(db: Tx, tenantId: string, cutoffIso: string, digestCutoff: Date): Promise<{ alerts: number; digests: number }> {
+export async function purgeOldAlertRows(db: Tx | AppPrismaClient, tenantId: string, cutoffIso: string, digestCutoff: Date): Promise<{ alerts: number; digests: number }> {
   const alerts = (await db.opsAlert.deleteMany({ where: { tenantId, deliveryDate: { lt: dateOnly(cutoffIso) } } })).count;
   const digests = (await db.opsAlertDigest.deleteMany({ where: { tenantId, createdAt: { lt: digestCutoff } } })).count;
   return { alerts, digests };

@@ -1,0 +1,26 @@
+{
+  "111111111111111": {
+    "name": "Example object A",
+    "dt_server": "2026-10-16 06:04:50",
+    "dt_tracker": "2026-10-16 06:04:45",
+    "lat": "10.512345",
+    "lng": "20.523456",
+    "altitude": "12",
+    "angle": "93",
+    "speed": "42",
+    "params": { "acc": "1", "gsmlev": "4", "odo": "1234" },
+    "loc_valid": "1"
+  },
+  "222222222222222": {
+    "name": "Example object B",
+    "dt_server": "2026-10-16 06:03:10",
+    "dt_tracker": "2026-10-16 05:40:00",
+    "lat": "10.498765",
+    "lng": "20.487654",
+    "altitude": "9",
+    "angle": "360",
+    "speed": "0",
+    "params": [],
+    "loc_valid": "0"
+  }
+}

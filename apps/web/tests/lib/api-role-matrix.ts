@@ -1,7 +1,7 @@
 /**
  * Reads every app/api/**\/route.ts and reports, per exported HTTP handler, how it is guarded:
  *   PUBLIC            no session needed (sign-in, sign-up, health, ...)
- *   TOKEN             a service token (janitor)
+ *   TOKEN             a service token (janitor) or the Ayun webhook's path secret
  *   GONE              retired, always 410 (lib/driver-app.ts)
  *   DRIVER_LINK       withDriverLink: the driver link token in a header (lib/driver-link/guard.ts)
  *   ANY               withTenantApi without a role: any signed-in tenant user, VIEWER included
@@ -30,7 +30,8 @@ function classify(segment: string, whole: string): string {
     const opts = [...segment.matchAll(/\}\s*,\s*\{\s*role:\s*'(\w+)'/g)];
     return opts.length ? opts[opts.length - 1]![1]! : 'ANY';
   }
-  if (/janitorAuthorized|authorize\(req\)/.test(segment) || /janitorAuthorized/.test(whole)) return 'TOKEN';
+  // The janitor's token; the Ayun webhook's path secret (lib/ivms/webhook-auth.ts, checked by handleAyunWebhook).
+  if (/janitorAuthorized|ivmsWebhookAuthorized|handleAyunWebhook\(|authorize\(req\)/.test(segment) || /janitorAuthorized/.test(whole)) return 'TOKEN';
   if (/await auth\(\)/.test(segment)) {
     const role = /hasRole\([^,]+,\s*'(\w+)'\)/.exec(segment);
     const can = /\b(canPlan|canManageMasterData|canApproveOverride)\(/.exec(segment);

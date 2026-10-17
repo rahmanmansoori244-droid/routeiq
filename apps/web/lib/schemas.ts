@@ -18,6 +18,8 @@ import { parseProductCode } from './product-code';
 import { readCustomerPhone } from './dispatch/customer-phone';
 import { readLoadingInstruction } from './dispatch/loading-instruction';
 import { WINDOW_RULES } from './dispatch/window-rule';
+import { IVMS_MODES } from './ivms/types';
+import { IVMS_SETTING_BOUNDS, type IvmsNumberSetting } from './ivms/settings';
 
 /** A number inside a planner bound (lib/planner-bounds.ts: never outside what the optimizer accepts). */
 function bounded(b: Bound) {
@@ -449,6 +451,11 @@ const alertEmailsSchema = z.union([z.string(), z.null()]).transform((v, ctx) => 
   return r.value;
 });
 
+/** A whole-number IVMS setting inside its bounds (lib/ivms/settings.ts, the database CHECKs). */
+function ivmsSetting(k: IvmsNumberSetting) {
+  return z.number().int().min(IVMS_SETTING_BOUNDS[k].min).max(IVMS_SETTING_BOUNDS[k].max);
+}
+
 /**
  * The tenant settings Settings can change: exactly the ones the daily dispatch planner uses
  * (review F21), each within the optimizer's own bounds (lib/planner-bounds.ts). Strict: the old
@@ -523,6 +530,18 @@ export const tenantConfigSchema = z
     alertEmailMinSeverity: z.enum(ALERT_EMAIL_SEVERITIES),
     alertQuietFromMin: alertMinuteOfDay,
     alertQuietToMin: alertMinuteOfDay,
+    // The IVMS live link (Ayun GPS trackers, 16 Oct 2026). Web only (the optimizer never reads them), company
+    // admin. Bounds = the database CHECKs (lib/ivms/settings.ts); OFF = no call to Ayun, nothing new shown.
+    ivmsMode: z.enum(IVMS_MODES),
+    ivmsPollSec: ivmsSetting('ivmsPollSec'),
+    ivmsRoutePullMin: ivmsSetting('ivmsRoutePullMin'),
+    ivmsFromMin: ivmsSetting('ivmsFromMin'),
+    ivmsToMin: ivmsSetting('ivmsToMin'),
+    ivmsDailyCallBudget: ivmsSetting('ivmsDailyCallBudget'),
+    ivmsStopRadiusM: ivmsSetting('ivmsStopRadiusM'),
+    ivmsStopDwellMin: ivmsSetting('ivmsStopDwellMin'),
+    ivmsDepotRadiusM: ivmsSetting('ivmsDepotRadiusM'),
+    ivmsTrailDays: ivmsSetting('ivmsTrailDays'),
   })
   .strict();
 export type TenantConfigInput = z.infer<typeof tenantConfigSchema>;

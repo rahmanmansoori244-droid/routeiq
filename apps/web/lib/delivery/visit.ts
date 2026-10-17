@@ -1,8 +1,9 @@
 /**
  * One physical stop of a load that left the depot, rebuilt from its events (owner request 4 Oct 2026,
  * spec section 8.4). Pure: event-service.ts stores the events, then calls deriveVisit and writes the
- * result onto the StopVisit row. Ayun (later) writes events of source AYUN into the same table and is
- * treated like an observed automatic phone event.
+ * result onto the StopVisit row. The GPS trackers (Ayun, IVMS live link of 16 Oct 2026,
+ * lib/ivms/stop-events.ts) write ARRIVED and DEPARTED events of source AYUN into the same table: they
+ * only fill the gaps the driver and the office left (see "GPS (AYUN) events" below).
  *
  * - Result = the OUTCOME event with the latest `at` (ties: the latest received, then the dispatcher
  *   over the phone); an OUTCOME with outcome null clears it.
@@ -13,6 +14,25 @@
  *   the office entered later never ends the stop.
  * - Automatic timing only from OBSERVED automatic events: an arrival found when the page came back
  *   (observed false) or a departure after a gap never feeds measured times or the on-time KPI.
+ *
+ * GPS (AYUN) events (IVMS live link, design section 6.4 with the reviews' M1/M3 and the second review's
+ * H-2): the visit is first rebuilt from the driver's and the office's events ONLY, exactly as with the
+ * link off (tests/lib/ivms-visit-golden.spec.ts); the GPS events then only fill what is still empty.
+ * - Arrival: the office's, else the phone's (any: a tap, a "when?" answer, an automatic arrival, even
+ *   one found when the page came back); only a stop with none of these gets the GPS arrival (of the GPS
+ *   stay holding the result: an observed arrival of it first, then the earliest).
+ * - Departure: the office's Left, else the phone's; when nothing else ends the stop, or only the result
+ *   time stands in for it (and the phone's automatic timing does not end there: "Auto to result" is
+ *   never replaced), the GPS departure of the stay of the shown arrival (one that began at most 15 min
+ *   after it). The 15-minute rule after the result applies to a GPS departure too. A GPS arrival with a
+ *   phone result and no departure ends at the result time, as any arrival.
+ * - Automatic timing (autoArrivedAt, autoBasis, autoMinutes, autoServiceMinutes) is the phone's only, as
+ *   with the link off: GPS never feeds the measured unloading times used for planning or the "auto"
+ *   label (review M3), and never removes the phone's (second review H-2). A GPS-timed stop shows its
+ *   arrival to departure as a non-automatic timing.
+ * - GPS never writes a result, so the result and the driver facts never come from it; the
+ *   plausibility flags stay phone-only (a GPS position is never pin evidence).
+ * - The operations alerts read the visit without its GPS times (withoutGpsTimes), until ivmsMode ALERTS.
  */
 import { distanceM } from '../dispatch/snapshots';
 
@@ -127,8 +147,11 @@ export interface VisitState {
 
 const AUTO: ReadonlySet<EventSource> = new Set(['PHONE_AUTO', 'AYUN']);
 const PHONE: ReadonlySet<EventSource> = new Set(['PHONE_AUTO', 'PHONE_MANUAL']);
+/** A GPS departure counts only for a GPS stay that began at most this long after the chosen arrival. */
+export const GPS_DEPARTURE_MATCH_MIN = 15;
 
 const t = (d: Date) => d.getTime();
+const isObserved = (e: VisitEvent) => e.payload?.observed !== false;
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
 
@@ -224,14 +247,17 @@ function arrivalOf(c: Cycle): VisitEvent {
   return c.arrivals[0]!;
 }
 
+/** The arrival of a GPS cycle: an observed one first, then the earliest. */
+function gpsArrivalOf(c: Cycle): VisitEvent {
+  return [...c.arrivals].sort((a, b) => (isObserved(a) === isObserved(b) ? 0 : isObserved(a) ? -1 : 1) || t(a.at) - t(b.at))[0]!;
+}
+
 /** The newest entry (latest received, then latest time) of the dispatcher's events of a kind: a correction replaces the one before. */
 function newestOffice(events: readonly VisitEvent[], kind: 'ARRIVED' | 'DEPARTED'): VisitEvent | null {
   const office = events.filter((e) => e.kind === kind && e.source === 'DISPATCHER');
   if (!office.length) return null;
   return [...office].sort((a, b) => t(b.receivedAt) - t(a.receivedAt) || t(b.at) - t(a.at))[0]!;
 }
-
-const isObserved = (e: VisitEvent) => e.payload?.observed !== false;
 
 /**
  * Plausibility flags of phone-reported positions (spec section 8.3). Any flag sets timingSuspect: the
@@ -260,8 +286,126 @@ export function plausibility(events: readonly VisitEvent[], pin: { lat: number; 
 
 const minutesBetween = (a: number, b: number) => (b - a) / 60_000;
 
-/** The visit rebuilt from all its events (spec section 8.4). Pure. */
+/**
+ * The visit rebuilt from all its events (spec section 8.4). Pure. The driver's and the office's events
+ * make the visit exactly as with the IVMS link off; GPS (AYUN) events then only fill its gaps (withGps).
+ */
 export function deriveVisit(events: readonly VisitEvent[], ctx: VisitContext): VisitState {
+  const gps = events.filter((e) => e.source === 'AYUN' && (e.kind === 'ARRIVED' || e.kind === 'DEPARTED'));
+  const base = deriveOwnVisit(gps.length ? events.filter((e) => e.source !== 'AYUN') : events, ctx);
+  return gps.length ? withGps(base, gps, ctx) : base;
+}
+
+/**
+ * The GPS (AYUN) events fill what the driver and the office left empty (see the header): the arrival of a
+ * stop that has none, the departure of a stop nothing else ends. The automatic timing stays the phone's.
+ */
+function withGps(v: VisitState, gpsEvents: readonly VisitEvent[], ctx: VisitContext): VisitState {
+  const cycles = cyclesOf(gpsEvents);
+  if (!cycles.length) return v;
+  const maxAfter = (ctx.maxAfterOutcomeMin ?? 15) * 60_000;
+  const match = GPS_DEPARTURE_MATCH_MIN * 60_000;
+  const outcomeAt = v.outcome && v.outcomeAt ? t(v.outcomeAt) : null;
+  const out: VisitState = { ...v };
+  let arrivalAt = v.arrivedAt ? t(v.arrivedAt) : null;
+  let stay: Cycle | null = null;
+  if (arrivalAt === null) {
+    const c = chooseCycle(cycles, outcomeAt);
+    const a = c ? gpsArrivalOf(c) : null;
+    // Never at or after a Left the office already entered.
+    if (c && a && (v.departedAt === null || t(a.at) < t(v.departedAt))) {
+      stay = c;
+      arrivalAt = t(a.at);
+      out.arrivedAt = a.at;
+      out.arrivalSource = 'AYUN';
+      out.arrivalDistanceM = num(a.distanceM) ?? null;
+      out.arrivalAccuracyM = num(a.accuracyM) ?? null;
+      out.arrivalObserved = isObserved(a);
+    }
+  } else {
+    // The GPS stay of the arrival shown: there at that time, or begun at most 15 min after it.
+    const at = arrivalAt;
+    const near = cycles.filter((c) => c.start <= at + match && (!c.departure || t(c.departure.at) > at));
+    stay = chooseCycle(near, outcomeAt) ?? near[0] ?? null;
+  }
+  // The result time is only a stand-in for a departure nobody saw, unless the phone's automatic timing ends
+  // there ("Auto to result"): that one is never replaced (second review H-2).
+  const standIn = v.departedAtOutcome && v.autoBasis !== 'RESULT';
+  if ((out.departedAt === null || standIn) && arrivalAt !== null) {
+    const dep = stay?.departure ?? null;
+    if (dep && stay!.start <= arrivalAt + match && t(dep.at) > arrivalAt && !(outcomeAt !== null && t(dep.at) > outcomeAt + maxAfter)) {
+      out.departedAt = dep.at;
+      out.departureSource = 'AYUN';
+      out.departureGap = dep.payload?.gap === true;
+      out.departedAtOutcome = false;
+    } else if (out.departedAt === null && out.arrivalSource === 'AYUN' && outcomeAt !== null && outcomeAt >= arrivalAt && v.outcomeSource !== 'DISPATCHER') {
+      // A GPS arrival and the driver's result: the result ends the stop, as for any arrival.
+      out.departedAt = new Date(outcomeAt);
+      out.departureSource = v.outcomeSource;
+      out.departedAtOutcome = true;
+      out.departureGap = false;
+    }
+  }
+  out.state = out.outcome ? 'DONE' : out.arrivedAt && out.departedAt === null ? 'ARRIVED' : 'PENDING';
+  return out;
+}
+
+/** The times withGps may fill, as a stored visit (StopVisit) or a rebuilt one (VisitState) carries them. */
+export interface VisitTimes {
+  arrivedAt: Date | null;
+  arrivalSource: string | null;
+  arrivalDistanceM: number | null;
+  arrivalAccuracyM: number | null;
+  arrivalObserved: boolean;
+  departedAt: Date | null;
+  departureSource: string | null;
+  departedAtOutcome: boolean;
+  outcome: string | null;
+  outcomeAt: Date | null;
+  outcomeSource: string | null;
+}
+
+/**
+ * A visit's times as the driver's and the office's events alone made them, i.e. as with the IVMS link off:
+ * withGps undone, from the stored row alone (merge review of 17 Oct 2026, finding 1). The operations alerts
+ * read visits through it (lib/alerts/facts.ts, and the load row's time at the depot in outcome-view.ts; the
+ * replay leaves the AYUN events out): GPS times are not an alert input until the ivmsMode ALERTS step
+ * (lib/ivms/types.ts), so an alert never says "since arrival 10:02" about a stop the driver's phone shows as
+ * not arrived. Exact, because withGps only ever fills:
+ * - a GPS arrival (arrivalSource AYUN): the stop had no arrival, so no result stood in for its departure;
+ *   a departure the office or the phone gave stays, a GPS one or the result ending the GPS arrival goes;
+ * - a GPS departure after the driver's or the office's arrival: the stop had none, or the result stood in
+ *   for it (a result from the phone; one the office recorded never ends a stop).
+ * Everything else (the result, the automatic timing, the flags, the rest of the row) is the driver's and
+ * the office's already. The same object back when GPS gave neither time.
+ */
+export function withoutGpsTimes<V extends VisitTimes>(v: V): V {
+  const gpsArrival = v.arrivalSource === 'AYUN';
+  if (!gpsArrival && v.departureSource !== 'AYUN') return v;
+  const out: V = { ...v };
+  const o: VisitTimes = out;
+  if (gpsArrival) {
+    o.arrivedAt = null;
+    o.arrivalSource = null;
+    o.arrivalDistanceM = null;
+    o.arrivalAccuracyM = null;
+    o.arrivalObserved = true;
+    if (v.departureSource === 'AYUN' || v.departedAtOutcome) {
+      o.departedAt = null;
+      o.departureSource = null;
+      o.departedAtOutcome = false;
+    }
+    return out;
+  }
+  const standIn = v.outcome !== null && v.outcomeAt !== null && v.outcomeSource !== 'DISPATCHER';
+  o.departedAt = standIn ? v.outcomeAt : null;
+  o.departureSource = standIn ? v.outcomeSource : null;
+  o.departedAtOutcome = standIn;
+  return out;
+}
+
+/** The visit from the driver's and the office's events (spec section 8.4): the rebuild with the IVMS link off. */
+function deriveOwnVisit(events: readonly VisitEvent[], ctx: VisitContext): VisitState {
   const maxAfter = (ctx.maxAfterOutcomeMin ?? 15) * 60_000;
   // Load-level events (Back at depot, Leaving for next load) never belong to a visit; ignored if given.
   const evs = events.filter((e) => e.kind !== 'CARRY_CONFLICT' && e.kind !== 'BACK_AT_DEPOT' && e.kind !== 'DEPOT_DEPART');

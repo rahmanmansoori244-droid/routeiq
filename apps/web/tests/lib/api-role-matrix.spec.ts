@@ -197,6 +197,7 @@ const EXPECTED: Record<string, string> = {
   'PATCH /api/drivers/[id]/leave/[leaveId]': 'PLANNER',
   'DELETE /api/drivers/[id]/leave/[leaveId]': 'PLANNER',
   'POST /api/drivers/[id]/pin': 'GONE',
+  // Stays public; its IVMS `ivms` block only with the janitor token (lib/ivms/status.ts ivmsHealthForCaller).
   'GET /api/health': 'PUBLIC',
   // Owner request 13 Oct 2026: helpers (truck crew), kept like drivers (a new code stays the admin's in the route).
   'GET /api/helpers': 'ANY',
@@ -209,6 +210,10 @@ const EXPECTED: Record<string, string> = {
   'POST /api/hire-options': 'TENANT_ADMIN',
   'PATCH /api/hire-options/[id]': 'TENANT_ADMIN',
   'DELETE /api/hire-options/[id]': 'TENANT_ADMIN',
+  // IVMS live link (16 Oct 2026): the Ayun webhook, authenticated by the secret in its path
+  // (lib/ivms/webhook-auth.ts); 404 while no secret is set, 200 and nothing stored while the mode is OFF.
+  'GET /api/ivms/ayun/[secret]': 'TOKEN',
+  'POST /api/ivms/ayun/[secret]': 'TOKEN',
   'POST /api/locations/parse': 'PLANNER',
   'GET /api/orders': 'ANY',
   'GET /api/orders/[batchId]': 'ANY',
@@ -249,6 +254,13 @@ const EXPECTED: Record<string, string> = {
   'PATCH /api/runs/[id]/loads/[loadId]': 'PLANNER',
   'POST /api/runs/[id]/optimize': 'PLANNER',
   'GET /api/runs/[id]/outcomes': 'ANY',
+  // IVMS live link (16 Oct 2026): the day screen's live trucks are positions of people at work (PLANNER and
+  // up, VIEWER 403); the tracker mapping and the Ayun tracker suggestions are the company admin's.
+  'GET /api/runs/[id]/vehicles': 'PLANNER',
+  'POST /api/ivms/objects': 'TENANT_ADMIN',
+  'PUT /api/ivms/trucks/[id]/tracker': 'TENANT_ADMIN',
+  // The undo of a truck-day's GPS times (first review M-3): company admin, dry run by default, audited.
+  'POST /api/ivms/trucks/[id]/gps-times': 'TENANT_ADMIN',
   'GET /api/runs/[id]/plan': 'ANY',
   'POST /api/runs/[id]/replan': 'PLANNER',
   'POST /api/runs/[id]/reset-stuck': 'PLANNER',

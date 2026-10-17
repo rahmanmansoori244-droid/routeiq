@@ -49,7 +49,7 @@ import { firstSignOf, plannedDriveOf, previousTrip, turnaroundLine, turnaroundOf
 import { clockText } from '../alerts/text';
 import { actualMinutes, arrivalNote, departureNote, noPhotoText, OUTCOME_LABEL, reasonText, sourceWord } from './office-text';
 import { copyConflicts } from './carry-conflicts';
-import { readVisitLines, type VisitLine } from './visit';
+import { readVisitLines, withoutGpsTimes, type VisitLine, type VisitTimes } from './visit';
 import type { KpiVisit } from './kpis';
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -359,7 +359,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
         departedAt: iso(v.departedAt),
         departureGap,
         departedAtOutcome: v.departedAtOutcome,
-        departureNote: departureNote(v.departedAtOutcome, departureGap),
+        departureNote: departureNote(v.departedAtOutcome, departureGap, v.departureSource),
         actualMin: actual.min,
         actualLabel: actual.label,
         plannedMin: v.plannedServiceMin ?? s.plannedServiceMin,
@@ -399,8 +399,8 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
 
 const ALL_STATUSES = ['PLANNED', 'LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED'] as const;
 
-/** A visit as turnaroundsOf reads it. */
-type TurnaroundVisit = { id: string; depotId: string; deliveryDate: Date; truckId: string; loadNo: number } & SignVisit;
+/** A visit as turnaroundsOf reads it (its times without the GPS ones: withoutGpsTimes). */
+type TurnaroundVisit = { id: string; depotId: string; deliveryDate: Date; truckId: string; loadNo: number } & SignVisit & VisitTimes;
 
 /**
  * The turnaround before each load of the version (every status: a trip still Locked or Loading shows the
@@ -413,6 +413,9 @@ type TurnaroundVisit = { id: string; depotId: string; deliveryDate: Date; truckI
  * driver's Leaving button is offered then only (lib/driver-link/manifest.ts), so merging changes nothing
  * on the screens until the owner turns them on (second review of 16 Oct 2026, M1 and M3). A day that is
  * over shows "no leave recorded" for a trip that never left, as does a wait over TURNAROUND_MAX_MIN.
+ * The first sign leaves out the GPS times of the IVMS live link, as rule R2 does (lib/alerts/facts.ts;
+ * merge review of 17 Oct 2026): the driver page offers Leaving for next load until the driver's own
+ * arrival, so his tap after a GPS-only arrival still counts.
  */
 async function turnaroundsOf(
   db: Db,
@@ -461,7 +464,7 @@ async function turnaroundsOf(
       backAt: known.backs.get(backKey(prev)) ?? null,
       leftTaps: l.status === 'PLANNED' ? [] : (lefts.get(backKey(l)) ?? []),
       dispatchAt: o?.dispatchedAt ?? (l.status === 'DISPATCHED' ? l.statusChangedAt : null),
-      firstSignAt: firstSignOf(vs, vs.flatMap((v) => phoneTimes.get(v.id) ?? [])),
+      firstSignAt: firstSignOf(vs.map(withoutGpsTimes), vs.flatMap((v) => phoneTimes.get(v.id) ?? [])),
       plannedDriveMin: plannedDriveOf(l.departMin, known.stopsBy.get(l.id) ?? []),
       existedAt: o?.firstAt ?? null,
       completed: l.status === 'COMPLETED',

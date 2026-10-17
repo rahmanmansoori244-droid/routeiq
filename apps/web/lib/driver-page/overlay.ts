@@ -44,6 +44,13 @@ export interface StopView {
   editable: boolean;
   carriedTo: string | null;
   by: 'DRIVER' | 'OFFICE' | null;
+  /**
+   * IVMS live link: the server's only arrival at this stop is the truck's GPS tracker's (absent
+   * otherwise). The driver page treats such a stop as NOT arrived (first review M-2): the "I arrived"
+   * button stays, no "At stop" timer runs, the tracker does not count it as visited; this time is only
+   * shown as a note.
+   */
+  gpsArrivedAt?: number;
 }
 
 export type OverlayStop = ManifestStop & { view: StopView };
@@ -154,17 +161,19 @@ function stopView(s: ManifestStop, l: ManifestLoad, mine: QueueItem[], localPhot
   const arrivals = mine.filter((i) => (i.body as DriverAction).type === 'ARRIVE');
   const lastOutcome = outcomes.at(-1)?.body as Extract<DriverAction, { type: 'OUTCOME' }> | undefined;
   const firstArrival = arrivals[0]?.body as Extract<DriverAction, { type: 'ARRIVE' }> | undefined;
+  // A GPS-only arrival is not the driver's: the stop stays "not arrived" on the phone (first review M-2).
+  const gpsAt = r?.arrivalByGps === true ? ms(r.arrivedAt) : null;
   const base: StopView = {
-    state: r?.state ?? 'PENDING',
-    arrivedAt: ms(r?.arrivedAt),
-    arrivalObserved: r?.arrivalObserved ?? true,
+    state: gpsAt !== null ? (r?.outcome ? 'DONE' : 'PENDING') : (r?.state ?? 'PENDING'),
+    arrivedAt: gpsAt !== null ? null : ms(r?.arrivedAt),
+    arrivalObserved: gpsAt !== null ? true : (r?.arrivalObserved ?? true),
     doneAt: r?.outcome ? ms(r.outcomeAt) : null,
     outcome: r?.outcome ?? null,
     reason: r?.reason ?? null,
     note: r?.note ?? null,
     casesDelivered: r?.casesDelivered ?? null,
     lines: r?.lines ?? null,
-    minutes: r?.minutes ?? null,
+    minutes: gpsAt !== null ? null : (r?.minutes ?? null),
     pending: false,
     changedByOffice: false,
     photoIds: r?.photoIds ?? [],
@@ -175,8 +184,11 @@ function stopView(s: ManifestStop, l: ManifestLoad, mine: QueueItem[], localPhot
     editable: r ? r.editable : l.status === 'DISPATCHED',
     carriedTo: r?.carriedTo ?? null,
     by: r?.by ?? null,
+    ...(gpsAt !== null ? { gpsArrivedAt: gpsAt } : {}),
   };
+  // The phone's own unsent arrival (it replaces a GPS one: the driver's arrival wins over the tracker's).
   if (firstArrival && base.arrivedAt === null) {
+    delete base.gpsArrivedAt;
     base.arrivedAt = ms(firstArrival.at);
     base.arrivalObserved = firstArrival.observed !== false;
     base.state = base.outcome ? 'DONE' : 'ARRIVED';
@@ -209,7 +221,10 @@ export const LEAVE_RETAP_MIN = 30;
  * second review of 16 Oct 2026, finding 5) and name its depot (the action needs it). Once tapped it is
  * offered again for LEAVE_RETAP_MIN after the tap (`now`; without it, not again): a tap made too early is
  * corrected by tapping again, the latest one counts (finding 2). `from`: the trip the truck came back
- * from; `to`: the one it leaves with.
+ * from; `to`: the one it leaves with. A stop whose only arrival is the GPS tracker's (IVMS live link) is
+ * not arrived here (stopView) and is no sign for rule R2 either (the alerts read visits without GPS
+ * times: lib/delivery/visit.ts withoutGpsTimes), so the offer stays and the tap counts (merge review of
+ * 17 Oct 2026, finding 2).
  */
 export function leaveOffer(loads: readonly OverlayLoad[], now?: number): { from: OverlayLoad; to: OverlayLoad } | null {
   for (let i = loads.length - 2; i >= 0; i--) {
@@ -224,10 +239,15 @@ export function leaveOffer(loads: readonly OverlayLoad[], now?: number): { from:
   return null;
 }
 
-/** The stop in progress for restoreTracker: a server ARRIVED stop or an unsent arrival without a result. */
+/**
+ * The stop in progress for restoreTracker: a server ARRIVED stop or an unsent arrival without a result.
+ * Never a stop whose only arrival is the truck's GPS tracker's (IVMS live link, review M4): stopView shows
+ * it as not arrived, so the phone's timer keeps looking for the stop itself and its own (more precise)
+ * arrival is not suppressed.
+ */
 export function stopInProgress(loads: readonly OverlayLoad[], loadKey: string): { key: string; arrivedAt: number; observed: boolean } | null {
   const l = loads.find((x) => x.key === loadKey);
-  const s = l?.stops.find((x) => x.view.state === 'ARRIVED' && x.view.arrivedAt !== null && x.view.doneAt === null);
+  const s = l?.stops.find((x) => x.view.state === 'ARRIVED' && x.view.arrivedAt !== null && x.view.doneAt === null && x.view.gpsArrivedAt === undefined);
   return s ? { key: s.key, arrivedAt: s.view.arrivedAt!, observed: s.view.arrivalObserved } : null;
 }
 

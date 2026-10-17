@@ -18,6 +18,7 @@
 import { SolverError } from '../solver-client';
 import { activeHireJobs, failHireChecksForShutdown } from '../dispatch/hire-whatif';
 import { activeDispatchJobs, failJob } from './dispatch-job';
+import { stopIvms } from '../ivms/poll';
 
 /** The longest the handler waits for the failure writes before the process exits. */
 export const SHUTDOWN_FAIL_MS = 8_000;
@@ -62,6 +63,8 @@ export function installShutdownHandler(opts: { exit?: (code: number) => void; en
   const onSignal = (signal: NodeJS.Signals) => {
     if (started) return;
     started = true;
+    // IVMS live link: no new call to Ayun, and the one in flight is aborted (its lease expires by itself).
+    stopIvms();
     void failJobsForShutdown().then(
       (n) => {
         if (n) console.warn(`shutdown (${signal}): ${n} optimization(s) in progress failed so they can be started again`);

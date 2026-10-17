@@ -16,6 +16,10 @@ datasource db {
 
 generator client {
   provider = "prisma-client-js"
+  // IVMS live link (16 Oct 2026): `omit` hides the IVMS columns of Truck and Depot from every read
+  // (lib/db.ts PRISMA_GLOBAL_OMIT), so no existing response, page, export or audit row changes and
+  // only the IVMS code, which asks for them by name, ever sees a tracker IMEI. GA in Prisma 6.2.
+  previewFeatures = ["omitApi"]
 }
 
 enum Role {
@@ -199,6 +203,12 @@ model Tenant {
   // Operations alerts, owner request 16 Oct 2026.
   opsAlerts            OpsAlert[]
   opsAlertDigests      OpsAlertDigest[]
+  // IVMS live link (Ayun GPS trackers), 16 Oct 2026: lib/ivms/*.
+  truckPositions       TruckPosition[]
+  truckTrailPoints     TruckTrailPoint[]
+  ivmsEvents           IvmsEvent[]
+  ivmsState            IvmsState?
+  ivmsTruckDays        IvmsTruckDay[]
 }
 
 model TenantConfig {
@@ -356,6 +366,32 @@ model TenantConfig {
   alertEmailMinSeverity    String   @default("HIGH")
   alertQuietFromMin        Int?     @default(1320)
   alertQuietToMin          Int?     @default(360)
+  // IVMS live link (Ayun GPS trackers, 16 Oct 2026; lib/ivms/settings.ts IVMS_SETTING_BOUNDS, database
+  // CHECKs in 20261016200000_ivms_live). Company admin only. Nothing here is read while ivmsMode is OFF.
+  // OFF (default: no call to Ayun, nothing new shown) | MAP (live truck positions on the day screen) |
+  // TIMES (MAP + arrival and departure times from the trackers' history). ALERTS comes with a later PR.
+  ivmsMode                 String   @default("OFF")
+  // Seconds between two live-position calls while a mapped truck has a load out (30-900); the daily
+  // allowance may stretch it (lib/ivms/budget.ts). Positions are for the map only, never for times.
+  ivmsPollSec              Int      @default(60)
+  // Minutes between two history pulls of one truck while its load is out (30-240), plus one pull at
+  // the end: the source of GPS arrival and departure times (TIMES).
+  ivmsRoutePullMin         Int      @default(60)
+  // Operating hours, minutes from local midnight: no call outside [ivmsFromMin, ivmsToMin) unless a
+  // load is still out. 05:00-23:00 by default; ivmsToMin > ivmsFromMin (no hours across midnight).
+  ivmsFromMin              Int      @default(300)
+  ivmsToMin                Int      @default(1380)
+  // The provider's daily call allowance (today 100): RouteIQ never makes more calls than this per UTC
+  // day, all classes together (10-100000).
+  ivmsDailyCallBudget      Int      @default(100)
+  // GPS stop detection: a truck is at a customer when it stays within this distance of the pin
+  // (50-300 m; the same 100 m as the phone's geofenceRadiusM by default) for at least ivmsStopDwellMin
+  // minutes (1-30); the depot counts within ivmsDepotRadiusM (100-2000 m).
+  ivmsStopRadiusM          Int      @default(100)
+  ivmsStopDwellMin         Int      @default(3)
+  ivmsDepotRadiusM         Int      @default(300)
+  // Days the trucks' GPS trail is kept (1-7): written only while a load is out, never exported.
+  ivmsTrailDays            Int      @default(2)
 }
 
 // Defaults per customer type; a customer's own values always win.
@@ -448,6 +484,10 @@ model Depot {
   /// trucks of this depot (company admin, Depots page). Null: the company number
   /// (TenantConfig.dispatcherPhone). lib/driver-link/dispatcher-phone.ts.
   dispatcherPhone String?
+  /// IVMS live link (16 Oct 2026): the name of the Ayun zone whose IN/OUT events are this depot's
+  /// (compared trimmed and case-insensitively, 1-80 characters). NULL = the depot pin and
+  /// TenantConfig.ivmsDepotRadiusM only. Company admin; hidden from every read like Truck.ivmsImei.
+  ivmsZoneName  String?
   trucks        Truck[]
   regions       Region[]
   runs          RunPlan[]
@@ -505,8 +545,18 @@ model Truck {
   loads            PlanLoad[]
   driverLinks      DriverLink[]
   stopVisits       StopVisit[]
+  /// IVMS live link (16 Oct 2026): the IMEI of the truck's GPS tracker (Ayun), digits only (10-20,
+  /// database CHECK). NULL = no tracker: the driver's phone only, exactly as before. Unique per company.
+  /// Never on a one-day hired truck (CHECK). Company admin only: lib/db.ts omits it from every read, so
+  /// no existing response, page, sheet, export or audit row carries it; the IVMS code selects it by name.
+  ivmsImei         String?
+  ivmsPosition     TruckPosition?
+  ivmsTrail        TruckTrailPoint[]
+  ivmsEvents       IvmsEvent[]
+  ivmsDays         IvmsTruckDay[]
 
   @@unique([tenantId, code])
+  @@unique([tenantId, ivmsImei])
   @@index([tenantId, depotId])
   @@index([tenantId, onlyOnDate])
 }
@@ -1660,4 +1710,175 @@ model OpsAlertDigest {
   error          String?
 
   @@index([tenantId, createdAt])
+}
+
+// IVMS live link (Ayun, a GPS-Server.net tracking platform), 16 Oct 2026: lib/ivms/*. Off by default
+// (TenantConfig.ivmsMode OFF, kill switch ROUTEIQ_DISABLE_IVMS=1): while OFF nothing here is written
+// and RouteIQ makes no call to Ayun. Only trucks with a tracker IMEI (Truck.ivmsImei) are ever asked
+// for or stored; provider object names (they hold driver names), plates, SIMs and the like are never
+// stored. Driver and office entries always win over GPS; GPS never writes a result and never completes
+// a load. Every model below is tenant-scoped (lib/tenant.ts).
+
+/// The latest live position of a truck (one row, updated in place): the live map (MAP) only, never a
+/// source of arrival or departure times. Written only while the truck has a load out (LOCKED, LOADING
+/// or DISPATCHED); a truck without one has no row. Deleted when the tracker is moved to another truck.
+model TruckPosition {
+  id         String    @id @default(cuid())
+  tenantId   String
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  truckId    String    @unique
+  truck      Truck     @relation(fields: [truckId], references: [id], onDelete: Cascade)
+  /// The device's GPS time of the fix (provider dt_tracker, UTC, plus AYUN_API_TIME_OFFSET_MIN).
+  fixAt      DateTime  @db.Timestamptz(3)
+  /// When the provider received it (dt_server); fixAt far behind it = a delayed (buffered) fix.
+  serverAt   DateTime? @db.Timestamptz(3)
+  /// When RouteIQ read it (the poll): the map's "updated N min ago" and the retention purge.
+  receivedAt DateTime  @db.Timestamptz(3)
+  lat        Float
+  lng        Float
+  speedKmh   Float?
+  heading    Int?
+  /// The device's ignition input when it sends one (params.acc), else NULL.
+  ignition   Boolean?
+  /// lib/ivms/types.ts FIX_FLAGS: INVALID_FIX | CLOCK_AHEAD | DELAYED (database CHECK).
+  flags      String[]  @default([])
+  /// The last fix moving at 5 km/h or more ("parked for N min").
+  movedAt    DateTime? @db.Timestamptz(3)
+
+  @@index([tenantId, receivedAt])
+}
+
+/// A truck's GPS trail from the provider's history (OBJECT_GET_ROUTE): the only source of GPS
+/// arrival and departure times (TIMES). Pulled only while the truck has a load out and once at the
+/// end; kept TenantConfig.ivmsTrailDays (default 2) days; never exported, never shown outside the
+/// day screen. Invalid fixes (out of range, 0,0, clock ahead) are never stored.
+model TruckTrailPoint {
+  id       String   @id @default(cuid())
+  tenantId String
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  truckId  String
+  truck    Truck    @relation(fields: [truckId], references: [id], onDelete: Cascade)
+  /// The device's GPS time (UTC, plus AYUN_API_TIME_OFFSET_MIN). The same fix pulled twice is one row.
+  fixAt    DateTime @db.Timestamptz(3)
+  lat      Float
+  lng      Float
+  speedKmh Float?
+  ignition Boolean?
+
+  @@unique([tenantId, truckId, fixAt])
+  @@index([tenantId, fixAt])
+}
+
+/// Depot and zone moves of trucks with a tracker: Ayun webhooks, the OBJECT_GET_LAST_EVENTS backstop,
+/// or derived from the trail. Only for IMEIs mapped to a truck of this company (an unknown IMEI is
+/// counted, never stored). A fact for the screen (and later the alerts): never a load completion.
+model IvmsEvent {
+  id          String    @id @default(cuid())
+  tenantId    String
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  truckId     String
+  truck       Truck     @relation(fields: [truckId], references: [id], onDelete: Cascade)
+  /// The matched depot of this company (no FK, like StopVisit.depotId); NULL = not a depot zone.
+  depotId     String?
+  /// lib/ivms/types.ts IVMS_EVENT_KINDS: DEPOT_IN | DEPOT_OUT | ZONE_IN | ZONE_OUT (database CHECK).
+  kind        String
+  /// lib/ivms/types.ts IVMS_EVENT_ORIGINS: WEBHOOK | BACKSTOP | TRAIL (database CHECK).
+  origin      String
+  /// When it happened: the fix's dt_tracker (+ the channel's offset), or the first trail point in/out.
+  eventAt     DateTime  @db.Timestamptz(3)
+  serverAt    DateTime? @db.Timestamptz(3)
+  receivedAt  DateTime  @default(now()) @db.Timestamptz(3)
+  /// The provider zone's name, at most 80 characters (database CHECK).
+  zoneName    String?
+  /// Display only: never a pin, never pin evidence, never a stop-detection input.
+  lat         Float?
+  lng         Float?
+  /// 'ayun:' + a hash of (imei, type, dt_tracker, zone) (lib/ivms/dedupe.ts): a webhook and the
+  /// backstop row of the same event are one row.
+  dedupeKey   String
+  processedAt DateTime? @db.Timestamptz(3)
+  /// lib/ivms/types.ts IVMS_EVENT_OUTCOMES: what processing did with it (NULL = not processed yet).
+  outcome     String?
+
+  @@unique([tenantId, dedupeKey])
+  @@index([tenantId, truckId, eventAt])
+  @@index([tenantId, processedAt])
+  @@index([tenantId, receivedAt])
+}
+
+/// One row per company with the IVMS link on: the provider allowance used today, per call class, so
+/// that no class can starve another (lib/ivms/budget.ts); the lease that lets one container call at a
+/// time (released after each call); the backoff after failures; the webhook counters. Counted in the
+/// database, so a restart or two containers during a deploy never go over the allowance. Never
+/// deleted by Start fresh (the provider's count for the day would be lost).
+model IvmsState {
+  tenantId        String    @id
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// The provider's day: the UTC date (it resets its counters at 00:00 UTC, 04:00 in Muscat).
+  usageDay        DateTime  @db.Date
+  /// Calls made on usageDay per class (lib/ivms/types.ts IVMS_CALL_CLASSES); failed calls count too.
+  mapCalls        Int       @default(0) // OBJECT_GET_LOCATIONS: live positions (MAP)
+  routeCalls      Int       @default(0) // OBJECT_GET_ROUTE: history pulls (TIMES)
+  eventCalls      Int       @default(0) // OBJECT_GET_LAST_EVENTS: backstop for missed webhooks
+  adminCalls      Int       @default(0) // USER_GET_OBJECTS / USER_GET_ZONES: the admin's mapping dialogs
+  /// A background call in progress (deploy overlap): released when the call ends, expires on its own.
+  leaseUntil      DateTime? @db.Timestamptz(3)
+  leaseOwner      String?
+  mapLastAt       DateTime? @db.Timestamptz(3)
+  eventsLastAt    DateTime? @db.Timestamptz(3)
+  lastOkAt        DateTime? @db.Timestamptz(3)
+  /// Backoff: no background call before this (LIMIT: the next UTC midnight; AUTH: one hour).
+  nextTryAt       DateTime? @db.Timestamptz(3)
+  failures        Int       @default(0)
+  /// An error kind code only (lib/ivms/types.ts AYUN_ERROR_KINDS), never a URL, a key or a body.
+  lastError       String?
+  lastErrorAt     DateTime? @db.Timestamptz(3)
+  webhooksToday   Int       @default(0)
+  /// Webhooks answered but not stored: unknown IMEI or type, mode OFF.
+  webhooksIgnored Int       @default(0)
+  /// Webhooks refused for their time (outside [now - 26 h, now + 2 min]): a wrong offset shows here.
+  webhooksBadTime Int       @default(0)
+  /// The provider's clock as seen in the last live-position answer: its newest receipt time (dt_server,
+  /// with the API offset) minus RouteIQ's clock, seconds; about +-14400 = provider times not in UTC.
+  providerSkewSec Int?
+  /// When providerSkewSec was measured, and with which AYUN_API_TIME_OFFSET_MIN: GPS times are processed
+  /// only while a skew measured with the offset in use is within limits (lib/ivms/budget.ts clockCheck,
+  /// first review H-1; migration 20261016220000_ivms_review_fixes).
+  providerSkewAt        DateTime? @db.Timestamptz(3)
+  providerSkewOffsetMin Int?
+  updatedAt       DateTime  @updatedAt @db.Timestamptz(3)
+}
+
+/// One truck-day (delivery date) seen by the IVMS link: how far its history has been pulled (TIMES),
+/// and whether GPS is suppressed for it (undo, a tracker that does not match the phone, a remap): a
+/// suppressed truck-day gets nothing automatic written, and the next pass does not write it again.
+model IvmsTruckDay {
+  id             String    @id @default(cuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  truckId        String
+  truck          Truck     @relation(fields: [truckId], references: [id], onDelete: Cascade)
+  deliveryDate   DateTime  @db.Date
+  /// History pulled up to this provider time; the next pull starts a little before it.
+  pulledTo       DateTime? @db.Timestamptz(3)
+  lastPullAt     DateTime? @db.Timestamptz(3)
+  pulls          Int       @default(0)
+  /// The pull after the truck-day's last load came back: no more pulls for it after this.
+  finalPullAt    DateTime? @db.Timestamptz(3)
+  /// When the stop detector last ran over this truck-day.
+  processedAt    DateTime? @db.Timestamptz(3)
+  suppressedAt   DateTime? @db.Timestamptz(3)
+  /// lib/ivms/types.ts IVMS_SUPPRESS_REASONS: UNDO | MISMATCH | REMAP (database CHECK).
+  suppressReason String?
+  /// What the stop detector saw but must not write by itself (lib/ivms/stops.ts StopAmbiguity and
+  /// notes, review H4): a fact for the office, never a time. A JSON array, at most 8 KB (CHECK);
+  /// rewritten by each detector run (migration 20261016210000_ivms_gps_facts).
+  gpsFactsJson   Json?
+  /// The tracker was mapped to this truck at this time (it had none before): no point from before it is
+  /// pulled or used, so a tracker moved from another truck never brings that truck's morning along
+  /// (second review M-1; migration 20261016220000_ivms_review_fixes).
+  trailFrom      DateTime? @db.Timestamptz(3)
+
+  @@unique([tenantId, truckId, deliveryDate])
+  @@index([tenantId, deliveryDate])
 }

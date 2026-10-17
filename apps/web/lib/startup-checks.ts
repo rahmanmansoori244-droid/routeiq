@@ -6,6 +6,7 @@ import { pdfRenderConfigProblems } from './pdf-render/config';
 import { rateLimitConfigProblem } from './rate-limit';
 import { TOKEN_CANNOT_BE_SENT, URL_EXPECTED, URL_NOT_USABLE, solverEnv, solverUrlUsable, tokenCanBeSent } from './solver-env';
 import { uploadParseConfigProblems } from './upload-parse/config';
+import { ivmsConfigProblems } from './ivms/env';
 
 export interface ConfigProblem {
   level: 'error' | 'warn';
@@ -27,6 +28,8 @@ export function configProblems(env: NodeJS.ProcessEnv = process.env): ConfigProb
   for (const message of uploadParseConfigProblems(env)) out.push({ level: 'warn', message });
   // Review M3: the same for the PDF renderer settings.
   for (const message of pdfRenderConfigProblems(env)) out.push({ level: 'warn', message });
+  // IVMS live link (16 Oct 2026): variable names only, and nothing while no IVMS variable is set.
+  for (const message of ivmsConfigProblems(env)) out.push({ level: 'warn', message });
   if (env.NODE_ENV !== 'production') return out;
 
   // Audit F15: without these every optimization fails; /api/health answers 503 for the same reason.

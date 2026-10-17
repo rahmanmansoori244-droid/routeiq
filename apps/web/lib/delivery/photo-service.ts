@@ -177,7 +177,9 @@ export async function recordDriverPhoto(ctx: DriverWriteContext, meta: PhotoMeta
       const exifLat = exifBytes?.lat ?? meta.exif?.lat ?? null;
       const exifLng = exifBytes?.lng ?? meta.exif?.lng ?? null;
       const exifTakenAt = exifBytes?.takenAt ?? date(meta.exif?.takenAt);
-      const reference = visit.arrivedAt ?? (load.status === 'DISPATCHED' ? load.statusChangedAt : null);
+      // The driver's or the office's arrival only: a GPS (AYUN) arrival is never the reference of the old-photo
+      // check (IVMS live link, first review LOW: a wrong tracker time must not mark the driver's photo old).
+      const reference = (visit.arrivalSource !== 'AYUN' ? visit.arrivedAt : null) ?? (load.status === 'DISPATCHED' ? load.statusChangedAt : null);
       const oldPhoto = isOldPhotoOnServerClock({
         reference,
         skewMs: skew,

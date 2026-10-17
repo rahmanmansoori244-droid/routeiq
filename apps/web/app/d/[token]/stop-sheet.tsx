@@ -141,6 +141,7 @@ export function StopSheet({
               <button type="button" onClick={onArrive} className="flex min-h-14 w-full items-center justify-center gap-2 rounded-xl border-2 border-slate-900 text-lg font-bold" data-testid="i-arrived">
                 <Hand className="h-6 w-6" aria-hidden /> {t(lang, 'iArrived')}
               </button>
+              {v.gpsArrivedAt !== undefined ? <p className="text-sm text-slate-600" data-testid="gps-seen">{t(lang, 'gpsSeenAt', { time: time(v.gpsArrivedAt) })}</p> : null}
             </>
           )}
           {atThisStop && v.arrivedAt === null ? <p className="text-sm text-slate-600">{t(lang, 'waitingGps')}</p> : null}

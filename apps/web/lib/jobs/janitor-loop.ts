@@ -13,6 +13,8 @@ import { runDeliveryJanitor } from './delivery-janitor';
 import { failLostHireChecks, retireOneDayTrucks } from '../dispatch/hire-whatif';
 import { runAlertSweep } from '../alerts/sweep';
 import { sendAlertDigest } from '../alerts/notify';
+import { startIvmsTimer } from '../ivms/poll';
+import { ivmsRetentionChanged, runIvmsRetention } from '../ivms/retention';
 
 const INTERVAL_MS = 60_000;
 /** The returned-loads sweep: the last result already completes a load at once; this is the safety net. */
@@ -58,6 +60,14 @@ async function sweep() {
   } catch (err) {
     console.error('janitor: delivery retention not run', (err as Error)?.message ?? err);
   }
+  // IVMS live link (16 Oct 2026): the trackers' trail, live positions and depot moves age out (at most
+  // every 10 min; one EXISTS and nothing else while no GPS data exists). Its own try as well.
+  try {
+    const gps = await runIvmsRetention();
+    if (ivmsRetentionChanged(gps)) console.warn('janitor: GPS tracking retention', gps);
+  } catch (err) {
+    console.error('janitor: GPS tracking retention not run', (err as { code?: string } | null)?.code ?? (err as Error)?.name ?? 'error');
+  }
   // Operations alerts (owner request 16 Oct 2026): the companies that switched them on, at most every
   // 2 min (lib/alerts/sweep.ts throttles and logs), each followed by its e-mail digest (lib/alerts/notify.ts:
   // sends only with Resend set up and recipients saved, never in the quiet hours). Its own try as well;
@@ -76,4 +86,8 @@ export function startJanitor(): void {
   g.__routeiqJanitor = setInterval(sweep, INTERVAL_MS);
   g.__routeiqJanitor.unref();
   setTimeout(sweep, 5_000).unref();
+  // IVMS live link (16 Oct 2026): the calls to Ayun run on their own 15 s timer (lib/ivms/poll.ts), so a
+  // slow provider never delays the steps above. Not started at all without the AYUN_* variables or with
+  // ROUTEIQ_DISABLE_IVMS=1; with them, nothing is called while the company's ivmsMode is OFF.
+  startIvmsTimer();
 }

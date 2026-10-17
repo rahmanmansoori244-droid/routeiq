@@ -64,7 +64,7 @@ export function reasonText(reason: string | null | undefined, note: string | nul
   return reasonLabel(reason);
 }
 
-/** Who recorded it: "driver", "dispatcher", "Ayun", "RouteIQ". */
+/** Who recorded it: "driver", "dispatcher", "GPS (Ayun)" (the truck's tracker, IVMS live link), "RouteIQ". */
 export function sourceWord(source: string | null | undefined): string {
   switch (source) {
     case 'PHONE_AUTO':
@@ -73,13 +73,16 @@ export function sourceWord(source: string | null | undefined): string {
     case 'DISPATCHER':
       return 'dispatcher';
     case 'AYUN':
-      return 'Ayun';
+      return GPS_WORD;
     case 'SYSTEM':
       return 'RouteIQ';
     default:
       return 'unknown';
   }
 }
+
+/** How a time from the trucks' GPS trackers (source AYUN, IVMS live link of 16 Oct 2026) is named everywhere. */
+export const GPS_WORD = 'GPS (Ayun)';
 
 export const OUTCOME_LABEL: Record<string, string> = {
   DELIVERED: 'Delivered',
@@ -161,32 +164,44 @@ export function arrivalByText(source: string | null, observed: boolean): string 
     case 'DISPATCHER':
       return 'Office';
     case 'AYUN':
-      return 'Ayun';
+      return observed ? GPS_WORD : `${GPS_WORD}, not observed`;
     default:
       return '';
   }
 }
 
-/** The note under an arrival time: "manual", "set by office", "arrival not observed (page opened at the shop)". */
+/**
+ * The note under an arrival time: "manual", "set by office", "arrival not observed (page opened at the
+ * shop)"; a GPS arrival says so: "GPS (Ayun)" or "GPS (Ayun): not observed (gap in the tracker's points)".
+ */
 export function arrivalNote(source: string | null, observed: boolean): string | null {
   if (source === 'PHONE_MANUAL') return 'manual';
   if (source === 'DISPATCHER') return 'set by office';
-  if ((source === 'PHONE_AUTO' || source === 'AYUN') && !observed) return 'arrival not observed (page opened at the shop)';
+  if (source === 'AYUN') return observed ? GPS_WORD : `${GPS_WORD}: not observed (gap in the tracker's points)`;
+  if (source === 'PHONE_AUTO' && !observed) return 'arrival not observed (page opened at the shop)';
   return null;
 }
 
-/** The note under a departure time: "result time" / "not observed". */
-export function departureNote(atOutcome: boolean, gap: boolean): string | null {
+/** The note under a departure time: "result time" / "not observed"; a GPS departure: "GPS (Ayun)" / "GPS (Ayun), not observed". */
+export function departureNote(atOutcome: boolean, gap: boolean, source?: string | null): string | null {
   if (atOutcome) return 'result time';
+  if (source === 'AYUN') return gap ? `${GPS_WORD}, not observed` : GPS_WORD;
   if (gap) return 'not observed';
   return null;
 }
 
-/** "Timed by" in the Excel. */
+/**
+ * "Timed by" in the Excel. The automatic timing is the phone's only (GPS never feeds it, visit.ts); a
+ * GPS arrival says "GPS (Ayun)", a GPS departure after the driver's own arrival says so too (second
+ * review L-2: never "GPS (Ayun)" for a stop the driver tapped).
+ */
 export function timedByText(v: { autoBasis: string | null; arrivalSource: string | null; departureSource?: string | null; departedAtOutcome: boolean; outcomeSource: string | null }): string {
   if (v.autoBasis === 'DEPARTURE') return 'Auto to departure';
   if (v.autoBasis === 'RESULT') return 'Auto to result';
   if (v.arrivalSource === 'DISPATCHER' || v.departureSource === 'DISPATCHER' || (v.departedAtOutcome && v.outcomeSource === 'DISPATCHER')) return 'Office';
+  // A GPS arrival is not a manual one (it was labelled "Manual" before the IVMS live link).
+  if (v.arrivalSource === 'AYUN') return GPS_WORD;
+  if (v.departureSource === 'AYUN' && !v.departedAtOutcome) return `${v.arrivalSource === 'PHONE_AUTO' ? 'Auto' : 'Manual'} arrival, ${GPS_WORD} departure`;
   if (v.departedAtOutcome) return 'Result time';
   if (v.arrivalSource) return 'Manual';
   return '';

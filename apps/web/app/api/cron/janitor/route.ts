@@ -32,6 +32,8 @@ import { failLostHireChecks, retireOneDayTrucks } from '@/lib/dispatch/hire-what
 import { janitorAuthorized } from '@/lib/janitor-auth';
 import { runAlertSweep } from '@/lib/alerts/sweep';
 import { sendAlertDigest } from '@/lib/alerts/notify';
+import { runIvmsTick } from '@/lib/ivms/poll';
+import { runIvmsRetention } from '@/lib/ivms/retention';
 
 export const dynamic = 'force-dynamic';
 
@@ -47,10 +49,31 @@ async function runJanitor() {
   const deliveryRetention = await runDeliveryJanitor(new Date(), { force: true });
   // The hire suggestion: what-ifs lost with their process; one-day hired trucks whose day is over.
   const hire = { lostChecks: await failLostHireChecks(), oneDayTrucksRetired: await retireOneDayTrucks() };
+  // IVMS live link (16 Oct 2026): one tick now (`force` skips the wait only while the allowance is ample)
+  // and the GPS retention. Both null - and the answer exactly as before - while the link is not in use
+  // (no AYUN_* variables, the kill switch, ivmsMode OFF, no GPS data).
+  // Each in its own try, as in the in-process janitor (first review LOW): a database error there never turns
+  // the answer into a 500 after the steps above already ran; its code only is logged and answered.
+  const now = new Date();
+  const step = async <T,>(name: string, run: () => Promise<T>): Promise<T | { error: string }> => {
+    try {
+      return await run();
+    } catch (err) {
+      const code = String((err as { code?: string; name?: string } | null)?.code ?? (err as Error)?.name ?? 'error').slice(0, 40);
+      console.error(`janitor: ${name} failed`, code);
+      return { error: code };
+    }
+  };
+  const ivmsTick = await step('ivms tick', () => runIvmsTick(now, { force: true }));
+  const ivmsRetention = await step('ivms retention', () => runIvmsRetention(now, { force: true }));
+  const ivms = ivmsTick || ivmsRetention ? { tick: ivmsTick, retention: ivmsRetention } : null;
   // Operations alerts (owner request 16 Oct 2026): the companies that switched them on, now, each followed
   // by its e-mail digest (null when ROUTEIQ_DISABLE_ALERTS=1 or a sweep is still running in this process).
-  const alerts = await runAlertSweep(new Date(), { force: true, notify: sendAlertDigest });
-  return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts };
+  // Its own try as well (merge of 16 Oct 2026: a database error in one feature never hides the other's
+  // answer or turns it into a 500; a monitor watches /api/health `alerts` for a failing sweep). The sweep
+  // never reads the GPS times the tick writes (lib/alerts/facts.ts alertVisitRow).
+  const alerts = await step('alerts', () => runAlertSweep(new Date(), { force: true, notify: sendAlertDigest }));
+  return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts, ...(ivms ? { ivms } : {}) };
 }
 
 export async function POST(req: Request) {

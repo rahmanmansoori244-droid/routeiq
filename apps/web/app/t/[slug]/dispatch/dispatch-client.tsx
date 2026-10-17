@@ -182,11 +182,13 @@ interface Props {
   initialDepot: string | null;
   /** Calling code for drivers' phones saved without one (WhatsApp links); null = unknown. */
   phoneCountryCode: string | null;
+  /** Live trucks on the plan's map (IVMS live link): GPS tracking MAP or TIMES, PLANNER and up. */
+  liveMap?: boolean;
   /** Operations alerts (owner request 16 Oct 2026) are switched on: the Alerts card above Deliveries. */
   alertsEnabled?: boolean;
 }
 
-export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, initialDate, initialDepot, phoneCountryCode, alertsEnabled = false }: Props) {
+export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, initialDate, initialDepot, phoneCountryCode, liveMap = false, alertsEnabled = false }: Props) {
   const router = useRouter();
   const [date, setDate] = useState<string | null>(initialDate);
   const [depotId, setDepotId] = useState<string | null>(initialDepot);
@@ -798,6 +800,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             reloadSignal={planReload}
             onResultRecorded={() => void refreshResults()}
             today={day.today}
+            liveMap={liveMap}
             onChanged={async () => {
               // The plan's action keeps its buttons (and Step 3) waiting until the day shows its
               // result; then the plan screen is loaded fresh. When the day could not be loaded, the

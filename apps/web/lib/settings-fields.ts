@@ -1,10 +1,12 @@
 /**
  * The tenant settings the Settings page edits (review F21): exactly the fields of
- * tenantConfigSchema, i.e. the ones the daily dispatch planner reads. Kept in a plain module so
- * both the server page and the client form can import it.
+ * tenantConfigSchema, i.e. the ones the daily dispatch planner reads, and the web-only ones beside
+ * them (the driver page's, the operations alerts', the IVMS live link's). Kept in a plain module so both
+ * the server page and the client form can import it.
  */
 import type { TenantConfig } from '@prisma/client';
 import { ALERT_EMAIL_EVERY_BOUNDS, ALERT_QUIET_BOUNDS, ALERT_THRESHOLD_BOUNDS } from './alerts/catalog';
+import { IVMS_SETTINGS_FIELDS } from './ivms/settings';
 
 /**
  * Operations alerts (owner request 16 Oct 2026, lib/alerts/catalog.ts): company admin only. The master
@@ -77,6 +79,9 @@ export const SETTINGS_FIELDS = [
   'dispatcherPhone',
   // Operations alerts (owner request 16 Oct 2026): company admin only.
   ...ALERT_SETTINGS_FIELDS,
+  // The IVMS live link (Ayun GPS trackers, 16 Oct 2026): company admin only, never read by the planner
+  // (lib/ivms/settings.ts IVMS_SETTINGS_FIELDS, the same order).
+  ...IVMS_SETTINGS_FIELDS,
 ] as const satisfies readonly (keyof TenantConfig)[];
 
 /**

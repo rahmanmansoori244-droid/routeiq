@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { emailDeliveryConfigured } from '@/lib/password-reset';
 import { checkDispatchReadiness, overallReadiness, solverField } from '@/lib/health';
 import { alertSweepHealth } from '@/lib/alerts/sweep';
+import { ivmsHealthForCaller } from '@/lib/ivms/status';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -13,6 +14,20 @@ async function checkDb(): Promise<'up' | 'down'> {
     return 'up';
   } catch {
     return 'down';
+  }
+}
+
+/**
+ * The IVMS live link's counters. The route stays public; only a caller with the janitor token gets this
+ * block (first review LOW: the public answer never shows the GPS link's mode, counts, errors or clock,
+ * and reads nothing for it: lib/ivms/status.ts ivmsHealthForCaller); null (and no field) while the link
+ * is not in use. Never changes the status.
+ */
+async function ivmsField(req?: Request) {
+  try {
+    return await ivmsHealthForCaller(req);
+  } catch {
+    return null;
   }
 }
 
@@ -36,8 +51,8 @@ async function checkDb(): Promise<'up' | 'down'> {
  * operations-alert sweep last ran in this process and how many companies' last sweep failed or is
  * overdue (counts only, never a company; review of 16 Oct 2026, M2).
  */
-export async function GET() {
-  const [db, dispatch] = await Promise.all([checkDb(), checkDispatchReadiness()]);
+export async function GET(req?: Request) {
+  const [db, dispatch, ivms] = await Promise.all([checkDb(), checkDispatchReadiness(), ivmsField(req)]);
   const { status, httpStatus } = overallReadiness(db, dispatch);
   const email = emailDeliveryConfigured() ? 'configured' : 'not_configured';
   return NextResponse.json(
@@ -50,6 +65,10 @@ export async function GET() {
       routing: dispatch.routing,
       email,
       alerts: alertSweepHealth(),
+      // IVMS live link (16 Oct 2026): calls and webhooks of the provider's day, the last error's kind, the
+      // provider's clock; only with the janitor token and while the link is in use (AYUN_* variables set
+      // and the company's ivmsMode not OFF).
+      ...(ivms ? { ivms } : {}),
     },
     { status: httpStatus, headers: { 'Cache-Control': 'no-store' } },
   );

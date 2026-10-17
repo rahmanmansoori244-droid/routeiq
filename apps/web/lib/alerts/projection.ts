@@ -1,8 +1,9 @@
 /**
  * Operations alerts (owner request 16 Oct 2026, rule R3 "a driver's ETA changes to more than 30 min
- * late"): where a dispatched load is now, worked out from the plan and the driver's taps. Pure. There is
- * no GPS trail in RouteIQ (map-lifecycle §0): the projection walks the stops in sequence and moves the
- * plan by what really happened.
+ * late"): where a dispatched load is now, worked out from the plan and the driver's taps. Pure. It uses
+ * no GPS (map-lifecycle §0; the IVMS live link's GPS times are left out of the facts, facts.ts
+ * alertVisitRow, and its live positions are never read): the projection walks the stops in sequence and
+ * moves the plan by what really happened.
  *
  * Every time is a whole minute from local midnight of the load's delivery date (it may pass 1440).
  *

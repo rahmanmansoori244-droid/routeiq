@@ -1,0 +1,106 @@
+{
+  "about": [
+    "An invented delivery day for the IVMS live link simulation (tests/lib/ivms-day-simulation.spec.ts). Hand-written: nothing here comes from a real answer, a real truck, shop, driver or place.",
+    "Positions are metre offsets [east, north] from the invented depot of tests/lib/ivms-trail.ts (empty desert); times are local (Asia/Muscat, UTC+4) on the delivery date; the trackers are the vendor documentation's dummy IMEIs.",
+    "The spec's fake Ayun renders each truck's track as the device points the provider would hold (every 30 s while moving, every 60 s while parked) and answers OBJECT_GET_LOCATIONS / OBJECT_GET_ROUTE in the recorded shapes of locations.json and route.json, the webhook in the shape of webhook-depot-in.txt.",
+    "Provider quirks recorded here: T05's tracker has no coverage for 6 minutes just before shop C (its arrival there is not observed); T06's points of 07:40-07:52 reach the provider only at 08:30 (buffered); one forged Depot IN webhook, one repeated webhook and one webhook for a tracker that is not ours."
+  ],
+  "date": "2026-10-20",
+  "depotZone": "Example depot zone",
+  "shops": {
+    "A": { "at": [3000, 0], "name": "Shop Example A" },
+    "B": { "at": [6000, 800], "name": "Shop Example B" },
+    "C": { "at": [-4000, 2000], "name": "Shop Example C" },
+    "D1": { "at": [-7000, 3000], "name": "Mall Example unit 1" },
+    "D2": { "at": [-7000, 3040], "name": "Mall Example unit 2" },
+    "E": { "at": [150, 150], "name": "Kiosk Example next to the depot" },
+    "F": { "at": [2000, -3000], "name": "Shop Example F" },
+    "G": { "at": [5000, -5000], "name": "Shop Example G", "window": ["07:00", "07:30"] },
+    "H": { "at": [1000, 4000], "name": "Shop Example H" }
+  },
+  "trucks": [
+    {
+      "code": "T05",
+      "imei": "111111111111111",
+      "loads": [
+        { "loadNo": 1, "departAt": "07:00", "stops": ["A", "B"] },
+        { "loadNo": 2, "departAt": "08:45", "stops": ["C", "D1", "D2", "E", "A"] }
+      ],
+      "track": [
+        { "park": 120, "stepSec": 60 },
+        { "to": "A" },
+        { "park": 15 },
+        { "to": "B" },
+        { "park": 12 },
+        { "to": "depot" },
+        { "park": 59, "stepSec": 60 },
+        { "toward": "C", "share": 0.75 },
+        { "silent": 6, "jump": "C" },
+        { "park": 20 },
+        { "toMetres": [-7000, 3020] },
+        { "park": 25 },
+        { "to": "E" },
+        { "park": 10 },
+        { "to": "depot", "kmh": 20 },
+        { "park": 780, "stepSec": 300, "ignition": false }
+      ]
+    },
+    {
+      "code": "T06",
+      "imei": "222222222222222",
+      "loads": [{ "loadNo": 1, "departAt": "07:15", "stops": ["F", "G"] }],
+      "track": [
+        { "park": 135, "stepSec": 60 },
+        { "to": "F" },
+        { "park": 18 },
+        { "to": "G" },
+        { "park": 14 },
+        { "to": "depot" },
+        { "park": 890, "stepSec": 300, "ignition": false }
+      ],
+      "late": [{ "from": "07:40", "to": "07:52", "receivedAt": "08:30" }]
+    },
+    {
+      "code": "T07",
+      "imei": null,
+      "loads": [{ "loadNo": 1, "departAt": "07:30", "stops": ["H"] }]
+    }
+  ],
+  "world": [
+    { "at": "05:30", "truck": "T05", "load": 1, "status": "LOCKED" },
+    { "at": "05:30", "truck": "T05", "load": 2, "status": "LOCKED" },
+    { "at": "05:30", "truck": "T06", "load": 1, "status": "LOCKED" },
+    { "at": "05:30", "truck": "T07", "load": 1, "status": "LOCKED" },
+    { "at": "06:15", "truck": "T05", "load": 1, "status": "LOADING" },
+    { "at": "06:30", "truck": "T06", "load": 1, "status": "LOADING" },
+    { "at": "06:40", "truck": "T07", "load": 1, "status": "LOADING" },
+    { "at": "06:55", "truck": "T05", "load": 1, "status": "DISPATCHED" },
+    { "at": "07:10", "truck": "T06", "load": 1, "status": "DISPATCHED" },
+    { "at": "07:15", "truck": "T05", "load": 1, "stop": 1, "by": "driver", "result": "DELIVERED" },
+    { "at": "07:15:30", "webhook": "T06", "type": "zone_out", "receivedAt": "07:16:10" },
+    { "at": "07:15:30", "webhook": "T06", "type": "zone_out", "receivedAt": "07:16:40", "note": "the same event sent twice" },
+    { "at": "07:24", "truck": "T06", "load": 1, "stop": 1, "by": "driver", "arrived": true },
+    { "at": "07:27", "truck": "T05", "load": 1, "stop": 2, "by": "driver", "arrived": true },
+    { "at": "07:30", "truck": "T07", "load": 1, "status": "DISPATCHED" },
+    { "at": "07:30", "webhook": "T06", "type": "zone_in", "receivedAt": "07:31:00", "position": "depot", "note": "forged with the depot's own position: the truck is at shop F" },
+    { "at": "07:34", "truck": "T05", "load": 1, "stop": 2, "by": "driver", "result": "DELIVERED" },
+    { "at": "07:35", "truck": "T06", "load": 1, "stop": 1, "by": "driver", "result": "DELIVERED" },
+    { "at": "07:45", "webhook": "other", "type": "zone_in", "receivedAt": "07:45:20", "note": "a tracker that is not mapped" },
+    { "at": "07:46", "truck": "T07", "load": 1, "stop": 1, "by": "driver", "arrived": true },
+    { "at": "07:50", "truck": "T05", "load": 1, "by": "driver", "back": true },
+    { "at": "07:55", "truck": "T07", "load": 1, "stop": 1, "by": "driver", "result": "DELIVERED" },
+    { "at": "08:00", "truck": "T05", "load": 2, "status": "LOADING" },
+    { "at": "08:09:20", "webhook": "T06", "type": "zone_in", "receivedAt": "08:10:00" },
+    { "at": "08:20", "truck": "T07", "load": 1, "by": "driver", "back": true },
+    { "at": "08:40", "truck": "T05", "load": 2, "status": "DISPATCHED" },
+    { "at": "09:00", "truck": "T06", "load": 1, "stop": 2, "by": "office", "result": "DELIVERED" },
+    { "at": "09:05", "truck": "T06", "load": 1, "by": "office", "back": true },
+    { "at": "09:10", "truck": "T05", "load": 2, "stop": 1, "by": "driver", "result": "DELIVERED" },
+    { "at": "09:32", "truck": "T05", "load": 2, "stop": 2, "by": "driver", "result": "DELIVERED" },
+    { "at": "09:40", "truck": "T05", "load": 2, "stop": 3, "by": "driver", "result": "PARTLY_DELIVERED" },
+    { "at": "10:00", "truck": "T05", "load": 2, "stop": 4, "by": "driver", "result": "DELIVERED" },
+    { "at": "10:05", "truck": "T05", "load": 2, "stop": 5, "by": "driver", "result": "NOT_DELIVERED", "reason": "SHOP_CLOSED" },
+    { "at": "10:12", "truck": "T05", "load": 2, "by": "driver", "back": true }
+  ],
+  "screens": ["06:00", "07:06", "07:22", "07:46", "09:20", "10:30"]
+}

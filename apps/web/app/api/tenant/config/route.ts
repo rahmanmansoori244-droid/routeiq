@@ -3,6 +3,7 @@ import { withTenantApi, ok, parseBody, fail, hasRole } from '@/lib/api';
 import { alertQuietSaveProblem, breakSaveProblem, overtimeSaveProblem, retentionSaveProblem, tenantConfigSchema, tenantSettingsSchema } from '@/lib/schemas';
 import { adminOnlyFields, DISPATCHER_SETTINGS_FIELDS } from '@/lib/settings-fields';
 import { audit } from '@/lib/audit';
+import { ivmsHoursSaveProblem } from '@/lib/ivms/settings';
 import { prisma } from '@/lib/db';
 import { ruleOnAtAfterSave } from '@/lib/alerts/catalog';
 
@@ -97,6 +98,9 @@ export const PATCH = withTenantApi(
       // Operations alerts: the quiet hours have both ends or none (owner request 16 Oct 2026).
       const quiet = alertQuietSaveProblem(configPatch, { ...before.config, ...configPatch });
       if (quiet) return { status: 400 as const, error: quiet };
+      // IVMS live link: the GPS tracking hours never cross midnight (database CHECK TenantConfig_ivmsHours_order).
+      const ivmsHours = ivmsHoursSaveProblem(configPatch, { ...before.config, ...configPatch });
+      if (ivmsHours) return { status: 400 as const, error: ivmsHours };
       if (Object.keys(tenantPatch).length) await tx.tenant.update({ where: { id: user.tenantId }, data: tenantPatch });
       // Switching alerts on stamps the moment: nothing that began or happened before it raises an alert
       // (no backlog of the day so far, of yesterday's open loads or of old results: lib/alerts/catalog.ts).

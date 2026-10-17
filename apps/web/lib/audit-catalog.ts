@@ -98,6 +98,8 @@ export const AUDIT_ACTIONS = {
   // Operations alerts (owner request 16 Oct 2026): one row per acknowledgement (raising an alert is not audited).
   ALERTS_ACKNOWLEDGED: { label: 'Operations alerts acknowledged' },
   ONE_DAY_TRUCKS_RETIRED: { label: 'One-day hired trucks retired after their day' },
+  // IVMS live link (16 Oct 2026): the company admin removed a truck-day's GPS times (the undo).
+  GPS_TIMES_UNDONE: { label: "GPS times of a truck's day removed" },
   BASELINE_UPLOADED: { label: 'Baseline uploaded (legacy run)' },
   ROUTE_MANUALLY_CHANGED: { label: 'Route changed by hand (legacy run)' },
   SECURITY_CLEANUP: { label: 'Security clean-up (migration)' },

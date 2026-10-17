@@ -39,8 +39,8 @@
  * Idempotency-Key over its content, so a message Resend accepted but answered too late is not sent twice.
  */
 import { createHash } from 'node:crypto';
-import { Prisma, type PrismaClient } from '@prisma/client';
-import { prisma as defaultPrisma } from '../db';
+import { Prisma } from '@prisma/client';
+import { prisma as defaultPrisma, type AppPrismaClient } from '../db';
 import { addDaysIso, fmtDayMonth, fmtHhmm, isoOf, localMinutes, todayIso, zonedDayStart } from '../dispatch/time';
 import { plainEmailConfigured, sendPlainEmail, type SendResult } from '../email';
 import { resetBaseUrl } from '../password-reset';
@@ -337,7 +337,8 @@ async function failStaleDigests(tx: Tx, tenantId: string, now: Date) {
 }
 
 /** The digest store on PostgreSQL. Every query names the company (the sweep runs outside a session). */
-export function prismaDigestStore(db: PrismaClient): DigestStore {
+// The app's client (lib/db.ts: with the IVMS link's global omit; merge of 16 Oct 2026).
+export function prismaDigestStore(db: AppPrismaClient): DigestStore {
   return {
     async readConfig(tenantId) {
       const t = await db.tenant.findUnique({

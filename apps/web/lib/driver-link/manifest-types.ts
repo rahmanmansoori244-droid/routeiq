@@ -55,6 +55,12 @@ export interface StopResult {
   editable: boolean;
   /** The copy's date (YYYY-MM-DD), for any stop holding a brought-forward order. */
   carriedTo: string | null;
+  /**
+   * IVMS live link (16 Oct 2026): the arrival shown came from the truck's GPS tracker (source AYUN),
+   * not from this phone or the office. Present only then (a stop without a GPS arrival is sent exactly
+   * as before). The phone never restores its own stop timer from it (review M4) and labels it.
+   */
+  arrivalByGps?: true;
 }
 
 /** One action of the driver page's queue (POST /api/d/actions, spec section 8.1). */

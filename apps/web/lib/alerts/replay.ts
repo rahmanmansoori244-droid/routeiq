@@ -11,7 +11,8 @@
  * - a load's status and its Loading / Dispatch times come from its status moves (the LOAD_<status> audit
  *   rows of the load and of the loads it was copied from);
  * - each visit is rebuilt with deriveVisit (lib/delivery/visit.ts) from the events the server had
- *   received by t; photos, Back at depot and Leaving for next load by their receipt time too;
+ *   received by t, without the GPS (AYUN) ones, as the live facts read it (facts.ts); photos, Back at
+ *   depot and Leaving for next load by their receipt time too;
  * - the driver page counts as opened from its first recorded open (the link's device list) or the first
  *   thing the phone sent.
  * Known limits: the plan is the day's final plan in use (a load re-solved during the day is replayed as
@@ -134,8 +135,10 @@ export function statusAsOf(l: Pick<ExportLoad, 'history' | 'finalStatus'>, t: nu
 }
 
 function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: { startMin: number; endMin: number } | null; radiusM: number }): FactVisit | null {
+  // The GPS (AYUN) events of the IVMS live link are left out, as the live facts leave out their times
+  // (facts.ts alertVisitRow): a visit only GPS made is none.
   const events: VisitEvent[] = v.events
-    .filter((e) => ms(e.receivedAt) <= t)
+    .filter((e) => ms(e.receivedAt) <= t && e.source !== 'AYUN')
     .map((e) => ({ kind: e.kind as VisitEvent['kind'], source: e.source as EventSource, at: new Date(e.at), receivedAt: new Date(e.receivedAt), distanceM: e.distanceM, accuracyM: e.accuracyM, payload: e.payload }));
   const photos: FactPhoto[] = v.photos
     .filter((p) => ms(p.receivedAt) <= t)
