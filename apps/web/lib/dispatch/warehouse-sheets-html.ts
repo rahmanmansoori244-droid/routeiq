@@ -20,7 +20,8 @@ export function esc(s: string | number | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
-const PRINT_SCRIPT = "document.getElementById('print').addEventListener('click',function(){window.print()});";
+/** The page's only script: the Print button (the Salesman ETA page runs the same one, under the same policy). */
+export const PRINT_SCRIPT = "document.getElementById('print').addEventListener('click',function(){window.print()});";
 /** The CSP hash of the page's only script (the Print button). */
 export const PRINT_SCRIPT_HASH = `sha256-${createHash('sha256').update(PRINT_SCRIPT).digest('base64')}`;
 /** The policy the export routes send with these pages. */

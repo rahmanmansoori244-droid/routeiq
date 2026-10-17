@@ -10,6 +10,7 @@ import { createIntakeKeys, INTAKE_BUSY, isIntakeKeyConflict, isTransactionTimeou
 import { cancelledLineNote, normSalesOrder, preferredCustomer, preferredProduct } from '@/lib/dispatch/order-intake';
 import { dateOnly, isAfterCutoff, localDateIso } from '@/lib/dispatch/time';
 import { intakeLineWeight } from '@/lib/dispatch/weights';
+import { normSalesRoute } from '@/lib/dispatch/sales-route';
 
 const schema = z.object({
   date: isoDateSchema,
@@ -21,6 +22,9 @@ const schema = z.object({
   reason: z.string().trim().min(3, 'Give the reason for accepting a late order').max(500),
   salesValue: z.number().min(0).optional(),
   margin: z.number().optional(),
+  // Salesman ETA (owner request 17 Oct 2026): the salesman's route of the order, as the order file's
+  // "route" column gives it for a file; optional, stored on every line as the file's (normSalesRoute).
+  salesRoute: z.string().max(200).optional(),
   lines: z
     .array(
       z.object({
@@ -80,6 +84,8 @@ export const POST = withTenantApi(
     const now = new Date();
     const late = isAfterCutoff(now, input.date, cfg.planningCutoffMin, cfg.timezone) || !!plan?.chosenScenarioId;
     const deliveryDate = dateOnly(input.date);
+    // The same rule as the file's route column: trimmed, upper-case, at most 40 characters; blank = none.
+    const salesRoute = normSalesRoute(input.salesRoute);
 
     let result;
     try {
@@ -195,6 +201,7 @@ export const POST = withTenantApi(
                 productDescription: l.productDescription ?? null,
                 weightKg: lineKg[i],
                 weightFromMaster: true,
+                salesRoute,
               })),
             },
           },

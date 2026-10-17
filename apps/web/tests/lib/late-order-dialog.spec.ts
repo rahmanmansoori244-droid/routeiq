@@ -110,3 +110,22 @@ describe('LateOrderDialog: priority (ui-dispatch-1)', () => {
     expect('priority' in posts[1].json).toBe(false);
   });
 });
+
+describe('LateOrderDialog: the sales route (Salesman ETA, owner request 17 Oct 2026)', () => {
+  it('a route typed in is sent (the server normalises it); none typed in sends no route; the next order opens empty', async () => {
+    const t = setup();
+    const route = () => elements(t.host.tree).find((e) => e.props?.id === 'lo-route');
+    expect(route().props.value).toBe('');
+    t.fill();
+    await t.save();
+    expect('salesRoute' in posts[0].json).toBe(false);
+
+    t.host.render({ open: true });
+    t.fill();
+    t.type(route(), ' r2x ');
+    await t.save();
+    expect(posts[1].json.salesRoute).toBe('r2x');
+    t.host.render({ open: true });
+    expect(route().props.value).toBe('');
+  });
+});

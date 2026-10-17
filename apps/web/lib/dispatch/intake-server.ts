@@ -615,6 +615,9 @@ export async function confirmIntake(
         marginValue: r.margin,
         sourceRow: r.row,
         notes: r.notes,
+        // The salesman's route of the invoice line (owner request 17 Oct 2026, Salesman ETA); null when
+        // the file has no route column or the cell is blank, and for a batch checked before it was kept.
+        salesRoute: r.salesRoute ?? null,
       })),
     });
     await createIntakeKeys(tx, tenantId, order.id, first.cid, order.deliveryDate, batch.id);

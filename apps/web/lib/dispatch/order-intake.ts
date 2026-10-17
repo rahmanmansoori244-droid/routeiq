@@ -16,6 +16,7 @@ import { normalizeBranchKey } from '../schemas';
 import { normalizeProductCode, productCodeProblem, productKey } from '../product-code';
 import { customerKey } from '../customer-code';
 import { daysBetween, fmtDayMonth } from './time';
+import { normSalesRoute } from './sales-route';
 
 // The header matching (aliases, the order-sheet test) lives in order-headers.ts, which has no
 // dependencies, so the upload parser process can use it (audit P5); it is re-exported here.
@@ -42,6 +43,13 @@ export interface NormalizedLine {
   notes: string | null;
   depotCode: string | null;
   customerType: string | null;
+  /**
+   * The salesman's route of the row (owner request 17 Oct 2026, the file's "route" column), as stored
+   * (normSalesRoute: trimmed, inner spaces collapsed, upper-case, at most 40 characters; blank = null).
+   * Absent when the file has no route column, and in batches checked before this field existed: the
+   * line is then stored without a route, exactly as before. Never part of a duplicate key.
+   */
+  salesRoute?: string | null;
 }
 
 export interface RowError {
@@ -330,6 +338,8 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
       notes: get(r, 'notes') || null,
       depotCode: get(r, 'depot_code') || null,
       customerType: get(r, 'customer_type') || null,
+      // Only with a route column (owner request 17 Oct 2026): a file without one gives the lines it always gave.
+      ...(mapping.used.sales_route ? { salesRoute: normSalesRoute(get(r, 'sales_route')) } : {}),
     });
   });
   for (const [date, far] of [...farAhead].sort(([a], [b]) => (a < b ? -1 : 1))) {
@@ -743,6 +753,9 @@ export function resolveOrderLines(
       existing.cases += l.cases;
       // The depot its rows name (they name one at most, see lineDepots), whichever row names it.
       if (!existing.depotCode && l.depotCode) existing.depotCode = l.depotCode;
+      // The salesman's route (owner request 17 Oct 2026): the first route its rows give, whichever row
+      // gives it (the rows of one invoice line are sold by one salesman); not part of the line's identity.
+      if (!existing.salesRoute && l.salesRoute) existing.salesRoute = l.salesRoute;
       if (l.weightKg !== null) existing.weightKg = (existing.weightKg ?? 0) + l.weightKg;
       else existing.weightMissingCases = (existing.weightMissingCases ?? 0) + l.cases;
       existing.salesValue = sumKnown(existing.salesValue, l.salesValue);

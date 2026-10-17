@@ -22,7 +22,8 @@ export type CanonicalField =
   | 'priority'
   | 'notes'
   | 'depot_code'
-  | 'customer_type';
+  | 'customer_type'
+  | 'sales_route';
 
 /** Built-in aliases (normalized: lowercase, letters+digits only). Tenants can add more. */
 export const HEADER_ALIASES: Record<CanonicalField, string[]> = {
@@ -68,6 +69,13 @@ export const HEADER_ALIASES: Record<CanonicalField, string[]> = {
   notes: ['notes', 'note', 'remarks', 'remark', 'comment', 'comments', 'instructions'],
   depot_code: ['depotcode', 'depot', 'warehouse', 'warehousecode', 'plant', 'plantcode'],
   customer_type: ['customertype', 'channel', 'custtype', 'outlettype', 'segment'],
+  // Salesman ETA (owner request 17 Oct 2026): the order file's "route" column is the code of the
+  // salesman's route that sold the invoice (R1, R2X, ...), kept per order line (OrderLine.salesRoute)
+  // for the Salesman ETA export. Optional: never required, never part of a duplicate key, and declared
+  // last, so mapHeaders offers it a column only after every other field has taken its own - a file
+  // without a route column maps every column exactly as before. None of these names is an alias of
+  // another field (tests/lib/salesman-eta-intake.spec.ts checks it).
+  sales_route: ['route', 'salesroute', 'salesmanroute', 'routecode', 'salesmancode', 'salesman'],
 };
 
 export function normHeader(h: string): string {

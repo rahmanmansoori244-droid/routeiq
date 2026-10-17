@@ -646,6 +646,8 @@ export interface CarrySource {
     marginValue: number | null;
     sourceRow: number | null;
     notes: string | null;
+    /** The salesman's route of the line (owner request 17 Oct 2026); absent / null = none. */
+    salesRoute?: string | null;
   }[];
 }
 
@@ -688,6 +690,10 @@ export function carryCopyData(
       marginValue: share(l.marginValue, cl.cases, l.cases),
       sourceRow: l.sourceRow,
       notes: l.notes,
+      // Salesman ETA (owner request 17 Oct 2026): the copy keeps the line's sales route, so the salesman
+      // still finds the customer on his page of the later day (bring forward and postpone both copy here).
+      // Left out for a line without one: the copy is then exactly what it was before.
+      ...(l.salesRoute ? { salesRoute: l.salesRoute } : {}),
     };
   });
   const cases = lines.reduce((a, l) => a + l.cases, 0);

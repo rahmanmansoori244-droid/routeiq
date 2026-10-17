@@ -37,7 +37,11 @@ function pick(r: Request, loads: DetailLoad[]): { loads: DetailLoad[]; filtered:
   return { loads: out, filtered: !!(loadId || truck), loadId };
 }
 
-async function planOf(tenantId: string, runId: string): Promise<PlanDetail | Response> {
+/**
+ * The plan detail of a dispatch plan version of this company, or the 404 answer (another company's
+ * run, a legacy route run, no such run). Shared with the Salesman ETA export (owner request 17 Oct 2026).
+ */
+export async function planOf(tenantId: string, runId: string): Promise<PlanDetail | Response> {
   // Dispatch plans only: a legacy route run has no loads, invoices or results to print.
   if (!(await isDispatchPlan(tenantId, runId))) return fail('Not found', 404);
   const detail = await getPlanDetail(tenantId, runId);
@@ -45,7 +49,8 @@ async function planOf(tenantId: string, runId: string): Promise<PlanDetail | Res
   return detail;
 }
 
-const tenantNameOf = async (tenantId: string) => (await prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true } }))?.name ?? '';
+/** The company's name, printed at the top of the pages. */
+export const tenantNameOf = async (tenantId: string) => (await prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true } }))?.name ?? '';
 
 export async function loadSheetsExport(r: Request, tenantId: string, runId: string): Promise<Response> {
   const detail = await planOf(tenantId, runId);
