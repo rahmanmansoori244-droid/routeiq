@@ -34,6 +34,7 @@ import { limiter as processLimiter, LIMITS, type RateLimiter } from '../rate-lim
 import { ivmsWebhookReady, readIvmsEnv, type IvmsEnv } from './env';
 import { zoneEventRow, type DepotZone } from './events';
 import { zoneEventOf } from './parse';
+import { ivmsModeAtLeast } from './settings';
 import { prismaIvmsStore, type IvmsCompany, type IvmsStore } from './store';
 import { ivmsWebhookAuthorized } from './webhook-auth';
 
@@ -171,7 +172,7 @@ export async function handleAyunWebhook(req: Request, secret: unknown, deps: Web
     if (!c || c.mode === 'OFF') return ok();
     const r = lim.consume(`ivms-wh:${c.tenantId}`, LIMITS.ivmsWebhook.limit, LIMITS.ivmsWebhook.windowMs);
     if (!r.ok) return tooMany(r.resetAt, now.getTime());
-    if (c.mode !== 'TIMES') {
+    if (!ivmsModeAtLeast(c.mode, 'TIMES')) {
       await store.bumpWebhookCounter(c.tenantId, 'webhooksIgnored', now);
       return ok();
     }

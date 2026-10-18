@@ -273,8 +273,15 @@ describe('PATCH /api/tenant/config: the GPS tracking settings (IVMS live link, 1
     expect(state.audits[0]!.afterJson).toEqual({ tenant: {}, config: { ivmsMode: 'MAP', ivmsPollSec: 120 } });
   });
 
-  it('refuses ALERTS (a later release), values outside the bounds, and hours across midnight (400, nothing saved)', async () => {
-    for (const config of [{ ivmsMode: 'ALERTS' }, { ivmsPollSec: 10 }, { ivmsDailyCallBudget: 0 }, { ivmsTrailDays: 0 }, { ivmsFromMin: 1380, ivmsToMin: 300 }, { ivmsToMin: 300 }]) {
+  it('the admin picks the GPS alerts mode (ALERTS, owner request 18 Oct 2026), audited like the others', async () => {
+    const res = await patch({ config: { ivmsMode: 'ALERTS' }, expect: { config: { ivmsMode: 'OFF' } } });
+    expect(res.status).toBe(200);
+    expect(state.updates).toEqual([{ model: 'config', data: { ivmsMode: 'ALERTS' } }]);
+    expect(state.audits[0]!.afterJson).toEqual({ tenant: {}, config: { ivmsMode: 'ALERTS' } });
+  });
+
+  it('refuses an unknown mode, values outside the bounds, and hours across midnight (400, nothing saved)', async () => {
+    for (const config of [{ ivmsMode: 'alerts' }, { ivmsMode: 'GPS' }, { ivmsPollSec: 10 }, { ivmsDailyCallBudget: 0 }, { ivmsTrailDays: 0 }, { ivmsFromMin: 1380, ivmsToMin: 300 }, { ivmsToMin: 300 }]) {
       expect((await patch({ config })).status, JSON.stringify(config)).toBe(400);
     }
     expect(state.updates).toEqual([]);

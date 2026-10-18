@@ -144,6 +144,20 @@ describe('the depot (H4) and its moves', () => {
     expect(out.candidates.length).toBe(2);
   });
 
+  it('each trail move says whether its time is exact: a point at most observedMaxGapSec before it (stored with the move: GPS alerts, review of 18 Oct 2026, finding 6)', () => {
+    const dense = trailDepotMoves(new Trail('06:00').park(30).drive(3000).park(10).drive(0).park(20).pts, [DEPOT], P).moves;
+    expect(dense.map((m) => [m.kind, m.observed])).toEqual([
+      ['DEPOT_OUT', true],
+      ['DEPOT_IN', true],
+    ]);
+    // Six minutes without a point while the truck drove out: the OUT is only an upper bound.
+    const gap = trailDepotMoves(new Trail('06:00').park(30).silent(6).jump(2000).park(10).drive(0).park(20).pts, [DEPOT], P).moves;
+    expect(gap.map((m) => [m.kind, m.observed])).toEqual([
+      ['DEPOT_OUT', false],
+      ['DEPOT_IN', true],
+    ]);
+  });
+
   it('a truck at the zone edge (290-340 m) does not flap', () => {
     const trail = new Trail('06:00').park(30);
     for (let i = 0; i < 20; i++) trail.point(i % 2 ? 290 : 340);

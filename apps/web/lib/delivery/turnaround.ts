@@ -16,6 +16,10 @@
  *   of the truck at a stop of trip N+1 (arrival, departure, the phone's result or photo) less the planned
  *   drive from the depot to the first stop ("left by");
  * - a tap only after that first sign (tapped late, at the customer): the sign is used.
+ * GPS tracking ALERTS (owner request 18 Oct 2026, lib/alerts/gps.ts; only the alert rule R2 passes it, never
+ * the load row): the trail's observed depot OUT after Back at depot (`gpsLeftAt`) stands in for a missing
+ * Leaving tap ahead of the fallbacks (the Dispatch press, the first stop reached): it is when the truck
+ * really left. The rule may also pass the trail's depot IN as `backAt` when Back at depot was not tapped.
  * Not measured (no number, never "still at the depot"): trip N+1 had started before Back at depot of trip N
  * was tapped (Back at depot tapped late: BACK_LATE); a Completed load with nothing that says when it left
  * (NO_LEAVE). Nothing without Back at depot (the "Load not closed" rule follows a trip without it) and
@@ -25,8 +29,8 @@
 /** A truck still not left this long after Back at depot is no longer followed (R2) / shown as "no leave recorded". */
 export const TURNAROUND_MAX_MIN = 4 * 60;
 
-/** How the leave time is known: the driver's tap, or a fallback (the Dispatch press, the first stop reached). */
-export type LeftHow = 'TAP' | 'DISPATCH' | 'ARRIVAL';
+/** How the leave time is known: the driver's tap, the trail's depot OUT (GPS alerts), or a fallback (the Dispatch press, the first stop reached). */
+export type LeftHow = 'TAP' | 'GPS' | 'DISPATCH' | 'ARRIVAL';
 
 /** BACK_LATE: Back at depot of the trip before was tapped after this trip had started; NO_LEAVE: Completed, nothing says when it left. */
 export type NotMeasured = 'BACK_LATE' | 'NO_LEAVE';
@@ -46,6 +50,8 @@ export interface TurnaroundIn {
   existedAt?: Date | null;
   /** The load is Completed: never "still at the depot". */
   completed?: boolean;
+  /** GPS tracking ALERTS: the trail's observed depot OUT the truck left with after Back at depot; absent or null: none. */
+  gpsLeftAt?: Date | null;
   now: Date;
 }
 
@@ -80,6 +86,23 @@ export interface Turnaround {
 const minutesBetween = (a: Date, b: Date) => Math.max(0, (b.getTime() - a.getTime()) / 60_000);
 const later = (a: Date, b: Date) => (a.getTime() >= b.getTime() ? a : b);
 
+/**
+ * The driver's Leaving for next load tap that says when the truck left: the LATEST tap up to `now` made at
+ * or before the first sign of the truck at a stop of the trip (every tap up to `now` when there is no sign
+ * yet). A tap made too early is corrected by tapping again; a tap only after the first sign (tapped late,
+ * at the customer) is not the leave. Null: no such tap. Shared by turnaroundOf (rule R2, the load row) and
+ * the truck day page's timeline (lib/ivms/truck-day.ts; review of 18 Oct 2026), so both name one time.
+ */
+export function countedLeaveTap(leftTaps: readonly Date[], firstSignAt: Date | null, now: Date): Date | null {
+  const sign = firstSignAt && firstSignAt.getTime() <= now.getTime() ? firstSignAt : null;
+  let best: Date | null = null;
+  for (const t of leftTaps) {
+    if (t.getTime() > now.getTime() || (sign && t.getTime() > sign.getTime())) continue;
+    if (!best || t.getTime() > best.getTime()) best = t;
+  }
+  return best;
+}
+
 /** The turnaround of one trip from the facts above (null: no Back at depot of the trip before). */
 export function turnaroundOf(i: TurnaroundIn): Turnaround | null {
   if (!i.backAt) return null;
@@ -95,14 +118,16 @@ export function turnaroundOf(i: TurnaroundIn): Turnaround | null {
   // Trip N+1 had started before Back at depot of trip N was tapped: Back at depot came late, no number.
   if (sign && sign.getTime() < back.getTime()) return notMeasured('BACK_LATE');
   // The latest tap before the truck reached a stop (a tap made too early is corrected by tapping again).
-  const before = sign ? taps.filter((t) => t.getTime() <= sign.getTime()) : taps;
-  const tap = before.length ? before[before.length - 1]! : null;
+  const tap = countedLeaveTap(taps, sign, i.now);
   if (tap && tap.getTime() < back.getTime()) return notMeasured('BACK_LATE');
   const left = (at: Date, how: LeftHow, extra: Partial<Turnaround> = {}): Turnaround => {
     const leftAt = later(at, start);
     return { ...base, ...extra, leftAt, how, minutes: minutesBetween(start, leftAt), final: true };
   };
   if (tap) return left(tap, 'TAP');
+  // GPS (ALERTS): the trail's depot OUT, after the count starts and before the first stop reached.
+  const gps = i.gpsLeftAt && i.gpsLeftAt.getTime() >= start.getTime() && i.gpsLeftAt.getTime() <= now && (!sign || i.gpsLeftAt.getTime() <= sign.getTime()) ? i.gpsLeftAt : null;
+  if (gps) return left(gps, 'GPS');
   const dispatch = i.dispatchAt && i.dispatchAt.getTime() >= start.getTime() && i.dispatchAt.getTime() <= now ? i.dispatchAt : null;
   if (dispatch && (!sign || dispatch.getTime() <= sign.getTime())) return left(dispatch, 'DISPATCH');
   if (sign) return left(new Date(sign.getTime() - drive * 60_000), 'ARRIVAL', { signAt: sign, driveMin: drive, tapLate: taps.length > 0 });
@@ -162,6 +187,7 @@ export function plannedDriveOf(departMin: number, stops: readonly { sequence: nu
 /** How the leave time is known, in words: "Leaving tapped", "the Dispatch press (no Leaving tap)". `clock`: hh:mm in the company's time. */
 export function leftHowText(t: Pick<Turnaround, 'how' | 'tapLate' | 'signAt' | 'driveMin'>, clock: (d: Date) => string): string {
   if (t.how === 'TAP') return 'Leaving tapped';
+  if (t.how === 'GPS') return 'the GPS depot exit (no Leaving tap)';
   if (t.how === 'DISPATCH') return 'the Dispatch press (no Leaving tap)';
   if (t.how === 'ARRIVAL') {
     const sign = t.signAt ? ` at ${clock(t.signAt)}` : '';
@@ -200,6 +226,6 @@ export function turnaroundLine(t: Turnaround, clock: (d: Date) => string, opts: 
     const how = t.signAt ? ` (first stop reached ${clock(t.signAt)}${t.driveMin ? `, less the planned ${t.driveMin} min drive` : ''})` : ' (first stop reached)';
     return `${back}, left by ${clock(t.leftAt)}${how}, ${turnaroundMinutesText(t.minutes)}`;
   }
-  const how = t.how === 'DISPATCH' ? ' (Dispatch press)' : '';
+  const how = t.how === 'DISPATCH' ? ' (Dispatch press)' : t.how === 'GPS' ? ' (GPS)' : '';
   return `${back}, left ${clock(t.leftAt)}${how}, ${turnaroundMinutesText(t.minutes)}`;
 }

@@ -11,7 +11,9 @@
  *    move from Ayun (webhook or backstop) is used only when the trail confirms it (a trail move of the
  *    same kind within 10 min), and the boundary keeps the TRAIL's time (the device's own points; a
  *    forged or late zone move can never shift a trip: second review, LOW). An unconfirmed zone move is
- *    never a trip boundary (a forged or misplaced webhook cannot cut trips: review M6).
+ *    never a trip boundary (a forged or misplaced webhook cannot cut trips: review M6). A trail move's
+ *    time is exact (`observed`) only when the point before it is at most observedMaxGapSec earlier; the
+ *    move is stored with that flag (GPS alerts, review of 18 Oct 2026, finding 6).
  * 2. Trips: from a depot OUT to the next depot IN (a trail that starts outside the depot opens a trip
  *    at its first point). Trips are matched to the truck-day's DISPATCHED / COMPLETED loads in dispatch
  *    order (the LOAD_DISPATCHED audit time, never a COMPLETED load's statusChangedAt): an
@@ -103,6 +105,13 @@ export interface TrailMove {
   depotId: string;
   lat: number;
   lng: number;
+  /**
+   * Its time is exact: the trail point before it is at most observedMaxGapSec earlier (else the truck
+   * crossed the radius during a gap and `at` is only an upper bound). Stored with the move
+   * (IvmsEvent.observed: review of 18 Oct 2026, finding 6), so the alerts never work it out again from
+   * trail points the retention may have deleted.
+   */
+  observed: boolean;
 }
 
 export interface DetectedTrip extends GpsTrip {
@@ -183,18 +192,23 @@ function nearestDepot(p: { lat: number; lng: number }, depots: DetectorInput['de
  */
 export function trailDepotMoves(points: readonly TrailPoint[], depots: DetectorInput['depots'], p: DetectorParams): { moves: TrailMove[]; startsInside: boolean | null } {
   if (!points.length || !depots.length) return { moves: [], startsInside: null };
-  type Run = { inside: boolean; first: TrailPoint; last: TrailPoint; depotId: string };
+  type Run = { inside: boolean; first: TrailPoint; last: TrailPoint; depotId: string; firstIdx: number };
   const runs: Run[] = [];
   let state: boolean | null = null;
-  for (const pt of points) {
+  points.forEach((pt, idx) => {
     const near = nearestDepot(pt, depots)!;
     const now: boolean | null = near.d <= p.depotRadiusM ? true : near.d > p.depotRadiusM + p.exitExtraM ? false : state;
-    if (now === null) continue; // the first points in the band: no state yet
+    if (now === null) return; // the first points in the band: no state yet
     const cur = runs[runs.length - 1];
     if (cur && cur.inside === now) cur.last = pt;
-    else runs.push({ inside: now, first: pt, last: pt, depotId: near.depotId });
+    else runs.push({ inside: now, first: pt, last: pt, depotId: near.depotId, firstIdx: idx });
     state = now;
-  }
+  });
+  // Exact: the point before the move's first point (any point of the trail) at most observedMaxGapSec earlier.
+  const observedAt = (r: Run) => {
+    const before = points[r.firstIdx - 1];
+    return !!before && ms(r.first.fixAt) - ms(before.fixAt) <= p.observedMaxGapSec * 1000;
+  };
   const held = runs.filter((r, i) => {
     const end = runs[i + 1]?.first.fixAt ?? r.last.fixAt;
     return ms(end) - ms(r.first.fixAt) >= p.depotDwellMin * MIN;
@@ -203,7 +217,7 @@ export function trailDepotMoves(points: readonly TrailPoint[], depots: DetectorI
   let prev: boolean | null = held[0]?.inside ?? null;
   for (const r of held.slice(1)) {
     if (r.inside === prev) continue;
-    moves.push({ kind: r.inside ? 'DEPOT_IN' : 'DEPOT_OUT', at: r.first.fixAt, depotId: r.depotId, lat: r.first.lat, lng: r.first.lng });
+    moves.push({ kind: r.inside ? 'DEPOT_IN' : 'DEPOT_OUT', at: r.first.fixAt, depotId: r.depotId, lat: r.first.lat, lng: r.first.lng, observed: observedAt(r) });
     prev = r.inside;
   }
   return { moves, startsInside: held[0]?.inside ?? null };

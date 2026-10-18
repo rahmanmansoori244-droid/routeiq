@@ -42,7 +42,7 @@ export default async function TrucksPage({ params }: { params: { slug: string } 
   const modeText =
     ivmsMode === 'OFF'
       ? 'GPS tracking is OFF (Settings): nothing is read from Ayun, so these numbers are only stored.'
-      : `GPS tracking is ${ivmsMode === 'MAP' ? 'MAP (live trucks on the day screen)' : 'TIMES (live trucks and GPS arrival and departure times)'}.`;
+      : `GPS tracking is ${ivmsMode === 'MAP' ? 'MAP (live trucks on the day screen)' : ivmsMode === 'TIMES' ? 'TIMES (live trucks and GPS arrival and departure times)' : 'ALERTS (live trucks, GPS arrival and departure times, and the alerts read them)'}.`;
 
   if (depots.length === 0) {
     return (

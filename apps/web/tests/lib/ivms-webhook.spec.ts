@@ -40,7 +40,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-function setup(mode: 'OFF' | 'MAP' | 'TIMES' = 'TIMES') {
+function setup(mode: 'OFF' | 'MAP' | 'TIMES' | 'ALERTS' = 'TIMES') {
   const store = new MemoryIvmsStore(company({ mode }));
   store.fleetOf = () => [{ truckId: 't1', imei: IMEI_A, depotId: 'd1', days: [{ date: '2026-10-16', loads: [{ loadNo: 1, status: 'DISPATCHED', statusChangedAt: null }] }] }];
   store.depots = [{ depotId: 'd1', zoneName: 'Example depot zone', lat: 10.5, lng: 20.5 }];
@@ -183,6 +183,13 @@ describe('storing a depot move', () => {
 });
 
 describe('what is not stored', () => {
+  it('ivmsMode ALERTS (GPS alerts, 18 Oct 2026) stores the depot move as TIMES does', async () => {
+    const { store, call } = setup('ALERTS');
+    expect((await call(get())).status).toBe(200);
+    expect(store.events).toHaveLength(1);
+    expect(store.events[0]).toMatchObject({ kind: 'DEPOT_IN', origin: 'WEBHOOK' });
+  });
+
   it('ivmsMode MAP: 200, counted as ignored, no row (only TIMES reads depot moves)', async () => {
     const { store, call } = setup('MAP');
     expect((await call(get())).status).toBe(200);

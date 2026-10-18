@@ -20,7 +20,7 @@ import { COUNTRY_NAMES, countryRoutingNote, isListedCountry } from '@/lib/countr
 import { DATA_COLLECT_DAYS_MAX } from '@/lib/dispatch/data-collection';
 import { preferredEndText, WINDOW_RULE_CHOICES, WINDOW_RULES, windowRuleOf } from '@/lib/dispatch/window-rule';
 import { AlertSettingsCard, alertSettingsProblem } from './alert-settings-card';
-import { IVMS_SETTING_BOUNDS, ivmsHoursSaveProblem, ivmsModeOf, type IvmsNumberSetting } from '@/lib/ivms/settings';
+import { IVMS_SETTING_BOUNDS, ivmsHoursSaveProblem, ivmsModeAtLeast, ivmsModeOf, type IvmsNumberSetting } from '@/lib/ivms/settings';
 import { classShares } from '@/lib/ivms/budget';
 import { IVMS_MODES, type IvmsMode } from '@/lib/ivms/types';
 
@@ -53,6 +53,11 @@ const GPS_MODE_TEXT: Record<IvmsMode, { label: string; hint: string }> = {
   TIMES: {
     label: 'Live map and GPS times',
     hint: "Also arrival and departure times from the trackers' history where the drivers' phones left gaps (marked GPS (Ayun) on the screens and in the Excel).",
+  },
+  // Owner request 18 Oct 2026 ("build GPS alerts"): ALERTS does all TIMES does, and the operations alerts read the GPS times.
+  ALERTS: {
+    label: 'Live map, GPS times and GPS alerts',
+    hint: "Map + GPS times + alerts use GPS times: the operations alerts also read the GPS arrival and departure times, the depot visits and, when it is fresh, the live position (each alert that used one says (GPS)). The driver's and the office's times still win.",
   },
 };
 const IVMS_LABELS: Record<IvmsNumberSetting, string> = {
@@ -93,7 +98,7 @@ function gpsPaceText(c: { ivmsMode: string; ivmsDailyCallBudget: number; ivmsPol
   const hoursSec = Math.max(60, (c.ivmsToMin - c.ivmsFromMin) * 60);
   const mapSec = shares.MAP > 0 ? Math.max(c.ivmsPollSec, Math.ceil(hoursSec / shares.MAP)) : null;
   const pos = mapSec === null ? 'no live positions' : mapSec >= 120 ? `live positions about every ${Math.round(mapSec / 60)} min` : `live positions about every ${mapSec} s`;
-  const times = mode === 'TIMES' ? `; ${shares.ROUTE} history pulls a day (every ${c.ivmsRoutePullMin} min per truck on the road, plus one at the end of each truck-day)` : '';
+  const times = ivmsModeAtLeast(mode, 'TIMES') ? `; ${shares.ROUTE} history pulls a day (every ${c.ivmsRoutePullMin} min per truck on the road, plus one at the end of each truck-day)` : '';
   return `At ${budget} calls a day: ${pos} while a truck has a load out${times}. A position older than 5 minutes shows grey and is never used for times.`;
 }
 
@@ -628,7 +633,7 @@ export function SettingsForm({
           <CardTitle className="text-base">GPS tracking (Ayun)</CardTitle>
           <CardDescription>
             The trucks&apos; GPS trackers at Ayun (set each truck&apos;s tracker on the Trucks page). The driver&apos;s and the office&apos;s entries always
-            win: GPS never records a result, never closes a trip and is never used for measured unloading times. Tell the drivers before switching it on.
+            win: GPS never records a result, never closes a trip and is never used for the measured unloading times of the planning (only the GPS alerts mode lets the alerts read GPS times). Tell the drivers before switching it on.
             Only a company admin changes these; every change is in the audit log.
           </CardDescription>
         </CardHeader>

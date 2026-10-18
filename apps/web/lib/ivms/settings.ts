@@ -60,7 +60,7 @@ export function ivmsModeOf(cfg: { ivmsMode?: string | null } | null | undefined)
   return (IVMS_MODES as readonly string[]).includes(m ?? '') ? (m as IvmsMode) : 'OFF';
 }
 
-/** Does `mode` include `wanted`? (The modes step up: OFF < MAP < TIMES.) */
+/** Does `mode` include `wanted`? (The modes step up: OFF < MAP < TIMES < ALERTS; ALERTS does all TIMES does.) */
 export function ivmsModeAtLeast(mode: IvmsMode, wanted: IvmsMode): boolean {
   return IVMS_MODES.indexOf(mode) >= IVMS_MODES.indexOf(wanted);
 }

@@ -369,7 +369,9 @@ model TenantConfig {
   // IVMS live link (Ayun GPS trackers, 16 Oct 2026; lib/ivms/settings.ts IVMS_SETTING_BOUNDS, database
   // CHECKs in 20261016200000_ivms_live). Company admin only. Nothing here is read while ivmsMode is OFF.
   // OFF (default: no call to Ayun, nothing new shown) | MAP (live truck positions on the day screen) |
-  // TIMES (MAP + arrival and departure times from the trackers' history). ALERTS comes with a later PR.
+  // TIMES (MAP + arrival and departure times from the trackers' history) | ALERTS (TIMES + the operations
+  // alerts read the GPS times, the depot moves and the fresh live position: owner request 18 Oct 2026,
+  // CHECK from 20261018120000_ivms_alerts_mode).
   ivmsMode                 String   @default("OFF")
   // Seconds between two live-position calls while a mapped truck has a load out (30-900); the daily
   // allowance may stretch it (lib/ivms/budget.ts). Positions are for the map only, never for times.
@@ -1756,8 +1758,9 @@ model TruckPosition {
 
 /// A truck's GPS trail from the provider's history (OBJECT_GET_ROUTE): the only source of GPS
 /// arrival and departure times (TIMES). Pulled only while the truck has a load out and once at the
-/// end; kept TenantConfig.ivmsTrailDays (default 2) days; never exported, never shown outside the
-/// day screen. Invalid fixes (out of range, 0,0, clock ahead) are never stored.
+/// end; kept TenantConfig.ivmsTrailDays (default 2) days; never exported; shown only to the dispatcher
+/// and up, as the line of a truck's day (owner request 18 Oct 2026, lib/ivms/truck-day.ts, at most 2,000
+/// points). Invalid fixes (out of range, 0,0, clock ahead) are never stored.
 model TruckTrailPoint {
   id       String   @id @default(cuid())
   tenantId String
@@ -1805,6 +1808,11 @@ model IvmsEvent {
   processedAt DateTime? @db.Timestamptz(3)
   /// lib/ivms/types.ts IVMS_EVENT_OUTCOMES: what processing did with it (NULL = not processed yet).
   outcome     String?
+  /// A TRAIL move only: its time is exact (a trail point at most observedMaxGapSec before it), decided by
+  /// the stop detector when it writes the move (GPS alerts, review of 18 Oct 2026, finding 6: never worked
+  /// out again from trail points the retention deletes). NULL: a zone move (the device's own event, exact),
+  /// or a trail move written before migration 20261018130000_ivms_move_observed (read against the trail).
+  observed    Boolean?
 
   @@unique([tenantId, dedupeKey])
   @@index([tenantId, truckId, eventAt])

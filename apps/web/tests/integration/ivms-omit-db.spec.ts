@@ -12,7 +12,8 @@
  *     Only a read that asks for them by name gets them.
  *  3. The database refuses what the app refuses: an IMEI that is not digits, a tracker on a one-day hired
  *     truck, the same tracker on two trucks of one company (another company may have it), a mode outside
- *     OFF / MAP / TIMES, operating hours across midnight, a stored error that is not a kind code.
+ *     OFF / MAP / TIMES / ALERTS (ALERTS since 20261018120000_ivms_alerts_mode, GPS alerts of 18 Oct 2026),
+ *     operating hours across midnight, a stored error that is not a kind code.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -128,11 +129,13 @@ describe('3. the database refuses what the app refuses', () => {
     expect(await refused(prisma.truck.create({ data: { tenantId, depotId, code: 'GT09' } }))).toBe(false);
   });
 
-  it('TenantConfig: the mode list, the bounds and the hours order', async () => {
-    for (const data of [{ ivmsMode: 'ALERTS' }, { ivmsPollSec: 10 }, { ivmsTrailDays: 0 }, { ivmsDailyCallBudget: 5 }, { ivmsFromMin: 600, ivmsToMin: 600 }]) {
+  it('TenantConfig: the mode list (ALERTS since 20261018120000_ivms_alerts_mode, anything else refused), the bounds and the hours order', async () => {
+    for (const data of [{ ivmsMode: 'alerts' }, { ivmsMode: 'GPS' }, { ivmsMode: '' }, { ivmsPollSec: 10 }, { ivmsTrailDays: 0 }, { ivmsDailyCallBudget: 5 }, { ivmsFromMin: 600, ivmsToMin: 600 }]) {
       expect(await refused(prisma.tenantConfig.update({ where: { tenantId }, data })), JSON.stringify(data)).toBe(true);
     }
     expect(await refused(prisma.tenantConfig.update({ where: { tenantId }, data: { ivmsMode: 'MAP' } }))).toBe(false);
+    // GPS alerts (owner request 18 Oct 2026): the database takes the fourth mode.
+    expect(await refused(prisma.tenantConfig.update({ where: { tenantId }, data: { ivmsMode: 'ALERTS' } }))).toBe(false);
     await prisma.tenantConfig.update({ where: { tenantId }, data: { ivmsMode: 'OFF' } });
   });
 

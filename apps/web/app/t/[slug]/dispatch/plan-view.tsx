@@ -63,6 +63,7 @@ import { HireSuggestionBox } from './hire-suggestion';
 import { CAMERA_ALERT_PER_DAY } from '@/lib/delivery/camera-exceptions';
 import { addDaysIso } from '@/lib/dispatch/time';
 import { LiveTrucksBar, useLiveTrucks } from './live-trucks';
+import { truckDayHref } from '@/lib/ivms/truck-day';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -81,6 +82,9 @@ const STOP_SEARCH_CONFIRM =
 /** Asked before "Reset stuck plan" (audit F09). */
 const STUCK_RESET_CONFIRM =
   'Reset this plan? It is shown as optimizing, but its optimization has ended or was lost. The plan goes back to "failed" (a re-plan version keeps the loads it holds) so it can be optimized or re-planned again. This is recorded in the audit log.';
+
+/** The truck code's title on the loads table (owner request 18 Oct 2026: the truck's day). */
+const TRUCK_DAY_LINK_TITLE = "Open this truck's day: where it is now and what it did - loads, stops, times, results, GPS trail and alerts";
 
 /** Once a load is out, who drove it is history. */
 const ON_ROAD = new Set(['DISPATCHED', 'COMPLETED']);
@@ -1231,7 +1235,24 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   <tr className="cursor-pointer border-t hover:bg-muted/30" onClick={() => { setOpen({ ...open, [l.id]: !open[l.id] }); setSelectedLoad(open[l.id] ? null : l.id); }}>
                     <td className="p-2">{open[l.id] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</td>
                     <td className="p-2 font-medium">
-                      {l.truckCode} · L{l.loadNo}
+                      {/* Owner request 18 Oct 2026: one click on the truck code opens that truck's day (where it
+                          is and what it did: loads, stops, times, results, GPS trail, alerts) for this plan's
+                          date, in RouteIQ. A link, so it can open in a new tab; the dispatcher and up only,
+                          like the live trucks (positions of people at work). */}
+                      {canPlan ? (
+                        <Link
+                          href={truckDayHref(slug, l.truckId, d.run.runDate)}
+                          className="underline decoration-dotted underline-offset-2 hover:decoration-solid"
+                          title={TRUCK_DAY_LINK_TITLE}
+                          onClick={(e) => e.stopPropagation()}
+                          data-testid={`truck-day-link-${l.truckCode}-${l.loadNo}`}
+                        >
+                          {l.truckCode}
+                        </Link>
+                      ) : (
+                        l.truckCode
+                      )}{' '}
+                      · L{l.loadNo}
                       {l.hired ? (
                         <Badge variant="outline" className="ml-1 text-[10px]" title={hiredLoadBadgeTitle(l.oneDay)} data-testid={`load-hired-${l.truckCode}-${l.loadNo}`}>
                           {l.oneDay ? 'hired · 1 day' : 'hired'}

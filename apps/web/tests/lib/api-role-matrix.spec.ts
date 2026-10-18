@@ -112,6 +112,10 @@
  *   /api/trucks/[id] (PLANNER may also send `defaultHelperId` alone), POST /api/trucks
  *   (`defaultHelperId`), PATCH /api/runs/[id]/loads/[loadId] (`helperIds`) and GET /api/runs/[id]/plan
  *   (a load's `helpers`).
+ * - A truck's day (owner request 18 Oct 2026: "i click on [a truck] it takes me to where the truck is and what
+ *   it was doing"): GET /api/ivms/trucks/[id]/day is PLANNER, like the day screen's live trucks (GET
+ *   /api/runs/[id]/vehicles): positions of people at work, never for a VIEWER. Reads only; another
+ *   company's truck is 404.
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -263,6 +267,9 @@ const EXPECTED: Record<string, string> = {
   'PUT /api/ivms/trucks/[id]/tracker': 'TENANT_ADMIN',
   // The undo of a truck-day's GPS times (first review M-3): company admin, dry run by default, audited.
   'POST /api/ivms/trucks/[id]/gps-times': 'TENANT_ADMIN',
+  // Owner request 18 Oct 2026: one truck's day (where it is, what it did: loads, stops, times, results, GPS
+  // trail, alerts) from the plan screen's truck code. Read like the live trucks: PLANNER and up, VIEWER 403.
+  'GET /api/ivms/trucks/[id]/day': 'PLANNER',
   'GET /api/runs/[id]/plan': 'ANY',
   'POST /api/runs/[id]/replan': 'PLANNER',
   'POST /api/runs/[id]/reset-stuck': 'PLANNER',
