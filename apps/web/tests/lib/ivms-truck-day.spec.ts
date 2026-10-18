@@ -638,3 +638,16 @@ describe('the small helpers', () => {
     expect(m.dates).toEqual(['2026-10-20', '2026-10-19', '2026-10-15']);
   });
 });
+
+describe('the GPS alerts mode (merge with the GPS alerts, 18 Oct 2026)', () => {
+  // ALERTS is TIMES plus the operations alerts reading GPS: the truck's day shows exactly what TIMES shows
+  // (a check for "exactly TIMES" would have hidden the trail and the GPS times once the alerts were on).
+  it('ALERTS shows the same trail, GPS times, depot moves, earlier GPS visits and live status as TIMES', () => {
+    const strip = (m: unknown) => JSON.parse(JSON.stringify(m, (k, v) => (k === 'mode' ? undefined : v)));
+    const times = buildTruckDay(input({ mode: 'TIMES' }));
+    const alerts = buildTruckDay(input({ mode: 'ALERTS' }));
+    expect(strip(alerts)).toEqual(strip(times));
+    // The comparison means something: MAP (no GPS times) gives a different day.
+    expect(strip(buildTruckDay(input({ mode: 'MAP' })))).not.toEqual(strip(times));
+  });
+});

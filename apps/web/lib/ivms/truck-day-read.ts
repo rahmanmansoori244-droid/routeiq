@@ -67,7 +67,7 @@ export async function readTruckDay(tenantId: string, truckId: string, date: stri
   const day = date ?? today;
   const dayStart = zonedDayStart(day, tz);
   const deliveryDate = dateOnly(day);
-  const times = mode === 'TIMES';
+  const times = ivmsModeAtLeast(mode, 'TIMES');
 
   // The loads of the truck on the plans in use of the date (every depot), with their stops and drivers.
   const runs = await liveRunsInRange(prisma, tenantId, day, day);

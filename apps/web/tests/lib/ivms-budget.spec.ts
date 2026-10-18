@@ -32,7 +32,7 @@ const muscat = (hhmm: string, day = '2026-10-16') => new Date(`${day}T${hhmm}:00
 describe('the shares of the allowance (H2)', () => {
   it('add up to the allowance for every budget and mode, and every class has its own', () => {
     for (const b of [10, 50, 100, 999, 1000, 3000, 100_000]) {
-      for (const mode of ['MAP', 'TIMES'] as const) {
+      for (const mode of ['MAP', 'TIMES', 'ALERTS'] as const) {
         for (const on of [false, true]) {
           const s = classShares(b, mode, on);
           expect(IVMS_CALL_CLASSES.reduce((n, c) => n + s[c], 0), `${b} ${mode} ${on}`).toBe(b);
@@ -47,6 +47,8 @@ describe('the shares of the allowance (H2)', () => {
   it('today\'s 100 a day: admin 5, no backstop, history 38 (TIMES), the map the rest', () => {
     expect(classShares(100, 'TIMES', true)).toEqual({ ADMIN: 5, EVENTS: 0, ROUTE: 38, MAP: 57 });
     expect(classShares(100, 'MAP', true)).toEqual({ ADMIN: 5, EVENTS: 0, ROUTE: 0, MAP: 95 });
+    // GPS alerts (owner request 18 Oct 2026): ALERTS pulls the history as TIMES does.
+    expect(classShares(100, 'ALERTS', true)).toEqual(classShares(100, 'TIMES', true));
   });
 
   it('the backstop only from 1,000 a day and with a webhook secret, at most 96 (every 15 min)', () => {

@@ -20,6 +20,10 @@
  *
  * A company switched on without the switch-on time (a support UPDATE of "alertsEnabled" alone) gets it
  * now, on its first sweep: nothing that began before raises an alert (review L1).
+ *
+ * GPS alerts (owner request 18 Oct 2026): a company whose GPS tracking is ALERTS (and the IVMS link not
+ * switched off by ROUTEIQ_DISABLE_IVMS=1) has its facts read with the GPS (gps.ts gpsAlertConfigOf,
+ * facts.ts); every other company exactly as before.
  */
 import type { TenantConfig } from '@prisma/client';
 import { prisma } from '../db';
@@ -27,6 +31,8 @@ import { DEFAULT_TZ } from '../dispatch/time';
 import { setLockTimeout } from '../dispatch/plan-locks';
 import { ALERT_SWEEP_EVERY_MS, ALERT_SWEEP_SLOW_MS, ALERT_SWEEP_STALE_MS, ALERT_THRESHOLD_COLUMNS, readRuleOnAt, rulesOn, thresholdsOf, type AlertConfig, type ResolvedReason } from './catalog';
 import { readAlertFacts } from './facts';
+import { gpsAlertConfigOf } from './gps';
+import { readIvmsEnv } from '../ivms/env';
 import { tryLockTenantAlerts } from './locks';
 import { evaluate } from './rules';
 import { applyPlan, planApply, type StoreCounts } from './store';
@@ -52,8 +58,9 @@ export interface AlertSweepReport {
   ms: number;
 }
 
-/** The company settings a sweep reads. */
-export type AlertTenantConfig = Pick<TenantConfig, 'tenantId' | 'timezone'> & AlertConfig & { alertRuleOnAtJson?: unknown };
+/** The company settings a sweep reads (the GPS ones only matter in GPS tracking ALERTS; absent: no GPS). */
+export type AlertTenantConfig = Pick<TenantConfig, 'tenantId' | 'timezone'> &
+  AlertConfig & { alertRuleOnAtJson?: unknown } & Partial<Pick<TenantConfig, 'ivmsMode' | 'ivmsStopRadiusM' | 'ivmsDepotRadiusM' | 'avgSpeedKmh' | 'distanceMultiplier'>>;
 
 const CONFIG_SELECT = {
   tenantId: true,
@@ -63,6 +70,12 @@ const CONFIG_SELECT = {
   alertRuleOnAtJson: true,
   alertDeliveredNote: true,
   ...Object.fromEntries(ALERT_THRESHOLD_COLUMNS.map((c) => [c, true])),
+  // GPS alerts (GPS tracking ALERTS only: gps.ts gpsAlertConfigOf).
+  ivmsMode: true,
+  ivmsStopRadiusM: true,
+  ivmsDepotRadiusM: true,
+  avgSpeedKmh: true,
+  distanceMultiplier: true,
 } as Record<string, true>;
 
 interface TenantHealth {
@@ -143,7 +156,8 @@ export async function sweepTenant(cfg: AlertTenantConfig, now: Date, db: typeof 
         await tx.tenantConfig.updateMany({ where: { tenantId: cfg.tenantId, alertsEnabledAt: null }, data: { alertsEnabledAt: now } });
         enabledAt = now;
       }
-      const { facts, rows } = await readAlertFacts(tx, cfg.tenantId, { tz, now, thresholds });
+      const gps = gpsAlertConfigOf(cfg, readIvmsEnv().disabled);
+      const { facts, rows } = await readAlertFacts(tx, cfg.tenantId, { tz, now, thresholds, gps });
       const ev = evaluate(facts, now, thresholds);
       if (ev.failures?.length) {
         // The rule and the error's message only (never a customer, a note or a text of the facts).

@@ -361,6 +361,14 @@ describe('Settings: the GPS tracking card (company admin only)', () => {
     expect(render('ADMIN', { ivmsMode: 'OFF' })).not.toContain('data-testid="gps-pace"');
   });
 
+  it('GPS alerts (owner request 18 Oct 2026): the fourth mode is offered with its plain description, and pulls history as TIMES', () => {
+    const html = render('ADMIN', { ivmsMode: 'ALERTS' });
+    expect(html).toContain('value="ALERTS"');
+    expect(html).toContain('Live map, GPS times and GPS alerts');
+    expect(html).toContain('Map + GPS times + alerts use GPS times');
+    expect(html).toMatch(/At 100 calls a day: live positions about every 19 min while a truck has a load out; 38 history pulls a day/);
+  });
+
   it('the dispatcher never sees it', () => {
     const html = render('DISPATCHER');
     expect(html).not.toContain('gps-tracking-settings');

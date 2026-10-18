@@ -9,7 +9,7 @@ import { janitorAuthorized } from '../janitor-auth';
 import { clockCheck, utcDay, type ClockState } from './budget';
 import { ivmsApiReady, ivmsWebhookReady, readIvmsEnv, type IvmsEnv } from './env';
 import { suggestedOffsetMin } from './parse';
-import { ivmsModeOf } from './settings';
+import { ivmsModeAtLeast, ivmsModeOf } from './settings';
 import type { IvmsMode } from './types';
 
 export interface IvmsHealth {
@@ -84,7 +84,7 @@ export function gpsStatusText(h: IvmsHealth): { text: string; warn: boolean } {
     h.status === 'ok' ? `working (last answer${ago(h.lastOkAgeSec)})` : h.status === 'waiting' ? 'no answer yet' : h.status === 'backoff' ? `paused after an error (${h.lastError ?? 'unknown'})` : `failing (${h.lastError ?? 'unknown'})`;
   const parts = [`Ayun link: ${link}; ${h.calls.total} of ${h.calls.budget} calls today.`];
   let warn = h.status === 'failing' || h.status === 'backoff';
-  if (h.mode === 'TIMES' && h.clock !== 'OK') {
+  if (ivmsModeAtLeast(h.mode, 'TIMES') && h.clock !== 'OK') {
     warn = true;
     if (h.clock === 'UNKNOWN') parts.push("GPS times wait for Ayun's next live position to check its clock.");
     else {

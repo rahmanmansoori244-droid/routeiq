@@ -5,8 +5,11 @@
  *
  * The rules the types encode (design + binding critique of 16 Oct 2026):
  * - Modes step up: OFF (default; nothing is called, written or shown) < MAP (live positions on the day
- *   screen) < TIMES (MAP + GPS arrival and departure times). ALERTS comes with a later PR: it is appended
- *   to IVMS_MODES (and to the database CHECK "TenantConfig_ivmsMode_check"), and reads GpsTruckDayFact.
+ *   screen) < TIMES (MAP + GPS arrival and departure times) < ALERTS (TIMES + the operations alerts read
+ *   the GPS times and the depot moves, and the live position where it is fresh: owner request 18 Oct 2026,
+ *   "build GPS alerts"; lib/alerts/gps.ts). ALERTS does everything TIMES does (ivmsModeAtLeast(mode,
+ *   'TIMES') is true for it); the database CHECK "TenantConfig_ivmsMode_check" allows it from migration
+ *   20261018120000_ivms_alerts_mode on.
  * - Live positions (OBJECT_GET_LOCATIONS) feed the MAP only: a fix older than STALE_FIX_SEC is shown as
  *   stale and is never used for times (H5).
  * - GPS times come only from the provider's history (OBJECT_GET_ROUTE), pulled per truck while a load is
@@ -21,7 +24,7 @@
 // ---------------------------------------------------------------------------------------------------
 // Modes
 
-export const IVMS_MODES = ['OFF', 'MAP', 'TIMES'] as const;
+export const IVMS_MODES = ['OFF', 'MAP', 'TIMES', 'ALERTS'] as const;
 export type IvmsMode = (typeof IVMS_MODES)[number];
 
 // ---------------------------------------------------------------------------------------------------
@@ -263,19 +266,55 @@ export interface LiveVehiclesResponse {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// The hook for the ALERTS PR (not produced in this PR)
+// What the operations alerts read about a truck-day in ivmsMode ALERTS (owner request 18 Oct 2026)
 
 /**
- * What the alerts engine will read about one truck-day once ivmsMode ALERTS exists. `tracked` is true
- * only while the latest fix is younger than STALE_FIX_SEC (an absolute limit, H5): a stale truck-day
- * falls back to the phone-based rules.
+ * A depot move of the truck confirmed by its trail (IvmsEvent DEPOT_IN / DEPOT_OUT with outcome USED: a
+ * trail move, or an Ayun zone move the trail confirmed, as lib/ivms/stops.ts uses them as trip
+ * boundaries). `observed`: the time is exact - a zone move is the device's own event; a trail move only
+ * when a trail point lies at most DETECTOR_FIXED.observedMaxGapSec before it (else the truck crossed the
+ * radius earlier, during a gap: the time is an upper bound and never feeds a measured duration). The stop
+ * detector decides it when it writes the move (IvmsEvent.observed, migration 20261018130000_ivms_move_observed:
+ * review of 18 Oct 2026, finding 6), so it never changes when the trail points are deleted (retention).
+ * `depotId`: the depot whose radius or zone the move crossed (review finding 5: a truck driving through
+ * another depot's zone is not back at, or away from, its load's depot); null: not known (counts for any).
+ */
+export interface GpsDepotMove {
+  at: Date;
+  observed: boolean;
+  depotId?: string | null;
+}
+
+/**
+ * What the alerts engine reads about one truck-day in ivmsMode ALERTS (lib/alerts/facts.ts builds it;
+ * lib/alerts/gps.ts and rules.ts read it). Only for a truck-day whose GPS is not suppressed
+ * (IvmsTruckDay.suppressedAt): a suppressed one has none and falls back to the phone-based rules.
+ *
+ * `tracked` is true only while the latest live fix is usable (younger than STALE_FIX_SEC, valid, clock not
+ * ahead: lib/ivms/eta.ts fixUsable; an absolute limit, H5). Only a tracked truck-day's live position is
+ * read (the live ETA, "still at the stop", "away from the depot"); a stale one falls back to the
+ * phone-based rules for those, while the GPS times its trail already gave (the visits' AYUN times, the
+ * depot moves) stay facts. The position never appears in an alert text, its facts or a log.
  */
 export interface GpsTruckDayFact {
   tracked: boolean;
+  /** The latest live fix's GPS time (TruckPosition.fixAt), tracked or not; null: no live fix. */
   fixAt: Date | null;
   speedKmh: number | null;
+  /** Minutes the truck stood still at the latest fix (null: moving, stale or unknown). */
   parkedSinceMin: number | null;
-  depotOut: Date[];
-  depotIn: Date[];
+  /** The latest live fix's position, only to tell whether the truck is at a pin or at the depot (null: not tracked). */
+  position: { lat: number; lng: number } | null;
+  /** The trail-confirmed depot moves of the truck around the delivery day, oldest first. */
+  depotOut: GpsDepotMove[];
+  depotIn: GpsDepotMove[];
+  /** The trips between those moves (depot OUT to the next IN). loadNo stays null: the detector's own matching needs the trail. */
   trips: GpsTrip[];
+  /**
+   * The truck-day's history was pulled AND turned into GPS times up to this provider time: the earlier of
+   * IvmsTruckDay.pulledTo and processedAt (a pull the stop detector has not run over yet adds no stop time);
+   * null: not known. Before it, a stop with no GPS time was not visited for long enough to be seen; after it,
+   * nothing is known (review of 18 Oct 2026, findings 1, 3 and 4).
+   */
+  trailTo: Date | null;
 }

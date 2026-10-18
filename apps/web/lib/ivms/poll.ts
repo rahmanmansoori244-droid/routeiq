@@ -12,11 +12,11 @@
  *    loads (first review LOW: no overnight tracking through a load left open). Nothing out: no call, and
  *    every live position of the company is deleted.
  * 2. The lease (IvmsState, lib/ivms/store.ts): one container at a time; a backoff refuses it.
- * 3. MAP (mode MAP and TIMES): one OBJECT_GET_LOCATIONS for those trucks' IMEIs, paced to the MAP share
+ * 3. MAP (mode MAP and up): one OBJECT_GET_LOCATIONS for those trucks' IMEIs, paced to the MAP share
  *    of the allowance (budget.ts). The fixes update the map's latest position per truck - and nothing
  *    else: live positions are never a source of times (H5). A stale fix stays what it is (the map shows
  *    its age), a fix whose clock runs ahead never moves the latest position forward.
- * 4. ROUTE (mode TIMES): OBJECT_GET_ROUTE per truck-day, from the operating hours' start of the delivery
+ * 4. ROUTE (mode TIMES, and ALERTS which does all TIMES does): OBJECT_GET_ROUTE per truck-day, from the operating hours' start of the delivery
  *    date: every ivmsRoutePullMin (30-60 min; longer when the ROUTE share would not last) while a load of
  *    that day is out, and once more, over the whole day, 10 minutes after its last load was completed
  *    (late buffered points included). The points are the trail (TruckTrailPoint), the only source of GPS
@@ -34,7 +34,7 @@
  * allowance used up (LIMIT) waits for the provider's midnight; a wrong key (AUTH) an hour. Only kind codes
  * are stored and logged, never a URL, a key or an answer.
  *
- * 7. TIMES: the processing step turns the pulled trail and the depot moves into GPS stop times (trips by
+ * 7. TIMES (and ALERTS): the processing step turns the pulled trail and the depot moves into GPS stop times (trips by
  *    depot OUT/IN, stops, H3/H4: lib/ivms/stop-events.ts processGpsTimesForCompany, through the store's
  *    processTimes). It runs after the lease is released, right after a tick that pulled history and
  *    otherwise at most every PROCESS_EVERY_MS (a late Dispatch press or a completion changes which trip is
@@ -69,6 +69,7 @@ import { todayIso } from '../dispatch/time';
 import { ivmsApiReady, readIvmsEnv, type IvmsEnv } from './env';
 import { zoneEventRow } from './events';
 import { parseLastEvents, parseLocations, parseRoute, providerSkewSec } from './parse';
+import { ivmsModeAtLeast } from './settings';
 import { prismaIvmsStore, type FleetTruck, type IvmsCompany, type IvmsStateRow, type IvmsStore, type TruckDayRow } from './store';
 import type { AyunErrorKind, IvmsMode } from './types';
 
@@ -121,7 +122,7 @@ export function planTick(c: Pick<IvmsCompany, 'mode' | 'timezone' | 'fromMin' | 
   const onMap = (date: string, status: string) => (inHours ? (date === today ? OUT.has(status) : status === 'DISPATCHED') : date === today && status === 'DISPATCHED');
   const mapTrucks = fleet.filter((t) => t.days.some((d) => d.loads.some((l) => onMap(d.date, l.status))));
   const routeDays: RouteDay[] = [];
-  if (c.mode === 'TIMES') {
+  if (ivmsModeAtLeast(c.mode, 'TIMES')) {
     for (const t of fleet) {
       for (const d of t.days) {
         if (!d.loads.some((l) => LEFT.has(l.status))) continue;
@@ -265,7 +266,7 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
     result.skipped = 'LEASE_OR_BACKOFF';
     // Another container holds the lease, or the provider backs off: the trail already pulled still gets
     // processed, while the provider's clock is right.
-    if (c.mode === 'TIMES' && plan.routeDays.length) result.clock = clockCheck(await store.readSkew(c.tenantId), env.apiTimeOffsetMin, now);
+    if (ivmsModeAtLeast(c.mode, 'TIMES') && plan.routeDays.length) result.clock = clockCheck(await store.readSkew(c.tenantId), env.apiTimeOffsetMin, now);
     await processTimes(store, c, plan, result, now, false);
     return result;
   }
@@ -418,7 +419,7 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
  * error code is logged and returned.
  */
 async function processTimes(store: IvmsStore, c: IvmsCompany, plan: TickPlan, result: IvmsTickResult, now: Date, due: boolean): Promise<void> {
-  if (c.mode !== 'TIMES' || !plan.routeDays.length) return;
+  if (!ivmsModeAtLeast(c.mode, 'TIMES') || !plan.routeDays.length) return;
   // A provider clock that is wrong or unknown: no GPS stop time at all (first review H-1).
   if (result.clock !== 'OK') return;
   const p = proc();

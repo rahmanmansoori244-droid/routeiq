@@ -18,10 +18,30 @@
  * Known limits: the plan is the day's final plan in use (a load re-solved during the day is replayed as
  * it ended); positions are not exported, so the plausibility flags that need them (timingSuspect) are
  * not rebuilt; the "Pin may be wrong" list is the one at export time.
+ *
+ * GPS alerts (owner request 18 Oct 2026; ReplayOptions.gps, by default when the day was exported with GPS
+ * tracking ALERTS; a day exported with TIMES can be replayed with them too, to see what ALERTS would have
+ * raised): the visits are rebuilt WITH the GPS (AYUN) events the server had received by t (their
+ * receivedAt is when the history pull was processed, so the trail's delay is replayed as it was), the
+ * truck-days get their trail-confirmed depot moves known by t (AlertDayExport.gps: when they were confirmed,
+ * whether their time is exact) and, from its suppression on, a suppressed truck-day none. Live positions
+ * are never saved: in the replay no truck-day has a fresh position, so what needs one (the live ETA of R3,
+ * "still at the stop" for R1 from a GPS arrival, "at the depot" for R2 from a GPS return) falls back as
+ * between reads with no fix (gps.ts principle 4) - the replay shows the GPS times' effect, never the live
+ * position's. A truck-day suppressed after the export's day kept no AYUN events (suppression deletes them).
+ * How far the GPS history was processed by t (GpsTruckDayFact.trailTo: what R1 waits for before it measures
+ * a GPS arrival ended by the driver's result, and what confirms a depot OUT as the truck leaving - review of
+ * 18 Oct 2026, findings 3 and 4) is not saved either: the replay takes the latest time the server wrote GPS
+ * for the truck-day by t (its AYUN events' and depot moves' receipt), a lower bound - so the replay may
+ * measure or close those a pull later than the live sweep did, never earlier. The depot moves carry their
+ * depot (only the load's own depot's count: finding 5) and whether their time is exact as stored when they
+ * were written (finding 6).
+ * Without the option, the AYUN events are left out, as the live facts below ALERTS (facts.ts alertVisitRow).
  */
 import { deriveVisit, type EventSource, type VisitEvent } from '../delivery/visit';
 import { fmtHhmm, localDateIso, zonedDayStart } from '../dispatch/time';
 import { ALERT_RULE_LIST, ALERT_RULE_SPECS, ALERT_RULES, rulesOn, severityOf, thresholdsOf, type AlertConfig, type AlertRule } from './catalog';
+import { gpsTruckDayFactOf, type AlertGpsConfig } from './gps';
 import { evaluate, openKey, truckDayOf, type AlertFacts, type FactLoad, type FactPhoto, type FactSignal, type FactStop, type FactTruckDay, type FactVisit, type OpenRowInfo, type WindowRuleName } from './rules';
 import { applyPlanInMemory, planApply, type MemAlert } from './store';
 import type { AlertKind } from './catalog';
@@ -95,6 +115,29 @@ export interface ExportTruckDay {
   lastSeenAt: string | null;
 }
 
+/** A truck-day's GPS as the GPS alerts read it (never a position). */
+export interface ExportGpsTruckDay {
+  truckId: string;
+  /** IvmsTruckDay.suppressedAt (ISO): from then on the truck-day has no GPS. */
+  suppressedAt: string | null;
+  /**
+   * The trail-confirmed depot moves: when they happened, when RouteIQ knew them confirmed (processed, else
+   * received), exact or not (gps.ts moveObserved), and their depot (absent in an earlier file: any depot).
+   */
+  moves: { kind: 'DEPOT_IN' | 'DEPOT_OUT'; at: string; knownAt: string; observed: boolean; depotId?: string | null }[];
+}
+
+/** The day's GPS (exported with GPS tracking TIMES or ALERTS; absent below, and in an export from before 18 Oct 2026). */
+export interface ExportGps {
+  /** The company's GPS tracking mode at export time. */
+  mode: string;
+  /** The settings the GPS alerts read with (gps.ts gpsAlertConfigOf). */
+  config: AlertGpsConfig;
+  truckDays: ExportGpsTruckDay[];
+  /** What the export could not save faithfully (the script prints them; replayText too). */
+  warnings?: string[];
+}
+
 /** One company's delivery day, saved for the replay (replay-export.ts). */
 export interface AlertDayExport {
   v: 1;
@@ -107,6 +150,8 @@ export interface AlertDayExport {
   config: Partial<AlertConfig>;
   loads: ExportLoad[];
   truckDays: ExportTruckDay[];
+  /** GPS alerts: the day's GPS (optional). */
+  gps?: ExportGps;
 }
 
 /** A file that is not a saved day: a short reason. */
@@ -134,11 +179,11 @@ export function statusAsOf(l: Pick<ExportLoad, 'history' | 'finalStatus'>, t: nu
   return { status, statusChangedAt: changed };
 }
 
-function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: { startMin: number; endMin: number } | null; radiusM: number }): FactVisit | null {
+function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: { startMin: number; endMin: number } | null; radiusM: number; gps?: boolean }): FactVisit | null {
   // The GPS (AYUN) events of the IVMS live link are left out, as the live facts leave out their times
-  // (facts.ts alertVisitRow): a visit only GPS made is none.
+  // (facts.ts alertVisitRow): a visit only GPS made is none. With the GPS alerts (`gps`) they are kept.
   const events: VisitEvent[] = v.events
-    .filter((e) => ms(e.receivedAt) <= t && e.source !== 'AYUN')
+    .filter((e) => ms(e.receivedAt) <= t && (ctx.gps || e.source !== 'AYUN'))
     .map((e) => ({ kind: e.kind as VisitEvent['kind'], source: e.source as EventSource, at: new Date(e.at), receivedAt: new Date(e.receivedAt), distanceM: e.distanceM, accuracyM: e.accuracyM, payload: e.payload }));
   const photos: FactPhoto[] = v.photos
     .filter((p) => ms(p.receivedAt) <= t)
@@ -179,13 +224,18 @@ function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: {
     windowStartMin: v.windowStartMin,
     windowEndMin: v.windowEndMin,
     photos,
+    ...(ctx.gps ? { departureSource: s.departureSource, departureObserved: !s.departureGap } : {}),
   };
 }
 
-/** The facts of the saved day as of `at` (the rows open in `rows` are the open alerts). */
-export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert[], radiusM = 100): AlertFacts {
+/** The facts of the saved day as of `at` (the rows open in `rows` are the open alerts); `opts.gps`: with the GPS alerts (see the file comment). */
+export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert[], radiusM = 100, opts: { gps?: boolean } = {}): AlertFacts {
   const t = at.getTime();
   const dayStart = zonedDayStart(exp.date, exp.tz);
+  const gps = opts.gps && exp.gps ? exp.gps : null;
+  const gpsDayOf = new Map((gps?.truckDays ?? []).map((d) => [d.truckId, d]));
+  /** The truck-day keeps its GPS as of t: GPS alerts, and not suppressed by then. */
+  const gpsOn = (truckId: string) => !!gps && !known(gpsDayOf.get(truckId)?.suppressedAt, t);
   const signals = new Map<string, FactSignal>();
   const take = (truckId: string, s: FactSignal) => {
     const k = truckDayOf(exp.date, truckId);
@@ -209,7 +259,7 @@ export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert
             for (const e of s.visit.events) if (PHONE.has(e.source) && known(e.receivedAt, t)) take(l.truckId, { at: new Date(e.receivedAt), kind: e.kind, depotId: l.depotId, loadNo: l.loadNo, sequence: s.sequence });
             for (const p of s.visit.photos) if (PHONE.has(p.source) && known(p.receivedAt, t)) take(l.truckId, { at: new Date(p.receivedAt), kind: 'PHOTO', depotId: l.depotId, loadNo: l.loadNo, sequence: s.sequence });
           }
-          return { ...s, visit: s.visit ? visitAsOf(s.visit, t, { dayStart, breakMin: l.breakMin, radiusM }) : null };
+          return { ...s, visit: s.visit ? visitAsOf(s.visit, t, { dayStart, breakMin: l.breakMin, radiusM, gps: gpsOn(l.truckId) }) : null };
         })
       : [];
     return {
@@ -235,17 +285,39 @@ export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert
       stops,
     };
   });
+  // When the server wrote each truck's GPS stop times (their AYUN events' receipt): the history processed by then.
+  const gpsWrittenOf = new Map<string, number[]>();
+  if (gps) {
+    for (const l of exp.loads) {
+      for (const s of l.stops) {
+        for (const e of s.visit?.events ?? []) if (e.source === 'AYUN') gpsWrittenOf.set(l.truckId, [...(gpsWrittenOf.get(l.truckId) ?? []), ms(e.receivedAt)]);
+      }
+    }
+  }
   const tdOf = new Map(exp.truckDays.map((d) => [d.truckId, d]));
   const truckDays: FactTruckDay[] = [...new Set(exp.loads.map((l) => l.truckId))].map((truckId) => {
     const d = tdOf.get(truckId);
     const sig = signals.get(truckDayOf(exp.date, truckId)) ?? null;
     const seen = [d?.firstSeenAt, d?.lastSeenAt].filter((x): x is string => known(x, t)).map((x) => ms(x));
     if (sig) seen.push(sig.at.getTime());
-    return { date: exp.date, truckId, linkSeenAt: seen.length ? new Date(Math.max(...seen)) : null, pageOpened: known(d?.firstSeenAt, t) || !!sig, lastSignal: sig };
+    // GPS alerts: the depot moves confirmed by t; never a live position (none is saved). The history as far
+    // as the server had turned it into GPS by t (see the file comment: a lower bound).
+    const g = gps && gpsOn(truckId) ? gpsDayOf.get(truckId) : undefined;
+    const movesKnown = g ? g.moves.filter((m) => known(m.knownAt, t) && ms(m.at) <= t) : [];
+    const written = [...movesKnown.map((m) => ms(m.knownAt)), ...(gpsWrittenOf.get(truckId) ?? []).filter((x) => x <= t)];
+    const gpsFact = g
+      ? gpsTruckDayFactOf({
+          position: null,
+          moves: movesKnown.map((m) => ({ kind: m.kind, at: new Date(m.at), observed: m.observed, depotId: m.depotId ?? null })),
+          trailTo: written.length ? new Date(Math.max(...written)) : null,
+          now: at,
+        })
+      : null;
+    return { date: exp.date, truckId, linkSeenAt: seen.length ? new Date(Math.max(...seen)) : null, pageOpened: known(d?.firstSeenAt, t) || !!sig, lastSignal: sig, ...(gps ? { gps: gpsFact } : {}) };
   });
   const open = new Map<string, OpenRowInfo>();
   for (const r of rows) if (!r.resolvedAt) open.set(openKey(r.rule, r.subjectKey), { kind: r.kind as AlertKind, tier: r.tier, depotId: r.depotId, deliveryDate: r.deliveryDate });
-  return { tz: exp.tz, today: localDateIso(at, exp.tz), dates: [exp.date], loads, truckDays, open };
+  return { tz: exp.tz, today: localDateIso(at, exp.tz), dates: [exp.date], loads, truckDays, open, ...(gps ? { gps: { ...gps.config, depots: new Map() } } : {}) };
 }
 
 export interface ReplayOptions {
@@ -259,6 +331,11 @@ export interface ReplayOptions {
   /** Settings to try instead of the exported ones (thresholds; null = the rule off). */
   overrides?: Partial<AlertConfig>;
   radiusM?: number;
+  /**
+   * With the GPS alerts (GPS tracking ALERTS: see the file comment). Default: the day was exported with
+   * ALERTS. True on a day exported without GPS (below TIMES, or before 18 Oct 2026) throws.
+   */
+  gps?: boolean;
 }
 
 export type ReplayEventKind = 'RAISED' | 'HISTORY' | 'ESCALATED' | 'REOPENED' | 'CLOSED';
@@ -296,6 +373,10 @@ export interface ReplayReport {
   from: string;
   to: string;
   steps: number;
+  /** Replayed with the GPS alerts. */
+  gps: boolean;
+  /** The export's warnings about its GPS (ExportGps.warnings), when replayed with the GPS alerts. */
+  warnings?: string[];
   rules: ReplayRuleSummary[];
   timeline: ReplayEvent[];
   rows: MemAlert[];
@@ -311,6 +392,8 @@ export function replayDay(exp: AlertDayExport, opts: ReplayOptions = {}): Replay
   const from = opts.fromMin ?? 5 * 60;
   const to = opts.toMin ?? 23 * 60 + 59;
   const step = Math.max(1, Math.round(opts.stepMin ?? 5));
+  if (opts.gps && !exp.gps) throw new Error('This export has no GPS (it was saved with GPS tracking below TIMES, or before 18 Oct 2026): it cannot be replayed with the GPS alerts.');
+  const gps = opts.gps ?? exp.gps?.mode === 'ALERTS';
   const cfg: Partial<AlertConfig> = { ...exp.config, ...(opts.overrides ?? {}), alertsEnabled: true };
   const thresholds = thresholdsOf(cfg);
   const on = rulesOn(cfg);
@@ -323,7 +406,7 @@ export function replayDay(exp: AlertDayExport, opts: ReplayOptions = {}): Replay
   for (let m = from; m <= to; m += step) {
     steps++;
     const now = at(m);
-    const facts = factsAsOf(exp, now, rows, opts.radiusM);
+    const facts = factsAsOf(exp, now, rows, opts.radiusM, { gps });
     const ev = evaluate(facts, now, thresholds);
     const plan = planApply(rows, ev, { now, alertsEnabledAt: switchOn, windowFrom: exp.date, rulesOn: on });
     const byId = new Map(rows.map((r) => [r.id, r]));
@@ -363,12 +446,15 @@ export function replayDay(exp: AlertDayExport, opts: ReplayOptions = {}): Replay
       samples: [...new Set([...raised, ...mine.filter((e) => e.kind === 'HISTORY')].map((e) => e.text))].slice(0, 3),
     };
   });
-  return { date: exp.date, from: dayClock(from), to: dayClock(to), steps, rules, timeline, rows };
+  return { date: exp.date, from: dayClock(from), to: dayClock(to), steps, gps, ...(gps && exp.gps?.warnings?.length ? { warnings: exp.gps.warnings } : {}), rules, timeline, rows };
 }
 
 /** The replay as plain text (the script prints it): one block per rule, then the e-mail count. */
 export function replayText(r: ReplayReport): string {
-  const lines = [`Alerts replay of ${r.date}, ${r.from}-${r.to}, ${r.steps} steps (no writes, no e-mail).`, ''];
+  const lines = [`Alerts replay of ${r.date}, ${r.from}-${r.to}, ${r.steps} steps (no writes, no e-mail).`];
+  if (r.gps) lines.push('With the GPS alerts (GPS tracking ALERTS): the GPS times and depot moves as RouteIQ received them; live positions are not saved, so the live ETA and the "still at the stop / at the depot" checks are not replayed.');
+  for (const w of r.warnings ?? []) lines.push(`Warning: ${w}`);
+  lines.push('');
   for (const s of r.rules) {
     const setting = s.threshold === null ? 'off' : ALERT_RULE_SPECS[s.rule].unit === null ? 'on' : `threshold ${s.threshold}`;
     const head = `R${s.no} ${s.label} (${setting}): ${s.raised} raised, ${s.history} history, ${s.escalated} escalated, ${s.reopened} reopened${s.first ? `, first ${s.first}` : ''}`;

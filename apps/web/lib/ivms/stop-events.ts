@@ -399,7 +399,12 @@ async function clearSuppressedDay(tenantId: string, truckId: string, date: strin
   return removeGpsEvents(tenantId, date, left, GPS_LOCK_TIMEOUT_MS, { truckId });
 }
 
-/** Depot moves from the trail, stored once (origin TRAIL): never when any move of the same kind is within 10 min. */
+/**
+ * Depot moves from the trail, stored once (origin TRAIL): never when any move of the same kind is within
+ * 10 min. Each with whether its time is exact (IvmsEvent.observed, the detector's flag: GPS alerts, review
+ * of 18 Oct 2026, finding 6): the alerts and the replay export read it from the row, so it stays what it
+ * was when the trail points are deleted after ivmsTrailDays. First write wins, as for the move's time.
+ */
 async function writeTrailMoves(tenantId: string, truckId: string, out: DetectorOutput, now: Date): Promise<number> {
   let n = 0;
   for (const m of out.trailMoves) {
@@ -410,7 +415,7 @@ async function writeTrailMoves(tenantId: string, truckId: string, out: DetectorO
     if (near) continue;
     try {
       await prisma.ivmsEvent.create({
-        data: { tenantId, truckId, depotId: m.depotId, kind: m.kind, origin: 'TRAIL', eventAt: m.at, receivedAt: now, lat: m.lat, lng: m.lng, dedupeKey: trailMoveKey(truckId, m.kind, m.at), processedAt: now, outcome: 'USED' },
+        data: { tenantId, truckId, depotId: m.depotId, kind: m.kind, origin: 'TRAIL', eventAt: m.at, receivedAt: now, lat: m.lat, lng: m.lng, dedupeKey: trailMoveKey(truckId, m.kind, m.at), processedAt: now, outcome: 'USED', observed: m.observed },
       });
       n++;
     } catch (e) {

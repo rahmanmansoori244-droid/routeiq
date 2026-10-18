@@ -519,7 +519,7 @@ export function buildTruckDay(i: TruckDayInput): TruckDayModel {
   const atMin = (m: number) => new Date(dayStart.getTime() + m * MIN);
   const suppressed = !!i.truckDay?.suppressedAt;
   // GPS times, depot moves, GPS visits, the trail and the facts: TIMES only, never on a suppressed truck-day.
-  const gpsTimes = i.mode === 'TIMES' && !suppressed;
+  const gpsTimes = ivmsModeAtLeast(i.mode, 'TIMES') && !suppressed;
   const loads = [...i.loads].sort((a, b) => a.departMin - b.departMin || a.loadNo - b.loadNo);
   const anyOut = loads.some((l) => OUT_STATUSES.has(l.status));
   // The live position: today or yesterday, and only while the truck has a load of that date out (Locked,
@@ -556,7 +556,7 @@ export function buildTruckDay(i: TruckDayInput): TruckDayModel {
         : "This truck has no GPS tracker set (Trucks page, company admin): its times come from the driver's phone only.",
     );
   }
-  if (i.mode === 'TIMES' && suppressed) {
+  if (ivmsModeAtLeast(i.mode, 'TIMES') && suppressed) {
     const why = SUPPRESS_TEXT[i.truckDay?.suppressReason ?? ''] ?? 'they were switched off';
     notes.push(`GPS times of this truck-day were removed (${why}): no GPS trail, depot move or GPS time is shown for it.`);
   }

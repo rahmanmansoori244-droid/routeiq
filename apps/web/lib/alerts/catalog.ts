@@ -34,6 +34,9 @@
  *   most one every `alertEmailEveryMin` and ALERT_EMAILS_PER_DAY a day.
  * - Messages never contain a phone number: runs of ALERT_REDACT_DIGITS_MIN or more digits in free text
  *   are removed, and driver notes are cut to ALERT_NOTE_MAX characters (lib/alerts/text.ts).
+ * - GPS alerts (owner request 18 Oct 2026): only while the company's GPS tracking is ALERTS do the rules read
+ *   the GPS times, the depot moves and the fresh live position (lib/alerts/gps.ts; every text that used
+ *   them says "(GPS)"); below ALERTS they read the driver's taps, the office's entries and the plan only.
  */
 import type { TenantConfig } from '@prisma/client';
 
@@ -175,7 +178,7 @@ export const ALERT_RULE_SPECS: Record<AlertRule, AlertRuleSpec> = {
     no: 3,
     owner: true,
     label: 'Running late',
-    meaning: 'The expected arrival at the next stop is more than N min after its planned time (worked out from the driver\'s taps and the plan; GPS tracking is not used).',
+    meaning: 'The expected arrival at the next stop is more than N min after its planned time (worked out from the driver\'s taps and the plan; with GPS tracking ALERTS from the truck\'s fresh GPS position, as on the live map).',
     kind: 'CONDITION',
     subject: 'LOAD',
     unit: 'min',

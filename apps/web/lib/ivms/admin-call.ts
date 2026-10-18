@@ -5,7 +5,7 @@
  * - Counted BEFORE it is made in the ADMIN share of the daily allowance (lib/ivms/budget.ts classShares):
  *   budget only, no lease (review M13), so the picker never waits behind the poller and never eats into
  *   the map's or the history's share (H2). A share used up answers LIMIT without calling.
- * - Only while the company is the Ayun account's (AYUN_TENANT_SLUG) and its ivmsMode is MAP or TIMES:
+ * - Only while the company is the Ayun account's (AYUN_TENANT_SLUG) and its ivmsMode is MAP or above:
  *   OFF never calls the provider (the caller checks it too).
  * - The provider's answer is returned as it came (the caller reduces it to IMEIs and plate keys: names and
  *   plates never leave lib/ivms/match.ts); nothing is stored. A wrong key (AUTH) or the allowance used up

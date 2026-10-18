@@ -13,10 +13,18 @@
  *
  *   2. Replay it (no database at all):
  *        tsx scripts/alerts-replay.ts replay <file> [--from 05:00] [--to 23:59] [--step 5] [--switch-on 06:00]
- *            [--set alertEtaLateMin=40] [--set alertLoadingOverMin=off] [--timeline] [--json]
+ *            [--set alertEtaLateMin=40] [--set alertLoadingOverMin=off] [--gps | --no-gps] [--timeline] [--json]
  *      Times are of the saved date; "21:00-1" is the evening before, "00:30+1" the night after.
  *      --set tries another setting (any alert threshold column of TenantConfig, or alertDeliveredNote=true/false).
  *      --switch-on: alerts switched on at that time (nothing that began before it raises).
+ *      --gps / --no-gps (GPS alerts, owner request 18 Oct 2026): replay with or without the GPS times and depot
+ *      moves (lib/alerts/replay.ts); by default with them when the day was saved in GPS tracking ALERTS. A
+ *      day saved in TIMES can be replayed with --gps to see what ALERTS would have raised. Live positions are
+ *      never saved, so the live ETA and the "still at the stop / at the depot" checks are not replayed.
+ *      Whether a GPS depot time is exact is saved as RouteIQ stored it with the move (review of 18 Oct 2026,
+ *      finding 6); a move stored before 18 Oct 2026 is read against the trail points, which are deleted
+ *      after ivmsTrailDays (default 2 days): export such a day within that time - the export warns when it
+ *      may be too late, and the replay repeats the warning.
  *      Prints, per rule, how many alerts were raised, kept as history, escalated and reopened, the first
  *      time and up to three sample texts, and how many a HIGH-only e-mail would have carried. Its output
  *      holds customer names too: do not paste it into the repository, an issue or a commit.
@@ -31,7 +39,7 @@ function usage(): never {
     [
       'Usage (from apps/web):',
       '  tsx scripts/alerts-replay.ts export --tenant <company code> --date YYYY-MM-DD --out <file outside the repository> [--depot <depot code>]',
-      '  tsx scripts/alerts-replay.ts replay <file> [--from HH:MM] [--to HH:MM] [--step N] [--switch-on HH:MM] [--set column=value] [--timeline] [--json]',
+      '  tsx scripts/alerts-replay.ts replay <file> [--from HH:MM] [--to HH:MM] [--step N] [--switch-on HH:MM] [--set column=value] [--gps | --no-gps] [--timeline] [--json]',
     ].join('\n'),
   );
   process.exit(2);
@@ -113,6 +121,7 @@ async function runExport(args: string[]) {
     );
     writeFileSync(out, JSON.stringify(day));
     console.error(`Saved ${day.loads.length} loads of ${date} to ${out} (read only). It holds customer names and driver notes: keep it private, delete it after use.`);
+    for (const w of day.gps?.warnings ?? []) console.error(`Warning: ${w}`);
   } finally {
     await db.$disconnect();
   }
@@ -133,9 +142,10 @@ function runReplay(args: string[]) {
     stepMin: step ? Number(step) : undefined,
     switchOnMin: switchOn ? parseDayMinute(switchOn) : null,
     overrides,
+    gps: args.includes('--gps') ? true : args.includes('--no-gps') ? false : undefined,
   });
   if (args.includes('--json')) {
-    console.log(JSON.stringify({ date: report.date, from: report.from, to: report.to, steps: report.steps, rules: report.rules, timeline: args.includes('--timeline') ? report.timeline : undefined }, null, 2));
+    console.log(JSON.stringify({ date: report.date, from: report.from, to: report.to, steps: report.steps, gps: report.gps, warnings: report.warnings, rules: report.rules, timeline: args.includes('--timeline') ? report.timeline : undefined }, null, 2));
     return;
   }
   console.log(replayText(report));

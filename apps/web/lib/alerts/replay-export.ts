@@ -12,11 +12,21 @@
  * open. Never a position, an IP, a device id or a phone number. It does hold customer names and driver
  * notes: the file must stay outside the repository (the script refuses a path inside it), and running it
  * on production data needs the owner's OK.
+ *
+ * GPS alerts (owner request 18 Oct 2026): with GPS tracking TIMES or ALERTS the visits' GPS (AYUN) events
+ * are in the export already (as every event of the day); the day's GPS is added (AlertDayExport.gps): the
+ * mode, the settings the GPS alerts read with, and per truck-day its suppression and its trail-confirmed
+ * depot moves (when they happened, when RouteIQ knew them confirmed, their depot, whether their time is
+ * exact) - never a position, a trail point or a tracker id. Whether a trail move's time is exact is the
+ * flag the stop detector stored with it (IvmsEvent.observed: review of 18 Oct 2026, finding 6), so a day
+ * exported after its trail points were deleted (ivmsTrailDays) keeps it. Only a move written before that
+ * flag existed is read against the trail points; when those may be gone already, it is saved as not exact
+ * and the export says so (ExportGps.warnings, printed by the script and by the replay).
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
-import { findInParts } from '../in-parts';
-import { dateOnly, isoOf } from '../dispatch/time';
+import { findInParts, inParts } from '../in-parts';
+import { dateOnly, isoOf, zonedDayStart } from '../dispatch/time';
 import { echoedWindowRule } from '../dispatch/window-rule';
 import { parseLoadBreak, readTruckSnapshot } from '../dispatch/snapshots';
 import { readDevices } from '../driver-link/service';
@@ -25,7 +35,10 @@ import { pinCheckList } from '../delivery/customer-stats';
 import { LOAD_STATUS_NAMES } from '../audit-catalog';
 import { ALERT_THRESHOLD_COLUMNS, type AlertConfig } from './catalog';
 import { pinMovedSince } from './facts';
-import { ALERT_EXPORT_KIND, type AlertDayExport, type ExportEvent, type ExportLoad, type ExportPhoto, type ExportStop } from './replay';
+import { gpsAlertConfigOf, moveNeedsPoints, moveObserved, type ConfirmedMove } from './gps';
+import { ALERT_EXPORT_KIND, type AlertDayExport, type ExportEvent, type ExportGps, type ExportLoad, type ExportPhoto, type ExportStop } from './replay';
+import { ivmsModeAtLeast, ivmsModeOf } from '../ivms/settings';
+import { DETECTOR_FIXED } from '../ivms/types';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -210,5 +223,68 @@ export async function exportAlertDay(db: Db, tenantId: string, date: string, opt
       return { truckId: x.truckId, firstSeenAt: firsts[0] ?? (x.lastSeenAt ? x.lastSeenAt.toISOString() : null), lastSeenAt: x.lastSeenAt ? x.lastSeenAt.toISOString() : null };
     });
   const config = Object.fromEntries(Object.entries(cfg).filter(([k]) => k !== 'timezone')) as Partial<AlertConfig>;
-  return { v: 1, kind: ALERT_EXPORT_KIND, date: isoOf(day), tz, exportedAt: now.toISOString(), config, loads: outLoads, truckDays };
+  const gps = await exportGps(db, tenantId, date, tz, [...new Set(loads.map((l) => l.truckId))], now);
+  return { v: 1, kind: ALERT_EXPORT_KIND, date: isoOf(day), tz, exportedAt: now.toISOString(), config, loads: outLoads, truckDays, ...(gps ? { gps } : {}) };
+}
+
+const DAY_MS = 24 * 3_600_000;
+
+/** The day's GPS for the GPS alerts' replay (see the file comment); null below GPS tracking TIMES. Read only. */
+export async function exportGps(db: Db, tenantId: string, date: string, tz: string, truckIds: readonly string[], now: Date = new Date()): Promise<ExportGps | null> {
+  const cfg = await db.tenantConfig.findFirst({ where: { tenantId }, select: { ivmsMode: true, ivmsStopRadiusM: true, ivmsDepotRadiusM: true, avgSpeedKmh: true, distanceMultiplier: true, ivmsTrailDays: true } });
+  const mode = ivmsModeOf(cfg);
+  if (!cfg || !ivmsModeAtLeast(mode, 'TIMES')) return null;
+  // The settings as ALERTS would read them (a TIMES day may be replayed with the GPS alerts).
+  const config = gpsAlertConfigOf({ ...cfg, ivmsMode: 'ALERTS' }, false)!;
+  if (!truckIds.length) return { mode, config, truckDays: [] };
+  const start = zonedDayStart(date, tz).getTime();
+  const [days, events] = await Promise.all([
+    findInParts(truckIds, (part) => db.ivmsTruckDay.findMany({ where: { tenantId, truckId: { in: part }, deliveryDate: dateOnly(date) }, select: { truckId: true, suppressedAt: true } })),
+    findInParts(truckIds, (part) =>
+      db.ivmsEvent.findMany({
+        where: { tenantId, truckId: { in: part }, kind: { in: ['DEPOT_IN', 'DEPOT_OUT'] }, outcome: 'USED', eventAt: { gte: new Date(start - 3 * 3_600_000), lte: new Date(start + 27 * 3_600_000) } },
+        select: { truckId: true, depotId: true, kind: true, origin: true, eventAt: true, receivedAt: true, processedAt: true, observed: true },
+      }),
+    ),
+  ]);
+  const gapMs = DETECTOR_FIXED.observedMaxGapSec * 1000;
+  const confirmed = (e: (typeof events)[number]): ConfirmedMove => ({ kind: e.kind as ConfirmedMove['kind'], at: e.eventAt, origin: e.origin, observed: e.observed ?? null });
+  // Only a trail move written before the detector stored its exactness is read against the trail points.
+  const trail = events.filter((e) => moveNeedsPoints(confirmed(e)));
+  const pointsOf = new Map<string, Date[]>();
+  for (const part of inParts(trail, 500)) {
+    const points = await db.truckTrailPoint.findMany({
+      where: { tenantId, OR: part.map((m) => ({ truckId: m.truckId, fixAt: { gte: new Date(m.eventAt.getTime() - gapMs), lt: m.eventAt } })) },
+      select: { truckId: true, fixAt: true },
+    });
+    for (const p of points) pointsOf.set(p.truckId, [...(pointsOf.get(p.truckId) ?? []), p.fixAt]);
+  }
+  const suppressedOf = new Map(days.map((d) => [d.truckId, d.suppressedAt]));
+  // Such a move older than the trail retention may have lost its points: saved as not exact, and said.
+  const trailDays = Math.min(7, Math.max(1, cfg.ivmsTrailDays ?? 2));
+  const gone = trail.filter((e) => e.eventAt.getTime() < now.getTime() - trailDays * DAY_MS).length;
+  const warnings = gone
+    ? [
+        `${gone} GPS depot move${gone === 1 ? ' was' : 's were'} stored before RouteIQ kept whether their time is exact, and the trail points of that time may be deleted already (trail kept ${trailDays} day${trailDays === 1 ? '' : 's'}): ${gone === 1 ? 'it is' : 'they are'} saved as not exact where no point is left, so a replay with --gps can show fewer depot-based alerts (R2, R4) than the GPS alerts would have raised.`,
+      ]
+    : [];
+  return {
+    mode,
+    config,
+    ...(warnings.length ? { warnings } : {}),
+    truckDays: truckIds.map((truckId) => ({
+      truckId,
+      suppressedAt: suppressedOf.get(truckId)?.toISOString() ?? null,
+      moves: events
+        .filter((e): e is typeof e & { kind: 'DEPOT_IN' | 'DEPOT_OUT' } => e.truckId === truckId && (e.kind === 'DEPOT_IN' || e.kind === 'DEPOT_OUT'))
+        .sort((a, b) => a.eventAt.getTime() - b.eventAt.getTime())
+        .map((e) => ({
+          kind: e.kind,
+          at: e.eventAt.toISOString(),
+          knownAt: (e.processedAt ?? e.receivedAt).toISOString(),
+          observed: moveObserved(confirmed(e), pointsOf.get(truckId) ?? []),
+          depotId: e.depotId ?? null,
+        })),
+    })),
+  };
 }
