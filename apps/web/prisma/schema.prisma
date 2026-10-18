@@ -1756,8 +1756,9 @@ model TruckPosition {
 
 /// A truck's GPS trail from the provider's history (OBJECT_GET_ROUTE): the only source of GPS
 /// arrival and departure times (TIMES). Pulled only while the truck has a load out and once at the
-/// end; kept TenantConfig.ivmsTrailDays (default 2) days; never exported, never shown outside the
-/// day screen. Invalid fixes (out of range, 0,0, clock ahead) are never stored.
+/// end; kept TenantConfig.ivmsTrailDays (default 2) days; never exported; shown only to the dispatcher
+/// and up, as the line of a truck's day (owner request 18 Oct 2026, lib/ivms/truck-day.ts, at most 2,000
+/// points). Invalid fixes (out of range, 0,0, clock ahead) are never stored.
 model TruckTrailPoint {
   id       String   @id @default(cuid())
   tenantId String
