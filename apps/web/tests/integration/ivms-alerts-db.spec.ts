@@ -2,20 +2,22 @@
  * GPS ALERTS (owner request 18 Oct 2026: "build GPS alerts"; GPS tracking mode ALERTS) on real PostgreSQL,
  * library level: the alert sweep (lib/alerts/sweep.ts sweepTenant) reading the IVMS rows through
  * lib/alerts/facts.ts (IvmsTruckDay, TruckPosition, IvmsEvent, TruckTrailPoint and the AYUN StopEvents).
- * Needs DATABASE_URL (migrated, with 20261018120000_ivms_alerts_mode); the web server and the solver are
+ * Needs DATABASE_URL (migrated, with 20261018120000_ivms_alerts_mode and 20261018130000_ivms_move_observed); the web server and the solver are
  * not used, and no call is made to Ayun. A fixed delivery day (10 Mar 2026, Asia/Muscat) with a fixed
  * clock. Invented data only: truck T-100, a depot and a shop at made-up coordinates near 10.0001 / 20.0002.
  *
  * Three companies with the same day: T-100 L1 dispatched 07:00, one stop planned 07:30 for 20 min, the
  * driver page open, no tap at the stop; the GPS history gave the stop an arrival at 08:00 and a departure
- * at 09:20 (observed), and the trail-confirmed depot OUT 07:05 and IN 09:40 (a trail point just before
- * each: exact); planned back 09:00; the latest live fix at 11:09 at the depot. Alerts on since 06:00.
+ * at 09:20 (observed), and the trail-confirmed depot OUT 07:05 and IN 09:40 (exact, as the stop detector
+ * stored them: IvmsEvent.observed - the trail points are deleted by then, review of 18 Oct 2026, finding 6);
+ * planned back 09:00; the latest live fix at 11:09 at the depot. Alerts on since 06:00.
  *  1. Company A in ALERTS: at 11:10 the sweep keeps one UNLOAD_OVER history row naming GPS (1 h 20 min,
  *     GPS arrival and departure), and LOAD_NOT_CLOSED says the truck is back at the depot by GPS.
  *  2. Company B in TIMES: the same rows read without GPS: no unloading alert at all (a GPS-only visit is
  *     none), and LOAD_NOT_CLOSED has no Back at depot.
  *  3. Company C in ALERTS with the truck-day's GPS suppressed: as B.
- * The database accepts the mode ALERTS (the seed itself) and still refuses junk.
+ * The database accepts the mode ALERTS (the seed itself) and still refuses junk, and keeps a move's
+ * exactness only on a move from the trail (CHECK "IvmsEvent_observed_trail_only").
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
@@ -77,13 +79,12 @@ async function seed(c: Co, mode: 'TIMES' | 'ALERTS', suppressed = false) {
     });
   await gpsEvent('ARRIVED', '08:00', '09:05');
   await gpsEvent('DEPARTED', '09:20', '10:05');
-  await prisma.ivmsTruckDay.create({ data: { tenantId, truckId, deliveryDate: day, pulledTo: at('10:00'), lastPullAt: at('10:05'), pulls: 3, ...(suppressed ? { suppressedAt: at('10:10'), suppressReason: 'UNDO' } : {}) } });
+  await prisma.ivmsTruckDay.create({ data: { tenantId, truckId, deliveryDate: day, pulledTo: at('10:00'), lastPullAt: at('10:05'), processedAt: at('10:05'), pulls: 3, ...(suppressed ? { suppressedAt: at('10:10'), suppressReason: 'UNDO' } : {}) } });
+  // The detector stored both moves as exact; no trail point is left (the retention deleted them).
   const move = (kind: 'DEPOT_OUT' | 'DEPOT_IN', hhmm: string) =>
-    prisma.ivmsEvent.create({ data: { tenantId, truckId, depotId, kind, origin: 'TRAIL', eventAt: at(hhmm), receivedAt: at('10:05'), processedAt: at('10:05'), outcome: 'USED', dedupeKey: `ayun:t:${c.slug}:${kind}:${hhmm}`.slice(0, 64), ...DEPOT } });
+    prisma.ivmsEvent.create({ data: { tenantId, truckId, depotId, kind, origin: 'TRAIL', eventAt: at(hhmm), receivedAt: at('10:05'), processedAt: at('10:05'), outcome: 'USED', observed: true, dedupeKey: `ayun:t:${c.slug}:${kind}:${hhmm}`.slice(0, 64), ...DEPOT } });
   await move('DEPOT_OUT', '07:05');
   await move('DEPOT_IN', '09:40');
-  // A trail point just before each move: both times are exact.
-  for (const hhmm of ['07:03', '09:38']) await prisma.truckTrailPoint.create({ data: { tenantId, truckId, fixAt: at(hhmm), ...DEPOT, speedKmh: 10 } });
   await prisma.truckPosition.create({ data: { tenantId, truckId, fixAt: at('11:09'), receivedAt: at('11:09'), ...DEPOT, speedKmh: 0, flags: [], movedAt: at('09:40') } });
 }
 
@@ -148,5 +149,17 @@ describe('GPS alerts on the real database', () => {
     expect(await refused('ALERTS')).toBe(false);
     for (const junk of ['alerts', 'GPS', '']) expect(await refused(junk), junk).toBe(true);
     await prisma.tenantConfig.update({ where: { tenantId: B.tenantId }, data: { ivmsMode: 'TIMES' } });
+  });
+
+  it('a depot move keeps whether its time is exact only when it comes from the trail (migration 20261018130000_ivms_move_observed)', async () => {
+    const truck = await prisma.truck.findFirstOrThrow({ where: { tenantId: B.tenantId }, select: { id: true } });
+    const zoneMove = (observed: boolean | null) =>
+      prisma.ivmsEvent.create({
+        data: { tenantId: B.tenantId, truckId: truck.id, kind: 'DEPOT_IN', origin: 'WEBHOOK', eventAt: at('12:00'), outcome: 'USED', observed, dedupeKey: `ayun:z:${B.slug}:${String(observed)}`.slice(0, 64) },
+      });
+    await expect(zoneMove(true)).rejects.toThrow();
+    await expect(zoneMove(null)).resolves.toMatchObject({ observed: null });
+    const trail = await prisma.ivmsEvent.findMany({ where: { tenantId: B.tenantId, origin: 'TRAIL' }, select: { observed: true } });
+    expect(trail.map((e) => e.observed)).toEqual([true, true]);
   });
 });

@@ -23,12 +23,14 @@
  *
  * GPS alerts (owner request 18 Oct 2026; GPS tracking ALERTS only, `opts.gps` from the sweep: gps.ts
  * gpsAlertConfigOf): for the trucks of the window, their truck-days (IvmsTruckDay: suppressed? history
- * pulled up to?), their latest live fix (TruckPosition), their trail-confirmed depot moves (IvmsEvent
- * DEPOT_IN / DEPOT_OUT with outcome USED, as the stop detector uses them; a trail move's time is exact
- * only with a trail point just before it), the loads' depot pins, the GPS departures' observed flags
- * (their StopEvent payload) - six more indexed queries. Every truck-day whose GPS is not suppressed then
- * gets its GpsTruckDayFact (lib/ivms/types.ts) and its visits WITH their GPS times; a suppressed one is
- * read as with the link off. Below ALERTS none of this is read and the facts are exactly as before.
+ * pulled and processed up to?), their latest live fix (TruckPosition), their trail-confirmed depot moves
+ * (IvmsEvent DEPOT_IN / DEPOT_OUT with outcome USED, as the stop detector uses them, with their depot; a
+ * trail move's time is exact as the detector stored it - IvmsEvent.observed, review of 18 Oct 2026, finding
+ * 6 - and only a move from before that is read against the trail points just before it), the loads' depot
+ * pins, the GPS departures' observed flags (their StopEvent payload) - six more indexed queries. Every
+ * truck-day whose GPS is not suppressed then gets its GpsTruckDayFact (lib/ivms/types.ts) and its visits
+ * WITH their GPS times; a suppressed one is read as with the link off. Below ALERTS none of this is read
+ * and the facts are exactly as before.
  */
 import type { Prisma, StopVisit } from '@prisma/client';
 import { prisma } from '../db';
@@ -43,7 +45,7 @@ import { withoutGpsTimes } from '../delivery/visit';
 import { distanceM, PIN_MOVED_M } from '../dispatch/snapshots';
 import { pinCheckList } from '../delivery/customer-stats';
 import { ALERT_DAYS_AHEAD, ALERT_DAYS_BACK, type AlertRule } from './catalog';
-import { gpsTruckDayFactOf, moveObserved, type AlertGpsConfig, type AlertGpsSettings, type ConfirmedMove } from './gps';
+import { gpsTruckDayFactOf, moveNeedsPoints, moveObserved, type AlertGpsConfig, type AlertGpsSettings, type ConfirmedMove } from './gps';
 import { openKey, truckDayOf, type AlertFacts, type FactLoad, type FactPhoto, type FactSignal, type FactStop, type FactTruckDay, type FactVisit, type OpenRowInfo } from './rules';
 import { DETECTOR_FIXED, type GpsTruckDayFact } from '../ivms/types';
 import { STORED_SELECT, storedOf, type StoredAlert } from './store';
@@ -255,6 +257,17 @@ export async function readAlertFacts(
   return { facts: { tz, today: todayIso(tz, now), dates, loads: factLoads, truckDays, open, ...(gps ? { gps } : {}) }, rows: stored };
 }
 
+/**
+ * How far a truck-day's GPS history has been turned into GPS times (GpsTruckDayFact.trailTo): the earlier of
+ * how far it was pulled (pulledTo) and when the stop detector last ran over it (processedAt) - between a pull
+ * and the detector's run the new points have no stop time yet (review of 18 Oct 2026, findings 1, 3 and 4).
+ * Null: never pulled or never processed.
+ */
+export function trailToOf(row: { pulledTo: Date | null; processedAt: Date | null } | null): Date | null {
+  if (!row?.pulledTo || !row.processedAt) return null;
+  return row.processedAt.getTime() < row.pulledTo.getTime() ? row.processedAt : row.pulledTo;
+}
+
 /** The trail read around a truck-day, as the stop detector reads it (lib/ivms/stop-events.ts): 3 h before its local midnight to 27 h after. */
 const GPS_WINDOW_BEFORE_MS = 3 * 3_600_000;
 const GPS_WINDOW_AFTER_MS = 27 * 3_600_000;
@@ -281,20 +294,22 @@ async function readGpsFacts(db: Db, tenantId: string, i: { loads: readonly { tru
   const to = new Date(zonedDayStart(last, i.tz).getTime() + GPS_WINDOW_AFTER_MS);
   const range = { gte: dateOnly(first), lte: dateOnly(last) };
   const [days, positions, events, depots, departures] = await Promise.all([
-    findInParts(truckIds, (part) => db.ivmsTruckDay.findMany({ where: { tenantId, truckId: { in: part }, deliveryDate: range }, select: { truckId: true, deliveryDate: true, suppressedAt: true, pulledTo: true } })),
+    findInParts(truckIds, (part) => db.ivmsTruckDay.findMany({ where: { tenantId, truckId: { in: part }, deliveryDate: range }, select: { truckId: true, deliveryDate: true, suppressedAt: true, pulledTo: true, processedAt: true } })),
     findInParts(truckIds, (part) => db.truckPosition.findMany({ where: { tenantId, truckId: { in: part } }, select: { truckId: true, fixAt: true, lat: true, lng: true, speedKmh: true, flags: true, movedAt: true } })),
     findInParts(truckIds, (part) =>
       db.ivmsEvent.findMany({
         where: { tenantId, truckId: { in: part }, kind: { in: ['DEPOT_IN', 'DEPOT_OUT'] }, outcome: 'USED', eventAt: { gte: from, lte: to } },
-        select: { truckId: true, kind: true, origin: true, eventAt: true },
+        select: { truckId: true, depotId: true, kind: true, origin: true, eventAt: true, observed: true },
       }),
     ),
     depotIds.length ? db.depot.findMany({ where: { tenantId, id: { in: depotIds } }, select: { id: true, lat: true, lng: true } }) : [],
     db.stopEvent.findMany({ where: { tenantId, deliveryDate: range, source: 'AYUN', kind: 'DEPARTED' }, select: { visitId: true, at: true, payloadJson: true } }),
   ]);
-  // A trail move's time is exact only with a trail point just before it (gps.ts moveObserved).
+  // A trail move's time is exact as the detector stored it; only a move from before 18 Oct 2026 (no flag)
+  // is read against the trail points just before it, while they are kept (gps.ts moveObserved).
   const gapMs = DETECTOR_FIXED.observedMaxGapSec * 1000;
-  const trailMoves = events.filter((e) => e.origin === 'TRAIL');
+  const confirmed = (e: (typeof events)[number]): ConfirmedMove => ({ kind: e.kind as ConfirmedMove['kind'], at: e.eventAt, origin: e.origin, observed: e.observed ?? null });
+  const trailMoves = events.filter((e) => moveNeedsPoints(confirmed(e)));
   const pointsOf = new Map<string, Date[]>();
   for (const part of inParts(trailMoves, TRAIL_MOVES_PER_QUERY)) {
     const points = await db.truckTrailPoint.findMany({
@@ -305,10 +320,7 @@ async function readGpsFacts(db: Db, tenantId: string, i: { loads: readonly { tru
   }
   const moves = events
     .filter((e): e is typeof e & { kind: 'DEPOT_IN' | 'DEPOT_OUT' } => e.kind === 'DEPOT_IN' || e.kind === 'DEPOT_OUT')
-    .map((e) => {
-      const m: ConfirmedMove = { kind: e.kind, at: e.eventAt, origin: e.origin };
-      return { truckId: e.truckId, kind: m.kind, at: m.at, observed: moveObserved(m, pointsOf.get(e.truckId) ?? []) };
-    });
+    .map((e) => ({ truckId: e.truckId, kind: e.kind, at: e.eventAt, depotId: e.depotId ?? null, observed: moveObserved(confirmed(e), pointsOf.get(e.truckId) ?? []) }));
 
   const today = todayIso(i.tz, i.now);
   const keyOfDay = (d: { deliveryDate: Date; truckId: string }) => truckDayOf(isoOf(d.deliveryDate), d.truckId);
@@ -333,7 +345,7 @@ async function readGpsFacts(db: Db, tenantId: string, i: { loads: readonly { tru
     const pos = posDate.get(truckId) === date ? (posOf.get(truckId) ?? null) : null;
     const row = dayRow.get(k);
     if (!row && !pos && !mine.length) continue;
-    truckDays.set(k, gpsTruckDayFactOf({ position: pos ? { fixAt: pos.fixAt, lat: pos.lat, lng: pos.lng, speedKmh: pos.speedKmh, flags: pos.flags ?? [], movedAt: pos.movedAt } : null, moves: mine, trailTo: row?.pulledTo ?? null, now: i.now }));
+    truckDays.set(k, gpsTruckDayFactOf({ position: pos ? { fixAt: pos.fixAt, lat: pos.lat, lng: pos.lng, speedKmh: pos.speedKmh, flags: pos.flags ?? [], movedAt: pos.movedAt } : null, moves: mine, trailTo: trailToOf(row ?? null), now: i.now }));
   }
 
   const departuresOf = new Map<string, { at: Date; payload: { observed?: unknown; gap?: unknown } | null }[]>();

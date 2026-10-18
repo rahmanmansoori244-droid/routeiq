@@ -29,6 +29,13 @@
  * "still at the stop" for R1 from a GPS arrival, "at the depot" for R2 from a GPS return) falls back as
  * between reads with no fix (gps.ts principle 4) - the replay shows the GPS times' effect, never the live
  * position's. A truck-day suppressed after the export's day kept no AYUN events (suppression deletes them).
+ * How far the GPS history was processed by t (GpsTruckDayFact.trailTo: what R1 waits for before it measures
+ * a GPS arrival ended by the driver's result, and what confirms a depot OUT as the truck leaving - review of
+ * 18 Oct 2026, findings 3 and 4) is not saved either: the replay takes the latest time the server wrote GPS
+ * for the truck-day by t (its AYUN events' and depot moves' receipt), a lower bound - so the replay may
+ * measure or close those a pull later than the live sweep did, never earlier. The depot moves carry their
+ * depot (only the load's own depot's count: finding 5) and whether their time is exact as stored when they
+ * were written (finding 6).
  * Without the option, the AYUN events are left out, as the live facts below ALERTS (facts.ts alertVisitRow).
  */
 import { deriveVisit, type EventSource, type VisitEvent } from '../delivery/visit';
@@ -113,8 +120,11 @@ export interface ExportGpsTruckDay {
   truckId: string;
   /** IvmsTruckDay.suppressedAt (ISO): from then on the truck-day has no GPS. */
   suppressedAt: string | null;
-  /** The trail-confirmed depot moves: when they happened, when RouteIQ knew them confirmed (processed, else received), exact or not (gps.ts moveObserved). */
-  moves: { kind: 'DEPOT_IN' | 'DEPOT_OUT'; at: string; knownAt: string; observed: boolean }[];
+  /**
+   * The trail-confirmed depot moves: when they happened, when RouteIQ knew them confirmed (processed, else
+   * received), exact or not (gps.ts moveObserved), and their depot (absent in an earlier file: any depot).
+   */
+  moves: { kind: 'DEPOT_IN' | 'DEPOT_OUT'; at: string; knownAt: string; observed: boolean; depotId?: string | null }[];
 }
 
 /** The day's GPS (exported with GPS tracking TIMES or ALERTS; absent below, and in an export from before 18 Oct 2026). */
@@ -124,6 +134,8 @@ export interface ExportGps {
   /** The settings the GPS alerts read with (gps.ts gpsAlertConfigOf). */
   config: AlertGpsConfig;
   truckDays: ExportGpsTruckDay[];
+  /** What the export could not save faithfully (the script prints them; replayText too). */
+  warnings?: string[];
 }
 
 /** One company's delivery day, saved for the replay (replay-export.ts). */
@@ -273,19 +285,31 @@ export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert
       stops,
     };
   });
+  // When the server wrote each truck's GPS stop times (their AYUN events' receipt): the history processed by then.
+  const gpsWrittenOf = new Map<string, number[]>();
+  if (gps) {
+    for (const l of exp.loads) {
+      for (const s of l.stops) {
+        for (const e of s.visit?.events ?? []) if (e.source === 'AYUN') gpsWrittenOf.set(l.truckId, [...(gpsWrittenOf.get(l.truckId) ?? []), ms(e.receivedAt)]);
+      }
+    }
+  }
   const tdOf = new Map(exp.truckDays.map((d) => [d.truckId, d]));
   const truckDays: FactTruckDay[] = [...new Set(exp.loads.map((l) => l.truckId))].map((truckId) => {
     const d = tdOf.get(truckId);
     const sig = signals.get(truckDayOf(exp.date, truckId)) ?? null;
     const seen = [d?.firstSeenAt, d?.lastSeenAt].filter((x): x is string => known(x, t)).map((x) => ms(x));
     if (sig) seen.push(sig.at.getTime());
-    // GPS alerts: the depot moves confirmed by t; never a live position (none is saved).
+    // GPS alerts: the depot moves confirmed by t; never a live position (none is saved). The history as far
+    // as the server had turned it into GPS by t (see the file comment: a lower bound).
     const g = gps && gpsOn(truckId) ? gpsDayOf.get(truckId) : undefined;
+    const movesKnown = g ? g.moves.filter((m) => known(m.knownAt, t) && ms(m.at) <= t) : [];
+    const written = [...movesKnown.map((m) => ms(m.knownAt)), ...(gpsWrittenOf.get(truckId) ?? []).filter((x) => x <= t)];
     const gpsFact = g
       ? gpsTruckDayFactOf({
           position: null,
-          moves: g.moves.filter((m) => known(m.knownAt, t) && ms(m.at) <= t).map((m) => ({ kind: m.kind, at: new Date(m.at), observed: m.observed })),
-          trailTo: null,
+          moves: movesKnown.map((m) => ({ kind: m.kind, at: new Date(m.at), observed: m.observed, depotId: m.depotId ?? null })),
+          trailTo: written.length ? new Date(Math.max(...written)) : null,
           now: at,
         })
       : null;
@@ -351,6 +375,8 @@ export interface ReplayReport {
   steps: number;
   /** Replayed with the GPS alerts. */
   gps: boolean;
+  /** The export's warnings about its GPS (ExportGps.warnings), when replayed with the GPS alerts. */
+  warnings?: string[];
   rules: ReplayRuleSummary[];
   timeline: ReplayEvent[];
   rows: MemAlert[];
@@ -420,13 +446,14 @@ export function replayDay(exp: AlertDayExport, opts: ReplayOptions = {}): Replay
       samples: [...new Set([...raised, ...mine.filter((e) => e.kind === 'HISTORY')].map((e) => e.text))].slice(0, 3),
     };
   });
-  return { date: exp.date, from: dayClock(from), to: dayClock(to), steps, gps, rules, timeline, rows };
+  return { date: exp.date, from: dayClock(from), to: dayClock(to), steps, gps, ...(gps && exp.gps?.warnings?.length ? { warnings: exp.gps.warnings } : {}), rules, timeline, rows };
 }
 
 /** The replay as plain text (the script prints it): one block per rule, then the e-mail count. */
 export function replayText(r: ReplayReport): string {
   const lines = [`Alerts replay of ${r.date}, ${r.from}-${r.to}, ${r.steps} steps (no writes, no e-mail).`];
   if (r.gps) lines.push('With the GPS alerts (GPS tracking ALERTS): the GPS times and depot moves as RouteIQ received them; live positions are not saved, so the live ETA and the "still at the stop / at the depot" checks are not replayed.');
+  for (const w of r.warnings ?? []) lines.push(`Warning: ${w}`);
   lines.push('');
   for (const s of r.rules) {
     const setting = s.threshold === null ? 'off' : ALERT_RULE_SPECS[s.rule].unit === null ? 'on' : `threshold ${s.threshold}`;

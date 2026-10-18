@@ -21,6 +21,10 @@
  *      moves (lib/alerts/replay.ts); by default with them when the day was saved in GPS tracking ALERTS. A
  *      day saved in TIMES can be replayed with --gps to see what ALERTS would have raised. Live positions are
  *      never saved, so the live ETA and the "still at the stop / at the depot" checks are not replayed.
+ *      Whether a GPS depot time is exact is saved as RouteIQ stored it with the move (review of 18 Oct 2026,
+ *      finding 6); a move stored before 18 Oct 2026 is read against the trail points, which are deleted
+ *      after ivmsTrailDays (default 2 days): export such a day within that time - the export warns when it
+ *      may be too late, and the replay repeats the warning.
  *      Prints, per rule, how many alerts were raised, kept as history, escalated and reopened, the first
  *      time and up to three sample texts, and how many a HIGH-only e-mail would have carried. Its output
  *      holds customer names too: do not paste it into the repository, an issue or a commit.
@@ -117,6 +121,7 @@ async function runExport(args: string[]) {
     );
     writeFileSync(out, JSON.stringify(day));
     console.error(`Saved ${day.loads.length} loads of ${date} to ${out} (read only). It holds customer names and driver notes: keep it private, delete it after use.`);
+    for (const w of day.gps?.warnings ?? []) console.error(`Warning: ${w}`);
   } finally {
     await db.$disconnect();
   }
@@ -140,7 +145,7 @@ function runReplay(args: string[]) {
     gps: args.includes('--gps') ? true : args.includes('--no-gps') ? false : undefined,
   });
   if (args.includes('--json')) {
-    console.log(JSON.stringify({ date: report.date, from: report.from, to: report.to, steps: report.steps, gps: report.gps, rules: report.rules, timeline: args.includes('--timeline') ? report.timeline : undefined }, null, 2));
+    console.log(JSON.stringify({ date: report.date, from: report.from, to: report.to, steps: report.steps, gps: report.gps, warnings: report.warnings, rules: report.rules, timeline: args.includes('--timeline') ? report.timeline : undefined }, null, 2));
     return;
   }
   console.log(replayText(report));

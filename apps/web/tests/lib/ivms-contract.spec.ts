@@ -4,6 +4,7 @@
  * - prisma/schema.prisma <-> migration 20261016200000_ivms_live: every new table and column, the defaults
  *   and the CHECKs (bounds and value lists = lib/ivms/settings.ts and lib/ivms/types.ts); the mode list as
  *   migration 20261018120000_ivms_alerts_mode replaced it (GPS alerts, owner request 18 Oct 2026: ALERTS);
+ *   IvmsEvent.observed as migration 20261018130000_ivms_move_observed added it (review of 18 Oct 2026);
  * - the migration is additive (no DROP, no data change, no enum change) and takes its locks without waiting;
  * - every IVMS column on an existing model is hidden from every read (lib/db.ts PRISMA_GLOBAL_OMIT), so
  *   no existing response, page, sheet, export or audit row changes and no lower role sees an IMEI;
@@ -174,6 +175,41 @@ describe('migration 20261018120000_ivms_alerts_mode (GPS alerts, owner request 1
     expect(raw).toContain(`CHECK ("ivmsMode" IN ('OFF', 'MAP', 'TIMES'));`);
     expect(raw).toContain(`DELETE FROM "_prisma_migrations" WHERE migration_name = '${NAME}';`);
     expect(raw.indexOf(`'TIMES' WHERE "ivmsMode" = 'ALERTS'`)).toBeLessThan(raw.indexOf(`IN ('OFF', 'MAP', 'TIMES'))`));
+  });
+});
+
+describe('migration 20261018130000_ivms_move_observed (GPS alerts, review of 18 Oct 2026, finding 6)', () => {
+  const NAME = '20261018130000_ivms_move_observed';
+  const raw = readFileSync(path.join(WEB, 'prisma', 'migrations', NAME, 'migration.sql'), 'utf8').replace(/\r\n/g, '\n');
+  const body = raw
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('--'))
+    .join('\n');
+
+  it('sorts right after the GPS alerts mode migration', () => {
+    const dir = path.join(WEB, 'prisma', 'migrations');
+    const folders = readdirSync(dir).filter((n) => statSync(path.join(dir, n)).isDirectory() && /^\d{14}_/.test(n)).sort();
+    expect(folders.indexOf(NAME)).toBe(folders.indexOf('20261018120000_ivms_alerts_mode') + 1);
+  });
+
+  it('adds one nullable column IvmsEvent.observed (no default: no row rewritten) and a CHECK that only a TRAIL move carries it; schema.prisma agrees', () => {
+    expect(body.match(/\bALTER TABLE\b/g)).toHaveLength(2);
+    expect(body).toContain('ALTER TABLE "IvmsEvent" ADD COLUMN     "observed" BOOLEAN;');
+    expect(body).toContain(`ALTER TABLE "IvmsEvent" ADD CONSTRAINT "IvmsEvent_observed_trail_only" CHECK ("observed" IS NULL OR "origin" = 'TRAIL');`);
+    for (const re of [/\bDROP\s+(TABLE|COLUMN|INDEX|TYPE|CONSTRAINT)\b/i, /\bRENAME\b/i, /\bALTER\s+TYPE\b/i, /\bALTER\s+COLUMN\b/i, /\bNOT NULL\b/i, /\bDEFAULT\b/i, /\bUPDATE\s+"/i, /\bDELETE\s+FROM\b/i, /\bINSERT\s+INTO\b/i, /\bTRUNCATE\b/i]) {
+      expect(body, String(re)).not.toMatch(re);
+    }
+    expect(modelBlock('IvmsEvent')).toMatch(/\n\s+observed\s+Boolean\?\n/);
+  });
+
+  it('takes its lock without waiting first, before the change, with no time limit, and documents the rollback', () => {
+    expect(body).toContain('LOCK TABLE "IvmsEvent" IN ACCESS EXCLUSIVE MODE NOWAIT;');
+    expect(body).toContain('LOCK TABLE "IvmsEvent" IN ACCESS EXCLUSIVE MODE;');
+    expect(body.indexOf('NOWAIT')).toBeLessThan(body.indexOf('ALTER TABLE'));
+    expect(body).toContain("SELECT set_config('statement_timeout', '0', true);");
+    expect(body).toContain("PERFORM set_config('lock_timeout', '5s', true);");
+    expect(raw).toContain('--   ALTER TABLE "IvmsEvent" DROP CONSTRAINT "IvmsEvent_observed_trail_only", DROP COLUMN "observed";');
+    expect(raw).toContain(`DELETE FROM "_prisma_migrations" WHERE migration_name = '${NAME}';`);
   });
 });
 

@@ -9,7 +9,9 @@
  *    GPS, and "Load not closed" says the truck is back at the depot by GPS; a gap in the trail makes the
  *    times not exact (not measured); two trips without Back at depot or Leaving for next load: the depot IN
  *    and OUT the trail saw measure the time at the depot (R2, the detector's trips matched to the loads);
- *  - ALERTS with the truck-day's GPS undone (suppressed): read as with the link off.
+ *  - ALERTS with the truck-day's GPS undone (suppressed): read as with the link off;
+ *  - review of 18 Oct 2026, finding 6: the trail moves are stored with whether their time is exact, so the
+ *    alerts and the replay export keep it after the retention deletes the trail points.
  * Invented data: the empty-desert depot of tests/lib/ivms-trail.ts, truck T-100, shops "Shop Example A/B".
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -24,6 +26,7 @@ const { processGpsTimes, suppressGpsTimes } = await import('@/lib/ivms/stop-even
 const { readAlertFacts } = await import('@/lib/alerts/facts');
 const { evaluate } = await import('@/lib/alerts/rules');
 const { gpsAlertConfigOf } = await import('@/lib/alerts/gps');
+const { exportGps } = await import('@/lib/alerts/replay-export');
 const { thresholdsOf } = await import('@/lib/alerts/catalog');
 
 const TEN = 'tA';
@@ -185,6 +188,27 @@ describe('GPS tracking ALERTS: the alerts read the GPS times and the depot moves
     expect(r2.value).toBeGreaterThan(55);
     expect(r2.value).toBeLessThan(65);
     expect(r2.text).toMatch(new RegExp(`^T-100 L2: 1 h( 0\\d min)? at the depot between L1 and L2 \\(back ${back} \\(GPS\\), left ${left}, by the GPS depot exit \\(no Leaving tap\\)\\), limit 40 min\\.$`));
+  });
+
+  it('review finding 6: the detector stores whether each trail move is exact; the alerts and the replay export keep it after the trail points are deleted', async () => {
+    seed('ALERTS');
+    await processGpsTimes(TEN, 't1', DATE, NOW);
+    const trailMoves = tables.ivmsEvent!.filter((e) => e.origin === 'TRAIL');
+    expect(trailMoves.length).toBeGreaterThanOrEqual(2);
+    for (const e of trailMoves) expect(e).toMatchObject({ observed: true, depotId: 'D1' });
+    // The retention deletes the trail points after ivmsTrailDays: the depot times stay exact.
+    tables.truckTrailPoint = [];
+    const gps = (await sweepFacts()).facts.truckDays[0]!.gps!;
+    expect([...gps.depotOut, ...gps.depotIn].map((m) => [m.observed, m.depotId])).toEqual(trailMoves.map(() => [true, 'D1']));
+    const later = new Date(NOW.getTime() + 3 * 24 * 3_600_000);
+    const saved = (await exportGps(fakePrisma as never, TEN, DATE, TZ, ['t1'], later))!;
+    expect(saved.truckDays[0]!.moves.map((m) => [m.observed, m.depotId])).toEqual(trailMoves.map(() => [true, 'D1']));
+    expect(saved.warnings).toBeUndefined();
+    // A trail move stored before the flag existed: read against the points, which are gone - saved as not exact, and said.
+    for (const e of tables.ivmsEvent!) delete (e as { observed?: unknown }).observed;
+    const legacy = (await exportGps(fakePrisma as never, TEN, DATE, TZ, ['t1'], later))!;
+    expect(legacy.truckDays[0]!.moves.every((m) => !m.observed)).toBe(true);
+    expect(legacy.warnings?.[0]).toMatch(/^\d+ GPS depot moves were stored before RouteIQ kept whether their time is exact, and the trail points of that time may be deleted already \(trail kept 2 days\)/);
   });
 
   it('the truck-day undone (suppressed): read as with the link off', async () => {

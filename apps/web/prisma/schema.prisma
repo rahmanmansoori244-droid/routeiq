@@ -1807,6 +1807,11 @@ model IvmsEvent {
   processedAt DateTime? @db.Timestamptz(3)
   /// lib/ivms/types.ts IVMS_EVENT_OUTCOMES: what processing did with it (NULL = not processed yet).
   outcome     String?
+  /// A TRAIL move only: its time is exact (a trail point at most observedMaxGapSec before it), decided by
+  /// the stop detector when it writes the move (GPS alerts, review of 18 Oct 2026, finding 6: never worked
+  /// out again from trail points the retention deletes). NULL: a zone move (the device's own event, exact),
+  /// or a trail move written before migration 20261018130000_ivms_move_observed (read against the trail).
+  observed    Boolean?
 
   @@unique([tenantId, dedupeKey])
   @@index([tenantId, truckId, eventAt])

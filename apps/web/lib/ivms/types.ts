@@ -273,11 +273,16 @@ export interface LiveVehiclesResponse {
  * trail move, or an Ayun zone move the trail confirmed, as lib/ivms/stops.ts uses them as trip
  * boundaries). `observed`: the time is exact - a zone move is the device's own event; a trail move only
  * when a trail point lies at most DETECTOR_FIXED.observedMaxGapSec before it (else the truck crossed the
- * radius earlier, during a gap: the time is an upper bound and never feeds a measured duration).
+ * radius earlier, during a gap: the time is an upper bound and never feeds a measured duration). The stop
+ * detector decides it when it writes the move (IvmsEvent.observed, migration 20261018130000_ivms_move_observed:
+ * review of 18 Oct 2026, finding 6), so it never changes when the trail points are deleted (retention).
+ * `depotId`: the depot whose radius or zone the move crossed (review finding 5: a truck driving through
+ * another depot's zone is not back at, or away from, its load's depot); null: not known (counts for any).
  */
 export interface GpsDepotMove {
   at: Date;
   observed: boolean;
+  depotId?: string | null;
 }
 
 /**
@@ -305,6 +310,11 @@ export interface GpsTruckDayFact {
   depotIn: GpsDepotMove[];
   /** The trips between those moves (depot OUT to the next IN). loadNo stays null: the detector's own matching needs the trail. */
   trips: GpsTrip[];
-  /** The truck-day's history was pulled up to this provider time (IvmsTruckDay.pulledTo); null: not known. */
+  /**
+   * The truck-day's history was pulled AND turned into GPS times up to this provider time: the earlier of
+   * IvmsTruckDay.pulledTo and processedAt (a pull the stop detector has not run over yet adds no stop time);
+   * null: not known. Before it, a stop with no GPS time was not visited for long enough to be seen; after it,
+   * nothing is known (review of 18 Oct 2026, findings 1, 3 and 4).
+   */
   trailTo: Date | null;
 }

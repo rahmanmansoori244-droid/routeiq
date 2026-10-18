@@ -27,6 +27,18 @@
  *    No fix for longer (or none at all): the phone-based rule, as before.
  * 5. Every alert text that used a GPS time or the live position says "(GPS)", so the office knows the
  *    source. The position itself is never in a text, the row's facts or a log.
+ * 6. The GPS history comes in steps (a pull every 30-60 min, then the stop detector): what it has not
+ *    covered yet (GpsTruckDayFact.trailTo) is not known, never "not happened" (review of 18 Oct 2026):
+ *    - the live ETA judges the stops only while the history reaches to within LIVE_ETA_TRAIL_LAG_MIN of the
+ *      fix (else a stop served since the last pull still looks ahead of the truck: finding 1), and a fresh
+ *      fix at the pin of a stop with no sign puts every stop before it with no sign behind the truck;
+ *    - a GPS arrival whose only end is the driver's result (perhaps tapped in a batch later) is measured
+ *      only once the history covers that end (the GPS departure that replaces it comes with it: finding 3);
+ *    - a depot OUT is the truck leaving only once the trail followed it GPS_OUT_CONFIRM_MIN without a return
+ *      to that depot, or it reached a stop; never while a fresh fix shows it back at the depot (a fuel run
+ *      or the weighbridge: finding 4).
+ *    A row raised from GPS is never closed only because the live fix aged out (it waits for the history:
+ *    finding 2), and only the load's own depot's moves count (finding 5).
  */
 import { distanceM } from '../dispatch/snapshots';
 import { AT_STOP_MARGIN_M, fixUsable, liveEta, type EtaStop, type StopEta } from '../ivms/eta';
@@ -36,6 +48,21 @@ import { DETECTOR_FIXED, MOVING_KMH, type FixFlag, type GpsDepotMove, type GpsTr
 
 /** Between two GPS reads (the last fix at most this old, but not fresh) the rules that read the live position wait. */
 export const GPS_WAIT_MIN = 30;
+/**
+ * The live ETA judges the stops only while the GPS history (trailTo) reaches to at most this long before the
+ * fix (review of 18 Oct 2026, finding 1): a stop the truck reached since then has no GPS time yet, and the
+ * live ETA would take it for the next stop (the drive back to it, compared with its early planned time).
+ * Shorter than a truck usually takes to reach a stop, unload and leave it, so a stop passed unseen is rare
+ * and at most this long ago (the drive back it would cost stays well under the alert's 30 min); a truck at a
+ * stop's pin since then is at most this long (plus the detector's dwell) "later" than it really arrived.
+ */
+export const LIVE_ETA_TRAIL_LAG_MIN = 10;
+/**
+ * A depot OUT is the truck leaving once the trail followed it this long without a return to that depot
+ * (review of 18 Oct 2026, finding 4: a fuel run or the weighbridge leaves the depot zone and comes back),
+ * or once the truck reached a stop after it.
+ */
+export const GPS_OUT_CONFIRM_MIN = 30;
 /**
  * R4: a trail-confirmed depot OUT counts as the truck's first load leaving from this long before its
  * planned departure (the stop detector's anchor for a load pressed long before it left: lib/ivms/stops.ts).
@@ -85,23 +112,31 @@ export interface ConfirmedMove {
   at: Date;
   /** WEBHOOK / BACKSTOP: the device's own zone event; TRAIL: a move the stop detector derived from the trail. */
   origin: string;
+  /** IvmsEvent.observed: a TRAIL move's exactness as the detector stored it; null or absent: not stored (a move from before 18 Oct 2026). */
+  observed?: boolean | null;
 }
 
 /**
  * Is a confirmed depot move's time exact (lib/ivms/types.ts GpsDepotMove.observed)? A zone move is the
- * device's own event; a trail move only when a trail point lies at most observedMaxGapSec before it
- * (`pointsBefore`: the truck's trail points just before the move).
+ * device's own event; a trail move as the stop detector stored it when it wrote the move (IvmsEvent.observed,
+ * review of 18 Oct 2026, finding 6: it never changes when the trail points are deleted). Only a trail move
+ * written before that (no stored flag) is read against the trail: exact when a trail point lies at most
+ * observedMaxGapSec before it (`pointsBefore`: the truck's trail points just before the move, while kept).
  */
 export function moveObserved(m: ConfirmedMove, pointsBefore: readonly Date[]): boolean {
   if (m.origin !== 'TRAIL') return true;
+  if (typeof m.observed === 'boolean') return m.observed;
   const gapMs = DETECTOR_FIXED.observedMaxGapSec * 1000;
   return pointsBefore.some((p) => p.getTime() < m.at.getTime() && m.at.getTime() - p.getTime() <= gapMs);
 }
 
+/** A TRAIL move whose exactness was not stored (written before 18 Oct 2026): only these are read against the trail points. */
+export const moveNeedsPoints = (m: ConfirmedMove) => m.origin === 'TRAIL' && typeof m.observed !== 'boolean';
+
 /** One truck-day's GpsTruckDayFact (lib/ivms/types.ts) from its latest live fix, its confirmed depot moves and its history pull. */
 export function gpsTruckDayFactOf(i: {
   position: { fixAt: Date; lat: number; lng: number; speedKmh: number | null; flags: readonly string[]; movedAt: Date | null } | null;
-  moves: readonly { kind: 'DEPOT_IN' | 'DEPOT_OUT'; at: Date; observed: boolean }[];
+  moves: readonly { kind: 'DEPOT_IN' | 'DEPOT_OUT'; at: Date; observed: boolean; depotId?: string | null }[];
   trailTo: Date | null;
   now: Date;
 }): GpsTruckDayFact {
@@ -120,8 +155,8 @@ export function gpsTruckDayFactOf(i: {
     speedKmh: p?.speedKmh ?? null,
     parkedSinceMin: p && !moving && p.movedAt ? Math.max(0, Math.floor((p.fixAt.getTime() - p.movedAt.getTime()) / 60_000)) : null,
     position: tracked ? { lat: p!.lat, lng: p!.lng } : null,
-    depotOut: sorted.filter((m) => m.kind === 'DEPOT_OUT').map((m) => ({ at: m.at, observed: m.observed })),
-    depotIn: sorted.filter((m) => m.kind === 'DEPOT_IN').map((m) => ({ at: m.at, observed: m.observed })),
+    depotOut: sorted.filter((m) => m.kind === 'DEPOT_OUT').map((m) => ({ at: m.at, observed: m.observed, depotId: m.depotId ?? null })),
+    depotIn: sorted.filter((m) => m.kind === 'DEPOT_IN').map((m) => ({ at: m.at, observed: m.observed, depotId: m.depotId ?? null })),
     trips,
     trailTo: i.trailTo,
   };
@@ -150,43 +185,84 @@ export function liveAt(g: GpsTruckDayFact | null | undefined, pin: { lat: number
 
 const t = (d: Date) => d.getTime();
 
-/** The first trail-confirmed depot IN after `after`, not after `now` (null: none). */
-export function firstInAfter(g: GpsTruckDayFact | null | undefined, after: Date, now: Date): GpsDepotMove | null {
-  return (g?.depotIn ?? []).filter((m) => t(m.at) > t(after) && t(m.at) <= t(now)).sort((a, b) => t(a.at) - t(b.at))[0] ?? null;
+/**
+ * A move of `depotId`'s own radius or zone (review of 18 Oct 2026, finding 5: the stop detector writes the
+ * moves of every depot of the company, and a truck driving through another depot's zone is neither back at
+ * nor away from its load's depot). A move of no known depot counts for any; no `depotId`: every move.
+ */
+const ofDepot = (m: GpsDepotMove, depotId: string | null | undefined) => !depotId || !m.depotId || m.depotId === depotId;
+
+/** The first trail-confirmed depot IN (of `depotId`) after `after`, not after `now` (null: none). */
+export function firstInAfter(g: GpsTruckDayFact | null | undefined, after: Date, now: Date, depotId?: string | null): GpsDepotMove | null {
+  return (g?.depotIn ?? []).filter((m) => ofDepot(m, depotId) && t(m.at) > t(after) && t(m.at) <= t(now)).sort((a, b) => t(a.at) - t(b.at))[0] ?? null;
 }
 
 /**
- * The trail-confirmed depot OUT the truck has been out since at `until`: the latest OUT in [from, until]
- * with no confirmed IN after it and before `until` (a fuel run that came back is not a departure). Null:
- * the trail shows the truck at the depot (or knows nothing) at `until`.
+ * The trail-confirmed depot OUT (of `depotId`) the truck has been out since at `until`: the latest OUT in
+ * [from, until] with no confirmed IN at that depot after it and before `until` (a fuel run that came back is
+ * not a departure). Null: the trail shows the truck at the depot (or knows nothing) at `until`. Whether
+ * the OUT is the truck really leaving: outState.
  */
-export function outSince(g: GpsTruckDayFact | null | undefined, from: Date, until: Date): GpsDepotMove | null {
-  const outs = (g?.depotOut ?? []).filter((m) => t(m.at) >= t(from) && t(m.at) <= t(until)).sort((a, b) => t(b.at) - t(a.at));
+export function outSince(g: GpsTruckDayFact | null | undefined, from: Date, until: Date, depotId?: string | null): GpsDepotMove | null {
+  const outs = (g?.depotOut ?? []).filter((m) => ofDepot(m, depotId) && t(m.at) >= t(from) && t(m.at) <= t(until)).sort((a, b) => t(b.at) - t(a.at));
   const last = outs[0];
   if (!last) return null;
-  const backIn = (g?.depotIn ?? []).some((m) => t(m.at) > t(last.at) && t(m.at) <= t(until));
+  const backIn = (g?.depotIn ?? []).some((m) => ofDepot(m, depotId) && t(m.at) > t(last.at) && t(m.at) <= t(until));
   return backIn ? null : last;
 }
 
 /**
- * The truck came back to the depot from a load, by GPS: the first trail-confirmed depot IN after the load's
- * last sign at a stop and after its Dispatch press, not after now - only once every stop of the load has a
- * result or a sign (`allStopsDone`): a depot IN while stops are still pending may be a run back for missing
- * goods or a break at the depot, not the end of the load. Null: not known to be back by GPS.
+ * Is a depot OUT (outSince) the truck leaving (review of 18 Oct 2026, finding 4)? The history comes 30-60 min
+ * late, and a fuel run or the weighbridge also leaves the depot zone and comes back, the IN only in a later
+ * pull. So:
+ * - LEFT: the truck reached a stop after it (`signAt`), or the trail followed it GPS_OUT_CONFIRM_MIN out
+ *   without a return to that depot (trailTo);
+ * - BACK: the fresh live fix shows the truck at the depot after it (`atDepot` 'AT', fixAt after the OUT):
+ *   it came back and the history has not shown the IN yet - the truck is at the depot;
+ * - PENDING: not known yet - a rule waits (an open row stays as it is, nothing new: no close and reopen).
+ */
+export type OutState = 'LEFT' | 'BACK' | 'PENDING';
+
+export function outState(g: GpsTruckDayFact | null | undefined, out: GpsDepotMove, o: { signAt?: Date | null; atDepot: 'AT' | 'AWAY' | null }): OutState {
+  if (o.signAt && t(o.signAt) >= t(out.at)) return 'LEFT';
+  if (o.atDepot === 'AT' && g?.fixAt && t(g.fixAt) > t(out.at)) return 'BACK';
+  if (g?.trailTo && t(g.trailTo) >= t(out.at) + GPS_OUT_CONFIRM_MIN * 60_000) return 'LEFT';
+  return 'PENDING';
+}
+
+/**
+ * The truck came back to its load's depot, by GPS: the first trail-confirmed depot IN of that depot after
+ * the load's last sign at a stop and after its Dispatch press, not after now - only once every stop of the
+ * load has a result or a sign (`allStopsDone`): a depot IN while stops are still pending may be a run back
+ * for missing goods or a break at the depot, not the end of the load. Null: not known to be back by GPS.
  */
 export function gpsBackOf(
   g: GpsTruckDayFact | null | undefined,
-  load: { lastSignAt: Date | null; dispatchAt: Date | null; allStopsDone: boolean },
+  load: { lastSignAt: Date | null; dispatchAt: Date | null; allStopsDone: boolean; depotId?: string | null },
   now: Date,
 ): GpsDepotMove | null {
   if (!g || !load.allStopsDone || !load.lastSignAt) return null;
   const after = load.dispatchAt && t(load.dispatchAt) > t(load.lastSignAt) ? load.dispatchAt : load.lastSignAt;
-  return firstInAfter(g, after, now);
+  return firstInAfter(g, after, now, load.depotId);
+}
+
+/**
+ * The GPS history has caught up with the live fix (review of 18 Oct 2026, finding 1): trailTo at most
+ * LIVE_ETA_TRAIL_LAG_MIN before fixAt. Only then may the live ETA say which stop is next: before, a stop the
+ * truck reached since the last pull has no GPS time yet and still looks ahead of it.
+ */
+export function historyCoversFix(g: GpsTruckDayFact | null | undefined): boolean {
+  return !!g?.fixAt && !!g.trailTo && t(g.trailTo) >= t(g.fixAt) - LIVE_ETA_TRAIL_LAG_MIN * 60_000;
 }
 
 /**
  * The live ETA of the stops still ahead from the truck's fresh fix: the same as the live map's (lib/ivms/eta.ts
- * liveEta, lib/ivms/vehicles.ts), from the plan's own legs. [] when the truck-day is not LIVE.
+ * liveEta, lib/ivms/vehicles.ts), from the plan's own legs. [] when the truck-day is not LIVE. The caller
+ * reads it only while the history covers the fix (historyCoversFix). A fresh fix at the pin of a stop with
+ * no sign at all (no arrival, departure or result: a stay the detector left to the office, or too short to
+ * be one yet) puts every stop before it with no sign behind the truck: the truck is at that stop now, so
+ * they were served unseen or skipped, never "next" (review of 18 Oct 2026, finding 1: else the live ETA is
+ * the drive back to them, compared with their early planned times).
  */
 export function liveEtasOf(
   g: GpsTruckDayFact | null | undefined,
@@ -195,14 +271,22 @@ export function liveEtasOf(
   now: Date,
 ): StopEta[] {
   if (gpsLiveOf(g, now) !== 'LIVE' || !g!.fixAt) return [];
+  const pos = g!.position!;
+  const untouched = (x: EtaStop) => !x.done && !x.arrivedAt;
+  const touched = load.stops.filter((x) => !untouched(x)).map((x) => x.sequence);
+  const latest = touched.length ? Math.max(...touched) : -Infinity;
+  const atPin = [...load.stops]
+    .sort((a, b) => a.sequence - b.sequence)
+    .find((x) => x.sequence > latest && untouched(x) && !!x.pin && distanceM(pos, x.pin) <= s.atStopRadiusM);
+  const stops = atPin ? load.stops.map((x) => (untouched(x) && x.sequence < atPin.sequence ? { ...x, done: true } : x)) : load.stops;
   return liveEta({
     now,
     // `tracked` already left out an invalid fix and a clock ahead.
-    fix: { fixAt: g!.fixAt, lat: g!.position!.lat, lng: g!.position!.lng },
+    fix: { fixAt: g!.fixAt, lat: pos.lat, lng: pos.lng },
     dayStart: load.dayStart,
     departMin: load.departMin,
     depot: s.depots.get(load.depotId) ?? null,
-    stops: load.stops,
+    stops,
     avgSpeedKmh: s.avgSpeedKmh,
     distanceMultiplier: s.distanceMultiplier,
     atStopRadiusM: s.atStopRadiusM,
