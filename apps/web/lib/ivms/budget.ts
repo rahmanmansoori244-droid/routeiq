@@ -23,6 +23,7 @@
  */
 import { addDaysIso, localMinutes, todayIso, zonedDayStart } from '../dispatch/time';
 import { type AyunErrorKind, type IvmsCallClass, type IvmsMode } from './types';
+import { ivmsModeAtLeast } from './settings';
 
 /** The in-process timer's tick: cheap when nothing is due. */
 export const IVMS_TICK_MS = 15_000;
@@ -100,7 +101,8 @@ export function classShares(budget: number, mode: IvmsMode, eventsOn: boolean): 
   const admin = Math.min(b, Math.max(3, Math.min(20, Math.ceil(b * 0.05))));
   const events = eventsOn && b >= EVENTS_MIN_BUDGET ? Math.min(96, Math.floor(b * 0.05)) : 0;
   const rest = Math.max(0, b - admin - events);
-  const route = mode === 'TIMES' ? Math.floor(rest * 0.4) : 0;
+  // TIMES and ALERTS (which does all TIMES does) pull the trucks' history.
+  const route = ivmsModeAtLeast(mode, 'TIMES') ? Math.floor(rest * 0.4) : 0;
   return { ADMIN: admin, EVENTS: events, ROUTE: route, MAP: rest - route };
 }
 

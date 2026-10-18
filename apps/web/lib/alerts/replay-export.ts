@@ -12,11 +12,17 @@
  * open. Never a position, an IP, a device id or a phone number. It does hold customer names and driver
  * notes: the file must stay outside the repository (the script refuses a path inside it), and running it
  * on production data needs the owner's OK.
+ *
+ * GPS alerts (owner request 18 Oct 2026): with GPS tracking TIMES or ALERTS the visits' GPS (AYUN) events
+ * are in the export already (as every event of the day); the day's GPS is added (AlertDayExport.gps): the
+ * mode, the settings the GPS alerts read with, and per truck-day its suppression and its trail-confirmed
+ * depot moves (when they happened, when RouteIQ knew them confirmed, whether their time is exact) - never a
+ * position, a trail point or a tracker id.
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
-import { findInParts } from '../in-parts';
-import { dateOnly, isoOf } from '../dispatch/time';
+import { findInParts, inParts } from '../in-parts';
+import { dateOnly, isoOf, zonedDayStart } from '../dispatch/time';
 import { echoedWindowRule } from '../dispatch/window-rule';
 import { parseLoadBreak, readTruckSnapshot } from '../dispatch/snapshots';
 import { readDevices } from '../driver-link/service';
@@ -25,7 +31,10 @@ import { pinCheckList } from '../delivery/customer-stats';
 import { LOAD_STATUS_NAMES } from '../audit-catalog';
 import { ALERT_THRESHOLD_COLUMNS, type AlertConfig } from './catalog';
 import { pinMovedSince } from './facts';
-import { ALERT_EXPORT_KIND, type AlertDayExport, type ExportEvent, type ExportLoad, type ExportPhoto, type ExportStop } from './replay';
+import { gpsAlertConfigOf, moveObserved } from './gps';
+import { ALERT_EXPORT_KIND, type AlertDayExport, type ExportEvent, type ExportGps, type ExportLoad, type ExportPhoto, type ExportStop } from './replay';
+import { ivmsModeAtLeast, ivmsModeOf } from '../ivms/settings';
+import { DETECTOR_FIXED } from '../ivms/types';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -210,5 +219,54 @@ export async function exportAlertDay(db: Db, tenantId: string, date: string, opt
       return { truckId: x.truckId, firstSeenAt: firsts[0] ?? (x.lastSeenAt ? x.lastSeenAt.toISOString() : null), lastSeenAt: x.lastSeenAt ? x.lastSeenAt.toISOString() : null };
     });
   const config = Object.fromEntries(Object.entries(cfg).filter(([k]) => k !== 'timezone')) as Partial<AlertConfig>;
-  return { v: 1, kind: ALERT_EXPORT_KIND, date: isoOf(day), tz, exportedAt: now.toISOString(), config, loads: outLoads, truckDays };
+  const gps = await exportGps(db, tenantId, date, tz, [...new Set(loads.map((l) => l.truckId))]);
+  return { v: 1, kind: ALERT_EXPORT_KIND, date: isoOf(day), tz, exportedAt: now.toISOString(), config, loads: outLoads, truckDays, ...(gps ? { gps } : {}) };
+}
+
+/** The day's GPS for the GPS alerts' replay (see the file comment); null below GPS tracking TIMES. Read only. */
+async function exportGps(db: Db, tenantId: string, date: string, tz: string, truckIds: readonly string[]): Promise<ExportGps | null> {
+  const cfg = await db.tenantConfig.findFirst({ where: { tenantId }, select: { ivmsMode: true, ivmsStopRadiusM: true, ivmsDepotRadiusM: true, avgSpeedKmh: true, distanceMultiplier: true } });
+  const mode = ivmsModeOf(cfg);
+  if (!cfg || !ivmsModeAtLeast(mode, 'TIMES')) return null;
+  // The settings as ALERTS would read them (a TIMES day may be replayed with the GPS alerts).
+  const config = gpsAlertConfigOf({ ...cfg, ivmsMode: 'ALERTS' }, false)!;
+  if (!truckIds.length) return { mode, config, truckDays: [] };
+  const start = zonedDayStart(date, tz).getTime();
+  const [days, events] = await Promise.all([
+    findInParts(truckIds, (part) => db.ivmsTruckDay.findMany({ where: { tenantId, truckId: { in: part }, deliveryDate: dateOnly(date) }, select: { truckId: true, suppressedAt: true } })),
+    findInParts(truckIds, (part) =>
+      db.ivmsEvent.findMany({
+        where: { tenantId, truckId: { in: part }, kind: { in: ['DEPOT_IN', 'DEPOT_OUT'] }, outcome: 'USED', eventAt: { gte: new Date(start - 3 * 3_600_000), lte: new Date(start + 27 * 3_600_000) } },
+        select: { truckId: true, kind: true, origin: true, eventAt: true, receivedAt: true, processedAt: true },
+      }),
+    ),
+  ]);
+  const gapMs = DETECTOR_FIXED.observedMaxGapSec * 1000;
+  const trail = events.filter((e) => e.origin === 'TRAIL');
+  const pointsOf = new Map<string, Date[]>();
+  for (const part of inParts(trail, 500)) {
+    const points = await db.truckTrailPoint.findMany({
+      where: { tenantId, OR: part.map((m) => ({ truckId: m.truckId, fixAt: { gte: new Date(m.eventAt.getTime() - gapMs), lt: m.eventAt } })) },
+      select: { truckId: true, fixAt: true },
+    });
+    for (const p of points) pointsOf.set(p.truckId, [...(pointsOf.get(p.truckId) ?? []), p.fixAt]);
+  }
+  const suppressedOf = new Map(days.map((d) => [d.truckId, d.suppressedAt]));
+  return {
+    mode,
+    config,
+    truckDays: truckIds.map((truckId) => ({
+      truckId,
+      suppressedAt: suppressedOf.get(truckId)?.toISOString() ?? null,
+      moves: events
+        .filter((e): e is typeof e & { kind: 'DEPOT_IN' | 'DEPOT_OUT' } => e.truckId === truckId && (e.kind === 'DEPOT_IN' || e.kind === 'DEPOT_OUT'))
+        .sort((a, b) => a.eventAt.getTime() - b.eventAt.getTime())
+        .map((e) => ({
+          kind: e.kind,
+          at: e.eventAt.toISOString(),
+          knownAt: (e.processedAt ?? e.receivedAt).toISOString(),
+          observed: moveObserved({ kind: e.kind, at: e.eventAt, origin: e.origin }, pointsOf.get(truckId) ?? []),
+        })),
+    })),
+  };
 }

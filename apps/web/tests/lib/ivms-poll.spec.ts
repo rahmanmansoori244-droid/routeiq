@@ -107,6 +107,8 @@ describe('who is asked about (M7)', () => {
     expect(night.mapTrucks.map((t) => t.truckId)).toEqual(['t2']);
     expect(night.routeDays.map((d) => d.truckId)).toEqual(['t2']);
     expect(planTick(company({ mode: 'MAP' }), fleet, muscat('10:00')).routeDays).toEqual([]);
+    // GPS alerts (owner request 18 Oct 2026): ALERTS does all TIMES does.
+    expect(planTick(company({ mode: 'ALERTS' }), fleet, muscat('10:00'))).toEqual(day);
   });
 
   it('asks for the IMEIs of the trucks out only, and deletes the positions of trucks no longer out', async () => {

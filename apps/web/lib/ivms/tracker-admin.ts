@@ -15,7 +15,7 @@
  *   is created for it (OFF writes no GPS row), only an existing one is marked.
  * - The audit row names the truck and the tracker's last 4 digits only ("ends 1234").
  * - Suggestions: one USER_GET_OBJECTS call (the ADMIN class of the allowance), only in ivmsMode MAP or
- *   TIMES (OFF never calls the provider), only for the company the Ayun account belongs to
+ *   above (OFF never calls the provider), only for the company the Ayun account belongs to
  *   (AYUN_TENANT_SLUG). Names and plates of the provider's objects never leave this module.
  */
 import { prisma } from '../db';

@@ -3,7 +3,7 @@
  * GET /api/runs/[id]/vehicles and the words around it. Pure and browser-safe.
  *
  * - A truck is shown only while it has a load out on the plan (LOCKED, LOADING or DISPATCHED: review
- *   M7, no off-duty positions), only to PLANNER and up, only in ivmsMode MAP or TIMES.
+ *   M7, no off-duty positions), only to PLANNER and up, only in ivmsMode MAP and up (MAP, TIMES, ALERTS).
  * - A fix older than STALE_FIX_SEC (or invalid, or ahead of the clock) is STALE: grey, its speed is not
  *   shown, it is never "moving" and it gives no ETA (H5).
  * - Never the tracker IMEI or any provider field; coordinates at 5 decimals (about 1 m).

@@ -75,6 +75,30 @@
  * - R11 PAGE_NOT_OPENED: a dispatched truck-day whose driver page was not opened T after its first planned
  *   departure. R1, R3, R5, R6 (projected) and R10 follow the phone and are checked only on truck-days
  *   whose page was opened (H3): a truck without it raises this one WARN instead of a pile.
+ *
+ * GPS alerts (owner request 18 Oct 2026, GPS tracking mode ALERTS only; the principles are in gps.ts): the
+ * facts then carry the truck-day's GPS (FactTruckDay.gps) and every visit WITH the GPS times the driver and
+ * the office left as gaps. Per rule (each text that used GPS says "(GPS)"; below ALERTS nothing changes):
+ * - R1: a GPS arrival (observed only) starts the unloading like a tap, and a GPS departure ends it; it is
+ *   raised live only while the fresh GPS position shows the truck still at the stop; a truck the fresh
+ *   position shows away has left (the row waits for the GPS departure, which closes it with the minutes);
+ *   an unobserved GPS arrival or departure is "not measured".
+ * - R2: without Back at depot, the trail's (observed) depot IN after the trip before counts as it; without
+ *   Leaving for next load, the trail's (observed) depot OUT counts before the fallbacks (the Dispatch press,
+ *   the first stop reached: a GPS arrival there only when observed). The planned wait at the depot still
+ *   counts (owner decision of 16 Oct 2026). Live only while the fresh position shows the truck at the depot.
+ * - R3: with a fresh position, the next stop's ETA is the live map's (lib/ivms/eta.ts), also while the
+ *   driver is silent; without one, the projection (which then reads the GPS stop times).
+ * - R4: the trail's depot OUT counts as leaving: the row closes with the time it left (one history row
+ *   when that was late), and says Dispatch is still to be pressed.
+ * - R5: the silence is still the phone's (results come only from it), and the overdue next stop is
+ *   worked out with the GPS stop times; while GPS follows the truck (a fix in the last GPS_WAIT_MIN) it is
+ *   a warning at most and says when GPS last saw the truck: the truck is not lost, its results are missing.
+ * - R6: an observed GPS arrival is an arrival (the driver's tap wins: a tap inside the window corrects it).
+ * - R10 and the end of R1, R3, R5, R6: the truck is back also by the trail's depot IN after its last stop,
+ *   once every stop of the load has a result or a sign (gps.ts gpsBackOf).
+ * - R7, R8, R9, R11: unchanged (GPS never writes a result and is never pin evidence; R9's "a later stop had
+ *   activity before the result" sees the GPS stop times too).
  */
 import { actualMinutes, OUTCOME_LABEL, reasonLabel, sourceWord } from '../delivery/office-text';
 import { arrivalIsObserved } from '../delivery/kpis';
@@ -98,6 +122,9 @@ import {
   type AlertTier,
 } from './catalog';
 import { firstSignOf, leftHowText, plannedDriveOf, previousTrip, turnaroundOf, type TurnaroundIn } from '../delivery/turnaround';
+import type { StopEta } from '../ivms/eta';
+import type { GpsTruckDayFact } from '../ivms/types';
+import { GPS_LEAVE_EARLY_MIN, gpsBackOf, gpsLiveOf, liveAt, liveEtasOf, motionWords, openStayEnd, outSince, type AlertGpsSettings, type GpsLive } from './gps';
 import { projectLoad, type ProjectedStop, type Projection, type ProjectionIn } from './projection';
 import {
   clockText,
@@ -161,6 +188,10 @@ export interface FactVisit {
   windowStartMin: number | null;
   windowEndMin: number | null;
   photos: FactPhoto[];
+  /** Who gave the departure (StopVisit.departureSource): AYUN = the GPS tracker (GPS tracking ALERTS only). Absent: as before. */
+  departureSource?: string | null;
+  /** false: a GPS departure found after a gap in the trail, its time only an upper bound (never measured). Absent: observed. */
+  departureObserved?: boolean;
 }
 
 /** One planned stop of a load that left (DISPATCHED or COMPLETED), with its visit. */
@@ -182,6 +213,8 @@ export interface FactStop {
   pinVerified: boolean;
   /** The visit was planned at a pin more than PIN_MOVED_M from the customer's pin now (corrected since: R9 leaves it out). */
   pinMoved?: boolean;
+  /** The planned pin (the visit's, else the plan's), for the GPS "at the stop" check and the live ETA (ALERTS only; never in a text). */
+  pin?: { lat: number; lng: number } | null;
   visit: FactVisit | null;
 }
 
@@ -242,6 +275,11 @@ export interface FactTruckDay {
   /** The driver page was opened (a lastSeenAt, or anything from the phone). */
   pageOpened: boolean;
   lastSignal: FactSignal | null;
+  /**
+   * GPS tracking ALERTS: the truck-day's GPS (its live fix and trail-confirmed depot moves: lib/ivms/types.ts
+   * GpsTruckDayFact). Absent or null: none (another mode, GPS suppressed for the truck-day, no tracker).
+   */
+  gps?: GpsTruckDayFact | null;
 }
 
 /** A row open now (resolvedAt null), acknowledged or not. */
@@ -262,6 +300,11 @@ export interface AlertFacts {
   truckDays: FactTruckDay[];
   /** The rows open now by openKey(rule, subjectKey). */
   open: ReadonlyMap<string, OpenRowInfo>;
+  /**
+   * GPS tracking ALERTS only (owner request 18 Oct 2026, gps.ts): the settings the GPS is read with. Absent
+   * or null: no GPS at all, and every rule behaves exactly as before (the truck-days' `gps` are not read).
+   */
+  gps?: AlertGpsSettings | null;
 }
 
 export const openKey = (rule: string, subjectKey: string) => `${rule}|${subjectKey}`;
@@ -339,6 +382,9 @@ interface Left {
   text: string;
 }
 
+/** A time the GPS tracker gave (StopVisit arrivalSource / departureSource AYUN; the facts carry one only in GPS tracking ALERTS). */
+const isGps = (source: string | null | undefined) => source === 'AYUN';
+
 /** What every rule of one load reads. */
 interface LoadCtx {
   load: FactLoad;
@@ -361,6 +407,11 @@ interface LoadCtx {
   back: Left | null;
   /** Past the planned return + RETURN_GRACE_MIN, or a load of an earlier day. */
   pastReturn: boolean;
+  /** GPS tracking ALERTS: the truck-day's GPS (null: none: every rule as before) and how its live position may be read now (gps.ts). */
+  gps: GpsTruckDayFact | null;
+  gpsLive: GpsLive;
+  /** A fresh live position only: the live ETA of the load's stops ahead, the same as the live map's ([] otherwise). */
+  liveEtas: StopEta[];
 }
 
 const has = (v: number | null | undefined): v is number => v !== null && v !== undefined && Number.isFinite(v);
@@ -420,13 +471,33 @@ function laterActivityAfter(stops: readonly FactStop[], i: number, since: Date):
 const laterActivityBefore = (stops: readonly FactStop[], i: number, t: Date) => stops.slice(i + 1).some((s) => activityTimes(s).some((x) => x < t));
 
 /**
+ * The times a stop shows the truck there: the arrival, the departure, the driver's result, the first phone
+ * photo (an office result is typed later: not one, as lib/delivery/turnaround.ts firstSignOf).
+ */
+const signTimes = (s: FactStop): Date[] =>
+  [s.visit?.arrivedAt, s.visit?.departedAt, s.visit?.outcomeSource !== 'DISPATCHER' ? s.visit?.outcomeAt : null, firstPhotoAt(s.visit)].filter((t): t is Date => !!t);
+
+/** What gps.ts gpsBackOf reads of a load: its last sign at a stop, its Dispatch press, and whether every stop has a result or a sign. */
+function gpsBackInput(l: FactLoad): { lastSignAt: Date | null; dispatchAt: Date | null; allStopsDone: boolean } {
+  const signs = l.stops.flatMap(signTimes).map((d) => d.getTime());
+  return {
+    lastSignAt: signs.length ? new Date(Math.max(...signs)) : null,
+    dispatchAt: l.dispatchedAt ?? (l.status === 'DISPATCHED' ? l.statusChangedAt : null),
+    allStopsDone: l.stops.length > 0 && l.stops.every((s) => !!s.visit && (!!s.visit.outcome || !!s.visit.arrivedAt || !!s.visit.departedAt)),
+  };
+}
+
+/**
  * The truck is back from this load (null: not known): Back at depot, or out on a later load of the
  * day - a stop of it has activity, or its Dispatch press came no earlier than RETURN_GRACE_MIN before
  * this load's planned return (Dispatch may be pressed for every load in the morning). Never after now.
+ * GPS tracking ALERTS (`gps`): also the trail's depot IN after its last stop (gps.ts gpsBackOf).
  */
-function backOf(l: FactLoad, truckDayLoads: readonly FactLoad[], now: Date, tz: string): Left | null {
+function backOf(l: FactLoad, truckDayLoads: readonly FactLoad[], now: Date, tz: string, gps: GpsTruckDayFact | null = null): Left | null {
   const found: Left[] = [];
   if (l.backAt && l.backAt <= now) found.push({ at: l.backAt, text: `back at the depot at ${clockText(l.backAt, l.date, tz)}` });
+  const byGps = gps ? gpsBackOf(gps, gpsBackInput(l), now) : null;
+  if (byGps) found.push({ at: byGps.at, text: `back at the depot ${byGps.observed ? 'at' : 'by'} ${clockText(byGps.at, l.date, tz)} (GPS)` });
   for (const x of truckDayLoads) {
     if (x.loadNo <= l.loadNo || !ON_ROAD.has(x.status)) continue;
     const times = x.stops.flatMap(activityTimes);
@@ -498,6 +569,12 @@ function unloadOver(out: Out, c: LoadCtx): void {
     if (farArrival(v)) return out.end(rule, key, `${label}: the arrival was tapped ${fmtDistance(v.arrivalDistanceM!)} from the customer, so it is not counted as unloading.`);
     const planned = plannedServiceOf(s);
     if (!has(planned)) return out.end(rule, key, `${label}: no planned unloading time.`);
+    // GPS tracking ALERTS: an unobserved GPS arrival (a gap in the trail before it) is only an upper bound:
+    // the unloading is never measured from it (gps.ts principle 3).
+    const gpsArrival = !!out.facts.gps && isGps(v.arrivalSource);
+    if (gpsArrival && !v.arrivalObserved) {
+      return out.end(rule, key, `${label}: GPS arrival ${clockText(v.arrivedAt, l.date, tz)} is not certain (a gap in the GPS trail before it), so the unloading is not measured (GPS).`);
+    }
     const winStart = windowStartOf(s);
     const winStartAt = has(winStart) ? dateAt(c.dayStart, winStart) : null;
     const start = winStartAt && winStartAt > v.arrivedAt ? winStartAt : v.arrivedAt;
@@ -519,12 +596,27 @@ function unloadOver(out: Out, c: LoadCtx): void {
       if (left) return out.end(rule, key, `${label}: no departure or result was tapped; ${left.text}.`);
       // Past the planned return + 60 min: no longer followed ("Load not closed" follows the load).
       if (c.pastReturn) return out.unfollow(rule, key, `${label}: no departure or result tapped; past the planned return ${planTime(l.returnMin)} + ${RETURN_GRACE_MIN} min it is no longer followed (see "Load not closed").`);
+      // GPS tracking ALERTS: where the truck is now (gps.ts principle 4). Away from the stop: it has left,
+      // and the GPS departure that comes with the next history pull closes the row with the minutes. Between
+      // two reads: wait. A GPS arrival is followed live only while the fresh position shows the truck there.
+      let stillThere = '';
+      if (c.gps) {
+        const fix = c.gps.fixAt ? clockText(c.gps.fixAt, l.date, tz) : '?';
+        const where = liveAt(c.gps, s.pin, out.facts.gps!.atStopRadiusM, out.now);
+        if (where === 'AWAY') return out.holdOrEnd(rule, key, `${label}: the GPS position at ${fix} shows the truck away from the stop: it has left (the departure time comes with the GPS history) (GPS).`);
+        if (where === null && c.gpsLive === 'WAIT') return out.holdOrEnd(rule, key, `${label}: waiting for the next GPS position (last ${fix}) (GPS).`);
+        if (where === null && gpsArrival) {
+          const text = `${label}: GPS arrival ${clockText(v.arrivedAt, l.date, tz)}; no recent GPS position shows the truck still there, so the unloading is not followed (GPS).`;
+          return out.isOpen(rule, key) ? out.unfollow(rule, key, text) : out.end(rule, key, text);
+        }
+        if (where === 'AT') stillThere = ` GPS: the truck is still there at ${fix}.`;
+      }
       const elapsed = Math.max(0, minutesBetween(start, out.now));
       const over = elapsed - planned;
       const tier = tierAt(over, T);
       if (!tier) return out.end(rule, key, `${label}: unloading within the planned time + ${T} min.`);
       c.unloadingSeq = s.sequence;
-      const since = `since arrival ${clockText(v.arrivedAt, l.date, tz)}${v.arrivalObserved ? '' : ' (arrival time not certain)'}${fromWindow ? `, counted from the window start ${planTime(winStart)}` : ''}`;
+      const since = `since arrival ${clockText(v.arrivedAt, l.date, tz)}${gpsArrival ? ' (GPS)' : v.arrivalObserved ? '' : ' (arrival time not certain)'}${fromWindow ? `, counted from the window start ${planTime(winStart)}` : ''}`;
       // M2: the knock-on delay is told here (R3 and the projected R6 wait while this is raised).
       const nx = c.proj?.next ?? null;
       const nextStop = nx ? l.stops.find((x) => x.sequence === nx.sequence) : null;
@@ -537,12 +629,14 @@ function unloadOver(out: Out, c: LoadCtx): void {
         tier,
         value: over,
         threshold: T,
-        text: `${label}: no result or departure tapped ${since} - ${fmtDuration(elapsed)} at the stop, planned ${fmtDuration(planned)} (${fmtDuration(over)} over).${knock}`,
+        text: `${label}: no result or departure ${gpsArrival ? 'recorded' : 'tapped'} ${since} - ${fmtDuration(elapsed)} at the stop, planned ${fmtDuration(planned)} (${fmtDuration(over)} over).${stillThere}${knock}`,
         occurredAt,
-        facts: { elapsedMin: Math.round(elapsed), plannedMin: planned, observed: v.arrivalObserved },
+        facts: { elapsedMin: Math.round(elapsed), plannedMin: planned, observed: v.arrivalObserved, ...(gpsArrival || stillThere ? { gps: true } : {}) },
       });
     }
     const actual = actualMinutes(v);
+    // GPS tracking ALERTS: a GPS departure after a gap in the trail is only an upper bound (gps.ts principle 3).
+    const gpsDeparture = !!out.facts.gps && !actual.auto && isGps(v.departureSource) && !v.departedAtOutcome;
     let took = actual.min;
     // The unloading ended at the latest when the truck showed up at a later stop, was back, or at the
     // planned return + 60 min: a result tapped hours later (results recorded in a batch, a customer who
@@ -561,12 +655,17 @@ function unloadOver(out: Out, c: LoadCtx): void {
       const who = v.outcomeSource === 'DISPATCHER' ? 'the result was recorded by the office' : 'the unloading time is not known';
       return out.end(rule, key, `${label}: ${who}.`);
     }
+    if (gpsDeparture && !until && v.departureObserved === false) {
+      return out.end(rule, key, `${label}: GPS departure ${clockText(v.departedAt!, l.date, tz)} is not certain (a gap in the GPS trail before it), so the unloading is not measured (GPS).`);
+    }
     const over = took - planned;
-    const final = `${label}: unloading took ${fmtDuration(took)}${until}, planned ${fmtDuration(planned)}${over > 0 ? ` (${fmtDuration(over)} over)` : ''}.`;
+    const byGps = !actual.auto && (gpsArrival || (gpsDeparture && !until));
+    const gpsWords = !byGps ? '' : gpsArrival && gpsDeparture && !until ? ' (GPS arrival and departure)' : gpsArrival ? ' (GPS arrival)' : ' (GPS departure)';
+    const final = `${label}: unloading took ${fmtDuration(took)}${until}${gpsWords}, planned ${fmtDuration(planned)}${over > 0 ? ` (${fmtDuration(over)} over)` : ''}.`;
     const tier = tierAt(over, T);
     // A stop that ended over the limit before any sweep saw it live: kept as history (no toast, no e-mail).
     if (!out.isOpen(rule, key) && tier) {
-      return out.raise({ ...stopBase(c, s), rule, kind: 'CONDITION', subjectKey: key, tier, value: over, threshold: T, text: final, occurredAt, history: true, facts: { tookMin: Math.round(took), plannedMin: planned } });
+      return out.raise({ ...stopBase(c, s), rule, kind: 'CONDITION', subjectKey: key, tier, value: over, threshold: T, text: final, occurredAt, history: true, facts: { tookMin: Math.round(took), plannedMin: planned, ...(byGps ? { gps: true } : {}) } });
     }
     return out.end(rule, key, final);
   });
@@ -576,25 +675,54 @@ function unloadOver(out: Out, c: LoadCtx): void {
 // R2 LOADING_OVER: the turnaround at the depot between two trips (owner decision of 16 Oct 2026)
 // ---------------------------------------------------------------------------------------------
 
-/** The first sign of the truck at a stop of a load that left (lib/delivery/turnaround.ts firstSignOf; a load not out has no stops here). */
-function firstSignOfLoad(l: FactLoad): Date | null {
+/** A visit's times without its unobserved GPS ones (upper bounds: gps.ts principle 3). */
+const certainTimes = (v: FactVisit) => ({
+  arrivedAt: isGps(v.arrivalSource) && !v.arrivalObserved ? null : v.arrivedAt,
+  departedAt: isGps(v.departureSource) && v.departureObserved === false ? null : v.departedAt,
+  outcomeAt: v.outcomeAt,
+  outcomeSource: v.outcomeSource,
+});
+
+/**
+ * The first sign of the truck at a stop of a load that left (lib/delivery/turnaround.ts firstSignOf; a load
+ * not out has no stops here). With GPS (`gps`, ALERTS) an unobserved GPS time is no sign: it would date the
+ * leave too late.
+ */
+function firstSignOfLoad(l: FactLoad, gps = false): Date | null {
   return firstSignOf(
-    l.stops.map((s) => s.visit),
+    l.stops.map((s) => (gps && s.visit ? certainTimes(s.visit) : s.visit)),
     l.stops.flatMap((s) => (s.visit?.photos ?? []).filter(phonePhoto).map((p) => p.takenAt ?? p.receivedAt)),
   );
 }
 
-/** The inputs of turnaroundOf for a load after a trip whose Back at depot is `prevBackAt`. */
-function turnaroundInOf(l: FactLoad, prevBackAt: Date | null, now: Date): TurnaroundIn {
+/**
+ * The inputs of turnaroundOf for a load after a trip whose Back at depot is `prevBackAt`. GPS tracking
+ * ALERTS (`gps`): the trail's observed depot OUT the truck has been out since (after Back at depot, before
+ * the first stop reached) stands in for a missing Leaving tap, ahead of the fallbacks; `signGps`: the
+ * first sign at a stop is a GPS time.
+ */
+function turnaroundInOf(l: FactLoad, prevBackAt: Date | null, now: Date, gps: GpsTruckDayFact | null = null): TurnaroundIn & { signGps: boolean } {
+  const sign = firstSignOfLoad(l, !!gps);
+  const out = gps && prevBackAt ? outSince(gps, prevBackAt, sign ?? now) : null;
+  const signGps =
+    !!gps &&
+    !!sign &&
+    l.stops.some((s) => {
+      const v = s.visit;
+      if (!v) return false;
+      return (isGps(v.arrivalSource) && v.arrivalObserved && v.arrivedAt?.getTime() === sign.getTime()) || (isGps(v.departureSource) && v.departureObserved !== false && v.departedAt?.getTime() === sign.getTime());
+    });
   return {
     backAt: prevBackAt,
     leftTaps: l.leftTaps ?? (l.leftTapAt ? [l.leftTapAt] : []),
     dispatchAt: l.dispatchedAt ?? (l.status === 'DISPATCHED' ? l.statusChangedAt : null),
-    firstSignAt: firstSignOfLoad(l),
+    firstSignAt: sign,
     plannedDriveMin: plannedDriveOf(l.departMin, l.stops),
     existedAt: l.existedAt ?? null,
     completed: l.status === 'COMPLETED',
     now,
+    ...(gps ? { gpsLeftAt: out?.observed ? out.at : null } : {}),
+    signGps,
   };
 }
 
@@ -620,21 +748,39 @@ function loadingOver(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): 
   if (!prev) return out.end(rule, c.key, `${c.label}: the first trip of the day (loaded before it): not measured.`);
   if (prev.depotId !== l.depotId) return out.end(rule, c.key, `${c.label}: the trip before (L${prev.loadNo}) was at another depot: not measured.`);
   if (!l.stopCount) return out.end(rule, c.key, `${c.label}: no stops.`);
-  const t = turnaroundOf(turnaroundInOf(l, prev.backAt, out.now));
+  // GPS tracking ALERTS: without Back at depot of the trip before, the trail's observed depot IN after it
+  // (every stop of it done: gps.ts gpsBackOf) counts as it (a tapped one always wins).
+  let backAt = prev.backAt;
+  let backGps = false;
+  if (!backAt && c.gps) {
+    const m = gpsBackOf(c.gps, gpsBackInput(prev), out.now);
+    if (m?.observed) {
+      backAt = m.at;
+      backGps = true;
+    }
+  }
+  const input = turnaroundInOf(l, backAt, out.now, c.gps);
+  const t = turnaroundOf(input);
   if (!t) return out.end(rule, c.key, `${c.label}: no Back at depot tapped for L${prev.loadNo}: the time at the depot is not known (see "Load not closed").`);
+  const backWords = backGps ? `L${prev.loadNo} back at the depot at ${when(t.backAt)} (GPS)` : `Back at depot of L${prev.loadNo} at ${when(t.backAt)}`;
   if (t.notMeasured === 'BACK_LATE') {
-    return out.end(rule, c.key, `${c.label}: Back at depot of L${prev.loadNo} was tapped at ${when(t.backAt)}, after L${l.loadNo} had already started: the time at the depot is not known.`);
+    return backGps
+      ? out.end(rule, c.key, `${c.label}: ${backWords}, after L${l.loadNo} had already started: the time at the depot is not known.`)
+      : out.end(rule, c.key, `${c.label}: Back at depot of L${prev.loadNo} was tapped at ${when(t.backAt)}, after L${l.loadNo} had already started: the time at the depot is not known.`);
   }
   if (t.notMeasured === 'NO_LEAVE') {
-    return out.end(rule, c.key, `${c.label}: completed with no Leaving tap, Dispatch press or stop reached after Back at depot of L${prev.loadNo} at ${when(t.backAt)}: not measured.`);
+    return out.end(rule, c.key, `${c.label}: completed with no Leaving tap, Dispatch press or stop reached after ${backWords}: not measured.`);
   }
-  const from = t.addedLater ? `L${l.loadNo} was planned at ${when(t.startAt)} (after Back at depot of L${prev.loadNo} at ${when(t.backAt)})` : `Back at depot of L${prev.loadNo} at ${when(t.backAt)}`;
+  const from = t.addedLater ? `L${l.loadNo} was planned at ${when(t.startAt)} (after ${backWords})` : backWords;
   const occurredAt = new Date(t.startAt.getTime() + (T + t.graceMin) * 60_000);
-  const facts = { afterLoadNo: prev.loadNo, backAt: t.backAt.toISOString(), startAt: t.startAt.toISOString(), leftAt: t.leftAt?.toISOString() ?? null, how: t.how, minutes: Math.round(t.minutes) };
+  const byGps = backGps || t.how === 'GPS' || (t.how === 'ARRIVAL' && input.signGps);
+  const facts = { afterLoadNo: prev.loadNo, backAt: t.backAt.toISOString(), startAt: t.startAt.toISOString(), leftAt: t.leftAt?.toISOString() ?? null, how: t.how, minutes: Math.round(t.minutes), ...(byGps ? { gps: true } : {}) };
   if (t.final && t.leftAt) {
-    const span = t.addedLater ? `back ${when(t.backAt)}, L${l.loadNo} planned ${when(t.startAt)}` : `back ${when(t.backAt)}`;
+    const backGpsTag = backGps ? ' (GPS)' : '';
+    const span = t.addedLater ? `back ${when(t.backAt)}${backGpsTag}, L${l.loadNo} planned ${when(t.startAt)}` : `back ${when(t.backAt)}${backGpsTag}`;
     const left = t.how === 'ARRIVAL' ? `left by ${when(t.leftAt)}` : `left ${when(t.leftAt)}`;
-    const final = `${c.label}: ${fmtDuration(t.minutes)} at the depot between L${prev.loadNo} and L${l.loadNo} (${span}, ${left}, by ${leftHowText(t, when)}), limit ${T} min.`;
+    const how = leftHowText(t, when) + (t.how === 'ARRIVAL' && input.signGps ? ' (GPS)' : '');
+    const final = `${c.label}: ${fmtDuration(t.minutes)} at the depot between L${prev.loadNo} and L${l.loadNo} (${span}, ${left}, by ${how}), limit ${T} min.`;
     const tier = tierAt(t.minutes, T);
     // Over the limit before any sweep saw it live (a tap sent late, the sweep not running): history.
     if (!out.isOpen(rule, c.key) && tier) return out.raise({ ...base(c), rule, kind: 'CONDITION', subjectKey: c.key, tier, value: t.minutes, threshold: T, text: final, occurredAt, history: true, facts });
@@ -642,6 +788,22 @@ function loadingOver(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): 
   }
   if (t.minutes > TURNAROUND_MAX_MIN) {
     return out.unfollow(rule, c.key, `${c.label}: no Leaving tap, Dispatch or stop reached ${fmtDuration(TURNAROUND_MAX_MIN)} after ${from}: no longer followed.`);
+  }
+  // GPS tracking ALERTS: still at the depot by the live position (gps.ts principle 4). Away from it: it has
+  // left, and the depot OUT that comes with the next history pull closes the row with the minutes. Between
+  // two reads: wait. A Back at depot only GPS gave is followed live only while the fresh position shows the
+  // truck at the depot.
+  let atDepot = '';
+  if (c.gps) {
+    const fix = c.gps.fixAt ? when(c.gps.fixAt) : '?';
+    const at = liveAt(c.gps, out.facts.gps!.depots.get(l.depotId) ?? null, out.facts.gps!.atDepotRadiusM, out.now);
+    if (at === 'AWAY') return out.holdOrEnd(rule, c.key, `${c.label}: the GPS position at ${fix} shows the truck away from the depot: it has left with L${l.loadNo} (the time comes with the GPS history) (GPS).`);
+    if (at === null && c.gpsLive === 'WAIT') return out.holdOrEnd(rule, c.key, `${c.label}: waiting for the next GPS position (last ${fix}) (GPS).`);
+    if (at === null && backGps) {
+      const text = `${c.label}: ${backWords}; no recent GPS position shows the truck still at the depot, so it is not followed live (GPS).`;
+      return out.isOpen(rule, c.key) ? out.unfollow(rule, c.key, text) : out.end(rule, c.key, text);
+    }
+    if (at === 'AT') atDepot = ` GPS: the truck is at the depot at ${fix}.`;
   }
   // Dispatched before Back at depot and no tap: the truck may be on its way to the first stop already.
   const counted = t.minutes - t.graceMin;
@@ -656,9 +818,9 @@ function loadingOver(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): 
     tier,
     value: counted,
     threshold: T,
-    text: `${c.label}: at the depot for ${fmtDuration(t.minutes)} since ${from}, not left with L${l.loadNo} yet (limit ${T} min${grace}). Planned departure ${planTime(l.departMin)}, load is ${STATUS_WORD[l.status] ?? l.status}.`,
+    text: `${c.label}: at the depot for ${fmtDuration(t.minutes)} since ${from}, not left with L${l.loadNo} yet (limit ${T} min${grace}). Planned departure ${planTime(l.departMin)}, load is ${STATUS_WORD[l.status] ?? l.status}.${atDepot}`,
     occurredAt,
-    facts: { ...facts, graceMin: t.graceMin },
+    facts: { ...facts, graceMin: t.graceMin, ...(atDepot ? { gps: true } : {}) },
   });
 }
 
@@ -684,10 +846,15 @@ function etaLate(out: Out, c: LoadCtx): void {
   if (l.status !== 'DISPATCHED') return out.end(rule, c.key, `${c.label}: ${STATUS_WORD[l.status] ?? l.status}.`);
   if (c.back) return out.end(rule, c.key, `${c.label}: ${c.back.text}.`);
   if (!c.pageOpened) return out.end(rule, c.key, `${c.label}: the driver page was not opened, so the delay cannot be worked out.`);
+  // GPS tracking ALERTS with a fresh position: the live map's ETA of the next stop (gps.ts), also while the
+  // driver is silent. Between two reads: wait (gps.ts principle 4).
+  const live = c.liveEtas.find((e) => !e.atStop) ?? null;
+  if (live) return etaLateLive(out, c, T, live);
   const proj = c.proj!;
   const next = proj.next;
   if (!next) return out.end(rule, c.key, `${c.label}: no stop left to reach.`);
   if (c.pastReturn) return out.unfollow(rule, c.key, `${c.label}: past the planned return (${planTime(l.returnMin)}): no longer followed, see "Load not closed".`);
+  if (c.gpsLive === 'WAIT') return out.holdOrEnd(rule, c.key, `${c.label}: waiting for the next GPS position (last ${clockText(c.gps!.fixAt!, l.date, out.facts.tz)}) (GPS).`);
   if (c.silent) return out.holdOrEnd(rule, c.key, `${c.label}: the driver is silent, so the delay cannot be worked out.`);
   if (c.unloadingSeq !== null) {
     const at = l.stops.find((s) => s.sequence === c.unloadingSeq)!;
@@ -733,6 +900,59 @@ function etaLate(out: Out, c: LoadCtx): void {
     text: `${c.label} is running ${about} ${fmtDuration(delay)} late: ${nextText}; ${stopsText(stopsWithoutResult(l))} left, back ${about} ${planTime(proj.returnMin)} (planned ${planTime(l.returnMin)}).${risk}`,
     occurredAt,
     facts: { nextSequence: next.sequence, delayMin: Math.round(delay), returnMin: proj.returnMin, atRisk },
+  });
+}
+
+/**
+ * R3 from the fresh GPS position (GPS tracking ALERTS): the live map's ETA of the next stop ahead
+ * (lib/ivms/eta.ts, from the plan's own legs) instead of the projection from the phone's progress; the same
+ * hysteresis, the same wait while R1 is raised, the stops further on that may miss their window from the
+ * live ETAs too. Dated to when the projection reached T for that stop, else now (a position is not history).
+ */
+function etaLateLive(out: Out, c: LoadCtx, T: number, live: StopEta): void {
+  const rule: AlertRule = 'ETA_LATE';
+  const l = c.load;
+  const tz = out.facts.tz;
+  if (c.pastReturn) return out.unfollow(rule, c.key, `${c.label}: past the planned return (${planTime(l.returnMin)}): no longer followed, see "Load not closed".`);
+  if (c.unloadingSeq !== null) {
+    const at = l.stops.find((s) => s.sequence === c.unloadingSeq)!;
+    return out.holdOrEnd(rule, c.key, `${c.label}: unloading at ${stopLabel(at)} takes longer than planned (see "Unloading longer than planned").`);
+  }
+  const delay = live.delayMin;
+  if (!has(delay)) return out.end(rule, c.key, `${c.label}: the next stop has no planned time.`);
+  const fix = clockText(c.gps!.fixAt!, l.date, tz);
+  let tier: number = tierAt(delay, T);
+  if (!tier && out.isOpen(rule, c.key) && delay > T - ALERT_HYSTERESIS_MIN) tier = 1;
+  const stop = l.stops.find((s) => s.sequence === live.sequence)!;
+  if (!tier) return out.end(rule, c.key, `${c.label}: back on time (about ${fmtDuration(Math.max(0, delay))} late at the next stop, ${stopLabel(stop)}, by the GPS position at ${fix}) (GPS).`);
+  const t6 = out.on('AFTER_CLOSING');
+  const own = t6 !== null ? nextWithWindowOf(c) : null;
+  const atRisk = c.liveEtas
+    .filter((e) => !e.atStop && e.sequence !== own?.sequence)
+    .filter((e) => {
+      const s = l.stops.find((x) => x.sequence === e.sequence);
+      const end = s ? windowEndOf(s) : null;
+      const arr = minutesOnDate(e.etaAt, l.date, tz);
+      const judged = l.windowRule === 'FINISH' ? arr + Math.max(0, (s ? plannedServiceOf(s) : null) ?? 0) : arr;
+      return has(end) && judged > end + (t6 ?? 0);
+    })
+    .map((e) => e.sequence);
+  const risk = atRisk.length ? ` ${sequencesText(atRisk).replace(/^s/, 'S')} may miss ${atRisk.length === 1 ? 'its' : 'their'} delivery window.` : '';
+  // Back: the plan's way back from the last stop ahead, as late as that stop.
+  const last = c.liveEtas[c.liveEtas.length - 1]!;
+  const returnMin = l.returnMin + Math.max(0, last.delayMin ?? 0);
+  const occurredAt = projectedSince(c, out.now, T, (p) => (p.next?.sequence === live.sequence ? p.next.delayMin : null));
+  return out.raise({
+    ...base(c),
+    rule,
+    kind: 'CONDITION',
+    subjectKey: c.key,
+    tier: tier as AlertTier,
+    value: delay,
+    threshold: T,
+    text: `${c.label} is running about ${fmtDuration(delay)} late (GPS): next ${stopLabel(stop)} expected about ${clockText(live.etaAt, l.date, tz)} from the truck's GPS position at ${fix} (planned ${planTime(stop.etaMin)}); ${stopsText(stopsWithoutResult(l))} left, back about ${planTime(returnMin)} (planned ${planTime(l.returnMin)}).${risk}`,
+    occurredAt,
+    facts: { nextSequence: live.sequence, delayMin: Math.round(delay), returnMin, atRisk, gps: true },
   });
 }
 
@@ -801,8 +1021,36 @@ function departLate(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): v
   if (notOut) return out.end(rule, c.key, `${c.label}: Load ${notOut.loadNo} of this truck is not dispatched yet.`);
   const r = departRef(c, prev, tz);
   if ('out' in r) return out.end(rule, c.key, `${c.label}: Load ${r.out.loadNo} of this truck is still out.`);
+  // GPS tracking ALERTS: the trail's depot OUT counts as leaving (the truck out since then, after the
+  // previous load came back - its tap, else its GPS return - or for the first load from 2 h before its
+  // planned departure): the row closes with the time it left (one history row when that was more than T
+  // late; an unobserved OUT says the truck left by then, never how late). By the fresh position: away from
+  // the depot, it has left (the time comes with the GPS history); between two reads, wait.
+  let gpsWords = '';
+  if (c.gps) {
+    const when = (d: Date) => clockText(d, l.date, tz);
+    const from = prev ? (prev.backAt ?? gpsBackOf(c.gps, gpsBackInput(prev), out.now)?.at ?? null) : dateAt(c.dayStart, l.departMin - GPS_LEAVE_EARLY_MIN);
+    const m = from ? outSince(c.gps, from, out.now) : null;
+    if (m) {
+      const leftMin = minutesOnDate(m.at, l.date, tz);
+      const lateBy = leftMin - r.ref;
+      const final = `${c.label} left the depot ${m.observed ? 'at' : 'by'} ${when(m.at)} (GPS)${lateBy > 0 && m.observed ? `, ${fmtDuration(lateBy)} after ${planTime(r.ref)}${r.text}` : ` (planned ${planTime(l.departMin)})`}; Dispatch is not pressed yet (load is ${STATUS_WORD[l.status] ?? l.status}): press it so the driver page and the alerts follow the truck.`;
+      const tier = m.observed ? tierAt(lateBy, T) : 0;
+      if (!out.isOpen(rule, c.key) && tier && minutesBetween(m.at, out.now) <= DEPART_LATE_HISTORY_MIN) {
+        return out.raise({ ...base(c), rule, kind: 'CONDITION', subjectKey: c.key, tier, value: lateBy, threshold: T, text: final, occurredAt: m.at, history: true, facts: { leftMin, refMin: r.ref, gps: true } });
+      }
+      return out.end(rule, c.key, final);
+    }
+  }
   const late = c.nowMin - r.ref;
   if (late > DEPART_LATE_EXPIRE_MIN) return out.unfollow(rule, c.key, `${c.label}: still not dispatched ${fmtDuration(DEPART_LATE_EXPIRE_MIN)} after ${planTime(r.ref)}: no longer followed.`);
+  if (c.gps) {
+    const fix = c.gps.fixAt ? clockText(c.gps.fixAt, l.date, tz) : '?';
+    const at = liveAt(c.gps, out.facts.gps!.depots.get(l.depotId) ?? null, out.facts.gps!.atDepotRadiusM, out.now);
+    if (at === 'AWAY') return out.holdOrEnd(rule, c.key, `${c.label}: the GPS position at ${fix} shows the truck away from the depot: it has left (the time comes with the GPS history); Dispatch is not pressed yet (GPS).`);
+    if (at === null && c.gpsLive === 'WAIT') return out.holdOrEnd(rule, c.key, `${c.label}: waiting for the next GPS position (last ${fix}) (GPS).`);
+    if (at === 'AT') gpsWords = ` GPS: the truck is still at the depot at ${fix}.`;
+  }
   const tier = tierAt(late, T);
   if (!tier) return out.end(rule, c.key, `${c.label}: not late.`);
   const seen = c.td?.linkSeenAt ? ` Driver page last open ${clockText(c.td.linkSeenAt, l.date, tz)}.` : '';
@@ -815,9 +1063,9 @@ function departLate(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]): v
     tier,
     value: late,
     threshold: T,
-    text: `${c.label} not dispatched: planned departure ${planTime(l.departMin)}${r.text}, now ${clockText(out.now, l.date, tz)} (${fmtDuration(late)} late), load is ${STATUS_WORD[l.status] ?? l.status}.${seen}${left} Dispatch it if it has left.`,
+    text: `${c.label} not dispatched: planned departure ${planTime(l.departMin)}${r.text}, now ${clockText(out.now, l.date, tz)} (${fmtDuration(late)} late), load is ${STATUS_WORD[l.status] ?? l.status}.${seen}${left}${gpsWords} Dispatch it if it has left.`,
     occurredAt: dateAt(c.dayStart, r.ref + T),
-    facts: { departMin: l.departMin, refMin: r.ref, status: l.status },
+    facts: { departMin: l.departMin, refMin: r.ref, status: l.status, ...(gpsWords ? { gps: true } : {}) },
   });
 }
 
@@ -873,7 +1121,10 @@ function driverSilent(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]):
   const counted = silence - overlap;
   const expected = proj.next.expectedArrMin;
   const overdue = has(expected) && c.nowMin > expected + SILENT_AFTER_NEXT_ETA_MIN;
-  const tier = tierAt(counted, T, ALERT_RULE_SPECS[rule].maxTier);
+  // GPS tracking ALERTS: while GPS follows the truck (a fix in the last GPS_WAIT_MIN) it is not lost - only
+  // its results are missing (they come only from the phone): a warning at most, saying when GPS last saw it.
+  const gpsSeen = c.gps && c.gpsLive && c.gps.fixAt ? c.gps : null;
+  const tier = tierAt(counted, T, gpsSeen ? 1 : ALERT_RULE_SPECS[rule].maxTier);
   if (!tier || !overdue) {
     const resumed = sig && dispatchAt && sig.at > dispatchAt ? ` The driver's phone sent at ${clockText(sig.at, l.date, tz)}.` : '';
     return out.end(rule, c.key, `${c.label}: not silent.${resumed}`);
@@ -883,6 +1134,7 @@ function driverSilent(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]):
   const seen = c.td?.linkSeenAt ? ` Driver page last open ${clockText(c.td.linkSeenAt, l.date, tz)}.` : '';
   const nextStop = l.stops.find((s) => s.sequence === proj.next!.sequence)!;
   const brkText = overlap > 0 ? ` (the planned break of ${fmtDuration(overlap)} not counted)` : '';
+  const gpsText = gpsSeen ? ` GPS last saw the truck at ${clockText(gpsSeen.fixAt!, l.date, tz)} (${motionWords(gpsSeen)}): it is followed, but no results come from the driver (GPS).` : '';
   return out.raise({
     ...base(c),
     rule,
@@ -891,9 +1143,9 @@ function driverSilent(out: Out, c: LoadCtx, truckDayLoads: readonly FactLoad[]):
     tier,
     value: counted,
     threshold: T,
-    text: `${c.label}: nothing from the driver's phone for ${fmtDuration(counted)}${brkText} (${what}).${seen} ${stopsText(stopsWithoutResult(l))} left; ${stopLabel(nextStop)} was expected about ${planTime(expected)}.`,
+    text: `${c.label}: nothing from the driver's phone for ${fmtDuration(counted)}${brkText} (${what}).${seen} ${stopsText(stopsWithoutResult(l))} left; ${stopLabel(nextStop)} was expected about ${planTime(expected)}.${gpsText}`,
     occurredAt: new Date(last.getTime() + (T + overlap) * 60_000),
-    facts: { silentMin: Math.round(counted), breakMin: overlap, nextSequence: nextStop.sequence },
+    facts: { silentMin: Math.round(counted), breakMin: overlap, nextSequence: nextStop.sequence, ...(gpsSeen ? { gps: true } : {}) },
   });
 }
 
@@ -920,10 +1172,15 @@ function afterClosing(out: Out, c: LoadCtx): void {
     }
     const v = s.visit;
     if (v?.arrivedAt) {
-      if (!arrivalIsObserved(v)) {
-        out.end(rule, key, `${label}: arrived (the arrival time is not certain).`);
+      // GPS tracking ALERTS: an observed GPS arrival is an arrival (the on-time KPI's arrivalIsObserved also
+      // waits for a Delivered result; an arrival after the window is a fact either way). The driver's tap
+      // wins: a tap inside the window corrects the event.
+      const gpsArr = !!out.facts.gps && isGps(v.arrivalSource);
+      if (gpsArr ? !v.arrivalObserved : !arrivalIsObserved(v)) {
+        out.end(rule, key, gpsArr ? `${label}: arrived by GPS (the GPS arrival time is not certain) (GPS).` : `${label}: arrived (the arrival time is not certain).`);
         continue;
       }
+      const gpsTag = gpsArr ? ' (GPS)' : '';
       const arr = minutesOnDate(v.arrivedAt, l.date, tz);
       const over = arr - end;
       if (over > T) {
@@ -936,11 +1193,11 @@ function afterClosing(out: Out, c: LoadCtx): void {
           tier: tierAt(over, T, ALERT_RULE_SPECS[rule].maxTier) as AlertTier,
           value: over,
           threshold: T,
-          text: `${label}: arrived ${clockText(v.arrivedAt, l.date, tz)}, after its delivery window ended at ${planTime(end)} (${fmtDuration(over)} late).`,
+          text: `${label}: arrived ${clockText(v.arrivedAt, l.date, tz)}${gpsTag}, after its delivery window ended at ${planTime(end)} (${fmtDuration(over)} late).`,
           occurredAt: v.arrivedAt,
-          facts: { arrivedMin: arr, windowEndMin: end },
+          facts: { arrivedMin: arr, windowEndMin: end, ...(gpsArr ? { gps: true } : {}) },
         });
-      } else out.end(rule, key, `${label}: arrived ${clockText(v.arrivedAt, l.date, tz)}, inside its delivery window (ends ${planTime(end)}).`);
+      } else out.end(rule, key, `${label}: arrived ${clockText(v.arrivedAt, l.date, tz)}${gpsTag}, inside its delivery window (ends ${planTime(end)}).`);
       continue;
     }
     const p = proj?.stops.find((x) => x.sequence === s.sequence) ?? null;
@@ -1251,9 +1508,17 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
     const truckDayLoads = dayLoads.get(truckDayOf(l.date, l.truckId)) ?? [l];
     const dayStart = zonedDayStart(l.date, tz);
     const nowMin = minutesOnDate(now, l.date, tz);
+    // GPS tracking ALERTS (gps.ts): the truck-day's GPS and how its live position may be read now.
+    const gps = facts.gps ? (td?.gps ?? null) : null;
+    const gpsLive = gpsLiveOf(gps, now);
     const stopsIn = l.stops.map((s) => {
       const v = s.visit;
-      const endAt = v?.departedAt ?? (v?.outcomeAt && v.outcomeSource !== 'DISPATCHER' ? v.outcomeAt : null);
+      let endAt = v?.departedAt ?? (v?.outcomeAt && v.outcomeSource !== 'DISPATCHER' ? v.outcomeAt : null);
+      // GPS: a stop with an arrival and nothing that ends it, where the GPS knows better than the clock
+      // (the truck away from it, or a GPS stay the trail lost sight of): its projected end (gps.ts openStayEnd).
+      if (gps && v?.arrivedAt && !v.departedAt && !v.outcome) {
+        endAt = openStayEnd({ arrivedAt: v.arrivedAt, gpsArrival: isGps(v.arrivalSource), plannedServiceMin: plannedServiceOf(s) }, liveAt(gps, s.pin, facts.gps!.atStopRadiusM, now), gps, now);
+      }
       // M3: a delivery photo of the driver's phone is the truck being there, when no arrival was recorded.
       const arrAt = v?.arrivedAt ?? firstPhotoAt(v);
       return {
@@ -1295,8 +1560,33 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
       silent: false,
       unloadingSeq: null,
       laterActivity,
-      back: backOf(l, truckDayLoads, now, tz),
+      back: backOf(l, truckDayLoads, now, tz, gps),
       pastReturn: l.date < facts.today || nowMin > l.returnMin + RETURN_GRACE_MIN,
+      gps,
+      gpsLive,
+      // The live map's ETA of the stops ahead (a stop is behind once it has a result or a departure; an open
+      // arrival is "at the stop" only while the fresh fix is near its pin: lib/ivms/eta.ts).
+      liveEtas:
+        gps && gpsLive === 'LIVE' && l.status === 'DISPATCHED'
+          ? liveEtasOf(
+              gps,
+              facts.gps!,
+              {
+                depotId: l.depotId,
+                departMin: l.departMin,
+                dayStart,
+                stops: l.stops.map((s) => ({
+                  sequence: s.sequence,
+                  pin: s.pin ?? null,
+                  etaMin: s.etaMin,
+                  plannedServiceMin: plannedServiceOf(s),
+                  done: !!s.visit?.outcome || !!s.visit?.departedAt,
+                  arrivedAt: s.visit && !s.visit.outcome && !s.visit.departedAt ? s.visit.arrivedAt : null,
+                })),
+              },
+              now,
+            )
+          : [],
     };
     const run = (rule: AlertRule, fn: () => void) => {
       if (out.on(rule) === null) return;

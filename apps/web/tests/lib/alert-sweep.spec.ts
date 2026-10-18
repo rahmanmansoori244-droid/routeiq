@@ -5,7 +5,9 @@
  * each, the 2-minute throttle (the cron route forces it), no second sweep while one runs, the kill switch
  * ROUTEIQ_DISABLE_ALERTS=1, no backlog before the switch-on time (also when it was never stamped: review
  * L1), per rule too (review H2), and the "Checked" health each company's sweep leaves (review M2). And the
- * hooks: the janitor loop and the cron route run it. Synthetic data; invented names.
+ * hooks: the janitor loop and the cron route run it. GPS alerts (owner request 18 Oct 2026): only a company
+ * whose GPS tracking is ALERTS has its facts read with the GPS, never with ROUTEIQ_DISABLE_IVMS=1.
+ * Synthetic data; invented names.
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -28,6 +30,7 @@ vi.mock('@/lib/alerts/facts', () => ({
 }));
 vi.mock('@/lib/alerts/locks', () => ({ tryLockTenantAlerts: vi.fn(async (_tx: unknown, tenantId: string) => !state.busy.has(tenantId)) }));
 
+import { readAlertFacts } from '@/lib/alerts/facts';
 import { alertSweepHealth, alertSweepStatus, resetAlertSweepClock, runAlertSweep } from '@/lib/alerts/sweep';
 import { zonedDayStart } from '@/lib/dispatch/time';
 
@@ -82,6 +85,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   delete process.env.ROUTEIQ_DISABLE_ALERTS;
+  delete process.env.ROUTEIQ_DISABLE_IVMS;
 });
 
 describe('runAlertSweep', () => {
@@ -166,6 +170,24 @@ describe('runAlertSweep', () => {
 
     process.env.ROUTEIQ_DISABLE_ALERTS = '1';
     expect(await runAlertSweep(new Date(NOW.getTime() + 20 * 60_000), { db, force: true })).toBeNull();
+  });
+});
+
+describe('GPS alerts (owner request 18 Oct 2026): only GPS tracking ALERTS gives the facts their GPS', () => {
+  it('OFF, MAP and TIMES read no GPS; ALERTS reads it with the company settings; ROUTEIQ_DISABLE_IVMS=1 turns it off', async () => {
+    const companies = { tOff: { ivmsMode: 'OFF' }, tMap: { ivmsMode: 'MAP' }, tTimes: { ivmsMode: 'TIMES' }, tAlerts: { ivmsMode: 'ALERTS', ivmsStopRadiusM: 100, ivmsDepotRadiusM: 300, avgSpeedKmh: 40, distanceMultiplier: 1.3 } };
+    for (const t of Object.keys(companies)) state.facts.set(t, lateFacts());
+    const { db, queries } = stubDb(Object.entries(companies).map(([t, c]) => cfg(t, c)));
+    const calls = vi.mocked(readAlertFacts).mock.calls;
+    const gpsOf = (from: number) => Object.fromEntries(calls.slice(from).map((c) => [c[1], (c[2] as { gps?: unknown }).gps]));
+    let from = calls.length;
+    await runAlertSweep(NOW, { db, force: true });
+    expect(queries[0]!.select).toMatchObject({ ivmsMode: true, ivmsStopRadiusM: true, ivmsDepotRadiusM: true, avgSpeedKmh: true, distanceMultiplier: true });
+    expect(gpsOf(from)).toEqual({ tOff: null, tMap: null, tTimes: null, tAlerts: { atStopRadiusM: 250, atDepotRadiusM: 450, avgSpeedKmh: 40, distanceMultiplier: 1.3 } });
+    process.env.ROUTEIQ_DISABLE_IVMS = '1';
+    from = calls.length;
+    await runAlertSweep(new Date(NOW.getTime() + 5 * 60_000), { db, force: true });
+    expect(gpsOf(from)).toEqual({ tOff: null, tMap: null, tTimes: null, tAlerts: null });
   });
 });
 

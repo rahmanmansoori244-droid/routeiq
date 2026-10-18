@@ -2,7 +2,8 @@
  * IVMS live link (16 Oct 2026), the day-0 contract: the Prisma models, the migration, the settings and
  * the shared lists agree with each other, and nothing existing can see the new data.
  * - prisma/schema.prisma <-> migration 20261016200000_ivms_live: every new table and column, the defaults
- *   and the CHECKs (bounds and value lists = lib/ivms/settings.ts and lib/ivms/types.ts);
+ *   and the CHECKs (bounds and value lists = lib/ivms/settings.ts and lib/ivms/types.ts); the mode list as
+ *   migration 20261018120000_ivms_alerts_mode replaced it (GPS alerts, owner request 18 Oct 2026: ALERTS);
  * - the migration is additive (no DROP, no data change, no enum change) and takes its locks without waiting;
  * - every IVMS column on an existing model is hidden from every read (lib/db.ts PRISMA_GLOBAL_OMIT), so
  *   no existing response, page, sheet, export or audit row changes and no lower role sees an IMEI;
@@ -92,7 +93,8 @@ describe('schema.prisma and the migration agree', () => {
   });
 
   it('the value lists of the CHECKs are the lists of lib/ivms/types.ts', () => {
-    expect(checkList('TenantConfig_ivmsMode_check')).toEqual([...IVMS_MODES]);
+    // The mode list as first created (never edited: 20261018120000_ivms_alerts_mode replaces it, see below).
+    expect(checkList('TenantConfig_ivmsMode_check')).toEqual(IVMS_MODES.filter((m) => m !== 'ALERTS'));
     expect(checkList('IvmsEvent_kind_check')).toEqual([...IVMS_EVENT_KINDS]);
     expect(checkList('IvmsEvent_origin_check')).toEqual([...IVMS_EVENT_ORIGINS]);
     expect([...sql.matchAll(/ARRAY\[([^\]]*)\]::TEXT\[\]\)/g)].map((m) => [...m[1]!.matchAll(/'([A-Z_]+)'/g)].map((x) => x[1]))).toEqual([[...FIX_FLAGS]]);
@@ -122,6 +124,56 @@ describe('schema.prisma and the migration agree', () => {
     // Every object has a rollback line.
     for (const m of NEW_MODELS) expect(migration, m).toContain(`DROP TABLE "${m}"`);
     for (const c of ['ivmsImei', 'ivmsZoneName', ...IVMS_SETTINGS_FIELDS]) expect(migration, c).toContain(`DROP COLUMN "${c}"`);
+  });
+});
+
+describe('migration 20261018120000_ivms_alerts_mode (GPS alerts, owner request 18 Oct 2026)', () => {
+  const NAME = '20261018120000_ivms_alerts_mode';
+  const raw = readFileSync(path.join(WEB, 'prisma', 'migrations', NAME, 'migration.sql'), 'utf8').replace(/\r\n/g, '\n');
+  const body = raw
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('--'))
+    .join('\n');
+  const list = () => {
+    const m = /ADD CONSTRAINT "TenantConfig_ivmsMode_check" CHECK \("ivmsMode" IN \(([^)]*)\)\);/.exec(body);
+    if (!m) throw new Error('no new TenantConfig_ivmsMode_check in the migration');
+    return [...m[1]!.matchAll(/'([A-Za-z_]+)'/g)].map((x) => x[1]!);
+  };
+  /** What the CHECK ("ivmsMode" IN (...)) lets through: exactly the listed strings, case and spaces included. */
+  const allowed = (v: string) => list().includes(v);
+
+  it('sorts right after the IVMS and sales-route migrations', () => {
+    const dir = path.join(WEB, 'prisma', 'migrations');
+    const folders = readdirSync(dir).filter((n) => statSync(path.join(dir, n)).isDirectory() && /^\d{14}_/.test(n)).sort();
+    expect(folders.indexOf(NAME)).toBeGreaterThan(folders.indexOf('20261017200000_order_line_sales_route'));
+    expect(folders.indexOf(NAME)).toBeGreaterThan(folders.indexOf(MIGRATION_NAME));
+  });
+
+  it('allows ALERTS and still refuses anything else: the new mode list is lib/ivms/types.ts IVMS_MODES', () => {
+    expect(list()).toEqual([...IVMS_MODES]);
+    for (const m of IVMS_MODES) expect(allowed(m), m).toBe(true);
+    for (const m of ['alerts', 'Alerts', 'ALERTS ', 'GPS', 'ALERT', '', 'OFF,ALERTS']) expect(allowed(m), JSON.stringify(m)).toBe(false);
+  });
+
+  it('changes only that CHECK: no column, row, type or other constraint', () => {
+    expect(body.match(/\bALTER TABLE\b/g)).toHaveLength(2);
+    expect(body).toContain('ALTER TABLE "TenantConfig" DROP CONSTRAINT "TenantConfig_ivmsMode_check";');
+    for (const re of [/\bDROP\s+(TABLE|COLUMN|INDEX|TYPE)\b/i, /\bRENAME\b/i, /\bALTER\s+TYPE\b/i, /\bALTER\s+COLUMN\b/i, /\bADD\s+COLUMN\b/i, /\bUPDATE\s+"/i, /\bDELETE\s+FROM\b/i, /\bINSERT\s+INTO\b/i, /\bTRUNCATE\b/i]) {
+      expect(body, String(re)).not.toMatch(re);
+    }
+  });
+
+  it('takes its lock without waiting first, before the change, with no time limit, and documents the rollback', () => {
+    expect(body).toContain('LOCK TABLE "TenantConfig" IN ACCESS EXCLUSIVE MODE NOWAIT;');
+    expect(body).toContain('LOCK TABLE "TenantConfig" IN ACCESS EXCLUSIVE MODE;');
+    expect(body.indexOf('NOWAIT')).toBeLessThan(body.indexOf('ALTER TABLE'));
+    expect(body).toContain("SELECT set_config('statement_timeout', '0', true);");
+    expect(body).toContain("PERFORM set_config('lock_timeout', '5s', true);");
+    // The rollback (comments): a company in ALERTS back to TIMES first, then the old list.
+    expect(raw).toContain(`--   UPDATE "TenantConfig" SET "ivmsMode" = 'TIMES' WHERE "ivmsMode" = 'ALERTS';`);
+    expect(raw).toContain(`CHECK ("ivmsMode" IN ('OFF', 'MAP', 'TIMES'));`);
+    expect(raw).toContain(`DELETE FROM "_prisma_migrations" WHERE migration_name = '${NAME}';`);
+    expect(raw.indexOf(`'TIMES' WHERE "ivmsMode" = 'ALERTS'`)).toBeLessThan(raw.indexOf(`IN ('OFF', 'MAP', 'TIMES'))`));
   });
 });
 
@@ -156,7 +208,7 @@ describe('the IVMS settings', () => {
     const p = tenantConfigSchema.partial();
     expect(p.safeParse({ ...IVMS_SETTING_DEFAULTS }).success).toBe(true);
     for (const m of IVMS_MODES) expect(p.safeParse({ ivmsMode: m }).success, m).toBe(true);
-    for (const m of ['ALERTS', 'off', '', null, 1]) expect(p.safeParse({ ivmsMode: m }).success, String(m)).toBe(false);
+    for (const m of ['alerts', 'GPS', 'off', '', null, 1]) expect(p.safeParse({ ivmsMode: m }).success, String(m)).toBe(false);
     for (const [k, b] of Object.entries(IVMS_SETTING_BOUNDS)) {
       expect(p.safeParse({ [k]: b.min }).success, `${k} min`).toBe(true);
       expect(p.safeParse({ [k]: b.max }).success, `${k} max`).toBe(true);
@@ -166,17 +218,21 @@ describe('the IVMS settings', () => {
     }
   });
 
-  it('the modes step up OFF < MAP < TIMES; anything unknown reads as OFF', () => {
-    expect(IVMS_MODES).toEqual(['OFF', 'MAP', 'TIMES']);
+  it('the modes step up OFF < MAP < TIMES < ALERTS (ALERTS does all TIMES does); anything unknown reads as OFF', () => {
+    expect(IVMS_MODES).toEqual(['OFF', 'MAP', 'TIMES', 'ALERTS']);
     expect(ivmsModeOf(null)).toBe('OFF');
     expect(ivmsModeOf({})).toBe('OFF');
-    expect(ivmsModeOf({ ivmsMode: 'ALERTS' })).toBe('OFF');
+    expect(ivmsModeOf({ ivmsMode: 'alerts' })).toBe('OFF');
+    expect(ivmsModeOf({ ivmsMode: 'ALERTS' })).toBe('ALERTS');
     expect(ivmsModeOf({ ivmsMode: 'TIMES' })).toBe('TIMES');
     expect(ivmsModeAtLeast('OFF', 'MAP')).toBe(false);
     expect(ivmsModeAtLeast('MAP', 'MAP')).toBe(true);
     expect(ivmsModeAtLeast('TIMES', 'MAP')).toBe(true);
     expect(ivmsModeAtLeast('MAP', 'TIMES')).toBe(false);
     expect(ivmsModeAtLeast('OFF', 'OFF')).toBe(true);
+    expect(ivmsModeAtLeast('ALERTS', 'TIMES')).toBe(true);
+    expect(ivmsModeAtLeast('ALERTS', 'MAP')).toBe(true);
+    expect(ivmsModeAtLeast('TIMES', 'ALERTS')).toBe(false);
   });
 
   it('operating hours never cross midnight, checked only on a save that changes them', () => {

@@ -89,6 +89,18 @@ describe('turnaroundOf', () => {
     // The tap wins over a later Dispatch press.
     expect(turnaroundOf(input({ leftTaps: [at(30)], dispatchAt: at(40), now: at(50) }))).toMatchObject({ how: 'TAP', minutes: 30 });
   });
+
+  it('GPS alerts (owner request 18 Oct 2026): the depot OUT stands in for a missing tap, ahead of the Dispatch press and the first stop', () => {
+    expect(turnaroundOf(input({ gpsLeftAt: at(48), dispatchAt: at(55), firstSignAt: at(70), plannedDriveMin: 10, now: at(80) }))).toMatchObject({ leftAt: at(48), how: 'GPS', minutes: 48, final: true });
+    // The driver's tap wins.
+    expect(turnaroundOf(input({ leftTaps: [at(45)], gpsLeftAt: at(48), now: at(80) }))).toMatchObject({ leftAt: at(45), how: 'TAP' });
+    // Never before the count starts, after now, or after the first stop reached.
+    expect(turnaroundOf(input({ gpsLeftAt: at(-5), dispatchAt: at(40), now: at(80) }))).toMatchObject({ how: 'DISPATCH' });
+    expect(turnaroundOf(input({ gpsLeftAt: at(90), now: at(80) }))).toMatchObject({ final: false, minutes: 80 });
+    expect(turnaroundOf(input({ gpsLeftAt: at(75), firstSignAt: at(70), now: at(80) }))).toMatchObject({ how: 'ARRIVAL' });
+    // Absent (the load row never passes it): as before.
+    expect(turnaroundOf(input({ dispatchAt: at(45), now: at(60) }))).toMatchObject({ how: 'DISPATCH' });
+  });
 });
 
 describe('the signs at a stop and the planned drive', () => {
@@ -121,7 +133,8 @@ describe('the signs at a stop and the planned drive', () => {
 });
 
 describe('the words', () => {
-  it('how the leave is known', () => {
+  it('how the leave is known (GPS alerts: the GPS depot exit)', () => {
+    expect(leftHowText({ how: 'GPS', tapLate: false, signAt: null, driveMin: 0 }, clock)).toBe('the GPS depot exit (no Leaving tap)');
     expect(leftHowText({ how: 'TAP', tapLate: false, signAt: null, driveMin: 0 }, clock)).toBe('Leaving tapped');
     expect(leftHowText({ how: 'DISPATCH', tapLate: false, signAt: null, driveMin: 0 }, clock)).toBe('the Dispatch press (no Leaving tap)');
     expect(leftHowText({ how: 'ARRIVAL', tapLate: false, signAt: at(60), driveMin: 15 }, clock)).toBe('the first stop reached at 12:20 less the planned 15 min drive (no Leaving tap)');

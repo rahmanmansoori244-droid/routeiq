@@ -222,6 +222,8 @@ describe('in use: the counters, never a secret', () => {
       warn: true,
     });
     expect(gpsStatusText({ ...h, clock: 'OK', skewSec: 2, suggestedOffsetMin: null })).toEqual({ text: 'Ayun link: working (last answer 40 s ago); 37 of 100 calls today.', warn: false });
+    // GPS alerts (18 Oct 2026): ALERTS pauses its GPS times on a wrong clock as TIMES does.
+    expect(gpsStatusText({ ...h, mode: 'ALERTS' })).toEqual(gpsStatusText(h));
     // MAP never pauses anything for the clock.
     expect(gpsStatusText({ ...h, mode: 'MAP' }).warn).toBe(false);
   });
