@@ -22,6 +22,7 @@ import {
   trailWindow,
   truckDayHref,
   truckDayRefreshMs,
+  truckDayScreen,
   TRAIL_MAX_POINTS,
   type TruckDayEventInput,
   type TruckDayInput,
@@ -31,6 +32,7 @@ import {
   type TruckDayVisitInput,
 } from '@/lib/ivms/truck-day';
 import { zonedDayStart } from '@/lib/dispatch/time';
+import { countedLeaveTap, turnaroundOf } from '@/lib/delivery/turnaround';
 
 const TZ = 'Asia/Muscat';
 const DATE = '2026-10-20';
@@ -417,7 +419,133 @@ describe('the live status (today)', () => {
     expect(buildTruckDay(input({ position: p, date: '2026-10-19', now: T('11:50') })).live).not.toBeNull();
     const none = buildTruckDay(input({ position: null }));
     expect(none.gps.notes.join(' ')).toMatch(/No live position now/);
-    expect(buildTruckDay(input({ position: null, truck: { ...input().truck, hasTracker: false } })).gps.notes.join(' ')).toMatch(/no GPS tracker set/);
+    // No tracker now, on a day that shows GPS times and depot moves: they were recorded while it had one.
+    expect(buildTruckDay(input({ position: null, truck: { ...input().truck, hasTracker: false } })).gps.notes.join(' ')).toMatch(/No GPS tracker is set on this truck now/);
+  });
+
+  // Review of 18 Oct 2026: a position row the poller has not cleared yet (a LIMIT backoff until midnight,
+  // the retention's delay) is never shown for a truck with no load out, as on the live map (review M7).
+  it('no load out (every load Completed, or only Planned): no live status even with a stored position, today or yesterday', () => {
+    const p = pos({ ...at(4000), fixAt: T('13:58') });
+    const done = [{ ...L1 }, { ...L2, status: 'COMPLETED', statusChangedAt: T('14:00') }];
+    const today = buildTruckDay(input({ loads: done, position: p, now: T('20:00') }));
+    expect(today.live).toBeNull();
+    expect(today.gps.live).toBe(false);
+    expect(today.gps.notes.join(' ')).toMatch(/No live position now: RouteIQ reads a truck's position only while it has a load out/);
+    expect(truckDayRefreshMs(today)).toBe(60_000); // today is read again: a load may be locked again
+    expect(buildTruckDay(input({ loads: done, position: p, date: '2026-10-19', now: T('11:50') })).live).toBeNull();
+    const planned = [{ ...L1, status: 'PLANNED', dispatchedAt: null, statusChangedAt: null }];
+    expect(buildTruckDay(input({ loads: planned, visits: [], events: [], moves: [], position: p })).live).toBeNull();
+    // A load Locked or Loading is out: the position is shown (the truck is being loaded at the depot).
+    expect(buildTruckDay(input({ loads: [{ ...L1, status: 'LOADING' }], position: pos({ ...at(10) }) })).live).not.toBeNull();
+  });
+});
+
+describe('the no-tracker note (review of 18 Oct 2026: the tracker is the truck NOW, a past day keeps its GPS)', () => {
+  const trail = Array.from({ length: 20 }, (_, k) => ({ fixAt: new Date(T('06:00').getTime() + k * 60_000), ...at(k * 100), speedKmh: 30 }));
+  const noTracker = { ...input().truck, hasTracker: false };
+
+  it('yesterday with its trail, GPS times and depot moves, the tracker taken off this morning: the note says so, never "from the phone only"', () => {
+    const m = buildTruckDay(input({ date: '2026-10-19', trail, truck: noTracker }));
+    expect(m.trail.total).toBe(20);
+    expect(m.stops.find((s) => s.loadNo === 1 && s.sequence === 3)!.arrivalBy).toBe('GPS (Ayun)');
+    const notes = m.gps.notes.join(' ');
+    expect(notes).toMatch(/No GPS tracker is set on this truck now \(Trucks page, company admin\): the GPS times and the trail shown here were recorded while it had one/);
+    expect(notes).not.toMatch(/driver's phone only/);
+  });
+
+  it("a day with nothing GPS recorded (or MAP, which shows no GPS time): its times come from the driver's phone only", () => {
+    const phoneOnly = input().visits.filter((v) => v.arrivalSource !== 'AYUN' && v.departureSource !== 'AYUN');
+    const m = buildTruckDay(input({ truck: noTracker, visits: phoneOnly, moves: [], trail: [] }));
+    expect(m.gps.notes.join(' ')).toMatch(/This truck has no GPS tracker set \(Trucks page, company admin\): its times come from the driver's phone only/);
+    expect(buildTruckDay(input({ mode: 'MAP', truck: noTracker })).gps.notes.join(' ')).toMatch(/driver's phone only/);
+    // OFF says GPS is off, not the tracker.
+    expect(buildTruckDay(input({ mode: 'OFF', truck: noTracker })).gps.notes.join(' ')).not.toMatch(/tracker/);
+  });
+});
+
+describe('the depot taps as the rest of RouteIQ counts them (review of 18 Oct 2026)', () => {
+  const day = (events: TruckDayEventInput[], over: Partial<TruckDayInput> = {}) => buildTruckDay(input({ moves: [], events, ...over }));
+  const outs = (m: TruckDayModel) => m.timeline.filter((t) => t.kind === 'DEPOT_OUT');
+  const back = ev(1, null, 'BACK_AT_DEPOT', 'PHONE_MANUAL', '10:40');
+
+  it('two Leaving taps (10:20 too early, 10:55 the real one): one line at 10:55, the time rule R2 measures from; 10:20 named as corrected', () => {
+    const m = day([back, ev(2, null, 'DEPOT_DEPART', 'PHONE_MANUAL', '10:20'), ev(2, null, 'DEPOT_DEPART', 'PHONE_MANUAL', '10:55')]);
+    expect(outs(m)).toHaveLength(1);
+    expect(outs(m)[0]).toMatchObject({ at: T('10:55').toISOString(), title: 'Left the depot', source: 'driver', loadNo: 2, tone: 'info' });
+    expect(outs(m)[0]!.lines).toEqual(['"Leaving for next load" (L2)', 'Also tapped at 10:20: corrected by tapping again (the latest tap before the first stop counts)']);
+    // The same time as the turnaround of rule R2 and the plan screen's load row.
+    const t = turnaroundOf({ backAt: T('10:40'), leftTaps: [T('10:20'), T('10:55')], dispatchAt: T('11:05'), firstSignAt: T('11:35'), now: T('11:50') });
+    expect(t).toMatchObject({ how: 'TAP', leftAt: T('10:55') });
+    expect(ids(m).filter((x) => x.includes('DEPOT_'))).toEqual(['10:40 DEPOT_IN Back at the depot', '10:55 DEPOT_OUT Left the depot', '(15:00) DEPOT_IN Planned back at the depot']);
+  });
+
+  it('a tap again after the truck had reached a stop is not counted (named on the line); only such taps: one muted line', () => {
+    const again = day([ev(2, null, 'DEPOT_DEPART', 'PHONE_MANUAL', '11:08'), ev(2, null, 'DEPOT_DEPART', 'PHONE_MANUAL', '11:40')]);
+    expect(outs(again).map((t) => t.at)).toEqual([T('11:08').toISOString()]);
+    expect(outs(again)[0]!.lines).toContain('Tapped again at 11:40, after the truck had reached a stop: not counted');
+    const late = day([ev(2, null, 'DEPOT_DEPART', 'PHONE_MANUAL', '11:40')]);
+    expect(outs(late)).toHaveLength(1);
+    expect(outs(late)[0]).toMatchObject({ at: T('11:40').toISOString(), title: 'Leaving tapped (not counted)', tone: 'muted' });
+    expect(outs(late)[0]!.lines).toEqual(['"Leaving for next load" (L2) at 11:40', 'Tapped after the truck had reached a stop (11:35): not when it left the depot']);
+  });
+
+  it("the first sign is R2's: the driver's and the office's times and the phone's own photos, never a GPS-only time", () => {
+    const taps = [ev(2, null, 'DEPOT_DEPART', 'PHONE_MANUAL', '11:08'), ev(2, null, 'DEPOT_DEPART', 'PHONE_MANUAL', '11:25')];
+    // A photo the phone took at stop 1 at 11:20, before the driver's arrival tap: the 11:25 tap came after it.
+    const photo = day(taps, { visits: [visit(2, 1, { arrivedAt: T('11:35'), arrivalSource: 'PHONE_AUTO', phonePhotoTimes: [T('11:20')] })] });
+    expect(outs(photo).map((t) => t.at)).toEqual([T('11:08').toISOString()]);
+    // A GPS-only arrival at 11:15 is not a sign (R2 leaves out GPS times): the 11:25 tap counts.
+    const gps = day(taps, { visits: [visit(2, 1, { arrivedAt: T('11:15'), arrivalSource: 'AYUN' })] });
+    expect(gps.stops.find((s) => s.loadNo === 2 && s.sequence === 1)!.arrivalBy).toBe('GPS (Ayun)');
+    expect(outs(gps).map((t) => t.at)).toEqual([T('11:25').toISOString()]);
+    expect(outs(gps)[0]!.lines).toContain('Also tapped at 11:08: corrected by tapping again (the latest tap before the first stop counts)');
+  });
+
+  it('two Back at depot taps: one line at the earliest (the one the alerts read), the other named on it', () => {
+    const m = day([back, ev(1, null, 'BACK_AT_DEPOT', 'PHONE_MANUAL', '10:52')]);
+    const ins = m.timeline.filter((t) => t.kind === 'DEPOT_IN' && t.at);
+    expect(ins.map((t) => `${t.title} ${t.at}`)).toEqual([`Back at the depot ${T('10:40').toISOString()}`]);
+    expect(ins[0]!.lines).toEqual(['"Back at depot" (L1)', 'Tapped again at 10:52: the first tap counts']);
+  });
+
+  it('a tap on a load still Planned is not counted (rule R2 reads none there)', () => {
+    const planned = { ...L2, status: 'PLANNED', dispatchedAt: null, statusChangedAt: null };
+    const m = day([ev(2, null, 'DEPOT_DEPART', 'PHONE_MANUAL', '11:08')], { loads: [L1, planned], visits: [] });
+    expect(outs(m)[0]).toMatchObject({ title: 'Leaving tapped (not counted)', tone: 'muted' });
+    expect(outs(m)[0]!.lines.at(-1)).toBe('The load is planned, not on the road: not counted as the truck leaving');
+  });
+
+  it('countedLeaveTap: the latest tap up to now at or before the first sign; every tap up to now without one', () => {
+    expect(countedLeaveTap([T('10:55'), T('10:20')], T('11:35'), T('11:50'))).toEqual(T('10:55'));
+    expect(countedLeaveTap([T('10:55'), T('11:40')], T('11:35'), T('11:50'))).toEqual(T('10:55'));
+    expect(countedLeaveTap([T('11:40')], T('11:35'), T('11:50'))).toBeNull();
+    expect(countedLeaveTap([T('10:20'), T('10:55')], null, T('11:50'))).toEqual(T('10:55'));
+    expect(countedLeaveTap([T('10:20'), T('12:00')], null, T('11:50'))).toEqual(T('10:20'));
+    // A sign after now is no sign yet.
+    expect(countedLeaveTap([T('10:20'), T('10:55')], T('12:30'), T('11:50'))).toEqual(T('10:55'));
+    expect(countedLeaveTap([], null, T('11:50'))).toBeNull();
+  });
+});
+
+describe('what the page shows for the date picked (review of 18 Oct 2026: a failed read of a new date)', () => {
+  const held = { date: '2026-10-15' };
+  it('the day of the date picked; a refresh that failed says the day shown is the last read, with Try again', () => {
+    expect(truckDayScreen({ data: { date: DATE }, error: null, loading: false }, DATE)).toEqual({ show: 'DAY', loading: false, message: null, retry: false });
+    expect(truckDayScreen({ data: { date: DATE }, error: null, loading: true }, DATE)).toEqual({ show: 'DAY', loading: true, message: null, retry: false });
+    expect(truckDayScreen({ data: { date: DATE }, error: 'HTTP 500', loading: false }, DATE)).toEqual({ show: 'DAY', loading: false, message: 'HTTP 500 The day shown is from the last read.', retry: true });
+  });
+
+  it("another date's day held: the truck and the picker only, Loading while read; its failure stops Loading and offers Try again", () => {
+    expect(truckDayScreen({ data: held, error: null, loading: true }, DATE)).toEqual({ show: 'HELD', loading: true, message: null, retry: false });
+    expect(truckDayScreen({ data: held, error: 'Too many requests', loading: false }, DATE)).toEqual({ show: 'HELD', loading: false, message: 'Too many requests', retry: true });
+    // Trying again: Loading, the message gone until that read answers.
+    expect(truckDayScreen({ data: held, error: 'Too many requests', loading: true }, DATE)).toEqual({ show: 'HELD', loading: true, message: null, retry: false });
+  });
+
+  it('nothing read yet: Loading, or the failure with Try again', () => {
+    expect(truckDayScreen({ data: null, error: null, loading: true }, DATE)).toEqual({ show: 'NONE', loading: true, message: null, retry: false });
+    expect(truckDayScreen({ data: null, error: 'Not found', loading: false }, DATE)).toEqual({ show: 'NONE', loading: false, message: 'Not found', retry: true });
   });
 });
 

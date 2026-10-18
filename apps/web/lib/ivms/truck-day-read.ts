@@ -10,10 +10,14 @@
  * - Of the tracker, only whether the truck has one is read (a count): never the IMEI. Never a depot's
  *   Ayun zone name (lib/db.ts omits it; the depots are selected by field).
  * - GPS rows only while the mode in effect needs them (the kill switch is OFF): the live position from
- *   MAP on, for today (or yesterday while a load of it is out); the trail, the depot moves and the GPS
- *   stop events in TIMES only, the trail from IvmsTruckDay.trailFrom on (never a point from before the
- *   tracker was put on this truck: second review M-1), at most TRAIL_READ_MAX points, and only for a day
- *   the retention keeps whole (trailKept: today and yesterday by default).
+ *   MAP on, for today or yesterday and only while a load of that date is out (Locked, Loading, On the
+ *   road: the live map's rule, lib/ivms/vehicles.ts readLiveVehicles, review M7; a stored row the poller
+ *   has not cleared yet is never read for a truck off duty, review of 18 Oct 2026); the trail, the depot
+ *   moves and the GPS stop events in TIMES only, the trail from IvmsTruckDay.trailFrom on (never a point
+ *   from before the tracker was put on this truck: second review M-1), at most TRAIL_READ_MAX points, and
+ *   only for a day the retention keeps whole (trailKept: today and yesterday by default).
+ * - The phone's own photo times (DeliveryPhoto: the capture time only, never the photo or its position),
+ *   so the timeline places the Leaving for next load tap that rule R2 counts.
  */
 import { prisma } from '../db';
 import { toOpsAlertRow } from '../alerts/types';
@@ -85,6 +89,7 @@ export async function readTruckDay(tenantId: string, truckId: string, date: stri
     prisma.stopVisit.findMany({
       where: { tenantId, truckId, deliveryDate },
       select: {
+        id: true,
         depotId: true,
         loadNo: true,
         sequence: true,
@@ -153,8 +158,9 @@ export async function readTruckDay(tenantId: string, truckId: string, date: stri
   const gps = times && !suppressed;
   const since = truckDay?.trailFrom && truckDay.trailFrom > window.from ? truckDay.trailFrom : window.from;
   const anyOut = loadRows.some((l) => OUT.has(l.status));
-  const liveDay = day === today || (day === addDaysIso(today, -1) && anyOut);
-  const [moves, trail, position] = await Promise.all([
+  const liveDay = anyOut && (day === today || day === addDaysIso(today, -1));
+  const visitIds = visits.map((v) => v.id);
+  const [moves, trail, position, photos] = await Promise.all([
     gps
       ? prisma.ivmsEvent.findMany({
           where: { tenantId, truckId, kind: { in: ['DEPOT_IN', 'DEPOT_OUT'] }, eventAt: { gte: window.from, lte: window.to } },
@@ -174,7 +180,19 @@ export async function readTruckDay(tenantId: string, truckId: string, date: stri
     ivmsModeAtLeast(mode, 'MAP') && liveDay && tracked > 0
       ? prisma.truckPosition.findFirst({ where: { tenantId, truckId }, select: { truckId: true, fixAt: true, lat: true, lng: true, speedKmh: true, heading: true, flags: true, movedAt: true } })
       : Promise.resolve(null),
+    // The phone's own photos (not old gallery ones): a first sign at a stop for which Leaving tap counts
+    // (rule R2's firstSignOf), read only when there is a Leaving tap to place.
+    visitIds.length && eventRows.some((e) => e.kind === 'DEPOT_DEPART')
+      ? prisma.deliveryPhoto.findMany({
+          where: { tenantId, visitId: { in: visitIds }, source: { in: ['PHONE_AUTO', 'PHONE_MANUAL'] }, oldPhoto: false },
+          orderBy: { takenAt: 'asc' },
+          take: TRUCK_DAY_EVENTS_MAX,
+          select: { visitId: true, takenAt: true },
+        })
+      : Promise.resolve([]),
   ]);
+  const photosOf = new Map<string, Date[]>();
+  for (const p of photos) photosOf.set(p.visitId, [...(photosOf.get(p.visitId) ?? []), p.takenAt]);
 
   const driverOf = new Map(drivers.map((d) => [d.id, d]));
   const snapshotCode = readTruckSnapshot(loadRows[0]?.truckSnapshotJson ?? null)?.code ?? null;
@@ -221,7 +239,7 @@ export async function readTruckDay(tenantId: string, truckId: string, date: stri
         })),
       };
     }),
-    visits: visits.map((v) => ({ ...v, outcome: v.outcome ?? null, reason: v.reason ?? null })),
+    visits: visits.map(({ id: visitId, ...v }) => ({ ...v, outcome: v.outcome ?? null, reason: v.reason ?? null, phonePhotoTimes: photosOf.get(visitId) ?? [] })),
     events: eventRows,
     moves: moves.map((m) => ({ kind: m.kind, origin: m.origin, at: m.eventAt, depotId: m.depotId ?? null, outcome: m.outcome ?? null })),
     trail,

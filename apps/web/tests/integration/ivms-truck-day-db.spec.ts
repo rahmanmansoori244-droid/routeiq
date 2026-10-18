@@ -10,6 +10,9 @@
  *     yesterday: inside the trail's retention), no live position (none stored), and never the tracker's
  *     IMEI or the depot's Ayun zone.
  *  2. Another company's truck, or this truck asked by another company, is null (the route's 404).
+ *  3. The Leaving for next load tap shown is the one rule R2 counts (review of 18 Oct 2026): the latest
+ *     before the first sign at a stop, the phone's own photo (DeliveryPhoto, read by the page's reader)
+ *     being one and an old gallery photo not; a tap after it is named as not counted.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -138,5 +141,22 @@ describe('2. isolation', () => {
   it("another company's truck, or this truck asked by another company, is null", async () => {
     expect(await readTruckDay(tenantId, otherTruckId, D)).toBeNull();
     expect(await readTruckDay(otherId, truckId, D)).toBeNull();
+  });
+});
+
+describe('3. the Leaving tap rule R2 counts (review of 18 Oct 2026)', () => {
+  it("one line at the tap R2 counts: the latest before the first sign, the phone's own photo being one (an old photo is not)", async () => {
+    const visit = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId, truckId, sequence: 2 }, select: { id: true, depotId: true } });
+    const tap = { tenantId, depotId: visit.depotId, deliveryDate: dayDate, truckId, loadNo: 1, source: 'PHONE_MANUAL' as const, kind: 'DEPOT_DEPART' as const };
+    for (const hhmm of ['07:00', '07:10']) await prisma.stopEvent.create({ data: { ...tap, at: L(hhmm), idempotencyKey: `dl:${uniqueSuffix()}` } });
+    const photo = { tenantId, visitId: visit.id, positionStatus: 'OK' as const, byteSize: 3, sha256: 'x' };
+    // The phone's photo at stop 2 at 07:05, before the driver's 07:20 arrival tap: the first sign. Stop 1's
+    // GPS arrival is not one (R2 leaves out GPS times), nor is a gallery photo older than the arrival.
+    await prisma.deliveryPhoto.create({ data: { ...photo, idempotencyKey: `dlphoto:${uniqueSuffix()}`, source: 'PHONE_AUTO', takenAt: L('07:05') } });
+    await prisma.deliveryPhoto.create({ data: { ...photo, idempotencyKey: `dlphoto:${uniqueSuffix()}`, source: 'PHONE_MANUAL', takenAt: L('06:58'), oldPhoto: true } });
+    const m = await readTruckDay(tenantId, truckId, D, new Date());
+    const left = m!.timeline.filter((t) => t.kind === 'DEPOT_OUT' && t.source === 'driver');
+    expect(left.map((t) => t.at)).toEqual([L('07:00').toISOString()]);
+    expect(left[0]!.lines).toContain('Tapped again at 07:10, after the truck had reached a stop: not counted');
   });
 });

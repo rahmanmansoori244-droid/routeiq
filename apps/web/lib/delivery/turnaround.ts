@@ -80,6 +80,23 @@ export interface Turnaround {
 const minutesBetween = (a: Date, b: Date) => Math.max(0, (b.getTime() - a.getTime()) / 60_000);
 const later = (a: Date, b: Date) => (a.getTime() >= b.getTime() ? a : b);
 
+/**
+ * The driver's Leaving for next load tap that says when the truck left: the LATEST tap up to `now` made at
+ * or before the first sign of the truck at a stop of the trip (every tap up to `now` when there is no sign
+ * yet). A tap made too early is corrected by tapping again; a tap only after the first sign (tapped late,
+ * at the customer) is not the leave. Null: no such tap. Shared by turnaroundOf (rule R2, the load row) and
+ * the truck day page's timeline (lib/ivms/truck-day.ts; review of 18 Oct 2026), so both name one time.
+ */
+export function countedLeaveTap(leftTaps: readonly Date[], firstSignAt: Date | null, now: Date): Date | null {
+  const sign = firstSignAt && firstSignAt.getTime() <= now.getTime() ? firstSignAt : null;
+  let best: Date | null = null;
+  for (const t of leftTaps) {
+    if (t.getTime() > now.getTime() || (sign && t.getTime() > sign.getTime())) continue;
+    if (!best || t.getTime() > best.getTime()) best = t;
+  }
+  return best;
+}
+
 /** The turnaround of one trip from the facts above (null: no Back at depot of the trip before). */
 export function turnaroundOf(i: TurnaroundIn): Turnaround | null {
   if (!i.backAt) return null;
@@ -95,8 +112,7 @@ export function turnaroundOf(i: TurnaroundIn): Turnaround | null {
   // Trip N+1 had started before Back at depot of trip N was tapped: Back at depot came late, no number.
   if (sign && sign.getTime() < back.getTime()) return notMeasured('BACK_LATE');
   // The latest tap before the truck reached a stop (a tap made too early is corrected by tapping again).
-  const before = sign ? taps.filter((t) => t.getTime() <= sign.getTime()) : taps;
-  const tap = before.length ? before[before.length - 1]! : null;
+  const tap = countedLeaveTap(taps, sign, i.now);
   if (tap && tap.getTime() < back.getTime()) return notMeasured('BACK_LATE');
   const left = (at: Date, how: LeftHow, extra: Partial<Turnaround> = {}): Turnaround => {
     const leftAt = later(at, start);

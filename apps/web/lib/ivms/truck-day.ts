@@ -20,9 +20,12 @@
  * - the map: the depot, the stops numbered and coloured by result, the day's GPS trail (at most
  *   TRAIL_MAX_POINTS, evenly thinned; only for the days the retention keeps whole, today and yesterday
  *   with the default ivmsTrailDays of 2: trailKept), the live position;
- * - the live status (today; yesterday while a load of it is still out): the last fix, moving or parked
- *   since, the speed, the straight-line distance to the depot, the next stop and its live ETA (the day
- *   screen's own rules: lib/ivms/live-map.ts liveVehicleOf and lib/ivms/eta.ts liveEta).
+ * - the live status (today or yesterday, only while a load of that date is out: Locked, Loading or On the
+ *   road, as the live map; never a truck off duty): the last fix, moving or parked since, the speed, the
+ *   straight-line distance to the depot, the next stop and its live ETA (the day screen's own rules:
+ *   lib/ivms/live-map.ts liveVehicleOf and lib/ivms/eta.ts liveEta);
+ * - the depot taps as the rest of RouteIQ counts them: the Leaving for next load tap rule R2 counts (the
+ *   latest before the first stop), the earliest Back at depot; the other taps are named on that line.
  *
  * By the company's GPS tracking mode (TenantConfig.ivmsMode; the kill switch ROUTEIQ_DISABLE_IVMS counts
  * as OFF, the reader passes the mode in effect):
@@ -41,6 +44,7 @@ import { alertStateText, ruleLabel } from '../alerts/view';
 import { SEVERITY_LABEL } from '../alerts/catalog';
 import type { OpsAlertRow } from '../alerts/types';
 import { countOf, GPS_WORD, OUTCOME_LABEL, reasonText, sourceWord } from '../delivery/office-text';
+import { countedLeaveTap, firstSignOf } from '../delivery/turnaround';
 import { cyclesOf, GPS_DEPARTURE_MATCH_MIN, withoutGpsTimes, type VisitEvent, type VisitTimes } from '../delivery/visit';
 import { distanceM } from '../dispatch/snapshots';
 import { addDaysIso, fmtDayMonth, fmtHhmm, fmtWindow, localMinutes, todayIso, zonedDayStart } from '../dispatch/time';
@@ -124,6 +128,12 @@ export interface TruckDayVisitInput extends VisitTimes {
   casesDelivered: number | null;
   photoCount: number;
   outcomeLate: boolean;
+  /**
+   * When the phone took its own photos of the visit (PHONE_AUTO / PHONE_MANUAL, not an old gallery photo):
+   * a first sign of the truck at the stop, as rule R2 reads it (lib/delivery/turnaround.ts firstSignOf),
+   * for which Leaving for next load tap counts. Absent: none.
+   */
+  phonePhotoTimes?: Date[];
 }
 
 /** A load-level tap (BACK_AT_DEPOT, DEPOT_DEPART) or a GPS arrival / departure (source AYUN) of the truck-day. */
@@ -367,6 +377,37 @@ export function truckDayRefreshMs(m: Pick<TruckDayModel, 'date' | 'today' | 'liv
   return m.date === m.today || m.live ? TRUCK_DAY_REFRESH_MS : null;
 }
 
+/** What the truck day page shows for the date picked (truckDayScreen). */
+export interface TruckDayScreen {
+  /**
+   * DAY: the day read for the date picked; HELD: another date's day is still held (a date just picked,
+   * or its read failed): only the truck and the date picker are shown from it, never its loads, summary,
+   * live status, map or timeline under the date picked; NONE: nothing read yet.
+   */
+  show: 'DAY' | 'HELD' | 'NONE';
+  /** "Loading...": a read of the date picked is in flight. Never left on once that read has failed. */
+  loading: boolean;
+  /** The error to show; null: none. */
+  message: string | null;
+  /** A "Try again" button next to the message: the read failed and none is in flight. */
+  retry: boolean;
+}
+
+/**
+ * The page's state from its reads (app/t/[slug]/dispatch/truck/[truckId]/use-truck-day.ts: `error` is the
+ * failed read of the date picked only): review of 18 Oct 2026, a date whose read failed (a 429 after
+ * clicking quickly through dates, a 500) left the page on the old date's loads with "Loading..." for good
+ * and no way to read it again. Now the old day is never shown as the date picked, the loading stops when
+ * the read has failed, and the error comes with "Try again".
+ */
+export function truckDayScreen(s: { data: { date: string } | null; error: string | null; loading: boolean }, date: string): TruckDayScreen {
+  const show = !s.data ? 'NONE' : s.data.date === date ? 'DAY' : 'HELD';
+  const failed = !!s.error && !s.loading;
+  // The day of the date picked: a later read that failed (a refresh) says the day shown is the last read.
+  if (show === 'DAY') return { show, loading: s.loading, message: s.error ? `${s.error} The day shown is from the last read.` : null, retry: failed };
+  return { show, loading: !failed, message: failed ? s.error : null, retry: failed };
+}
+
 /**
  * The time range of a day's trail and depot moves: its local midnight to 24 h later, or to its last
  * activity (a late Back at depot, a result after midnight) + 15 min when that is later, never past 27 h.
@@ -481,7 +522,12 @@ export function buildTruckDay(i: TruckDayInput): TruckDayModel {
   const gpsTimes = i.mode === 'TIMES' && !suppressed;
   const loads = [...i.loads].sort((a, b) => a.departMin - b.departMin || a.loadNo - b.loadNo);
   const anyOut = loads.some((l) => OUT_STATUSES.has(l.status));
-  const liveDay = i.date === today || (i.date === addDaysIso(today, -1) && anyOut);
+  // The live position: today or yesterday, and only while the truck has a load of that date out (Locked,
+  // Loading, On the road), the live map's own rule (lib/ivms/vehicles.ts readLiveVehicles, review M7: no
+  // position of a truck off duty). A position row the poller has not cleared yet (a backoff, the
+  // retention's delay) is never shown for a truck whose loads are all Completed or still Planned (review
+  // of 18 Oct 2026). The reader reads it under the same rule (lib/ivms/truck-day-read.ts).
+  const liveDay = anyOut && (i.date === today || i.date === addDaysIso(today, -1));
   const liveOn = ivmsModeAtLeast(i.mode, 'MAP') && liveDay;
   const depotOf = new Map(i.depots.map((d) => [d.id, d]));
 
@@ -489,11 +535,27 @@ export function buildTruckDay(i: TruckDayInput): TruckDayModel {
   const visitKey = (depotId: string, loadNo: number, seq: number) => `${depotId}|${loadNo}|${seq}`;
   const visits = new Map(i.visits.map((v) => [visitKey(v.depotId, v.loadNo, v.sequence), gpsTimes ? v : withoutGpsTimes(v)]));
   const events = i.events.filter((e) => e.source !== 'AYUN' || gpsTimes);
+  // The depot moves shown (TIMES only): not the same move from another origin, nor one processing did not use.
+  const moves = gpsTimes ? i.moves.filter((m) => (m.kind === 'DEPOT_IN' || m.kind === 'DEPOT_OUT') && !HIDDEN_MOVE_OUTCOMES.has(m.outcome ?? '')) : [];
+  // The trail (TIMES, not suppressed, a day the retention keeps whole).
+  const kept = trailKept(i.date, today, i.trailDays);
+  const trailPts = gpsTimes && kept ? i.trail.filter((p) => okPoint(p.lat, p.lng)).sort((a, b) => a.fixAt.getTime() - b.fixAt.getTime()) : [];
+  // The day shows something GPS recorded: a trail, a depot move, a GPS stay or a GPS time of a stop.
+  const gpsShown = trailPts.length > 0 || moves.length > 0 || events.some((e) => e.source === 'AYUN') || [...visits.values()].some((v) => v.arrivalSource === 'AYUN' || v.departureSource === 'AYUN');
 
   const notes: string[] = [];
   if (i.mode === 'OFF') notes.push("GPS tracking is off (Settings, company admin): this page shows the plan and the results the drivers and the office recorded. Ayun's own site still has the truck's history.");
   else if (i.mode === 'MAP') notes.push("GPS tracking is on for the live map only: the times are the drivers' and the office's, and no GPS trail is kept.");
-  if (i.mode !== 'OFF' && !i.truck.hasTracker) notes.push('This truck has no GPS tracker set (Trucks page, company admin): its times come from the driver\'s phone only.');
+  // No tracker set: `hasTracker` is the truck's tracker NOW. A day recorded while it had one keeps its
+  // trail and GPS times (the reader still reads them), so the note never says "from the driver's phone
+  // only" next to them (review of 18 Oct 2026: a tracker taken off this morning, yesterday opened).
+  if (i.mode !== 'OFF' && !i.truck.hasTracker) {
+    notes.push(
+      gpsShown
+        ? 'No GPS tracker is set on this truck now (Trucks page, company admin): the GPS times and the trail shown here were recorded while it had one.'
+        : "This truck has no GPS tracker set (Trucks page, company admin): its times come from the driver's phone only.",
+    );
+  }
   if (i.mode === 'TIMES' && suppressed) {
     const why = SUPPRESS_TEXT[i.truckDay?.suppressReason ?? ''] ?? 'they were switched off';
     notes.push(`GPS times of this truck-day were removed (${why}): no GPS trail, depot move or GPS time is shown for it.`);
@@ -556,15 +618,50 @@ export function buildTruckDay(i: TruckDayInput): TruckDayModel {
         : { key: `dispatch:${l.id}`, kind: 'DISPATCHED', at: null, plannedAt: iso(atMin(l.departMin)), loadNo: l.loadNo, sequence: null, title: `${tag} planned departure`, source: null, lines: [...loadLines, `Status: ${loadStatusWord(l.status)}`], tone: 'muted' },
     );
     const mine = (kind: string) => events.filter((e) => e.kind === kind && e.loadNo === l.loadNo && e.depotId === l.depotId).sort((a, b) => a.at.getTime() - b.at.getTime());
-    mine('DEPOT_DEPART').forEach((e, n) =>
-      planOrder.push({ key: `tap:out:${l.id}:${n}`, kind: 'DEPOT_OUT', at: e.at.toISOString(), plannedAt: null, loadNo: l.loadNo, sequence: null, title: 'Left the depot', source: sourceWord(e.source), lines: [`"Leaving for next load" (${tag})`], tone: 'info' }),
-    );
+    const tapTimes = (list: readonly TruckDayEventInput[]) => `at ${list.map((e) => hhmm(e.at)).join(', ')}`;
+    // The driver's taps as the rest of RouteIQ reads them (review of 18 Oct 2026): every tap is kept, but
+    // one time counts, and the page shows that one, so it never says the truck left 35 min before it did
+    // and agrees with the R2 alert listed on the same page. Leaving for next load: the tap rule R2 counts
+    // (lib/delivery/turnaround.ts countedLeaveTap: the latest at or before the first sign at a stop, that
+    // sign from the driver's and the office's times and the phone's own photos as R2 reads them, never
+    // one on a Planned load); a tap made too early and tapped again, or one after the truck had reached a
+    // stop, is named on its line. With no tap that counts, the taps are one muted line at their time.
+    const lefts = mine('DEPOT_DEPART');
+    if (lefts.length) {
+      const own = i.visits.filter((v) => v.depotId === l.depotId && v.loadNo === l.loadNo);
+      const sign = firstSignOf(own.map(withoutGpsTimes), own.flatMap((v) => v.phonePhotoTimes ?? []));
+      const signSeen = sign && sign.getTime() <= i.now.getTime() ? sign : null;
+      const counted = l.status === 'PLANNED' ? null : countedLeaveTap(lefts.map((e) => e.at), signSeen, i.now);
+      const tapLine = `"Leaving for next load" (${tag})`;
+      if (counted) {
+        const earlier = lefts.filter((e) => e.at.getTime() < counted.getTime());
+        const later = lefts.filter((e) => e.at.getTime() > counted.getTime());
+        const tap = lefts.find((e) => e.at.getTime() === counted.getTime())!;
+        const lines = [tapLine];
+        if (earlier.length) lines.push(`Also tapped ${tapTimes(earlier)}: corrected by tapping again (the latest tap before the first stop counts)`);
+        if (later.length) lines.push(`Tapped again ${tapTimes(later)}${signSeen ? ', after the truck had reached a stop' : ''}: not counted`);
+        planOrder.push({ key: `tap:out:${l.id}`, kind: 'DEPOT_OUT', at: counted.toISOString(), plannedAt: null, loadNo: l.loadNo, sequence: null, title: 'Left the depot', source: sourceWord(tap.source), lines, tone: 'info' });
+      } else {
+        const why =
+          l.status === 'PLANNED'
+            ? 'The load is planned, not on the road: not counted as the truck leaving'
+            : signSeen
+              ? `Tapped after the truck had reached a stop (${hhmm(signSeen)}): not when it left the depot`
+              : 'Not counted as the truck leaving';
+        planOrder.push({ key: `tap:out:${l.id}`, kind: 'DEPOT_OUT', at: lefts[0]!.at.toISOString(), plannedAt: null, loadNo: l.loadNo, sequence: null, title: 'Leaving tapped (not counted)', source: sourceWord(lefts[0]!.source), lines: [`${tapLine} ${tapTimes(lefts)}`, why], tone: 'muted' });
+      }
+    }
     for (const s of [...l.stops].sort((a, b) => a.sequence - b.sequence)) planOrder.push(stopItems.get(visitKey(l.depotId, l.loadNo, s.sequence))!);
+    // Back at depot: the EARLIEST tap counts (lib/delivery/day-results.ts backAtDepot, the alert replay);
+    // a tap again later is named on its line.
     const backs = mine('BACK_AT_DEPOT');
-    backs.forEach((e, n) =>
-      planOrder.push({ key: `tap:in:${l.id}:${n}`, kind: 'DEPOT_IN', at: e.at.toISOString(), plannedAt: iso(atMin(l.returnMin)), loadNo: l.loadNo, sequence: null, title: 'Back at the depot', source: sourceWord(e.source), lines: [`"Back at depot" (${tag})`], tone: 'info' }),
-    );
-    if (!backs.length && l.status !== 'COMPLETED') {
+    const back = backs[0];
+    if (back) {
+      const again = backs.filter((e) => e.at.getTime() > back.at.getTime());
+      const lines = [`"Back at depot" (${tag})`, ...(again.length ? [`Tapped again ${tapTimes(again)}: the first tap counts`] : [])];
+      planOrder.push({ key: `tap:in:${l.id}`, kind: 'DEPOT_IN', at: back.at.toISOString(), plannedAt: iso(atMin(l.returnMin)), loadNo: l.loadNo, sequence: null, title: 'Back at the depot', source: sourceWord(back.source), lines, tone: 'info' });
+    }
+    if (!back && l.status !== 'COMPLETED') {
       planOrder.push({ key: `return:${l.id}`, kind: 'DEPOT_IN', at: null, plannedAt: iso(atMin(l.returnMin)), loadNo: l.loadNo, sequence: null, title: 'Planned back at the depot', source: null, lines: [`${tag} planned return ${fmtHhmm(l.returnMin)}`], tone: 'muted' });
     }
     if (l.status === 'COMPLETED') {
@@ -574,26 +671,23 @@ export function buildTruckDay(i: TruckDayInput): TruckDayModel {
 
   // ----- What happened at its own time: GPS depot moves, GPS visits, alerts
   const loose: TimelineItem[] = [...gpsVisitItems];
-  if (gpsTimes) {
-    for (const m of i.moves) {
-      if ((m.kind !== 'DEPOT_IN' && m.kind !== 'DEPOT_OUT') || HIDDEN_MOVE_OUTCOMES.has(m.outcome ?? '')) continue;
-      const depot = m.depotId ? depotOf.get(m.depotId) : undefined;
-      const lines = [depot ? `Depot: ${depot.name}` : 'A depot of the company'];
-      if (m.outcome === 'UNCONFIRMED') lines.push('Not confirmed by the GPS trail');
-      if (m.outcome === 'NO_LOAD') lines.push('No load was out at that time');
-      loose.push({
-        key: `move:${m.kind}:${m.origin}:${m.at.getTime()}`,
-        kind: m.kind === 'DEPOT_OUT' ? 'DEPOT_OUT' : 'DEPOT_IN',
-        at: m.at.toISOString(),
-        plannedAt: null,
-        loadNo: null,
-        sequence: null,
-        title: m.kind === 'DEPOT_OUT' ? 'Left the depot' : 'Arrived at the depot',
-        source: MOVE_ORIGIN_WORD[m.origin as IvmsEventOrigin] ?? GPS_WORD,
-        lines,
-        tone: m.outcome === 'UNCONFIRMED' ? 'muted' : 'info',
-      });
-    }
+  for (const m of moves) {
+    const depot = m.depotId ? depotOf.get(m.depotId) : undefined;
+    const lines = [depot ? `Depot: ${depot.name}` : 'A depot of the company'];
+    if (m.outcome === 'UNCONFIRMED') lines.push('Not confirmed by the GPS trail');
+    if (m.outcome === 'NO_LOAD') lines.push('No load was out at that time');
+    loose.push({
+      key: `move:${m.kind}:${m.origin}:${m.at.getTime()}`,
+      kind: m.kind === 'DEPOT_OUT' ? 'DEPOT_OUT' : 'DEPOT_IN',
+      at: m.at.toISOString(),
+      plannedAt: null,
+      loadNo: null,
+      sequence: null,
+      title: m.kind === 'DEPOT_OUT' ? 'Left the depot' : 'Arrived at the depot',
+      source: MOVE_ORIGIN_WORD[m.origin as IvmsEventOrigin] ?? GPS_WORD,
+      lines,
+      tone: m.outcome === 'UNCONFIRMED' ? 'muted' : 'info',
+    });
   }
   for (const a of i.alerts) {
     loose.push({
@@ -628,9 +722,7 @@ export function buildTruckDay(i: TruckDayInput): TruckDayModel {
   loose.forEach((item, n) => keyed.push({ item, key: Date.parse(item.at!), ord: planOrder.length + n }));
   keyed.sort((a, b) => a.key - b.key || a.ord - b.ord);
 
-  // ----- The trail (TIMES, not suppressed, a day the retention keeps whole)
-  const kept = trailKept(i.date, today, i.trailDays);
-  const trailPts = gpsTimes && kept ? i.trail.filter((p) => okPoint(p.lat, p.lng)).sort((a, b) => a.fixAt.getTime() - b.fixAt.getTime()) : [];
+  // ----- The trail line (trailPts above), at most TRAIL_MAX_POINTS
   const thin = downsampleTrail(trailPts);
   if (gpsTimes && i.truck.hasTracker && !trailPts.length && loads.some((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED')) {
     const days = Math.min(7, Math.max(1, Math.floor(i.trailDays) || 1));
@@ -651,7 +743,8 @@ export function buildTruckDay(i: TruckDayInput): TruckDayModel {
     const delay = n.delayMin === null || n.delayMin === 0 ? '' : ` (${n.delayMin > 0 ? '+' : ''}${n.delayMin} min against the plan)`;
     nextItem.lines.push(n.atStop ? 'The truck is here now (GPS)' : `Live ETA about ${hhmm(new Date(n.etaAt))}${delay} (GPS)`);
   }
-  if (liveOn && i.date === today && i.truck.hasTracker && !i.position) {
+  // Today with a tracker and no live status: no position stored, or none shown as no load is out.
+  if (ivmsModeAtLeast(i.mode, 'MAP') && i.date === today && i.truck.hasTracker && !live) {
     notes.push('No live position now: RouteIQ reads a truck\'s position only while it has a load out (locked, loading or on the road), within the GPS tracking hours.');
   }
 

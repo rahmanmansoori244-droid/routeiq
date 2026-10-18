@@ -17,7 +17,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { zonedDayStart } from '@/lib/dispatch/time';
-import { dateLabel, datePicker, loadStatusWord, RESULT_COLOR, timeOnDay, truckDayHref, type TimelineItem, type TimelineTone, type TruckDayModel } from '@/lib/ivms/truck-day';
+import { dateLabel, datePicker, loadStatusWord, RESULT_COLOR, timeOnDay, truckDayHref, truckDayScreen, type TimelineItem, type TimelineTone, type TruckDayModel } from '@/lib/ivms/truck-day';
 import { useTruckDay } from './use-truck-day';
 
 const TruckDayMap = dynamic(() => import('@/components/truck-day-map').then((m) => m.TruckDayMap), { ssr: false });
@@ -52,30 +52,29 @@ export function TruckDayClient({ slug, truckId, initialDate }: { slug: string; t
     router.replace(truckDayHref(slug, truckId, d), { scroll: false });
   };
 
-  if (!data) {
-    return error ? (
-      <div className="space-y-2">
-        <p className="text-sm text-red-700" role="alert">
-          {error}
-        </p>
-        <Button size="sm" variant="outline" onClick={reload}>
+  // What to show for the date picked (lib/ivms/truck-day.ts truckDayScreen; review of 18 Oct 2026): another
+  // date's day still held is never shown as this one, a failed read stops "Loading..." and offers "Try again".
+  const screen = truckDayScreen({ data, error, loading }, date);
+  const failure = screen.message ? (
+    <div className="flex flex-wrap items-center gap-2" data-testid="truck-day-error">
+      <p className={`text-sm ${screen.show === 'DAY' ? 'text-amber-700' : 'text-red-700'}`} role="alert">
+        {screen.message}
+      </p>
+      {screen.retry ? (
+        <Button size="sm" variant="outline" onClick={reload} data-testid="truck-day-retry">
           <RefreshCw className="mr-1 h-4 w-4" /> Try again
         </Button>
-      </div>
-    ) : (
-      <p className="text-sm text-muted-foreground">Loading the truck's day...</p>
-    );
-  }
+      ) : null}
+    </div>
+  ) : null;
 
-  const shownIsDate = data.date === date;
+  if (!data) return failure ?? <p className="text-sm text-muted-foreground">Loading the truck's day...</p>;
+
+  const shownIsDate = screen.show === 'DAY';
   return (
     <div className="space-y-4" data-testid="truck-day">
-      <Header model={data} slug={slug} date={date} onPick={pick} loading={loading || !shownIsDate} />
-      {error ? (
-        <p className="text-sm text-amber-700" role="alert">
-          {error} The day below is from the last read.
-        </p>
-      ) : null}
+      <Header model={data} slug={slug} date={date} onPick={pick} loading={screen.loading} dayShown={shownIsDate} />
+      {failure}
       {shownIsDate ? (
         <>
           <Card>
@@ -91,12 +90,16 @@ export function TruckDayClient({ slug, truckId, initialDate }: { slug: string; t
   );
 }
 
-function Header({ model, slug, date, onPick, loading }: { model: TruckDayModel; slug: string; date: string; onPick: (d: string) => void; loading: boolean }) {
+/**
+ * The truck, the buttons, the date picker; and, only when `dayShown` (the model is the date picked's day),
+ * the loads, the summary, the live status and the notes: another date's day still held while the date
+ * picked is read (or after its read failed) gives the truck and the date picker only.
+ */
+function Header({ model, slug, date, onPick, loading, dayShown }: { model: TruckDayModel; slug: string; date: string; onPick: (d: string) => void; loading: boolean; dayShown: boolean }) {
   const picker = datePicker(model.dates, date);
   const dayStart = zonedDayStart(model.date, model.tz);
-  const firstDepot = model.loads[0]?.depotId ?? null;
+  const firstDepot = dayShown ? (model.loads[0]?.depotId ?? null) : null;
   const planHref = `/t/${slug}/dispatch?date=${date}${firstDepot ? `&depot=${encodeURIComponent(firstDepot)}` : ''}`;
-  const s = model.summary;
   return (
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3 py-3">
@@ -151,51 +154,60 @@ function Header({ model, slug, date, onPick, loading }: { model: TruckDayModel; 
           </Button>
           {loading ? <span className="text-xs text-muted-foreground">Loading...</span> : null}
         </div>
-
-        {model.loads.length ? (
-          <ul className="space-y-1" data-testid="truck-day-loads">
-            {model.loads.map((l) => (
-              <li key={l.id} className="flex flex-wrap items-center gap-2">
-                <Badge variant={STATUS_VARIANT[l.status] ?? 'outline'}>
-                  L{l.loadNo} · {loadStatusWord(l.status)}
-                </Badge>
-                <span className="text-xs text-muted-foreground">
-                  {timeOnDay(l.departAt, dayStart, model.tz)}-{timeOnDay(l.returnAt, dayStart, model.tz)} · {l.done} of {l.stops} stops done · driver{' '}
-                  {l.driverName ? `${l.driverName}${l.driverCasual ? ' (daily)' : ''}` : 'none'}
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-muted-foreground">No load for this truck on {dateLabel(model.date, model.today)}.</p>
-        )}
-
-        {s.stops ? (
-          <p className="text-xs" data-testid="truck-day-summary">
-            {s.stops} stop{s.stops === 1 ? '' : 's'}: <span className="text-green-700">{s.delivered} delivered</span>
-            {s.partly ? <span className="text-amber-700">, {s.partly} partly</span> : null}
-            {s.notDelivered ? <span className="text-red-700">, {s.notDelivered} not delivered</span> : null}
-            {s.pending ? <span className="text-muted-foreground">, {s.pending} without a result</span> : null}
-          </p>
-        ) : null}
-
-        {model.live ? (
-          <p className={`flex items-start gap-1 text-sm ${model.live.stale ? 'text-amber-700' : ''}`} data-testid="truck-day-live">
-            <MapPin className="mt-0.5 h-4 w-4 shrink-0" /> {model.live.text}
-          </p>
-        ) : null}
-        {model.gps.facts.map((f, k) => (
-          <p key={`f${k}`} className="text-xs text-amber-700">
-            {f}
-          </p>
-        ))}
-        {model.gps.notes.map((n, k) => (
-          <p key={`n${k}`} className="text-xs text-muted-foreground" data-testid="truck-day-note">
-            {n}
-          </p>
-        ))}
+        {dayShown ? <DaySummary model={model} dayStart={dayStart} /> : null}
       </CardContent>
     </Card>
+  );
+}
+
+/** The loads, the summary, the live status, the GPS facts and notes of the day shown. */
+function DaySummary({ model, dayStart }: { model: TruckDayModel; dayStart: Date }) {
+  const s = model.summary;
+  return (
+    <>
+      {model.loads.length ? (
+        <ul className="space-y-1" data-testid="truck-day-loads">
+          {model.loads.map((l) => (
+            <li key={l.id} className="flex flex-wrap items-center gap-2">
+              <Badge variant={STATUS_VARIANT[l.status] ?? 'outline'}>
+                L{l.loadNo} · {loadStatusWord(l.status)}
+              </Badge>
+              <span className="text-xs text-muted-foreground">
+                {timeOnDay(l.departAt, dayStart, model.tz)}-{timeOnDay(l.returnAt, dayStart, model.tz)} · {l.done} of {l.stops} stops done · driver{' '}
+                {l.driverName ? `${l.driverName}${l.driverCasual ? ' (daily)' : ''}` : 'none'}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-muted-foreground">No load for this truck on {dateLabel(model.date, model.today)}.</p>
+      )}
+
+      {s.stops ? (
+        <p className="text-xs" data-testid="truck-day-summary">
+          {s.stops} stop{s.stops === 1 ? '' : 's'}: <span className="text-green-700">{s.delivered} delivered</span>
+          {s.partly ? <span className="text-amber-700">, {s.partly} partly</span> : null}
+          {s.notDelivered ? <span className="text-red-700">, {s.notDelivered} not delivered</span> : null}
+          {s.pending ? <span className="text-muted-foreground">, {s.pending} without a result</span> : null}
+        </p>
+      ) : null}
+
+      {model.live ? (
+        <p className={`flex items-start gap-1 text-sm ${model.live.stale ? 'text-amber-700' : ''}`} data-testid="truck-day-live">
+          <MapPin className="mt-0.5 h-4 w-4 shrink-0" /> {model.live.text}
+        </p>
+      ) : null}
+      {model.gps.facts.map((f, k) => (
+        <p key={`f${k}`} className="text-xs text-amber-700">
+          {f}
+        </p>
+      ))}
+      {model.gps.notes.map((n, k) => (
+        <p key={`n${k}`} className="text-xs text-muted-foreground" data-testid="truck-day-note">
+          {n}
+        </p>
+      ))}
+    </>
   );
 }
 

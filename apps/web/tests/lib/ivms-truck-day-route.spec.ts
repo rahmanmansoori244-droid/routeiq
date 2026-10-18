@@ -3,8 +3,10 @@
  * dispatcher and up only (VIEWER 403, no session 401), another company's truck (or none) 404 with nothing
  * of it read, a date that is not YYYY-MM-DD 400; the loads of the plan version in use; the other
  * company's GPS rows never in the answer even for the same truck id; never an IMEI or an Ayun zone name;
- * the trail and the depot moves in TIMES only; the live position from MAP on. Also the plan screen's
- * truck link. Invented data only (a depot in empty desert, truck "T-100", the vendor's dummy IMEI).
+ * the trail and the depot moves in TIMES only; the live position from MAP on, only while a load is out
+ * (review of 18 Oct 2026); the Leaving tap rule R2 counts, with the phone's own photos read company by
+ * company. Also the plan screen's truck link. Invented data only (a depot in empty desert, truck "T-100",
+ * the vendor's dummy IMEI).
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -219,6 +221,41 @@ describe('what the answer holds', () => {
     const m = (await call('t1', addDaysIso(TODAY, -3))).body.data!;
     expect(m.loads.map((l) => l.id)).toEqual(['L0']);
     expect(m.live).toBeNull();
+  });
+
+  // Review of 18 Oct 2026: a position row the poller has not cleared yet (its last load Completed while the
+  // poller is in a backoff) is never shown for a truck with no load out, as on the live map (review M7).
+  it('today with every load Completed: no live position even with a position row stored', async () => {
+    tables.planLoad.find((l) => l.id === 'L1')!.status = 'COMPLETED';
+    const m = (await call()).body.data!;
+    expect(m.loads.map((l) => l.status)).toEqual(['COMPLETED']);
+    expect(m.live).toBeNull();
+    expect(m.gps.live).toBe(false);
+    expect(m.gps.notes.join(' ')).toMatch(/No live position now/);
+  });
+
+  // Review of 18 Oct 2026: the Leaving tap shown is the one rule R2 counts, the latest before the first sign
+  // at a stop; the phone's own photo is a sign, an old gallery photo, an office upload or another
+  // company's row is not.
+  it("the Leaving tap shown is rule R2's: the phone's own photo is a first sign; an old, office or other company photo is not", async () => {
+    tables.stopEvent.push(
+      ...[425, 435, 445].map((min, k) => ({ id: `EL${k}`, tenantId: TEN, depotId: 'D1', deliveryDate: dateOnlyOf(TODAY), truckId: 't1', loadNo: 1, sequence: null, kind: 'DEPOT_DEPART', source: 'PHONE_MANUAL', at: local(min), receivedAt: local(min), payloadJson: null })),
+    );
+    tables.deliveryPhoto = [
+      { id: 'PH1', tenantId: TEN, visitId: 'V1', source: 'PHONE_AUTO', takenAt: local(440), oldPhoto: false },
+      { id: 'PH2', tenantId: TEN, visitId: 'V1', source: 'PHONE_MANUAL', takenAt: local(430), oldPhoto: true },
+      { id: 'PH3', tenantId: TEN, visitId: 'V1', source: 'DISPATCHER', takenAt: local(432), oldPhoto: false },
+      { id: 'PHB', tenantId: OTHER, visitId: 'V1', source: 'PHONE_AUTO', takenAt: local(426), oldPhoto: false },
+    ];
+    const m = (await call()).body.data!;
+    const left = m.timeline.filter((t) => t.kind === 'DEPOT_OUT' && t.source === 'driver');
+    // Photo 07:20 is the first sign (arrival 07:32): the 07:15 tap counts, 07:05 was corrected, 07:25 came after.
+    expect(left.map((t) => t.at)).toEqual([local(435).toISOString()]);
+    expect(left[0]!.lines).toEqual([
+      '"Leaving for next load" (L1)',
+      'Also tapped at 07:05: corrected by tapping again (the latest tap before the first stop counts)',
+      'Tapped again at 07:25, after the truck had reached a stop: not counted',
+    ]);
   });
 });
 
