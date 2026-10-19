@@ -39,7 +39,6 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 - The link works until 12:00 the day after your deliveries.
 - The location uses battery: use a car charger. Keep the phone's clock on automatic.
 - Your location: the company keeps the time and place of each arrival, departure, result and photo, and the delivery photos as proof, for the time your company set - 90 days unless it changed it (the page says how long) - never a track of your route.
-- The company's **salesmen** can follow their customers' deliveries on their own page: the time and result of each delivery (the reason of a delivery not made as you chose it, never what you wrote) and, from the truck's GPS tracker, the truck's **approximate position** while it still has their deliveries. They never see your name or phone number.
 
 ---
 
@@ -88,6 +87,5 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 - يعمل الرابط حتى الساعة 12:00 ظهرًا من اليوم التالي لتوصيلاتك.
 - استخدام الموقع يستهلك البطارية: استخدم شاحن السيارة. اترك ساعة الهاتف على الضبط التلقائي.
 - موقعك: تحفظ الشركة وقت ومكان كل وصول ومغادرة ونتيجة وصورة، وصور التسليم كإثبات، للمدة التي حددتها شركتك - 90 يومًا ما لم تغيّرها (وتذكرها الصفحة) - ولا تسجّل مسار رحلتك.
-- يتابع **مندوبو المبيعات** في الشركة توصيلات عملائهم في صفحتهم: وقت كل توصيل ونتيجته (وسبب عدم التسليم كما اخترته، وليس ما كتبته)، و**الموقع التقريبي** للشاحنة من جهاز تتبع GPS فيها ما دامت تحمل توصيلاتهم. لا يرون اسمك ولا رقم هاتفك.
 
 </div>

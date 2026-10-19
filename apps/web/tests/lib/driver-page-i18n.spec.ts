@@ -60,17 +60,10 @@ describe('the dictionary', () => {
     expect(t('en', 'noTrips', { truck: 'T05' })).toBe('No trips for truck T05 on {date} (yet).');
     // Owner decision 1 (5 Oct 2026): both periods are stated (photos 90 days by default), never "longer".
     const notice = t('en', 'locationNotice', { company: 'Synthetic Water Co', days: 60, photoDays: 90 });
-    expect(notice).toMatch(/^Location: Synthetic Water Co uses .* for 60 days and the delivery photos themselves for 90 days \(delivery proof\), never a track of your route\. .* Questions: ask your dispatcher at Synthetic Water Co\.$/);
+    expect(notice).toMatch(/^Location: Synthetic Water Co uses .* for 60 days and the delivery photos themselves for 90 days \(delivery proof\), never a track of your route\. Questions: ask your dispatcher at Synthetic Water Co\.$/);
     expect(notice).not.toMatch(/longer/);
-    // The salesman link (19 Oct 2026, critique 10 / owner decision 3): the salesmen see their deliveries' times and
-    // results and the truck's approximate GPS position while it has their deliveries. The notice says so.
-    expect(notice).toContain(
-      "The salesmen of Synthetic Water Co can see the time and result of their customers' deliveries and, from the truck's GPS tracker, its approximate position while it still has their deliveries.",
-    );
     const ar = t('ar', 'locationNotice', { company: 'Synthetic Water Co', days: 60, photoDays: 90 });
     expect(ar).toContain('لمدة 60 يومًا، وتحفظ صور التسليم نفسها لمدة 90 يومًا');
-    expect(ar).toContain('يرى مندوبو المبيعات في Synthetic Water Co');
-    expect(ar).toContain('الموقع التقريبي للشاحنة');
     expect(ar).not.toContain('أطول');
   });
 
