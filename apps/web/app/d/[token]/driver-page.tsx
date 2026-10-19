@@ -53,6 +53,8 @@ import { WhichCustomer } from './which-customer';
 const POLL_MS = 60_000;
 const FLUSH_MS = 15_000;
 const NOTICE_KEY = 'riq.d.notice';
+/** The notice's version a phone has seen: '2' since 19 Oct 2026 (it says the salesmen see the truck), so it opens once more. */
+const NOTICE_SEEN = '2';
 const LANG_KEY = 'riq.d.lang';
 
 type Phase =
@@ -405,7 +407,7 @@ export function DriverPage() {
 
   // The location notice on the first open (and from the info button).
   useEffect(() => {
-    if (manifest && storeGet(NOTICE_KEY) !== '1') setNotice(true);
+    if (manifest && storeGet(NOTICE_KEY) !== NOTICE_SEEN) setNotice(true);
   }, [manifest]);
 
   const overlay = useMemo<OverlayLoad[] | null>(() => (manifest ? applyQueued(manifest, items, sent) : null), [manifest, items, sent]);
@@ -830,7 +832,7 @@ export function DriverPage() {
           // A manifest kept on the phone from before this setting was sent has none: photos are never kept shorter than positions.
           photoDays={manifest.settings.photoRetentionDays ?? manifest.settings.locationRetentionDays}
           onOk={() => {
-            storeSet(NOTICE_KEY, '1');
+            storeSet(NOTICE_KEY, NOTICE_SEEN);
             setNotice(false);
           }}
         />
