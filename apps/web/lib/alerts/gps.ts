@@ -113,12 +113,24 @@ export function gpsAlertConfigOf(
   ivmsDisabled: boolean,
 ): AlertGpsConfig | null {
   if (ivmsDisabled || ivmsModeOf(cfg) !== 'ALERTS') return null;
+  return gpsReadConfigOf(cfg);
+}
+
+/**
+ * The radii and speeds the GPS is read with, whatever the mode (the caller decides whether GPS may be read
+ * at all): the company's stop radius + AT_STOP_MARGIN_M, depot radius + AT_DEPOT_MARGIN_M, average speed and
+ * distance multiplier (the live map's defaults when unset). gpsAlertConfigOf (ALERTS) and the salesman link
+ * (lib/sales-link/day-read.ts, from MAP up) both use it.
+ */
+export function gpsReadConfigOf(
+  cfg: { ivmsStopRadiusM?: number | null; ivmsDepotRadiusM?: number | null; avgSpeedKmh?: number | null; distanceMultiplier?: number | null } | null | undefined,
+): AlertGpsConfig {
   const num = (v: number | null | undefined, d: number) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d);
   return {
-    atStopRadiusM: num(cfg!.ivmsStopRadiusM, 100) + AT_STOP_MARGIN_M,
-    atDepotRadiusM: num(cfg!.ivmsDepotRadiusM, 300) + AT_DEPOT_MARGIN_M,
-    avgSpeedKmh: num(cfg!.avgSpeedKmh, 40),
-    distanceMultiplier: num(cfg!.distanceMultiplier, 1.3),
+    atStopRadiusM: num(cfg?.ivmsStopRadiusM, 100) + AT_STOP_MARGIN_M,
+    atDepotRadiusM: num(cfg?.ivmsDepotRadiusM, 300) + AT_DEPOT_MARGIN_M,
+    avgSpeedKmh: num(cfg?.avgSpeedKmh, 40),
+    distanceMultiplier: num(cfg?.distanceMultiplier, 1.3),
   };
 }
 
