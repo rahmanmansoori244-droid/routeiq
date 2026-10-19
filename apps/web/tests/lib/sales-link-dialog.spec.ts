@@ -62,6 +62,7 @@ const view = (over: Partial<SalesLinkView> = {}): SalesLinkView => ({
   lastSeenAt: null,
   phones: 0,
   routesSeen: [],
+  trucksSeen: [],
   message: MESSAGE,
   whatsappUrl: `https://wa.me/?text=${encodeURIComponent(MESSAGE)}`,
   ...over,
@@ -199,6 +200,10 @@ describe('what the office reads', () => {
     );
     const many = Array.from({ length: 33 }, (_, i) => `R${i + 1}`);
     expect(salesLinkSeenText(view({ phones: 40, routesSeen: many }), 'Asia/Muscat')).toMatch(/R30 and 3 more$/);
+    // Trucks looked up (owner decision of 20 Oct 2026), after the routes; trucks alone.
+    expect(salesLinkSeenText(view({ phones: 2, routesSeen: ['R1'], trucksSeen: ['1234-AB'] }), 'Asia/Muscat')).toBe('Opened on 2 phones · routes looked up: R1 · trucks looked up: 1234-AB');
+    expect(salesLinkSeenText(view({ phones: 1, trucksSeen: ['1234-AB', 'TEST-01'] }), 'Asia/Muscat')).toBe('Opened on 1 phone · trucks looked up: 1234-AB, TEST-01');
+    expect(salesLinkSeenText(view({ phones: 0 }), 'Asia/Muscat')).toBe('Not opened by a salesman yet · no route looked up yet');
   });
 
   it('the button is for the company\'s today or tomorrow only', () => {

@@ -8,6 +8,10 @@
  *  - route codes (critique item 18): NFKC, Arabic-Indic digits, the stored rule, a compact key without spaces or
  *    hyphens (an exact match first; both routes when the compact key is shared), "R1, R2X", "Route not given"
  *    never reachable;
+ *  - truck codes (owner decision of 20 Oct 2026): the same compact key, then a unique digits-only match; several
+ *    trucks with the digits are offered (SEVERAL_TRUCKS); a route code that is also a truck's shows the route and
+ *    offers the truck (ALSO_TRUCK); "Truck X" looks among the trucks only; "C1, 5678" mixes both; the trucks found
+ *    are kept in the link's list as "T:<code>" and read apart for the office;
  *  - the limits are keyed on the link and the public client IP, never on the page's device id; an unknown or
  *    internal IP shares one larger bucket per link; unknown tokens count only for a public IP (critique item 9).
  */
@@ -29,11 +33,11 @@ import {
   SALES_LINK_TOKEN_RE,
   tokenHash,
 } from '@/lib/sales-link/token';
-import { asciiDigits, compactRouteKey, matchRoutes, MAX_CODES, normTypedRoute, parseRouteQuery } from '@/lib/sales-link/route-code';
+import { asciiDigits, codeDigits, compactRouteKey, compactTruckKey, explicitTruck, matchLookup, matchRoutes, MAX_CODES, normTypedRoute, parseRouteQuery, truckQuery } from '@/lib/sales-link/route-code';
 import { salesBadTokenKey, salesDeviceFromHeader, salesIpKey, salesMissLimit, salesTokenFromHeader, salesViewLimit, SALES_HEADERS } from '@/lib/sales-link/guard';
-import { salesLinkDateProblem, salesTouchPlan } from '@/lib/sales-link/service';
+import { salesLinkDateProblem, salesTouchPlan, seenLists, TRUCK_SEEN_PREFIX } from '@/lib/sales-link/service';
 import { LIMITS } from '@/lib/rate-limit';
-import { expiryText, salesLinkMessage, shortDayText } from '@/lib/sales-link/text';
+import { choiceText, expiryText, notFoundText, salesLinkMessage, shortDayText } from '@/lib/sales-link/text';
 
 const ENV = { NEXTAUTH_SECRET: 'sales-link-token-test-secret' } as unknown as NodeJS.ProcessEnv;
 
@@ -137,6 +141,85 @@ describe('the route code a salesman types (critique item 18)', () => {
     expect(matchRoutes(['R1', 'R9'], known)).toEqual({ routes: ['R1'], notFound: ['R9'], ambiguous: [] });
     expect(matchRoutes(['ROUTE NOT GIVEN'], known).notFound).toEqual(['ROUTE NOT GIVEN']);
     expect(matchRoutes(['R2X', 'R1'], known).routes).toEqual(['R1', 'R2X']);
+  });
+});
+
+describe('the truck code a salesman types (owner decision of 20 Oct 2026)', () => {
+  // Synthetic trucks of one day: ids are the server's, never sent.
+  const trucks = [
+    { id: 'tk1', code: '5678-XY' },
+    { id: 'tk2', code: '1234-AB' },
+    { id: 'tk3', code: '1234-CD' },
+    { id: 'tk4', code: 'TEST-01' },
+    { id: 'tk5', code: 'C-1' },
+  ];
+  const routes = ['C1', 'R1', 'R2X', '101'];
+
+  it('the compact key and the digits of a truck code; the explicit form', () => {
+    for (const typed of ['5678-XY', '5678xy', '5678 XY', '٥٦٧٨-xy', '۵۶۷۸ XY', '５６７８ＸＹ']) expect(compactTruckKey(typed)).toBe('5678XY');
+    expect(codeDigits('5678-XY')).toBe('5678');
+    expect(codeDigits('TEST-01')).toBe('01');
+    expect(codeDigits('ABC')).toBe('');
+    expect(truckQuery('1234-AB')).toBe('Truck 1234-AB');
+    expect(explicitTruck('Truck 1234-AB')).toBe('1234-AB');
+    expect(explicitTruck('truck: 1234ab')).toBe('1234AB');
+    expect(explicitTruck('TRUCK   5678-xy')).toBe('5678-XY');
+    expect(explicitTruck('TRUCK')).toBeNull();
+    expect(explicitTruck('TRUCK1')).toBeNull();
+    expect(explicitTruck('R1')).toBeNull();
+  });
+
+  it('an exact truck code (compact key) first, with Arabic-Indic digits too', () => {
+    for (const typed of ['5678-XY', '5678XY', '5678 xy', '٥٦٧٨XY']) {
+      const code = parseRouteQuery(typed);
+      expect(code.ok).toBe(true);
+      expect(matchLookup(code.ok ? code.codes : [], routes, trucks)).toEqual({ routes: [], trucks: ['tk1'], notFound: [], ambiguous: [], choices: [] });
+    }
+  });
+
+  it('a unique digits-only match ("5678", "٥٦٧٨"); several trucks with the digits are offered, none shown', () => {
+    expect(matchLookup(['5678'], routes, trucks)).toMatchObject({ trucks: ['tk1'], choices: [], notFound: [] });
+    expect(matchLookup([normTypedRoute('٥٦٧٨')!], routes, trucks)).toMatchObject({ trucks: ['tk1'], choices: [] });
+    expect(matchLookup(['1234'], routes, trucks)).toEqual({ routes: [], trucks: [], notFound: [], ambiguous: [], choices: [{ asked: '1234', why: 'SEVERAL_TRUCKS', routes: [], trucks: ['tk2', 'tk3'] }] });
+    // Digits only: a code with letters never matches by its digits; other digits match nothing.
+    expect(matchLookup(['5678X'], routes, trucks)).toMatchObject({ trucks: [], notFound: ['5678X'] });
+    expect(matchLookup(['567'], routes, trucks)).toMatchObject({ trucks: [], notFound: ['567'] });
+    expect(matchLookup(['01'], routes, trucks)).toMatchObject({ trucks: ['tk4'] });
+  });
+
+  it('a route code that is also a truck code: the route is shown, the truck offered; "Truck X" is the truck only', () => {
+    expect(matchLookup(['C1'], routes, trucks)).toEqual({ routes: ['C1'], trucks: [], notFound: [], ambiguous: [], choices: [{ asked: 'C1', why: 'ALSO_TRUCK', routes: ['C1'], trucks: ['tk5'] }] });
+    expect(matchLookup(['TRUCK C1'], routes, trucks)).toEqual({ routes: [], trucks: ['tk5'], notFound: [], ambiguous: [], choices: [] });
+    expect(matchLookup(['TRUCK 1234'], routes, trucks).choices).toEqual([{ asked: 'TRUCK 1234', why: 'SEVERAL_TRUCKS', routes: [], trucks: ['tk2', 'tk3'] }]);
+    // A truck form that names no truck is not found (never a route).
+    expect(matchLookup(['TRUCK R2X'], routes, trucks)).toMatchObject({ routes: [], trucks: [], notFound: ['TRUCK R2X'] });
+    // A route with no truck of that code offers nothing.
+    expect(matchLookup(['R2X'], routes, trucks).choices).toEqual([]);
+  });
+
+  it('mixed "C1, 5678": routes first (natural order), then trucks by code; unknown codes listed', () => {
+    const q = parseRouteQuery('5678, r2x, Truck test-01, zz9');
+    expect(q).toEqual({ ok: true, codes: ['5678', 'R2X', 'TRUCK TEST-01', 'ZZ9'] });
+    expect(matchLookup(q.ok ? q.codes : [], routes, trucks)).toEqual({ routes: ['R2X'], trucks: ['tk1', 'tk4'], notFound: ['ZZ9'], ambiguous: [], choices: [] });
+    // Two trucks of the day with one compact code (rare): both shown in code order, the code listed as ambiguous.
+    expect(matchLookup(['X-9'], [], [{ id: 'a', code: 'X-9' }, { id: 'b', code: 'X 9' }])).toEqual({ routes: [], trucks: ['b', 'a'], notFound: [], ambiguous: ['X-9'], choices: [] });
+  });
+
+  it('the words: not found as a route or a truck; the choices', () => {
+    expect(notFoundText(['R9'], 'Mon 19 Oct')).toBe('No deliveries for route or truck R9 on Mon 19 Oct. Check the route code on your Salesman ETA page, or the truck code.');
+    expect(notFoundText(['R9', 'TRUCK 9999'], 'Mon 19 Oct')).toBe('No deliveries for route or truck R9 or truck 9999 on Mon 19 Oct. Check the route code on your Salesman ETA page, or the truck code.');
+    expect(notFoundText(['TRUCK 1', 'TRUCK 2'], 'Mon 19 Oct')).toMatch(/^No deliveries for trucks 1, 2 on /);
+    expect(notFoundText([], 'Mon 19 Oct')).toBeNull();
+    expect(choiceText('SEVERAL_TRUCKS', '1234', 2)).toBe('1234 matches 2 trucks today. Pick one:');
+    expect(choiceText('ALSO_TRUCK', 'C1', 1)).toBe('C1 is also a truck code. Show the truck instead:');
+  });
+
+  it('the trucks found are kept as "T:<code>" in the routes looked up, and read apart for the office', () => {
+    expect(TRUCK_SEEN_PREFIX).toBe('T:');
+    expect(seenLists(['R2X', 'T:1234-AB', 'R1', 'T:TEST-01', 'R1', 'T:'])).toEqual({ routes: ['R1', 'R2X'], trucks: ['1234-AB', 'TEST-01'] });
+    expect(seenLists(null)).toEqual({ routes: [], trucks: [] });
+    const now = new Date('2026-10-19T06:00:00Z');
+    expect(salesTouchPlan({ lastSeenAt: now, devicesJson: [], routesJson: ['R1'] }, null, ['R1', 'T:1234-AB'], now)).toEqual({ device: null, routes: ['T:1234-AB'], seen: false });
   });
 });
 

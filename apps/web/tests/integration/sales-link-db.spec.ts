@@ -10,10 +10,13 @@
  *  2. The salesman's page: R1 shows its delivered stop (R1's line fully delivered on a stop partly delivered
  *     overall) and its planned stop; R2X the same stop not delivered, with the driver's reason; the order
  *     cancelled before planning under "Cancelled" with the reason's label, never the office's note; an unknown
- *     code answers "no deliveries"; nothing of the other company (the relation filters, real here).
+ *     code answers "no deliveries"; nothing of the other company (the relation filters, real here). A truck code
+ *     ("t05", "T-05", its digits "05", "Truck T05"; owner decision of 20 Oct 2026) shows both trips of T05 with every
+ *     route's lines on the stop (partly delivered: 20 of 30, the driver's reason); never the other company's T05.
  *  3. Tenant scoping: the other company's planner changing this link: 404; signed in to the other company on
  *     the page: 403.
- *  4. Phones opening the page at once are each counted once (the atomic jsonb append), the route found once.
+ *  4. Phones opening the page at once are each counted once (the atomic jsonb append), the route found once; the
+ *     truck found is kept as "T:T05" and the office reads it apart (trucksSeen).
  *  5. Make a new link: the old one answers 410 LINK_REPLACED, the new one works; turn off: 410 LINK_REVOKED;
  *     past its end: 410 LINK_EXPIRED.
  *  6. The CHECK constraints of the table, and the location retention turning the phones into "" (count kept).
@@ -280,19 +283,44 @@ describe("2. the salesman's page", () => {
     const meta = await answer(await view(tokenOf(url)));
     expect(meta.data).toMatchObject({ meta: { date: T, company: 'Example Water Co' }, lookup: null });
     const r1 = await answer(await view(tokenOf(url), { route: 'r1' }));
-    const v = r1.data!.lookup!.routes[0]!;
-    expect(v.route).toBe('R1');
+    const v = r1.data!.lookup!.results[0]!;
+    expect(v).toMatchObject({ kind: 'ROUTE', code: 'R1' });
     const byCode = new Map(v.deliveries.map((d) => [d.customerCode, d]));
     expect([...byCode.keys()].sort()).toEqual(['TST0001', 'TST0002']);
     expect(byCode.get('TST0001')).toMatchObject({ status: 'DELIVERED', invoices: ['INV-1'], cases: 20, delivered: { cases: 20, of: 20 } });
     expect(byCode.get('TST0002')).toMatchObject({ invoices: ['INV-2'], cases: 12 });
     expect(v.offTruck.map((o) => `${o.kind} ${o.customerCode} ${o.why}`)).toEqual(['CANCELLED TST0003 Cancelled - Customer cancelled']);
-    const r2x = (await answer(await view(tokenOf(url), { route: 'R2X' }))).data!.lookup!.routes[0]!;
+    const r2x = (await answer(await view(tokenOf(url), { route: 'R2X' }))).data!.lookup!.results[0]!;
     expect(r2x.deliveries.map((d) => [d.customerCode, d.status, d.cases, d.reason])).toEqual([['TST0001', 'NOT_DELIVERED', 10, 'Shop closed (as reported by the driver)']]);
     const text = JSON.stringify([r1, r2x]);
     for (const s of ['TSTB01', 'INV-B', 'OFFICE-NOTE-SENTINEL', 'DRIVER-NOTE-SENTINEL', 'ORDER-NOTE-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', 'Rule 20 Driver', ids.truckA, ids.depotA, ids.runA]) expect(text).not.toContain(s);
     const unknown = (await answer(await view(tokenOf(url), { route: 'R9' }))).data!.lookup!;
-    expect(unknown).toMatchObject({ routes: [], notFound: ['R9'] });
+    expect(unknown).toMatchObject({ results: [], notFound: ['R9'] });
+  });
+
+  it('a truck code (owner decision of 20 Oct 2026): both trips of T05, every route on the stop, its result and reason', async () => {
+    as(null);
+    for (const typed of ['t05', 'T-05', '05', 'Truck T05']) {
+      const l = (await answer(await view(tokenOf(url), { route: typed }))).data!.lookup!;
+      expect(l.notFound).toEqual([]);
+      expect(l.results.map((x) => `${x.kind} ${x.code} ${x.query}`)).toEqual(['TRUCK T05 Truck T05']);
+    }
+    const t = (await answer(await view(tokenOf(url), { route: 'T05' }))).data!.lookup!.results[0]!;
+    expect(t.heading).toMatch(/^Truck T05 · /);
+    const byCode = new Map(t.deliveries.map((d) => [d.customerCode, d]));
+    expect([...byCode.keys()].sort()).toEqual(['TST0001', 'TST0002']);
+    // The stop partly delivered overall: both salesmen's lines on the truck's card.
+    expect(byCode.get('TST0001')).toMatchObject({ status: 'PARTLY_DELIVERED', routes: ['R1', 'R2X'], invoices: ['INV-1'], cases: 30, delivered: { cases: 20, of: 30 }, reason: 'Shop closed (as reported by the driver)' });
+    expect(byCode.get('TST0002')).toMatchObject({ routes: ['R1'], invoices: ['INV-2'], cases: 12 });
+    expect(t.trucks.map((x) => [x.truckCode, x.trips])).toEqual([['T05', 2]]);
+    expect(new Set(t.deliveries.map((d) => d.loadNo)).size).toBe(2);
+    // The order cancelled before planning was never on the truck.
+    expect(t.offTruck).toEqual([]);
+    // A route and the truck at once; the other company's truck (also T05) is never found.
+    const mixed = (await answer(await view(tokenOf(url), { route: 'R2X, T05' }))).data!.lookup!;
+    expect(mixed.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['ROUTE R2X', 'TRUCK T05']);
+    const text = JSON.stringify(mixed);
+    for (const s of ['TSTB01', 'INV-B', 'DRIVER-NOTE-SENTINEL', 'ORDER-NOTE-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', ids.truckA, ids.depotA, ids.runA]) expect(text).not.toContain(s);
   });
 });
 
@@ -318,9 +346,13 @@ describe('4. phones opening the page at once', () => {
     const row = await prisma.salesLink.findUniqueOrThrow({ where: { id: linkId } });
     expect((row.devicesJson as string[]).length).toBe(6);
     expect(new Set(row.devicesJson as string[]).size).toBe(6);
-    // Section 2's salesman (no office session) found R1 and R2X; six phones finding R1 again add nothing.
-    expect(row.routesJson).toEqual(['R1', 'R2X']);
+    // Section 2's salesman (no office session) found R1, R2X and truck T05 ("T:T05"); six phones finding R1 again add nothing.
+    expect(row.routesJson).toEqual(['R1', 'R2X', 'T:T05']);
     expect(row.lastSeenAt).not.toBeNull();
+    // The office reads them apart: "routes looked up: R1, R2X · trucks looked up: T05".
+    as('A');
+    expect((await (await post({ date: T })).json()).data).toMatchObject({ routesSeen: ['R1', 'R2X'], trucksSeen: ['T05'] });
+    as(null);
   });
 });
 

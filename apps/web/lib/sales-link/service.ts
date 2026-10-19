@@ -14,7 +14,7 @@
  * - listSalesLinks / getSalesLink: existing links only, never created, no audit row.
  * - resolveSalesLink: the ONLY lookup that is not tenant-scoped (a unique SHA-256 cannot cross companies);
  *   used only by withSalesLink (guard.ts).
- * - touchSalesLink: "opened on N phones", "routes looked up" and lastSeenAt, appended atomically in SQL (critique
+ * - touchSalesLink: "opened on N phones", "routes looked up" (the trucks too, as "T:<code>") and lastSeenAt, appended atomically in SQL (critique
  *   item 17: 30 phones opening the WhatsApp post at once lose nothing), best effort, after the answer is built.
  *
  * The token is never stored, logged or audited: audit rows carry the date, the generation and the reason only
@@ -102,6 +102,26 @@ export function readStrings(json: unknown): string[] {
   return Array.isArray(json) ? json.filter((x): x is string => typeof x === 'string') : [];
 }
 
+/**
+ * A truck looked up is kept in the link's "routes looked up" list (SalesLink.routesJson) as "T:<truck code>" (owner
+ * decision of 20 Oct 2026: one list, one cap of MAX_SALES_ROUTES); a stored route code never starts with it in
+ * practice (route codes are the order file's, "R1", "C1").
+ */
+export const TRUCK_SEEN_PREFIX = 'T:';
+
+/** The routes and the trucks a link's list holds, each in natural order. */
+export function seenLists(json: unknown): { routes: string[]; trucks: string[] } {
+  const all = [...new Set(readStrings(json))];
+  return {
+    routes: all.filter((x) => !x.startsWith(TRUCK_SEEN_PREFIX)).sort(compareSalesRoutes),
+    trucks: all
+      .filter((x) => x.startsWith(TRUCK_SEEN_PREFIX))
+      .map((x) => x.slice(TRUCK_SEEN_PREFIX.length))
+      .filter(Boolean)
+      .sort(compareSalesRoutes),
+  };
+}
+
 export function salesLinkView(link: SalesLink, ctx: { key: SalesLinkKey; base: string | null; now: Date; tz: string; company: string }): SalesLinkView {
   const date = isoOf(link.deliveryDate);
   const expired = link.expiresAt.getTime() <= ctx.now.getTime();
@@ -113,6 +133,7 @@ export function salesLinkView(link: SalesLink, ctx: { key: SalesLinkKey; base: s
   const dayShort = shortDayText(date);
   const until = expiryText(date, addDaysIso(date, 1), SALES_LINK_END_HOUR);
   const message = url ? salesLinkMessage({ dayShort, company: ctx.company, url, expiryText: until }) : null;
+  const seen = seenLists(link.routesJson);
   return {
     id: link.id,
     date,
@@ -127,7 +148,8 @@ export function salesLinkView(link: SalesLink, ctx: { key: SalesLinkKey; base: s
     issuedAt: link.issuedAt.toISOString(),
     lastSeenAt: link.lastSeenAt?.toISOString() ?? null,
     phones: readStrings(link.devicesJson).length,
-    routesSeen: [...new Set(readStrings(link.routesJson))].sort(compareSalesRoutes),
+    routesSeen: seen.routes,
+    trucksSeen: seen.trucks,
     message,
     whatsappUrl: message ? whatsappUrl(null, message) : null,
   };
@@ -344,7 +366,7 @@ export async function resolveSalesLink(token: string | null | undefined, opts: {
 }
 
 /**
- * What a salesman request adds to the link (pure): the phone when new (8 hex), the routes found that are new,
+ * What a salesman request adds to the link (pure): the phone when new (8 hex), the routes (and "T:<code>" trucks) found that are new,
  * and whether lastSeenAt is due (at most every 5 minutes). Null: nothing to write.
  */
 export function salesTouchPlan(
@@ -364,7 +386,7 @@ export function salesTouchPlan(
 
 /**
  * Best effort, never fails a request: the phone (first 8 hex of the hash of the page's random id), the routes
- * that had deliveries, lastSeenAt. Each list grows by an atomic jsonb append that skips an entry already there
+ * and the trucks ("T:<code>") that had deliveries, lastSeenAt. Each list grows by an atomic jsonb append that skips an entry already there
  * and stops at the cap, only while this generation is current (a reissue in between starts new lists).
  */
 export async function touchSalesLink(

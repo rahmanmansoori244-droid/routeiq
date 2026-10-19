@@ -6,7 +6,14 @@
  * WHICH DELIVERIES BELONG TO ROUTE R: per order LINE (OrderLine.salesRoute), as the printed Salesman ETA
  * (lib/exports/salesman-eta.ts salesmanEtaModel; a parity test keeps them together): one delivery = one stop
  * of one trip carrying a line of R that is neither cancelled nor moved to another day; its invoices and cases
- * are R's only. A customer with several deliveries gets "part i of n". Lines without a route are on no page.
+ * are R's only. A customer with several deliveries gets "part i of n". Lines without a route are on no route's page.
+ *
+ * WHICH DELIVERIES BELONG TO TRUCK T (owner decision of 20 Oct 2026: a lookup by truck code): every stop of every
+ * trip of T on the day's plans in use (every depot), with all its lines that are neither cancelled nor moved to
+ * another day (every route, and lines without one); a stop with none left is no delivery. The statuses, expected
+ * times and truck card follow the same rules; its position shows while T's trip on the road has any delivery still
+ * to make. Its "orders not on a truck" are the orders taken off its trips: cancelled, or moved to another day. The
+ * truck is named by the code its plan shows (a day-hired truck: its plate, lib/dispatch/hire.ts shownTruckCode).
  *
  * THE STATUS of a delivery (stop S of trip L; the first rule that holds; D = the delivery date):
  *  1. a result is recorded: DELIVERED / PARTLY_DELIVERED / NOT_DELIVERED from R's own lines of the visit
@@ -68,6 +75,7 @@ import { firstPhotoAt, liveEtaAllowed, loadLiveEtas, projectionInputOf, projecti
 import { fixStale } from '../ivms/live-map';
 import { MOVING_KMH, type GpsTruckDayFact } from '../ivms/types';
 import type { StopEta } from '../ivms/eta';
+import { truckQuery, type DayTruckRef } from './route-code';
 import {
   ADDED_AFTER_PLAN_WHY,
   cancelledWhy,
@@ -103,6 +111,7 @@ import type {
   SalesRouteView,
   SalesTruck,
   SalesTruckPosition,
+  SalesViewKind,
   TripStatus,
 } from './view-types';
 
@@ -204,6 +213,10 @@ export interface SalesDay {
   date: string;
   /** Every route of the day with a delivery or an order not on a truck, by its code. */
   routes: ReadonlyMap<string, SalesRouteView>;
+  /** Every truck with a delivery on a plan in use of the day (all its trips, every route), by its truck id (never sent). */
+  trucks: ReadonlyMap<string, SalesRouteView>;
+  /** The day's trucks as a lookup reads them (route-code.ts matchLookup): the id and the code the plan shows. */
+  truckRefs: readonly DayTruckRef[];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -664,7 +677,8 @@ export function etaView(
 // ---------------------------------------------------------------------------------------------
 
 interface DeliveryAcc {
-  route: string;
+  /** The sales routes of its lines (a route's delivery: that route). */
+  routes: Set<string>;
   rec: LoadRec;
   stopIndex: number;
   stop: DetailStop;
@@ -688,7 +702,7 @@ const OFF_ORDER: Record<OffTruckKind, number> = { CANCELLED: 0, NOT_PLANNED: 1, 
 const PENDING: ReadonlySet<DeliveryStatus> = new Set(['AT_CUSTOMER', 'NEXT', 'ON_THE_WAY', 'PASSED']);
 const DONE: ReadonlySet<DeliveryStatus> = new Set(['DELIVERED', 'PARTLY_DELIVERED', 'NOT_DELIVERED', 'NO_RESULT', 'VISITED']);
 
-/** Every route's view of the day (see the file comment). */
+/** Every route's and every truck's view of the day (see the file comment). */
 export function buildSalesDay(input: SalesDayInput): SalesDay {
   const { date, tz, now } = input;
   const today = todayIso(tz, now);
@@ -729,6 +743,21 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
   const movedOrders = new Set<string>();
   const onStopOrders = new Set<string>();
   const unservedOrders = new Set<string>();
+  const offAdd = (
+    m: Map<string, OffAcc>,
+    kind: OffTruckKind,
+    orderId: string,
+    who: { customerCode: string; branchCode: string | null; customerName: string },
+    ln: { salesOrderNo: string | null; cases: number },
+    why: string,
+  ) => {
+    const key = `${kind}|${orderId}|${why}`;
+    const e = m.get(key) ?? { kind, customerCode: who.customerCode, branchCode: who.branchCode, customerName: who.customerName, invoices: [], cases: 0, why };
+    const inv = invoiceText(ln.salesOrderNo);
+    if (!e.invoices.includes(inv)) e.invoices.push(inv);
+    e.cases += ln.cases;
+    m.set(key, e);
+  };
   const listOff = (
     kind: OffTruckKind,
     orderId: string,
@@ -740,49 +769,71 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
       if (!ln.salesRoute) continue;
       let m = off.get(ln.salesRoute);
       if (!m) off.set(ln.salesRoute, (m = new Map()));
-      const key = `${kind}|${orderId}|${why}`;
-      const e = m.get(key) ?? { kind, customerCode: who.customerCode, branchCode: who.branchCode, customerName: who.customerName, invoices: [], cases: 0, why };
-      const inv = invoiceText(ln.salesOrderNo);
-      if (!e.invoices.includes(inv)) e.invoices.push(inv);
-      e.cases += ln.cases;
-      m.set(key, e);
+      offAdd(m, kind, orderId, who, ln, why);
     }
+  };
+  const addTo = (a: DeliveryAcc, ln: { lineId: string; orderId: string; salesOrderNo: string | null; cases: number }, route: string | null) => {
+    if (route) a.routes.add(route);
+    a.lineIds.add(ln.lineId);
+    a.orderIds.add(ln.orderId);
+    const inv = invoiceText(ln.salesOrderNo);
+    if (!a.invoices.includes(inv)) a.invoices.push(inv);
+    a.cases += ln.cases;
+  };
+  // Each truck's deliveries (one per stop: all its lines left) and the orders taken off its trips.
+  const truckDeliveries = new Map<string, DeliveryAcc[]>();
+  const truckOff = new Map<string, Map<string, OffAcc>>();
+  const truckOffOf = (truckId: string) => {
+    let m = truckOff.get(truckId);
+    if (!m) truckOff.set(truckId, (m = new Map()));
+    return m;
   };
 
   for (const rec of recs) {
     const { facts } = rec.plan;
+    const truckId = rec.load.truckId;
     for (const [i, stop] of rec.stops.entries()) {
       const cancelled = new Set(stop.cancelledOrderIds ?? []);
       const byRoute = new Map<string, DeliveryAcc>();
+      const whole: DeliveryAcc = { routes: new Set(), rec, stopIndex: i, stop, lineIds: new Set(), orderIds: new Set(), invoices: [], cases: 0 };
       const moved = new Map<string, { salesRoute: string | null; salesOrderNo: string | null; cases: number }[]>();
       for (const ln of stop.orderLines) {
         onStopOrders.add(ln.orderId);
         const order = facts.orders.get(ln.orderId);
         // Cancelled as the plan read it, or since; only a trip that never left can hold one (listed from the day's cancelled orders).
-        if (cancelled.has(ln.orderId) || (order?.cancelled && carriedLoadShows(rec.load.status))) continue;
+        if (cancelled.has(ln.orderId) || (order?.cancelled && carriedLoadShows(rec.load.status))) {
+          // The truck's list: taken off it (when the order is cancelled now: the day's cancelled orders say why).
+          const x = extraOf.get(ln.orderId);
+          if (x?.cancelled) offAdd(truckOffOf(truckId), 'CANCELLED', ln.orderId, stop, ln, cancelledWhy(x.cancelReason));
+          continue;
+        }
         const route = facts.lines.get(ln.lineId)?.salesRoute ?? null;
         if (order?.carriedTo && carriedLoadShows(rec.load.status)) {
           moved.set(ln.orderId, [...(moved.get(ln.orderId) ?? []), { salesRoute: route, salesOrderNo: ln.salesOrderNo, cases: ln.cases }]);
           continue;
         }
         if (!carriedLoadShows(rec.load.status)) leftOrders.add(ln.orderId);
+        addTo(whole, ln, route);
         if (!route) continue;
         let a = byRoute.get(route);
-        if (!a) byRoute.set(route, (a = { route, rec, stopIndex: i, stop, lineIds: new Set(), orderIds: new Set(), invoices: [], cases: 0 }));
-        a.lineIds.add(ln.lineId);
-        a.orderIds.add(ln.orderId);
-        const inv = invoiceText(ln.salesOrderNo);
-        if (!a.invoices.includes(inv)) a.invoices.push(inv);
-        a.cases += ln.cases;
+        if (!a) byRoute.set(route, (a = { routes: new Set(), rec, stopIndex: i, stop, lineIds: new Set(), orderIds: new Set(), invoices: [], cases: 0 }));
+        addTo(a, ln, route);
       }
-      for (const a of byRoute.values()) {
-        const list = deliveries.get(a.route);
+      for (const [route, a] of byRoute) {
+        const list = deliveries.get(route);
         if (list) list.push(a);
-        else deliveries.set(a.route, [a]);
+        else deliveries.set(route, [a]);
+      }
+      if (whole.lineIds.size) {
+        const list = truckDeliveries.get(truckId);
+        if (list) list.push(whole);
+        else truckDeliveries.set(truckId, [whole]);
       }
       for (const [orderId, lines] of moved) {
         movedOrders.add(orderId);
-        listOff('MOVED', orderId, stop, lines, movedWhy(facts.orders.get(orderId)!.carriedTo!));
+        const why = movedWhy(facts.orders.get(orderId)!.carriedTo!);
+        listOff('MOVED', orderId, stop, lines, why);
+        for (const ln of lines) offAdd(truckOffOf(truckId), 'MOVED', orderId, stop, ln, why);
       }
     }
   }
@@ -846,12 +897,22 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
     if (!plannedDepots.has(o.depotId)) listOff('NOT_PLANNED_YET', o.id, o, o.lines, NOT_PLANNED_YET_WHY);
   }
 
+  const ctx: RouteCtx = { input, lives, extraOf, restKeys, rel, nowMin, dayShort };
   const routes = new Map<string, SalesRouteView>();
   const codes = [...new Set([...deliveries.keys(), ...off.keys()])].sort(compareSalesRoutes);
   for (const route of codes) {
-    routes.set(route, routeView(route, deliveries.get(route) ?? [], [...(off.get(route)?.values() ?? [])], { input, lives, extraOf, restKeys, rel, nowMin, dayShort }));
+    routes.set(route, routeView('ROUTE', route, deliveries.get(route) ?? [], [...(off.get(route)?.values() ?? [])], ctx));
   }
-  return { builtAt: now, date, routes };
+  // Each truck by the code of its first trip of the day (the plan's shownTruckCode: a day-hired truck's plate).
+  const trucks = new Map<string, SalesRouteView>();
+  const truckRefs: DayTruckRef[] = [];
+  for (const [truckId, accs] of truckDeliveries) {
+    const first = [...accs].sort((x, y) => x.rec.load.departMin - y.rec.load.departMin || x.rec.load.loadNo - y.rec.load.loadNo)[0]!;
+    const code = first.rec.load.truckCode;
+    truckRefs.push({ id: truckId, code });
+    trucks.set(truckId, routeView('TRUCK', code, accs, [...(truckOff.get(truckId)?.values() ?? [])], ctx));
+  }
+  return { builtAt: now, date, routes, trucks, truckRefs };
 }
 
 /** A planned stop as the shared ETA input reads it (lib/alerts/load-eta.ts), with its visit. */
@@ -908,7 +969,8 @@ function routeResult(a: DeliveryAcc, v: SalesVisitIn): { status: DeliveryStatus;
   return { status, delivered: { cases, of } };
 }
 
-function routeView(route: string, accs: DeliveryAcc[], offs: OffAcc[], c: RouteCtx): SalesRouteView {
+/** One route's view (kind ROUTE: its deliveries and orders not on a truck) or one truck's (kind TRUCK: its stops, the orders taken off it). */
+function routeView(kind: SalesViewKind, code: string, accs: DeliveryAcc[], offs: OffAcc[], c: RouteCtx): SalesRouteView {
   const { input, lives, rel, nowMin } = c;
   const { date, tz, now } = input;
   accs.sort(
@@ -974,7 +1036,7 @@ function routeView(route: string, accs: DeliveryAcc[], offs: OffAcc[], c: RouteC
 
     const notes: string[] = [];
     if (L.status === 'PLANNED') notes.push(NOT_LOCKED_NOTE);
-    if (c.restKeys.has(`${a.stop.customerId}|${route}`)) notes.push(REST_NOT_PLANNED_NOTE);
+    if ([...a.routes].some((r) => c.restKeys.has(`${a.stop.customerId}|${r}`))) notes.push(REST_NOT_PLANNED_NOTE);
     const from = [...a.orderIds].map((id) => c.extraOf.get(id)?.carriedFromDate).filter((x): x is string => !!x).sort()[0];
     if (from) notes.push(movedHereNote(from));
     if (!carriedLoadShows(L.status)) {
@@ -992,6 +1054,7 @@ function routeView(route: string, accs: DeliveryAcc[], offs: OffAcc[], c: RouteC
       branchCode: a.stop.branchCode,
       invoices: a.invoices,
       cases: a.cases,
+      routes: [...a.routes].sort(compareSalesRoutes),
       truckKey: truckKeys.get(L.truckId)!,
       truckCode: L.truckCode,
       loadNo: L.loadNo,
@@ -1050,20 +1113,22 @@ function routeView(route: string, accs: DeliveryAcc[], offs: OffAcc[], c: RouteC
   };
   const updatedText = `Updated ${hhmm(localMinutes(now, tz))}`;
   return {
-    route,
-    heading: `Route ${route} · ${longDayText(date)}`,
+    kind,
+    code,
+    query: kind === 'TRUCK' ? truckQuery(code) : code,
+    heading: `${kind === 'TRUCK' ? 'Truck' : 'Route'} ${code} · ${longDayText(date)}`,
     updatedAt: now.toISOString(),
     updatedText,
     notLocked: accs.some((a) => !FIXED_STATUSES.has(a.rec.load.status)),
     counts,
-    summaryText: summaryOf(counts),
+    summaryText: summaryOf(counts, kind),
     trucks,
     deliveries,
     offTruck,
   };
 }
 
-function summaryOf(c: SalesCounts): string {
+function summaryOf(c: SalesCounts, kind: SalesViewKind): string {
   const parts: [number, string][] = [
     [c.delivered, 'delivered'],
     [c.partly, 'partly delivered'],
@@ -1079,12 +1144,12 @@ function summaryOf(c: SalesCounts): string {
     [c.notPlanned, 'not on a truck'],
   ];
   const text = parts.filter(([n]) => n > 0).map(([n, w]) => `${n} ${w}`).join(' · ');
-  return text || 'Nothing for this route yet';
+  return text || (kind === 'TRUCK' ? 'Nothing for this truck yet' : 'Nothing for this route yet');
 }
 
 const TRIP_STATUSES: ReadonlySet<string> = new Set(['PLANNED', 'LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED']);
 
-/** One truck of the route's deliveries (`deliveries[i]` is `accs[i]`'s). */
+/** One truck of the route's (or the truck's own) deliveries (`deliveries[i]` is `accs[i]`'s). */
 function truckView(truckId: string, key: string, deliveries: SalesDelivery[], accs: DeliveryAcc[], c: RouteCtx): SalesTruck {
   const { input, lives, rel } = c;
   const { date, tz, now } = input;

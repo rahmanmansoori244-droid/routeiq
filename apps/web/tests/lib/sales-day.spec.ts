@@ -16,6 +16,9 @@
  *  - the truck card: the position only while the trip on the road has the route's deliveries to make, 3
  *    decimals (critique 10); pins at 4 decimals; nothing private in the answer;
  *  - parity with the printed Salesman ETA (salesmanEtaModel) on the same plan;
+ *  - a truck looked up (owner decision of 20 Oct 2026): both trips, every stop and route (a line without a route
+ *    too), the order cancelled on it taken off, its own card and position while its trip on the road has any
+ *    delivery to make; a day-hired truck by its plate; nothing private;
  *  - the review of 19 Oct 2026: a trip left open ends without the GPS keeping it alive (no position), Back at depot
  *    and a later trip that left end a trip, the stops after a clock-pushed stop only "not before", the next trip's
  *    shift, the alerts' late Dispatch threshold, Send to customer's window and "has been to you".
@@ -23,6 +26,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildSalesDay, etaView, salesLateDispatchMin, type SalesDayInput, type SalesGpsIn } from '@/lib/sales-link/day';
 import { salesmanEtaModel } from '@/lib/exports/salesman-eta';
+import { freedCode, shownTruckCode } from '@/lib/dispatch/hire';
+import { matchLookup } from '@/lib/sales-link/route-code';
 import type { DeliveryStatus, SalesRouteView } from '@/lib/sales-link/view-types';
 import { at, atMin, DAY, dayInput, east, extraOrder, factsOf, gpsIn, hm, ln, load, planDetail, stop, unserved, visit, type Ln } from './sales-day-fixture';
 
@@ -796,5 +801,104 @@ describe('times past midnight and the minutes helper', () => {
   it('an expected time after midnight says +1', () => {
     expect(etaView({ expectedMin: 1450, source: 'TRIP', dueNow: false, noLive: null, detail: null }, null, 1400)).toMatchObject({ expected: '00:10 +1' });
     expect(atMin(1450).toISOString()).toBe(at('00:10', '2026-10-20').toISOString());
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// A truck looked up (owner decision of 20 Oct 2026)
+// ---------------------------------------------------------------------------------------------
+
+describe('a truck looked up (owner decision of 20 Oct 2026): every stop of its trips, every route', () => {
+  // T05 (t5): trip 1 on the road (R1; R1 + R2X on one stop; a line without a route), trip 2 planned (R10, and an
+  // order cancelled on it). A day-hired truck (t6) shown by its plate, as the plan shows it (hire.ts shownTruckCode).
+  const L = {
+    a: ln('o1', 'o1-l1', 'INV-1', 20, 'R1'),
+    b1: ln('o2', 'o2-l1', 'INV-2', 12, 'R1'),
+    b2: ln('o2', 'o2-l2', 'INV-2', 5, 'R2X'),
+    c: ln('o3', 'o3-l1', 'INV-3', 8, null),
+    d: ln('o4', 'o4-l1', 'INV-4', 6, 'R10'),
+    x: ln('o6', 'o6-l1', 'INV-6', 4, 'R2X'),
+    e: ln('o5', 'o5-l1', 'INV-5', 9, 'R1'),
+  };
+  const plate = shownTruckCode(null, { code: freedCode('1234AB', DAY), onlyOnDate: DAY });
+  const trip1 = load({
+    id: 'L1',
+    status: 'DISPATCHED',
+    loadNo: 1,
+    departMin: hm(7),
+    returnMin: hm(11),
+    stops: [
+      stop({ seq: 1, customerId: 'c1', code: 'TST0001', eta: hm(8), lines: [L.a] }),
+      stop({ seq: 2, customerId: 'c2', code: 'TST0002', eta: hm(9), lines: [L.b1, L.b2] }),
+      stop({ seq: 3, customerId: 'c3', code: 'TST0003', eta: hm(10), lines: [L.c] }),
+    ],
+  });
+  const trip2 = load({ id: 'L2', status: 'PLANNED', loadNo: 2, departMin: hm(12), returnMin: hm(15), stops: [stop({ seq: 1, customerId: 'c4', code: 'TST0004', eta: hm(13), lines: [L.d, L.x], cancelled: ['o6'] })] });
+  const hired = load({ id: 'L3', truckId: 't6', truckCode: plate, status: 'LOCKED', loadNo: 1, departMin: hm(8), returnMin: hm(12), stops: [stop({ seq: 1, customerId: 'c5', code: 'TST0005', eta: hm(9, 30), lines: [L.e] })] });
+  const input = (o: Partial<Omit<SalesDayInput, 'plans'>> = {}) =>
+    dayInput({
+      plans: [{ detail: planDetail({ loads: [trip1, trip2, hired] }), facts: factsOf(Object.values(L)) }],
+      extraOrders: [extraOrder({ id: 'o6', customerCode: 'TST0004', cancelled: true, cancelReason: 'CUSTOMER_CANCELLED', lines: [{ id: 'o6-l1', salesRoute: 'R2X', salesOrderNo: 'INV-6', cases: 4 }] })],
+      now: at('08:40'),
+      loadTimes: new Map([['L1', at('07:00')]]),
+      visits: [delivered(1, '08:10', '08:25')],
+      phoneSeen: new Map([['t5', at('08:25')]]),
+      gps: gpsIn({ fixAt: at('08:39'), pos: east(1500), trailTo: at('08:35') }),
+      ...o,
+    });
+
+  it('the day knows its trucks by the code the plan shows (a day-hired truck: its plate)', () => {
+    const day = buildSalesDay(input());
+    expect(plate).toBe('1234AB');
+    expect([...day.truckRefs].sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      { id: 't5', code: 'T05' },
+      { id: 't6', code: '1234AB' },
+    ]);
+    expect(day.trucks.get('t6')).toMatchObject({ kind: 'TRUCK', code: '1234AB', query: 'Truck 1234AB' });
+    expect(JSON.stringify(day.trucks.get('t6'))).not.toContain(freedCode('1234AB', DAY));
+    // Typed as the salesman sees it, or by its digits.
+    expect(matchLookup(['1234-AB'], day.routes.keys(), day.truckRefs).trucks).toEqual(['t6']);
+    expect(matchLookup(['1234'], day.routes.keys(), day.truckRefs).trucks).toEqual(['t6']);
+    expect(matchLookup(['05'], day.routes.keys(), day.truckRefs).trucks).toEqual(['t5']);
+  });
+
+  it('both trips, every stop and every route on it (a line without a route too); the cancelled order is taken off', () => {
+    const t = buildSalesDay(input()).trucks.get('t5')!;
+    expect(t).toMatchObject({ kind: 'TRUCK', code: 'T05', query: 'Truck T05' });
+    expect(t.heading).toBe('Truck T05 · Monday 19 October 2026');
+    expect(t.deliveries.map((d) => `${d.customerCode} T${d.loadNo} ${d.status} ${d.cases} [${d.routes.join(',')}] ${d.invoices.join('+')}`)).toEqual([
+      'TST0001 T1 DELIVERED 20 [R1] INV-1',
+      'TST0002 T1 NEXT 17 [R1,R2X] INV-2',
+      'TST0003 T1 ON_THE_WAY 8 [] INV-3',
+      'TST0004 T2 PLANNED 6 [R10] INV-4',
+    ]);
+    expect(t.deliveries[0]).toMatchObject({ delivered: { cases: 20, of: 20 }, at: '08:25' });
+    expect(t.deliveries[1]!.eta).toMatchObject({ source: 'GPS', timing: 'ON_TIME' });
+    expect(t.deliveries[3]!.notes).toContain('Not locked yet: times can change if the day is re-planned');
+    expect(t.offTruck.map((o) => `${o.kind} ${o.customerCode} ${o.cases} ${o.why}`)).toEqual(['CANCELLED TST0004 4 Cancelled - Customer cancelled']);
+    expect(t.counts).toMatchObject({ delivered: 1, now: 1, onTheWay: 1, planned: 1, cancelled: 1 });
+    expect(t.summaryText).toBe('1 delivered · 1 at the customer or next · 1 on the way · 1 planned · 1 cancelled');
+    // One card: the truck itself, its two trips, its own next customer.
+    expect(t.trucks).toHaveLength(1);
+    expect(t.trucks[0]).toMatchObject({ key: 't1', truckCode: 'T05', trips: 2, trip: { loadNo: 1, status: 'DISPATCHED' }, nextYours: 'Example Mart TST0002 · about 09:00' });
+    // The route's own view is unchanged: R2X has its 5 cases only.
+    expect(buildSalesDay(input()).routes.get('R2X')!.deliveries.map((d) => `${d.customerCode} ${d.cases} [${d.routes.join(',')}]`)).toEqual(['TST0002 5 [R2X]']);
+  });
+
+  it('the position while the trip on the road has any delivery to make (a route: only its own)', () => {
+    const day = buildSalesDay(input());
+    expect(day.trucks.get('t5')!.trucks[0]!.position).toMatchObject({ lat: Math.round(east(1500).lat * 1e3) / 1e3, stale: false });
+    // R10 is only on trip 2 (not left): the route sees no position, the truck does.
+    expect(day.routes.get('R10')!.trucks[0]!.position).toBeNull();
+    // Every stop of the trip on the road has its result: no position for the truck either.
+    const done = buildSalesDay(input({ now: at('10:40'), visits: [delivered(1, '08:10', '08:25'), delivered(2, '09:05', '09:20'), delivered(3, '10:05', '10:20')], phoneSeen: new Map([['t5', at('10:20')]]), gps: gpsIn({ fixAt: at('10:39'), pos: east(1500), trailTo: at('10:35') }) }));
+    expect(done.trucks.get('t5')!.trucks[0]!.position).toBeNull();
+    // The day-hired truck has no tracker in this input: no position, the GPS line says so.
+    expect(day.trucks.get('t6')!.trucks[0]).toMatchObject({ position: null, gpsText: "No GPS on this truck - times from the driver's updates" });
+  });
+
+  it('nothing private in a truck view either', () => {
+    const text = JSON.stringify([...buildSalesDay(input()).trucks.values()]);
+    for (const s of ['DRIVER-NAME-SENTINEL', 'DRIVER-PHONE-SENTINEL', 'HELPER-NAME-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', 'ADDRESS-SENTINEL', 'ORDER-NOTE-SENTINEL', 'ACCESS-NOTE-SENTINEL', '"t5"', '"t6"', '"L1"', 'run-D1', '123.45']) expect(text).not.toContain(s);
   });
 });

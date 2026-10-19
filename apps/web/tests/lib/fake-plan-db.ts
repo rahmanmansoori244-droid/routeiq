@@ -8,12 +8,15 @@ type Row = Record<string, any>;
 
 export const tables: Record<string, Row[]> = {};
 export const rawLog: string[] = [];
+/** The values of each $executeRaw call, in order (rawLog has its SQL with "?" for them). */
+export const rawValues: unknown[][] = [];
 let seq = 0;
 const newId = (p: string) => `${p}_${++seq}`;
 
 export function resetDb() {
   for (const k of Object.keys(tables)) delete tables[k];
   rawLog.length = 0;
+  rawValues.length = 0;
   seq = 0;
 }
 
@@ -307,8 +310,9 @@ fakePrisma.$queryRaw = async (strings: TemplateStringsArray, ...values: unknown[
   }
   return [];
 };
-fakePrisma.$executeRaw = async (strings: TemplateStringsArray) => {
+fakePrisma.$executeRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
   rawLog.push(strings.join('?').replace(/\s+/g, ' ').trim());
+  rawValues.push(values);
   return 0;
 };
 fakePrisma.$executeRawUnsafe = async (sql: string) => {

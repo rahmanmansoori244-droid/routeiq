@@ -175,7 +175,7 @@ If you need to scale beyond one web instance, swap the inflight map for Redis-ba
 - To stop **every** link of every company at once (a suspected leak of the server key): rotate `DRIVER_LINK_SECRET` (or `NEXTAUTH_SECRET` when `DRIVER_LINK_SECRET` is not set; that also signs everyone out) on the `web` service. Every link then answers "replaced"; the dispatchers reopen **Link** or print the sheets again to get new ones. No start-up rehash is needed.
 
 ### Stopping a salesman link (19 Oct 2026)
-- One link per delivery date for the salesmen's WhatsApp group (plan screen, **Salesman link**). Anyone holding it can look up any route of that day (the owner's choice): send it to the group only.
+- One link per delivery date for the salesmen's WhatsApp group (plan screen, **Salesman link**). Anyone holding it can look up any route of that day, and any truck by its code (the owner's choices of 19 and 20 Oct 2026): send it to the group only.
 - Forwarded outside the group: **Make a new link** (the old one answers "replaced"; send the new one to the group) or **Turn off**. Every link stops by itself at 06:00 (company time) the day after its delivery date.
 - To stop **every** salesman link of every company at once: set or rotate `SALES_LINK_SECRET` on the `web` service (without it the links use `DRIVER_LINK_SECRET`, else `NEXTAUTH_SECRET`). The offices then open the dialog again to get new links.
 

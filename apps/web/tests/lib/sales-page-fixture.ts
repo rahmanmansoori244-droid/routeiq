@@ -1,6 +1,6 @@
 /**
  * Invented answers of GET /api/s/view for the salesman link page's specs (sales-page.spec.ts,
- * sales-page-hook.spec.ts): routes R1 / R2X / R9, trucks T05 / T06, customers TST0001.. "Customer A".., pins in
+ * sales-page-hook.spec.ts): routes R1 / R2X / R9, trucks T05 / T06 / 1234-AB, customers TST0001.. "Customer A".., pins in
  * empty desert (tests/lib/sales-day-fixture.ts ORIGIN). Never a real customer, route, plate or place.
  */
 import type { SalesDelivery, SalesLookup, SalesMeta, SalesOffTruck, SalesRouteView, SalesTruck, SalesViewAnswer } from '@/lib/sales-link/view-types';
@@ -17,7 +17,7 @@ export const meta = (over: Partial<SalesMeta> = {}): SalesMeta => ({
   tz: 'Asia/Muscat',
   serverNow: '2026-10-19T06:30:00.000Z',
   refreshSec: 60,
-  routeHint: 'Your route code, as on your Salesman ETA page',
+  routeHint: 'Your route code (as on your Salesman ETA page) or a truck code',
   ...over,
 });
 
@@ -30,6 +30,7 @@ export function delivery(over: Partial<SalesDelivery> & { no: number }): SalesDe
     branchCode: null,
     invoices: [`INV-${no}`],
     cases: 10 * no,
+    routes: ['R1'],
     truckKey: 't1',
     truckCode: 'T05',
     loadNo: 1,
@@ -83,7 +84,9 @@ export const offTruck = (over: Partial<SalesOffTruck> = {}): SalesOffTruck => ({
 /** A route on the road: delivered, at the customer, on the way (late), planned; one cancelled order. */
 export function routeView(route = 'R1', over: Partial<SalesRouteView> = {}): SalesRouteView {
   return {
-    route,
+    kind: 'ROUTE',
+    code: route,
+    query: route,
     heading: `Route ${route} · Monday 19 October 2026`,
     updatedAt: '2026-10-19T06:30:00.000Z',
     updatedText: 'Updated 10:30',
@@ -110,11 +113,28 @@ export function routeView(route = 'R1', over: Partial<SalesRouteView> = {}): Sal
   };
 }
 
-export const lookup = (routes: SalesRouteView[], over: Partial<SalesLookup> = {}): SalesLookup => ({
-  asked: routes.map((r) => r.route),
-  routes,
+/** A truck looked up (synthetic code 1234-AB): its deliveries of the day, every route, on two trips. */
+export function truckView(code = '1234-AB', over: Partial<SalesRouteView> = {}): SalesRouteView {
+  const base = routeView('R1');
+  return {
+    ...base,
+    kind: 'TRUCK',
+    code,
+    query: `Truck ${code}`,
+    heading: `Truck ${code} · Monday 19 October 2026`,
+    trucks: [truck({ truckCode: code, trips: 2, nextYours: 'Customer B · about 09:10' })],
+    deliveries: base.deliveries.map((d, i) => ({ ...d, truckCode: code, routes: i === 2 ? ['R1', 'R2X'] : ['R1'] })),
+    offTruck: [offTruck({ kind: 'MOVED', kindText: 'Moved to another day', why: 'Moved to Tue 20 Oct' })],
+    ...over,
+  };
+}
+
+export const lookup = (results: SalesRouteView[], over: Partial<SalesLookup> = {}): SalesLookup => ({
+  asked: results.map((r) => r.query.toUpperCase()),
+  results,
   notFound: [],
   ambiguous: [],
+  choices: [],
   notFoundText: null,
   ...over,
 });

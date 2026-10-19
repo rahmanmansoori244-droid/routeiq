@@ -14,6 +14,9 @@
  *    and pins; the WebGL check (critique 20: no-WebGL fallback).
  *  - The delivery card: the reason as the driver reported it, "Send to customer" as wa.me/?text= with no number
  *    and no link in the text.
+ *  - A truck looked up (owner decision of 20 Oct 2026): followed as "Truck X", titled "Truck X", keys apart from a
+ *    route of the same code, its card ("Next", its trips), each delivery's routes, "Taken off this truck", and the
+ *    trucks offered for a code as buttons sending their lookup.
  */
 import { describe, expect, it, vi } from 'vitest';
 import tailwindColors from 'tailwindcss/colors';
@@ -55,8 +58,10 @@ import { DeliveryCard } from '@/app/s/[token]/delivery-card';
 import { LinkState } from '@/app/s/[token]/link-state';
 import { TruckCard } from '@/app/s/[token]/truck-card';
 import { MapFallback } from '@/app/s/[token]/map-card';
+import { ChoiceList } from '@/app/s/[token]/choice-list';
+import { OffTruckList } from '@/app/s/[token]/off-truck-list';
 import { elements, textOf } from './hook-host';
-import { TOKEN, answer, delivery, lookup, meta, offTruck, routeView, truck } from './sales-page-fixture';
+import { TOKEN, answer, delivery, lookup, meta, offTruck, routeView, truck, truckView } from './sales-page-fixture';
 
 const ALL_STATUSES = Object.keys(STATUS_TEXT) as DeliveryStatus[];
 const ALL_KINDS = Object.keys(OFF_KIND_TEXT) as OffTruckKind[];
@@ -171,7 +176,7 @@ describe('every answer of GET /api/s/view as the page reads it', () => {
     const body = { data: answer(lookup([routeView()])), error: null };
     const a = readSalesAnswer(200, body, null);
     expect(a.kind).toBe('ok');
-    expect(a.kind === 'ok' && a.answer.lookup?.routes[0]?.route).toBe('R1');
+    expect(a.kind === 'ok' && a.answer.lookup?.results[0]?.code).toBe('R1');
     expect(readSalesAnswer(200, { data: {}, error: null }, null).kind).toBe('error');
   });
 
@@ -316,6 +321,19 @@ describe('colours, chips and lines', () => {
     expect(followQuery(lookup([routeView('R1'), routeView('R2X')], { asked: ['R1', 'R2X', 'R9'], notFound: ['R9'] }))).toBe('R1, R2X');
     expect(followQuery(lookup([], { asked: ['R9'], notFound: ['R9'] }))).toBeNull();
     expect(followQuery(null)).toBeNull();
+    // A truck is followed in the explicit form (owner decision of 20 Oct 2026): a refresh never turns it into a route.
+    expect(followQuery(lookup([routeView('C1'), truckView('1234-AB')], { asked: ['C1', '1234'] }))).toBe('C1, Truck 1234-AB');
+  });
+
+  it('a route or a truck: its title, and keys unique when a route and a truck share a code', () => {
+    expect(UI.viewTitle(routeView('C1'))).toBe('Route C1');
+    expect(UI.viewTitle(truckView('1234-AB'))).toBe('Truck 1234-AB');
+    expect(UI.routeLabel).toBe('Route or truck code');
+    const r = mapModel(routeView('R1'));
+    const t = mapModel(truckView('R1'));
+    expect(r.trucks[0]!.key).toBe('R1:t1');
+    expect(t.trucks[0]!.key).toBe('Truck R1:t1');
+    expect(t.fitKey).not.toBe(r.fitKey);
   });
 
   it('"Send to customer" opens WhatsApp with the text and no number', () => {
@@ -424,6 +442,36 @@ describe('the cards', () => {
     expect(text).toMatch(/Running about 20 min behind plan/);
     expect(text).toMatch(/Your next: Customer B · about 09:10 · 1 stop before it/);
     expect(text).toMatch(/GPS: updated 10:29 · on the map below/);
+  });
+
+  it('a truck looked up: the card says "Next" and its trips (not "your customers"); each delivery says its routes', () => {
+    const v = truckView('1234-AB');
+    const card = textOf(TruckCard({ t: v.trucks[0]!, rowKey: 'Truck 1234-AB:t1', kind: 'TRUCK' }));
+    expect(card).toMatch(/1234-AB/);
+    expect(card).toMatch(/2 trips/);
+    expect(card).not.toMatch(/your customers|Your next/);
+    expect(card).toMatch(/Next: Customer B · about 09:10/);
+    const two = textOf(DeliveryCard({ d: v.deliveries[2]!, rowKey: 'Truck 1234-AB:d3', kind: 'TRUCK' }));
+    expect(two).toMatch(/Routes R1, R2X/);
+    expect(textOf(DeliveryCard({ d: v.deliveries[0]!, rowKey: 'Truck 1234-AB:d1', kind: 'TRUCK' }))).toMatch(/Route R1/);
+    // A route's card never repeats its own route.
+    expect(textOf(DeliveryCard({ d: v.deliveries[2]!, rowKey: 'R1:d3' }))).not.toMatch(/Routes? R/);
+    expect(textOf(OffTruckList({ items: v.offTruck, route: v.query, heading: UI.offThisTruck }))).toMatch(/^Taken off this truck/);
+  });
+
+  it('the trucks offered for a code: one button each, sending its whole lookup', () => {
+    const picked: string[] = [];
+    const choices = [
+      { asked: '1234', kind: 'SEVERAL_TRUCKS' as const, text: '1234 matches 2 trucks today. Pick one:', options: [{ code: '1234-AB', query: 'Truck 1234-AB' }, { code: '1234-CD', query: 'Truck 1234-CD' }] },
+      { asked: 'C1', kind: 'ALSO_TRUCK' as const, text: 'C1 is also a truck code. Show the truck instead:', options: [{ code: 'C-1', query: 'R2X, Truck C-1' }] },
+    ];
+    const tree = ChoiceList({ choices, working: false, onPick: (q) => picked.push(q) })!;
+    expect(textOf(tree)).toMatch(/1234 matches 2 trucks today\. Pick one:.*Truck 1234-AB.*Truck 1234-CD.*C1 is also a truck code/);
+    const buttons = elements(tree).filter((e) => e.props?.['data-testid'] === 'choice-option');
+    expect(buttons.map((b) => b.props['data-query'])).toEqual(['Truck 1234-AB', 'Truck 1234-CD', 'R2X, Truck C-1']);
+    for (const b of buttons) b.props.onClick();
+    expect(picked).toEqual(['Truck 1234-AB', 'Truck 1234-CD', 'R2X, Truck C-1']);
+    expect(ChoiceList({ choices: [], working: false, onPick: () => undefined })).toBeNull();
   });
 
   it('a link that does not work: its own words, and the link\'s day', () => {

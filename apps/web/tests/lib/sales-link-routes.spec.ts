@@ -13,12 +13,16 @@
  *  - the answer: meta without a route, the route's deliveries with one, 400 for an empty or too long code, the
  *    same answer for an unknown code and a code with nothing that day, nothing of another company, no private
  *    keys; one build of the day for many requests (memo and single flight); the phone and route recorded;
+ *  - a truck code (owner decision of 20 Oct 2026): the truck's deliveries of the day, every route ("t05", "T-05",
+ *    "Truck T05", Arabic-Indic digits), recorded as "T:T05"; a route and a truck at once; an unknown truck counted
+ *    as a miss; several trucks with the digits offered, a route code that is also a truck's (the route shown, the
+ *    truck offered in its place); choices never counted;
  *  - the office: VIEWER 403; PLANNER makes the link (201, then 200, one audit row, never the token, its hash or
  *    the salt in it); only today or tomorrow; "Make a new link" (the old one answers replaced) and "Turn off"
  *    (idempotent); another company's link 404.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fakePrisma, rawLog, resetDb, tables } from './fake-plan-db';
+import { fakePrisma, rawLog, rawValues, resetDb, tables } from './fake-plan-db';
 import { factsOf, hm, ln, load, planDetail, stop } from './sales-day-fixture';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 import type { SalesmanEtaFacts } from '@/lib/exports/salesman-eta';
@@ -276,7 +280,7 @@ describe('the answer', () => {
     const r = await body(await view(token, { device: 'ab'.repeat(16) }));
     expect(r.error).toBeNull();
     expect(r.data!.lookup).toBeNull();
-    expect(r.data!.meta).toMatchObject({ date: D, company: 'Example Water Co', tz: TZ, refreshSec: 60, routeHint: 'Your route code, as on your Salesman ETA page' });
+    expect(r.data!.meta).toMatchObject({ date: D, company: 'Example Water Co', tz: TZ, refreshSec: 60, routeHint: 'Your route code (as on your Salesman ETA page) or a truck code' });
     expect(r.data!.meta.expiryText).toMatch(/^Works until \w{3} \d{1,2} \w{3} 06:00$/);
     const touch = rawLog.filter((s) => s.includes('UPDATE "SalesLink"'));
     expect(touch).toHaveLength(1);
@@ -292,8 +296,9 @@ describe('the answer', () => {
     expect(lookup.asked).toEqual(['R1']);
     expect(lookup.notFound).toEqual([]);
     expect(lookup.notFoundText).toBeNull();
-    const v = lookup.routes[0]!;
-    expect(v.route).toBe('R1');
+    const v = lookup.results[0]!;
+    expect(v).toMatchObject({ kind: 'ROUTE', code: 'R1', query: 'R1' });
+    expect(v.heading).toMatch(/^Route R1 · /);
     expect(v.deliveries.map((d) => `${d.customerCode} ${d.cases} ${d.status}`)).toEqual(['TST0001 20 PLANNED', 'TST0002 12 PLANNED']);
     expect(v.offTruck.map((o) => `${o.kind} ${o.customerCode} ${o.why}`)).toEqual(['CANCELLED TST0009 Cancelled - Customer cancelled']);
     const text = JSON.stringify(r);
@@ -301,18 +306,95 @@ describe('the answer', () => {
     expect(rawLog.some((s) => s.includes('"routesJson" = COALESCE("routesJson"'))).toBe(true);
     // Two routes at once ("R1, R2X"), and an unknown code next to them.
     const both = await body(await view(token, { route: 'R2X, r1, R9' }));
-    expect(both.data!.lookup!.routes.map((x) => x.route)).toEqual(['R1', 'R2X']);
+    expect(both.data!.lookup!.results.map((x) => x.code)).toEqual(['R1', 'R2X']);
     expect(both.data!.lookup!.notFound).toEqual(['R9']);
-    expect(both.data!.lookup!.notFoundText).toMatch(/^No deliveries for route R9 on \w{3} \d{1,2} \w{3}\. Check the code on your Salesman ETA page\.$/);
+    expect(both.data!.lookup!.notFoundText).toMatch(/^No deliveries for route or truck R9 on \w{3} \d{1,2} \w{3}\. Check the route code on your Salesman ETA page, or the truck code\.$/);
   });
 
   it('an unknown code and "Route not given": the same answer as a code with nothing that day', async () => {
     const token = makeLink();
     const a = (await body(await view(token, { route: 'R77' }))).data!.lookup!;
     const b = (await body(await view(token, { route: 'Route not given' }))).data!.lookup!;
-    expect(a.routes).toEqual([]);
-    expect(b.routes).toEqual([]);
+    expect(a.results).toEqual([]);
+    expect(b.results).toEqual([]);
     expect([a.notFound, b.notFound]).toEqual([['R77'], ['ROUTE NOT GIVEN']]);
+  });
+
+  it('a truck code (owner decision of 20 Oct 2026): the deliveries of the truck that day, every route; recorded as "T:<code>"', async () => {
+    const token = makeLink();
+    rawLog.length = 0;
+    rawValues.length = 0;
+    for (const typed of ['t05', 'T-05', 'Truck T05', '٠٥']) {
+      const l = (await body(await view(token, { route: typed }))).data!.lookup!;
+      expect(l.notFound).toEqual([]);
+      expect(l.results.map((x) => `${x.kind} ${x.code} ${x.query}`)).toEqual(['TRUCK T05 Truck T05']);
+      const t = l.results[0]!;
+      expect(t.heading).toMatch(/^Truck T05 · /);
+      // Every line of the stop (R1 and R2X), with its routes; the cancelled order is not the truck's.
+      expect(t.deliveries.map((d) => `${d.customerCode} ${d.cases} ${d.routes.join('+')} ${d.invoices.join('+')}`)).toEqual(['TST0001 30 R1+R2X INV-1', 'TST0002 12 R1 INV-2']);
+      expect(t.offTruck).toEqual([]);
+      expect(t.trucks.map((x) => x.truckCode)).toEqual(['T05']);
+      // Nothing of the other company (its truck has the same code).
+      expect(JSON.stringify(l)).not.toMatch(/TSTB|Other company|INV-B/);
+    }
+    expect(rawValues.some((v) => v.includes('T:T05'))).toBe(true);
+    // A route and a truck at once; an unknown code counts against the limit like an unknown route.
+    const mixed = (await body(await view(token, { route: 'T05, r2x, 9999' }))).data!.lookup!;
+    expect(mixed.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['ROUTE R2X', 'TRUCK T05']);
+    expect(mixed.notFound).toEqual(['9999']);
+    const unknownTruck = (await body(await view(token, { route: 'Truck 9999' }))).data!.lookup!;
+    expect(unknownTruck).toMatchObject({ results: [], notFound: ['TRUCK 9999'] });
+    expect(unknownTruck.notFoundText).toMatch(/^No deliveries for truck 9999 on /);
+  });
+
+  it('several trucks with the digits typed: offered, none shown; a route code that is also a truck code: the route, the truck offered', async () => {
+    const base = [ln('o1', 'o1-l1', 'INV-1', 20, 'R1'), ln('o1', 'o1-l2', 'INV-1', 10, 'R2X'), ln('o2', 'o2-l1', 'INV-2', 12, 'R1')];
+    const more = [ln('o5', 'o5-l1', 'INV-5', 4, 'R1'), ln('o6', 'o6-l1', 'INV-6', 6, null), ln('o7', 'o7-l1', 'INV-7', 3, 'R2X')];
+    const d = world.details.get('run-A') as PlanDetail;
+    const late = { status: 'LOCKED', departMin: hm(23, 30), returnMin: hm(23, 59) };
+    d.loads.push(
+      load({ ...late, id: 'L5', truckId: 't6', truckCode: '1234-AB', stops: [stop({ seq: 1, customerId: 'c5', code: 'TST0005', eta: hm(23, 40), lines: [more[0]!] })] }),
+      load({ ...late, id: 'L6', truckId: 't7', truckCode: '1234-CD', stops: [stop({ seq: 1, customerId: 'c6', code: 'TST0006', eta: hm(23, 45), lines: [more[1]!] })] }),
+      load({ ...late, id: 'L7', truckId: 't8', truckCode: 'R-1', stops: [stop({ seq: 1, customerId: 'c7', code: 'TST0007', eta: hm(23, 50), lines: [more[2]!] })] }),
+    );
+    world.facts.set('run-A', factsOf([...base, ...more]));
+    const token = makeLink();
+    const ip = freshIp();
+    const several = (await body(await view(token, { ip, route: '1234' }))).data!.lookup!;
+    expect(several).toMatchObject({ results: [], notFound: [], notFoundText: null });
+    expect(several.choices).toEqual([
+      {
+        asked: '1234',
+        kind: 'SEVERAL_TRUCKS',
+        text: '1234 matches 2 trucks today. Pick one:',
+        options: [
+          { code: '1234-AB', query: 'Truck 1234-AB' },
+          { code: '1234-CD', query: 'Truck 1234-CD' },
+        ],
+      },
+    ]);
+    // A truck picked: its deliveries, also a line without a route.
+    const picked = (await body(await view(token, { ip, route: 'Truck 1234-CD' }))).data!.lookup!;
+    expect(picked.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['TRUCK 1234-CD']);
+    expect(picked.results[0]!.deliveries.map((x) => `${x.customerCode} ${x.cases} [${x.routes.join(',')}]`)).toEqual(['TST0006 6 []']);
+    // R1 is a route and also truck R-1's code: the route is shown, the truck offered in its place.
+    const also = (await body(await view(token, { ip, route: 'R2X, r1' }))).data!.lookup!;
+    expect(also.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['ROUTE R1', 'ROUTE R2X']);
+    expect(also.choices).toEqual([{ asked: 'R1', kind: 'ALSO_TRUCK', text: 'R1 is also a truck code. Show the truck instead:', options: [{ code: 'R-1', query: 'R2X, Truck R-1' }] }]);
+    const truckR1 = (await body(await view(token, { ip, route: 'R2X, Truck R-1' }))).data!.lookup!;
+    expect(truckR1.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['ROUTE R2X', 'TRUCK R-1']);
+    expect(truckR1.choices).toEqual([]);
+    // None of it counted as a miss: the 40 misses of this link and address are all still there.
+    for (let i = 0; i < 40; i++) expect((await view(token, { ip, route: `ZZ${i}` })).status).toBe(200);
+    expect((await view(token, { ip, route: 'ZZ99' })).status).toBe(429);
+  });
+
+  it('truck lookups that miss count against the per-link and IP limit like route codes', async () => {
+    const token = makeLink();
+    const ip = freshIp();
+    for (let i = 0; i < 40; i++) expect((await body(await view(token, { ip, route: `Truck ZZ${i}` }))).data!.lookup!.notFound).toEqual([`TRUCK ZZ${i}`]);
+    expect((await view(token, { ip, route: 'T05' })).status).toBe(200);
+    expect((await view(token, { ip, route: '9999' })).status).toBe(429);
   });
 
   it('400 for an empty or too long code', async () => {

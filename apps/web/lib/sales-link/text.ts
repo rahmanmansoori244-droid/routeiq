@@ -9,6 +9,7 @@
 import { fmtDayMonth, fmtHhmm } from '../dispatch/time';
 import { orderActionReasonText } from '../dispatch/order-cancel-rules';
 import { reasonLabel } from '../delivery/office-text';
+import { explicitTruck } from './route-code';
 import type { DeliveryStatus, EtaSource, OffTruckKind } from './view-types';
 
 const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -35,7 +36,7 @@ export function expiryText(dateIso: string, endIso: string, endHour: number): st
 }
 
 /** The hint under the route field. */
-export const ROUTE_HINT = 'Your route code, as on your Salesman ETA page';
+export const ROUTE_HINT = 'Your route code (as on your Salesman ETA page) or a truck code';
 
 /** The WhatsApp message the office sends to the salesmen's group (no link preview data: the page is an empty shell). */
 export function salesLinkMessage(o: { dayShort: string; company: string; url: string; expiryText: string }): string {
@@ -46,11 +47,31 @@ export function salesLinkMessage(o: { dayShort: string; company: string; url: st
   ].join('\n');
 }
 
-/** "No deliveries for route R9 on Sun 19 Oct. Check the code on your Salesman ETA page." */
+/**
+ * "No deliveries for route or truck R9 on Sun 19 Oct. Check the route code on your Salesman ETA page, or the truck
+ * code."; an explicit truck form ("TRUCK 1234") is said as "truck 1234".
+ */
 export function notFoundText(codes: readonly string[], dayShort: string): string | null {
   if (!codes.length) return null;
-  const which = codes.length === 1 ? `route ${codes[0]}` : `routes ${codes.join(', ')}`;
-  return `No deliveries for ${which} on ${dayShort}. Check the code on your Salesman ETA page.`;
+  const trucks: string[] = [];
+  const plain: string[] = [];
+  for (const c of codes) {
+    const t = explicitTruck(c);
+    if (t !== null) trucks.push(t);
+    else plain.push(c);
+  }
+  const which = [
+    plain.length ? `${plain.length === 1 ? 'route or truck' : 'routes or trucks'} ${plain.join(', ')}` : null,
+    trucks.length ? `${trucks.length === 1 ? 'truck' : 'trucks'} ${trucks.join(', ')}` : null,
+  ]
+    .filter(Boolean)
+    .join(' or ');
+  return `No deliveries for ${which} on ${dayShort}. Check the route code on your Salesman ETA page, or the truck code.`;
+}
+
+/** The line above the trucks offered for a code: several trucks with its digits, or a route code that is also a truck's. */
+export function choiceText(kind: 'SEVERAL_TRUCKS' | 'ALSO_TRUCK', asked: string, trucks: number): string {
+  return kind === 'SEVERAL_TRUCKS' ? `${asked} matches ${trucks} trucks today. Pick one:` : `${asked} is also a truck code. Show the truck instead:`;
 }
 
 /** The status chip's words. */

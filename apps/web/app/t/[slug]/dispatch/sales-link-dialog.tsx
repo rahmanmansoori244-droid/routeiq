@@ -48,14 +48,22 @@ function clock(iso: string, tz: string): string {
 
 const ROUTES_SHOWN = 30;
 
-/** "Opened on 14 phones · last 10:32 · routes looked up: R1, R2X" (the office's own looks are not counted). */
-export function salesLinkSeenText(v: Pick<SalesLinkView, 'phones' | 'lastSeenAt' | 'routesSeen' | 'generation'>, tz: string): string {
+/**
+ * "Opened on 14 phones · last 10:32 · routes looked up: R1, R2X · trucks looked up: 1234-AB" (the office's own looks
+ * are not counted).
+ */
+export function salesLinkSeenText(v: Pick<SalesLinkView, 'phones' | 'lastSeenAt' | 'routesSeen' | 'trucksSeen' | 'generation'>, tz: string): string {
   const parts: string[] = [v.phones ? `Opened on ${v.phones} ${v.phones === 1 ? 'phone' : 'phones'}` : 'Not opened by a salesman yet'];
   if (v.lastSeenAt) parts.push(`last ${clock(v.lastSeenAt, tz)}`);
-  if (v.routesSeen.length) {
-    const more = v.routesSeen.length - ROUTES_SHOWN;
-    parts.push(`routes looked up: ${v.routesSeen.slice(0, ROUTES_SHOWN).join(', ')}${more > 0 ? ` and ${more} more` : ''}`);
-  } else parts.push('no route looked up yet');
+  const list = (what: string, codes: readonly string[]) => {
+    const more = codes.length - ROUTES_SHOWN;
+    return `${what} looked up: ${codes.slice(0, ROUTES_SHOWN).join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
+  };
+  // An answer of the server before the truck lookup has no truck list.
+  const trucks = v.trucksSeen ?? [];
+  if (v.routesSeen.length) parts.push(list('routes', v.routesSeen));
+  if (trucks.length) parts.push(list('trucks', trucks));
+  if (!v.routesSeen.length && !trucks.length) parts.push('no route looked up yet');
   if (v.generation > 1) parts.push(`link #${v.generation}`);
   return parts.join(' · ');
 }

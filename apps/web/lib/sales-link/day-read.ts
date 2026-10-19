@@ -1,7 +1,7 @@
 /**
  * The salesman link's reader and its answer (owner request 19 Oct 2026). Server only.
  *
- * salesDayFor(tenantId, date): every route's view of the day (day.ts buildSalesDay), built ONCE per company and
+ * salesDayFor(tenantId, date): every route's and truck's view of the day (day.ts buildSalesDay), built ONCE per company and
  * date and kept SALES_DAY_MEMO_MS (30 s); requests arriving while it is built wait for that one build (single
  * flight): thirty salesmen opening the WhatsApp post at once cause one build. The plan detail is the driver
  * manifest's memo (lib/driver-link/manifest.ts memoPlanDetail, per plan version, 60 s under a stamp).
@@ -40,12 +40,12 @@ import { ivmsModeAtLeast, ivmsModeOf } from '../ivms/settings';
 import type { IvmsMode } from '../ivms/types';
 import type { PlanDetail } from '../dispatch/plan-detail';
 import { buildSalesDay, salesLateDispatchMin, type SalesDay, type SalesDayInput, type SalesExtraOrderIn, type SalesGpsIn, type SalesPlanIn, type SalesPositionIn, type SalesVisitIn } from './day';
-import { matchRoutes, parseRouteQuery } from './route-code';
+import { matchLookup, MAX_CODES, parseRouteQuery, truckQuery, type LookupChoice } from './route-code';
 import { consumeMisses, salesFail, salesOk, type SalesLinkContext } from './guard';
-import { touchSalesLink } from './service';
+import { touchSalesLink, TRUCK_SEEN_PREFIX } from './service';
 import { SALES_LINK_END_HOUR } from './token';
-import { expiryText, notFoundText, ROUTE_HINT, shortDayText } from './text';
-import type { SalesMeta, SalesViewAnswer } from './view-types';
+import { choiceText, expiryText, notFoundText, ROUTE_HINT, shortDayText } from './text';
+import type { SalesChoice, SalesMeta, SalesRouteView, SalesViewAnswer } from './view-types';
 
 /** One build of a company's day serves every request for this long. */
 export const SALES_DAY_MEMO_MS = 30_000;
@@ -294,8 +294,9 @@ export function salesMeta(o: { date: string; company: string; tz: string; expire
 
 /**
  * GET /api/s/view: without `route` the header only (the page asks for a route code); with `route=<codes>`
- * ("R1" or "R1, R2X") the routes they name. Codes with no deliveries that day count against the link and client
- * (429 over the limit). A salesman's phone (never the office) is then recorded: the phone, the routes found.
+ * ("R1", "R1, R2X", "C1, 5678", "Truck 1234-AB") the routes and trucks they name (route-code.ts matchLookup), and
+ * the trucks to pick from. Codes that matched no route and no truck that day count against the link and client
+ * (429 over the limit). A salesman's phone (never the office) is then recorded: the phone, the routes and trucks found.
  */
 export async function salesView(req: Request, ctx: SalesLinkContext): Promise<Response> {
   const raw = new URL(req.url).searchParams.get('route');
@@ -311,25 +312,47 @@ export async function salesView(req: Request, ctx: SalesLinkContext): Promise<Re
   const q = parseRouteQuery(raw);
   if (!q.ok) {
     const message =
-      q.code === 'ROUTE_CODE_MISSING' ? 'Type your route code.' : q.code === 'TOO_MANY_CODES' ? 'At most 5 route codes at once.' : 'That route code is too long.';
+      q.code === 'ROUTE_CODE_MISSING' ? 'Type your route or truck code.' : q.code === 'TOO_MANY_CODES' ? 'At most 5 codes at once.' : 'That code is too long.';
     return salesFail({ code: q.code, message }, 400);
   }
   const m = await salesDayFor(ctx.tenantId, ctx.date, ctx.now);
-  const match = matchRoutes(q.codes, m.day.routes.keys());
+  const match = matchLookup(q.codes, m.day.routes.keys(), m.day.truckRefs);
+  // A code that matched no route and no truck counts against the link and client (a truck lookup as a route's).
   if (match.notFound.length) {
     const used = consumeMisses(ctx, match.notFound.length);
     if (!used.ok) return used.response;
   }
-  if (!ctx.session) await touchSalesLink(ctx.link, ctx.deviceId, match.routes, ctx.now);
+  const results = [...match.routes.map((r) => m.day.routes.get(r)!), ...match.trucks.map((id) => m.day.trucks.get(id)!)];
+  // "Routes looked up": the route codes found, and the trucks found as "T:<code>" (owner decision of 20 Oct 2026).
+  if (!ctx.session) await touchSalesLink(ctx.link, ctx.deviceId, [...match.routes, ...match.trucks.map((id) => `${TRUCK_SEEN_PREFIX}${m.day.trucks.get(id)!.code}`)], ctx.now);
   const answer: SalesViewAnswer = {
     meta: salesMeta({ date: ctx.date, company: m.company, tz: m.tz, expiresAt: ctx.expiresAt, now: ctx.now }),
     lookup: {
       asked: q.codes,
-      routes: match.routes.map((r) => m.day.routes.get(r)!),
+      results,
       notFound: match.notFound,
       ambiguous: match.ambiguous,
+      choices: salesChoices(match.choices, results, m.day),
       notFoundText: notFoundText(match.notFound, shortDayText(ctx.date)),
     },
   };
   return salesOk(answer);
+}
+
+/**
+ * The trucks offered for a code (several trucks with its digits; a route code that is also a truck's), each with
+ * the whole lookup to send when picked: what is shown now (without the routes an ALSO_TRUCK code showed) and the
+ * truck, at most MAX_CODES codes.
+ */
+export function salesChoices(choices: readonly LookupChoice[], results: readonly SalesRouteView[], day: Pick<SalesDay, 'trucks'>): SalesChoice[] {
+  return choices.map((ch) => {
+    const kept = results.filter((v) => !(ch.why === 'ALSO_TRUCK' && v.kind === 'ROUTE' && ch.routes.includes(v.code))).map((v) => v.query);
+    const options = ch.trucks.map((id) => {
+      const code = day.trucks.get(id)!.code;
+      const pick = truckQuery(code);
+      const rest = kept.filter((x) => x !== pick).slice(0, MAX_CODES - 1);
+      return { code, query: [...rest, pick].join(', ') };
+    });
+    return { asked: ch.asked, kind: ch.why, text: choiceText(ch.why, ch.asked, options.length), options };
+  });
 }

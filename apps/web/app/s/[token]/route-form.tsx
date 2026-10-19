@@ -8,7 +8,7 @@ import { UI } from '@/lib/sales-page/format';
 /**
  * The route code entry: one big field for a phone (16 px text, so iPhones do not zoom; capitals; no
  * autocorrect), the hint from the server ("as on your Salesman ETA page"), and the error of the last try.
- * Several routes at once: "R1, R2X".
+ * Several routes at once: "R1, R2X"; a truck by its code ("1234-AB", or its digits "1234"; owner decision of 20 Oct 2026).
  */
 export function RouteForm({
   initial,
@@ -54,7 +54,7 @@ export function RouteForm({
         data-testid="route-input"
       />
       <p id="sales-route-hint" className="text-sm text-slate-600">
-        {hint ?? 'Your route code, as on your Salesman ETA page'}. {UI.routeHelp}.
+        {hint ?? 'Your route code (as on your Salesman ETA page) or a truck code'}. {UI.routeHelp}.
       </p>
       <div id="sales-route-error" aria-live="polite">
         {error ? (

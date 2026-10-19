@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SalesLinkStateCode, SalesLookup, SalesMeta } from '@/lib/sales-link/view-types';
+import type { SalesChoice, SalesLinkStateCode, SalesLookup, SalesMeta } from '@/lib/sales-link/view-types';
 import { parseRouteQuery } from '@/lib/sales-link/route-code';
 import { deviceId, fetchSalesView, forgetRoute, routeFromHash, safeLocalStorage, saveRoute, savedRoute, tokenFromPath, type KeyStore, type SalesAnswer } from '@/lib/sales-page/api';
 import { followQuery, UI } from '@/lib/sales-page/format';
@@ -10,10 +10,13 @@ import { followQuery, UI } from '@/lib/sales-page/format';
  * The salesman link page's state (owner request 19 Oct 2026): which route codes it follows, the last answer, and
  * when it asks again. Read-only: it only ever sends GET /api/s/view.
  *
- * - The route codes come from the link's fragment ("/s/<token>#R1": WhatsApp's in-app browser may not keep
- *   localStorage), else from what this browser last found (`riq.s.route`), else the route form.
- * - Found codes are followed: the page asks for exactly the routes the server found, every `meta.refreshSec`
- *   (60 s) while the page is visible, and again when it comes back to the front or the signal returns.
+ * - The route (or truck) codes come from the link's fragment ("/s/<token>#R1": WhatsApp's in-app browser may not
+ *   keep localStorage), else from what this browser last found (`riq.s.route`), else the route form.
+ * - Found codes are followed: the page asks for exactly the routes and trucks the server found (a truck as
+ *   "Truck 1234-AB"), every `meta.refreshSec` (60 s) while the page is visible, and again when it comes back to
+ *   the front or the signal returns.
+ * - Trucks the server offers for a code (several trucks with the digits typed; a route code that is also a
+ *   truck's) are kept as `choices` until the codes change; picking one sends its whole lookup (`submit`).
  * - A code that matched nothing is never asked again by itself (each one counts against the link's limit): the
  *   form shows the server's "No deliveries for route R9 ..." and the saved code is forgotten.
  * - The newest request wins (a refresh answered after a route change is dropped); a 429 waits Retry-After; a
@@ -31,8 +34,10 @@ export interface SalesViewState {
   linkDate: string | null;
   /** The last answer with at least one route found. */
   lookup: SalesLookup | null;
-  /** "No deliveries for route R9 ..." when some of the codes typed matched nothing (the others are shown). */
+  /** "No deliveries for route or truck R9 ..." when some of the codes typed matched nothing (the others are shown). */
   notice: string | null;
+  /** Trucks offered for a code typed (on the form when nothing else was found, else above the results). */
+  choices: SalesChoice[];
   /** The route form's text and its error. */
   formText: string;
   formError: string | null;
@@ -108,6 +113,7 @@ export const INITIAL_SALES_STATE: SalesViewState = {
   linkDate: null,
   lookup: null,
   notice: null,
+  choices: [],
   formText: '',
   formError: null,
   working: false,
@@ -130,7 +136,7 @@ export function useSalesView(deps?: SalesViewDeps) {
   const device = useRef('');
   // Bumped by every request and by Change route: an answer to an older one is dropped.
   const seq = useRef(0);
-  /** The codes followed (the routes found, as stored): what every refresh asks for. */
+  /** The codes followed (the routes and trucks found, as the server names them): what every refresh asks for. */
   const follow = useRef<string | null>(null);
   /** The link does not work: nothing more is asked. */
   const stopped = useRef(false);
@@ -163,17 +169,20 @@ export function useSalesView(deps?: SalesViewDeps) {
           patch({ phase: 'form', meta, working: false, waitSec: null, staleSince: null });
           return;
         }
-        if (!lookup.routes.length) {
-          // Nothing found: never asked again (each unknown code counts against the link and this network).
+        if (!lookup.results.length) {
+          // Nothing found: never asked again (each unknown code counts against the link and this network). Trucks
+          // offered for a code (several with its digits) are shown on the form to pick from.
           follow.current = null;
           forgetRoute(d.storage);
+          const choices = lookup.choices ?? [];
           patch({
             phase: 'form',
             meta,
             lookup: null,
             notice: null,
+            choices,
             formText: route ?? '',
-            formError: lookup.notFoundText ?? 'No deliveries for that route code. Check the code on your Salesman ETA page.',
+            formError: lookup.notFoundText ?? (choices.length ? null : 'No deliveries for that code. Check the route code on your Salesman ETA page, or the truck code.'),
             working: false,
             waitSec: null,
             staleSince: null,
@@ -189,8 +198,9 @@ export function useSalesView(deps?: SalesViewDeps) {
           phase: 'ready',
           meta,
           lookup,
-          // A refresh asks only for the routes found: the first answer's notice stays until the route changes.
+          // A refresh asks only for what was found: the first answer's notice and choices stay until the codes change.
           notice: why === 'poll' || why === 'refresh' ? prev.notice : notice,
+          choices: why === 'poll' || why === 'refresh' ? prev.choices : (lookup.choices ?? []),
           formError: null,
           working: false,
           waitSec: null,
@@ -207,7 +217,7 @@ export function useSalesView(deps?: SalesViewDeps) {
       if (a.kind === 'badCode') {
         follow.current = null;
         forgetRoute(d.storage);
-        patch({ phase: 'form', formText: route ?? '', formError: a.message, working: false, waitSec: null });
+        patch({ phase: 'form', choices: [], formText: route ?? '', formError: a.message, working: false, waitSec: null });
         return;
       }
       if (a.kind === 'busy') {
@@ -252,7 +262,8 @@ export function useSalesView(deps?: SalesViewDeps) {
     const offHash = d.on('window', 'hashchange', () => {
       const r = routeFromHash(d.location.hash);
       const q = r ? parseRouteQuery(r) : null;
-      if (q?.ok && q.codes.join(', ') !== follow.current) void ask(q.codes.join(', '), 'submit');
+      const now = follow.current ? parseRouteQuery(follow.current) : null;
+      if (q?.ok && q.codes.join(', ') !== (now?.ok ? now.codes.join(', ') : null)) void ask(q.codes.join(', '), 'submit');
     });
     return () => {
       offHash();
@@ -305,7 +316,7 @@ export function useSalesView(deps?: SalesViewDeps) {
     };
   }, [offline, refreshMs, ask]);
 
-  /** The route form: "r1", "R1, R2X" (checked here first with the server's rule). */
+  /** The route form: "r1", "R1, R2X", "C1, 5678"; a truck picked from the choices sends its lookup here too (checked first with the server's rule). */
   const submit = useCallback(
     (text: string) => {
       const q = parseRouteQuery(text);
@@ -331,7 +342,7 @@ export function useSalesView(deps?: SalesViewDeps) {
       forgetRoute(d.storage);
       if (d.location.hash) d.replaceUrl(`${d.location.pathname}${d.location.search}`);
     }
-    setState((prev) => ({ ...prev, phase: 'form', lookup: null, notice: null, formText: was ?? prev.formText, formError: null, working: false, staleSince: null }));
+    setState((prev) => ({ ...prev, phase: 'form', lookup: null, notice: null, choices: [], formText: was ?? prev.formText, formError: null, working: false, staleSince: null }));
   }, []);
 
   /** The Refresh button. */

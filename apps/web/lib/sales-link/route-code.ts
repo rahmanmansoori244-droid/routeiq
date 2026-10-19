@@ -1,6 +1,7 @@
 /**
- * The route code a salesman types on the salesman link's page (owner request 19 Oct 2026; critique item 18).
- * Pure and browser-safe. The code is a FILTER, not a password (the owner's choice: docs/SECURITY.md).
+ * The route or truck code a salesman types on the salesman link's page (owner request 19 Oct 2026; critique
+ * item 18; the truck lookup: owner decision of 20 Oct 2026). Pure and browser-safe. The code is a FILTER, not a
+ * password (the owner's choice: docs/SECURITY.md).
  *
  * Phones type codes in many ways, so the lookup is forgiving:
  * - each code is put through NFKC (full-width letters and digits become plain ones), Arabic-Indic and
@@ -9,10 +10,18 @@
  * - a code the day has exactly (after that) is that route; else the day's routes with the same COMPACT key
  *   (no spaces, hyphens, dots, slashes or underscores: "r 1", "R-1" and "r1" are one key) - every one of
  *   them when several share it (the salesman sees both and picks his);
- * - several codes at once, "R1, R2X" (a salesman with two routes): split on commas and semicolons (the
- *   Arabic comma too), at most MAX_CODES.
- * The only list of codes is the day's own lines (OrderLine.salesRoute): an unknown code and a code without
- * deliveries that day cannot be told apart, and the answer is the same.
+ * - a code that is no route of the day is looked up among the day's TRUCKS, each by the code the plan shows (a
+ *   day-hired truck by its plate: lib/dispatch/hire.ts shownTruckCode): the truck with the same compact key
+ *   ("5678xy", "5678 XY" and "5678-XY" are one key; every truck when several share it), else, for a code of
+ *   digits only, the ONE truck whose code has exactly those digits ("5678" for "5678-XY"); several such trucks
+ *   are not shown but offered as choices (SEVERAL_TRUCKS);
+ * - a route code that is also a truck's code shows the ROUTE (the route is preferred) and offers the truck as a
+ *   choice (ALSO_TRUCK); "Truck 5678-XY" (also "truck: 5678xy") looks among the trucks only: the page sends that
+ *   form for a truck it shows or the salesman picks;
+ * - several codes at once, "R1, R2X" or "C1, 5678" (two routes; a route and a truck): split on commas and
+ *   semicolons (the Arabic comma too), at most MAX_CODES.
+ * The only lists of codes are the day's own: its lines' routes (OrderLine.salesRoute) and the trucks of its plans
+ * in use. An unknown code and a code without deliveries that day cannot be told apart, and the answer is the same.
  */
 import { normSalesRoute, SALES_ROUTE_MAX, compareSalesRoutes } from '../dispatch/sales-route';
 
@@ -44,6 +53,27 @@ export function normTypedRoute(raw: string | null | undefined): string | null {
 /** The compact key of a code: the normalised code without spaces, hyphens, dots, slashes and underscores. */
 export function compactRouteKey(code: string): string {
   return (normTypedRoute(code) ?? '').replace(/[\s\-._/\\]+/g, '');
+}
+
+/** A truck code's compact key: the same rule as a route's ("5678-xy", "5678 XY" and "٥٦٧٨XY" -> "5678XY"). */
+export const compactTruckKey = compactRouteKey;
+
+/** The digits of a code ("5678-XY" -> "5678"; Arabic-Indic digits as 0-9); "" without any. */
+export function codeDigits(code: string): string {
+  return compactRouteKey(code).replace(/\D+/g, '');
+}
+
+/** The explicit truck form: what the page sends for a truck it shows or offers ("Truck 5678-XY"). */
+export function truckQuery(truckCode: string): string {
+  return `Truck ${truckCode}`;
+}
+
+const TRUCK_FORM = /^TRUCK(?:\s*:\s*|\s+)(\S.*)$/;
+
+/** The truck code of an explicit truck lookup ("Truck 5678-XY" -> "5678-XY", "truck:5678xy" -> "5678XY"); else null. */
+export function explicitTruck(code: string): string | null {
+  const m = TRUCK_FORM.exec(normTypedRoute(code) ?? '');
+  return m ? m[1]!.trim() || null : null;
 }
 
 export type RouteQuery = { ok: true; codes: string[] } | { ok: false; code: 'ROUTE_CODE_MISSING' | 'ROUTE_CODE_TOO_LONG' | 'TOO_MANY_CODES' };
@@ -110,4 +140,100 @@ export function matchRoutes(codes: readonly string[], known: Iterable<string>): 
     for (const r of same) routes.add(r);
   }
   return { routes: [...routes].sort(compareSalesRoutes), notFound, ambiguous };
+}
+
+/** One truck of the day: an id the server keeps (never sent) and its code as the plan shows it. */
+export interface DayTruckRef {
+  id: string;
+  code: string;
+}
+
+/**
+ * A typed code the page offers choices for: several trucks have its digits (SEVERAL_TRUCKS: none of them is
+ * shown), or a route code is also a truck's code (ALSO_TRUCK: the route is shown).
+ */
+export interface LookupChoice {
+  asked: string;
+  why: 'SEVERAL_TRUCKS' | 'ALSO_TRUCK';
+  /** ALSO_TRUCK: the routes the code showed; else none. */
+  routes: string[];
+  /** The trucks to choose from (ids), in code order. */
+  trucks: string[];
+}
+
+export interface LookupMatch extends RouteMatch {
+  /** The day's trucks the codes matched (ids), in code order, each once. */
+  trucks: string[];
+  choices: LookupChoice[];
+}
+
+const byTruckCode = (a: DayTruckRef, b: DayTruckRef) => compareSalesRoutes(a.code, b.code) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
+/**
+ * The day's routes and trucks the typed codes name (the file comment): per code, an explicit "Truck X" among the
+ * trucks only; else a route (exact, else compact key) first, offering a truck with that code as a choice; else a
+ * truck (compact key, else a unique digits-only match; several: choices); else not found.
+ */
+export function matchLookup(codes: readonly string[], knownRoutes: Iterable<string>, knownTrucks: Iterable<DayTruckRef>): LookupMatch {
+  const routeList = [...knownRoutes];
+  const trucks = [...new Map([...knownTrucks].map((t) => [t.id, t])).values()].sort(byTruckCode);
+  const keyOf = new Map(trucks.map((t) => [t.id, compactTruckKey(t.code)]));
+  const digitsOf = new Map(trucks.map((t) => [t.id, codeDigits(t.code)]));
+  /** The trucks a code names: the same compact key, else (a code of digits only) the trucks with exactly those digits. */
+  const truckHits = (code: string): { exact: DayTruckRef[]; digits: DayTruckRef[] } => {
+    const key = compactTruckKey(code);
+    if (!key) return { exact: [], digits: [] };
+    const exact = trucks.filter((t) => keyOf.get(t.id) === key);
+    if (exact.length || !/^\d+$/.test(key)) return { exact, digits: [] };
+    return { exact, digits: trucks.filter((t) => digitsOf.get(t.id) === key) };
+  };
+
+  const routes = new Set<string>();
+  const found = new Set<string>();
+  const notFound: string[] = [];
+  const ambiguous: string[] = [];
+  const choices: LookupChoice[] = [];
+  /** A code among the trucks only: shown (the one, or every one with that exact key), offered as choices, or false. */
+  const asTruck = (asked: string, code: string): boolean => {
+    const { exact, digits } = truckHits(code);
+    if (exact.length) {
+      if (exact.length > 1) ambiguous.push(asked);
+      for (const t of exact) found.add(t.id);
+      return true;
+    }
+    if (digits.length === 1) {
+      found.add(digits[0]!.id);
+      return true;
+    }
+    if (digits.length > 1) {
+      choices.push({ asked, why: 'SEVERAL_TRUCKS', routes: [], trucks: digits.map((t) => t.id) });
+      return true;
+    }
+    return false;
+  };
+  for (const c of codes) {
+    const truck = explicitTruck(c);
+    if (truck !== null) {
+      if (!asTruck(c, truck)) notFound.push(c);
+      continue;
+    }
+    const r = matchRoutes([c], routeList);
+    if (r.routes.length) {
+      // The route is preferred; a truck with that code is offered.
+      for (const x of r.routes) routes.add(x);
+      ambiguous.push(...r.ambiguous);
+      const { exact, digits } = truckHits(c);
+      const also = exact.length ? exact : digits;
+      if (also.length) choices.push({ asked: c, why: 'ALSO_TRUCK', routes: r.routes, trucks: also.map((t) => t.id) });
+      continue;
+    }
+    if (!asTruck(c, c)) notFound.push(c);
+  }
+  return {
+    routes: [...routes].sort(compareSalesRoutes),
+    trucks: trucks.filter((t) => found.has(t.id)).map((t) => t.id),
+    notFound,
+    ambiguous,
+    choices,
+  };
 }

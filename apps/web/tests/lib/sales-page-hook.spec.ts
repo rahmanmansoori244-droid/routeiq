@@ -11,10 +11,12 @@
  *    the newest request wins (an answer for the route left behind is dropped); Change route drops the fragment.
  *  - A first request that failed is asked again by itself (signal back, page back, every period); a server error
  *    is said as such, not as "no connection"; a proxy's bare 503 is ridden out (review of 19 Oct 2026).
+ *  - A truck looked up (owner decision of 20 Oct 2026) is followed as "Truck X"; the trucks offered for a code are
+ *    kept until the codes change, shown on the form when nothing else was found, and a pick asks for that truck.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { Host, deferred } from './hook-host';
-import { TOKEN, answer, lookup, routeView } from './sales-page-fixture';
+import { TOKEN, answer, lookup, routeView, truckView } from './sales-page-fixture';
 import { readSalesAnswer, type SalesAnswer } from '@/lib/sales-page/api';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
@@ -23,7 +25,10 @@ import { useSalesView, WAKE_MIN_MS, refreshMsOf, type SalesViewDeps, type SalesV
 
 type Answerer = (route: string | null) => SalesAnswer | Promise<SalesAnswer>;
 
-const ok = (routes: string[], over: Parameters<typeof lookup>[1] = {}): SalesAnswer => ({ kind: 'ok', answer: answer(routes.length || over.notFound ? lookup(routes.map((r) => routeView(r)), over) : null) });
+const ok = (routes: string[], over: Parameters<typeof lookup>[1] = {}): SalesAnswer => ({
+  kind: 'ok',
+  answer: answer(routes.length || over.notFound || over.choices ? lookup(routes.map((r) => (r.startsWith('Truck ') ? truckView(r.slice(6)) : routeView(r))), over) : null),
+});
 const metaOnly: SalesAnswer = { kind: 'ok', answer: answer(null) };
 
 function world(o: { path?: string; hash?: string; saved?: string; answer: Answerer }) {
@@ -155,7 +160,7 @@ describe('where the route comes from', () => {
     await w.mount();
     expect(w.calls).toEqual(['r 2x']);
     expect(w.state().phase).toBe('ready');
-    expect(w.state().lookup?.routes.map((r) => r.route)).toEqual(['R2X']);
+    expect(w.state().lookup?.results.map((r) => r.code)).toEqual(['R2X']);
     expect(w.data['riq.s.route']).toBe('R2X');
   });
 
@@ -172,7 +177,7 @@ describe('where the route comes from', () => {
     w.location.hash = '#R2X';
     await w.fire('window', 'hashchange');
     expect(w.calls).toEqual(['R1', 'R2X']);
-    expect(w.state().lookup?.routes[0]?.route).toBe('R2X');
+    expect(w.state().lookup?.results[0]?.code).toBe('R2X');
     // The same route again: nothing asked.
     await w.fire('window', 'hashchange');
     expect(w.calls).toEqual(['R1', 'R2X']);
@@ -235,9 +240,9 @@ describe('following the routes found', () => {
     const w = world({ answer: () => metaOnly });
     await w.mount();
     await w.act((a) => a.submit('   '));
-    expect(w.state().formError).toBe('Type your route code.');
+    expect(w.state().formError).toBe('Type your route or truck code.');
     await w.act((a) => a.submit('R1, R2, R3, R4, R5, R6'));
-    expect(w.state().formError).toBe('At most 5 route codes at once.');
+    expect(w.state().formError).toBe('At most 5 codes at once.');
     expect(w.calls).toEqual([null]);
     w.answer = () => ({ kind: 'badCode', code: 'ROUTE_CODE_TOO_LONG', message: 'That route code is too long.' });
     await w.act((a) => a.submit('R1'));
@@ -261,6 +266,62 @@ describe('following the routes found', () => {
     // No refresh in the form.
     await w.tick();
     expect(w.calls).toEqual(['R1', 'R1']);
+  });
+});
+
+describe('a truck looked up (owner decision of 20 Oct 2026)', () => {
+  const several = {
+    asked: '1234',
+    kind: 'SEVERAL_TRUCKS' as const,
+    text: '1234 matches 2 trucks today. Pick one:',
+    options: [
+      { code: '1234-AB', query: 'Truck 1234-AB' },
+      { code: '1234-CD', query: 'Truck 1234-CD' },
+    ],
+  };
+
+  it('a truck found is followed (and saved) in the explicit form, so a refresh never turns it into a route', async () => {
+    const w = world({ answer: () => metaOnly });
+    await w.mount();
+    w.answer = (r) => (r === 'C1, 1234' || r === 'C1, Truck 1234-AB' ? ok(['C1', 'Truck 1234-AB']) : ok([]));
+    await w.act((a) => a.submit('c1, 1234'));
+    expect(w.state().phase).toBe('ready');
+    expect(w.state().lookup?.results.map((r) => `${r.kind} ${r.code}`)).toEqual(['ROUTE C1', 'TRUCK 1234-AB']);
+    expect(w.data['riq.s.route']).toBe('C1, Truck 1234-AB');
+    await w.tick();
+    expect(w.calls).toEqual([null, 'C1, 1234', 'C1, Truck 1234-AB']);
+    // The same codes in the link's fragment: nothing asked again.
+    w.location.hash = '#c1,%20truck%201234-ab';
+    await w.fire('window', 'hashchange');
+    expect(w.calls).toHaveLength(3);
+  });
+
+  it('several trucks with the digits: the form offers them (no error, nothing followed); a pick asks for that truck', async () => {
+    const w = world({ answer: () => metaOnly });
+    await w.mount();
+    w.answer = (r) => (r === '1234' ? ok([], { asked: ['1234'], choices: [several] }) : r === 'TRUCK 1234-CD' ? ok(['Truck 1234-CD']) : ok([]));
+    await w.act((a) => a.submit('1234'));
+    expect(w.state()).toMatchObject({ phase: 'form', formError: null, choices: [several], formText: '1234' });
+    expect(w.data['riq.s.route']).toBeUndefined();
+    expect(w.every.filter((e) => e.on)).toEqual([]);
+    await w.act((a) => a.submit(several.options[1]!.query));
+    expect(w.state().phase).toBe('ready');
+    expect(w.state().choices).toEqual([]);
+    expect(w.state().lookup?.results.map((r) => r.query)).toEqual(['Truck 1234-CD']);
+    expect(w.calls).toEqual([null, '1234', 'TRUCK 1234-CD']);
+    expect(w.data['riq.s.route']).toBe('Truck 1234-CD');
+  });
+
+  it('a route code that is also a truck code: the route with the truck offered; kept on refresh, gone on Change route', async () => {
+    const also = { asked: 'R1', kind: 'ALSO_TRUCK' as const, text: 'R1 is also a truck code. Show the truck instead:', options: [{ code: 'R-1', query: 'Truck R-1' }] };
+    const w = world({ saved: 'R1', answer: () => ok(['R1'], { choices: [also] }) });
+    await w.mount();
+    expect(w.state()).toMatchObject({ phase: 'ready', choices: [also] });
+    w.answer = () => ok(['R1']);
+    await w.tick();
+    expect(w.state().choices).toEqual([also]);
+    await w.act((a) => a.changeRoute());
+    expect(w.state()).toMatchObject({ phase: 'form', choices: [] });
   });
 });
 
@@ -314,7 +375,7 @@ describe('when things go wrong', () => {
     await w.tick();
     expect(w.state().phase).toBe('ready');
     expect(w.state().staleSince).toBe(1_001_000);
-    expect(w.state().lookup?.routes[0]?.route).toBe('R1');
+    expect(w.state().lookup?.results[0]?.code).toBe('R1');
     w.advance(60_000);
     await w.tick();
     expect(w.state().staleSince).toBe(1_001_000);

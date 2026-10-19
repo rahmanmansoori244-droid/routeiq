@@ -1,7 +1,7 @@
 'use client';
 
 import { AlertTriangle, MessageCircle } from 'lucide-react';
-import type { SalesDelivery } from '@/lib/sales-link/view-types';
+import type { SalesDelivery, SalesViewKind } from '@/lib/sales-link/view-types';
 import { casesLine, codeText, hoursLine, shareUrl, STATUS_EDGE, STATUS_TONE, timeLine, timingChip, tripText, UI, windowLine } from '@/lib/sales-page/format';
 
 /**
@@ -10,7 +10,7 @@ import { casesLine, codeText, hoursLine, shareUrl, STATUS_EDGE, STATUS_TONE, tim
  * the truck, trip and stop, the reason as the driver reported it, the customer's hours, notes, and "Send to
  * customer" (WhatsApp with the status as text; no link is sent).
  */
-export function DeliveryCard({ d, rowKey }: { d: SalesDelivery; rowKey: string }) {
+export function DeliveryCard({ d, rowKey, kind = 'ROUTE' }: { d: SalesDelivery; rowKey: string; kind?: SalesViewKind }) {
   const timing = timingChip(d.eta);
   const time = timeLine(d);
   const win = windowLine(d);
@@ -37,6 +37,11 @@ export function DeliveryCard({ d, rowKey }: { d: SalesDelivery; rowKey: string }
         {codeText(d.customerCode, d.branchCode)}
         {d.invoices.length ? ` · ${UI.invoices(d.invoices)}` : ''}
       </p>
+      {kind === 'TRUCK' && d.routes?.length ? (
+        <p className="text-sm font-medium text-slate-700" data-testid="delivery-routes">
+          {UI.routesOf(d.routes)}
+        </p>
+      ) : null}
       {time ? (
         <p className="mt-1 text-base font-medium text-slate-900" data-testid="delivery-time">
           {time}

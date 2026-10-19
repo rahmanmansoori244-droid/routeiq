@@ -20,8 +20,8 @@ export function shortDayText(iso: string): string {
 /** The page's own words. */
 export const UI = {
   title: 'Deliveries',
-  routeLabel: 'Route code',
-  routeHelp: 'Two routes? Type both: R1, R2X',
+  routeLabel: 'Route or truck code',
+  routeHelp: 'Two routes? Type both: R1, R2X. A truck: its code (1234-AB, or just 1234)',
   show: 'Show my deliveries',
   changeRoute: 'Change route',
   refresh: 'Refresh',
@@ -38,6 +38,8 @@ export const UI = {
   deliveries: 'Deliveries',
   // The link may be tomorrow's (sent the evening before): never "today" here.
   offTruck: 'Not on a truck',
+  /** A truck's orders not on it any more (cancelled, moved to another day). */
+  offThisTruck: 'Taken off this truck',
   noDeliveries: 'No deliveries on a truck for this route.',
   notPlannedYet: 'Not planned yet - the plan is usually made the evening before. Check again later.',
   filtered: (n: number, of: number) => `Showing ${n} of ${of}`,
@@ -56,10 +58,16 @@ export const UI = {
   invoices: (list: readonly string[]) => (list.length === 1 ? `Invoice ${list[0]}` : `Invoices ${list.join(', ')}`),
   stale: (updated: string) => `Could not refresh - showing the data of ${updated.replace(/^Updated\s+/i, '')}. Trying again every minute.`,
   busy: (sec: number | null) => (sec ? `Too many requests. Trying again in ${sec} s.` : 'Too many requests. Trying again in a minute.'),
-  codeMissing: 'Type your route code.',
-  codeTooLong: 'That route code is too long.',
-  tooManyCodes: 'At most 5 route codes at once.',
-  ambiguous: (codes: readonly string[]) => `${codes.join(', ')} matched more than one route: each is shown.`,
+  codeMissing: 'Type your route or truck code.',
+  codeTooLong: 'That code is too long.',
+  tooManyCodes: 'At most 5 codes at once.',
+  ambiguous: (codes: readonly string[]) => `${codes.join(', ')} matched more than one route or truck: each is shown.`,
+  /** The heading and tab of a result: "Route R1", "Truck 1234-AB". */
+  viewTitle: (v: Pick<SalesRouteView, 'kind' | 'code'>) => `${v.kind === 'TRUCK' ? 'Truck' : 'Route'} ${v.code}`,
+  /** A truck offered for a code ("Truck 1234-AB"). */
+  pickTruck: (code: string) => `Truck ${code}`,
+  /** A delivery's sales routes on a truck's result. */
+  routesOf: (routes: readonly string[]) => (routes.length === 1 ? `Route ${routes[0]}` : `Routes ${routes.join(', ')}`),
 } as const;
 
 /** The full-page texts of a link that does not work (the same words as the server's SALES_STATE_TEXT). */
@@ -296,16 +304,17 @@ export function filterView(view: Pick<SalesRouteView, 'deliveries' | 'offTruck'>
 // ---------------------------------------------------------------------------------------
 
 /**
- * What the page asks for on each refresh: the routes the lookup FOUND, as the day stores them ("R1, R2X").
+ * What the page asks for on each refresh: the routes and trucks the lookup FOUND, as the day names them
+ * ("R1, R2X", "C1, Truck 1234-AB": a truck in the explicit form, so a refresh never turns it into a route).
  * A code that matched nothing is never asked again (each one counts against the link's limit); null = none found.
  */
-export function followQuery(lookup: Pick<SalesLookup, 'routes'> | null): string | null {
-  const codes = lookup?.routes.map((r) => r.route) ?? [];
+export function followQuery(lookup: Pick<SalesLookup, 'results'> | null): string | null {
+  const codes = lookup?.results.map((r) => r.query) ?? [];
   return codes.length ? codes.join(', ') : null;
 }
 
-/** A key unique on a page that shows several routes (the answer's keys are unique per route only). */
-export const rowKey = (route: string, key: string) => `${route}:${key}`;
+/** A key unique on a page that shows several results (the answer's keys are unique per result only): the result's query and the key. */
+export const rowKey = (query: string, key: string) => `${query}:${key}`;
 
 export interface MapTruck {
   key: string;
@@ -328,21 +337,21 @@ export interface MapPin {
 
 const isPoint = (lat: number, lng: number) => Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
 
-/** What the map draws for a route: the trucks the server gives a position for, and the deliveries still to come (numbered, no names). */
-export function mapModel(view: Pick<SalesRouteView, 'route' | 'trucks' | 'deliveries'>): { trucks: MapTruck[]; pins: MapPin[]; fitKey: string } {
+/** What the map draws for a route or truck: the trucks the server gives a position for, and the deliveries still to come (numbered, no names). */
+export function mapModel(view: Pick<SalesRouteView, 'query' | 'trucks' | 'deliveries'>): { trucks: MapTruck[]; pins: MapPin[]; fitKey: string } {
   const trucks: MapTruck[] = view.trucks
     .filter((t) => t.position && isPoint(t.position.lat, t.position.lng))
-    .map((t) => ({ key: rowKey(view.route, t.key), label: t.truckCode, lat: t.position!.lat, lng: t.position!.lng, stale: t.position!.stale, moving: t.position!.moving, text: `${t.truckCode} · ${t.position!.updatedText}` }));
+    .map((t) => ({ key: rowKey(view.query, t.key), label: t.truckCode, lat: t.position!.lat, lng: t.position!.lng, stale: t.position!.stale, moving: t.position!.moving, text: `${t.truckCode} · ${t.position!.updatedText}` }));
   const pins: MapPin[] = view.deliveries
     .filter((d) => isPending(d) && d.pin && isPoint(d.pin.lat, d.pin.lng))
-    .map((d) => ({ key: rowKey(view.route, d.key), no: d.no, lat: d.pin!.lat, lng: d.pin!.lng, color: PIN_COLOR[d.status], text: [`No. ${d.no}`, d.statusText, d.eta?.expected ? `about ${d.eta.expected}` : d.window].filter(Boolean).join(' · ') }));
-  // The view is fitted once per route and set of pins: a refresh that only moves a truck never moves the map.
-  const fitKey = `${view.route}|${pins.map((p) => `${p.no}@${p.lat},${p.lng}`).join(';')}|${trucks.length > 0}`;
+    .map((d) => ({ key: rowKey(view.query, d.key), no: d.no, lat: d.pin!.lat, lng: d.pin!.lng, color: PIN_COLOR[d.status], text: [`No. ${d.no}`, d.statusText, d.eta?.expected ? `about ${d.eta.expected}` : d.window].filter(Boolean).join(' · ') }));
+  // The view is fitted once per result and set of pins: a refresh that only moves a truck never moves the map.
+  const fitKey = `${view.query}|${pins.map((p) => `${p.no}@${p.lat},${p.lng}`).join(';')}|${trucks.length > 0}`;
   return { trucks, pins, fitKey };
 }
 
 /** The map is worth showing: a truck position or a delivery still to come with a pin. */
-export function hasMapContent(view: Pick<SalesRouteView, 'route' | 'trucks' | 'deliveries'>): boolean {
+export function hasMapContent(view: Pick<SalesRouteView, 'query' | 'trucks' | 'deliveries'>): boolean {
   const m = mapModel(view);
   return m.trucks.length > 0 || m.pins.length > 0;
 }
