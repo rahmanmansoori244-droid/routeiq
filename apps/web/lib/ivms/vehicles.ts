@@ -6,13 +6,16 @@
  * Nothing at all while the company's ivmsMode is OFF or ROUTEIQ_DISABLE_IVMS=1 (mode OFF, no vehicle),
  * for a plan of another day than today or yesterday, or for a truck without a load out (LOCKED,
  * LOADING, DISPATCHED: no off-duty positions, review M7). The positions are written by the poller
- * (TruckPosition, live map only); they are never used for times (H5).
+ * (TruckPosition, live map only); they are never used for times (H5). Whether the truck is still at a stop
+ * it arrived at reaches the customer's GPS site radius (Customer.siteRadiusM, owner request 19 Oct 2026), as
+ * in the GPS alerts (lib/alerts/gps.ts atStopRadiusOf): the map and the alerts give one answer.
  */
 import { prisma } from '../db';
 import { shownTruckCode } from '../dispatch/hire';
 import { readTruckSnapshot } from '../dispatch/snapshots';
 import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, todayIso, zonedDayStart } from '../dispatch/time';
 import { stopsOfLoads, type PlannedStopRow } from '../delivery/day-results';
+import { atStopRadiusOf } from '../alerts/gps';
 import { mapIntervalInEffect, utcDay } from './budget';
 import { readIvmsEnv } from './env';
 import { AT_STOP_MARGIN_M, liveEta } from './eta';
@@ -82,6 +85,7 @@ export async function readLiveVehicles(tenantId: string, runId: string, now: Dat
   let stops = new Map<string, PlannedStopRow[]>();
   let visits: { truckId: string; loadNo: number; sequence: number; outcome: string | null; arrivedAt: Date | null; departedAt: Date | null; depotId: string }[] = [];
   let depot: { id: string; lat: number; lng: number } | null = null;
+  let siteOf = new Map<string, number | null>();
   if (onRoad.length) {
     const [s, v, r] = await Promise.all([
       stopsOfLoads(prisma, onRoad.map((l) => ({ id: l.id, breakJson: l.breakJson }))),
@@ -94,8 +98,16 @@ export async function readLiveVehicles(tenantId: string, runId: string, now: Dat
     stops = s;
     visits = v;
     depot = r ? await prisma.depot.findFirst({ where: { id: r.depotId, tenantId }, select: { id: true, lat: true, lng: true } }) : null;
+    // The customers' GPS site radius (review of 19 Oct 2026): "at the stop" as the GPS alerts read it.
+    const customerIds = [...new Set([...s.values()].flat().map((x) => x.customerId))];
+    const sites = customerIds.length ? await prisma.customer.findMany({ where: { tenantId, id: { in: customerIds } }, select: { id: true, siteRadiusM: true } }) : [];
+    siteOf = new Map(sites.map((c) => [c.id, c.siteRadiusM ?? null]));
   }
   const dayStart = zonedDayStart(date, tz);
+  // "At the stop" for an open arrival: the company's radius (stop radius + margin), or the customer's site
+  // radius when larger (owner request 19 Oct 2026; the review of the same day: the live map said "left" for a
+  // truck at a big customer's second drop point while the GPS alerts said it was still there).
+  const atStop = { atStopRadiusM: (cfg?.ivmsStopRadiusM ?? IVMS_SETTING_DEFAULTS.ivmsStopRadiusM) + AT_STOP_MARGIN_M };
 
   base.vehicles = positions.map((p): DayVehicle => {
     const load = loadOf.get(p.truckId)!;
@@ -114,6 +126,7 @@ export async function readLiveVehicles(tenantId: string, runId: string, now: Dat
         depot: depot ? { lat: depot.lat, lng: depot.lng } : null,
         stops: planned.map((s) => {
           const vis = mine.find((x) => x.sequence === s.sequence);
+          const site = siteOf.get(s.customerId) ?? null;
           return {
             sequence: s.sequence,
             pin: s.pin,
@@ -121,11 +134,12 @@ export async function readLiveVehicles(tenantId: string, runId: string, now: Dat
             plannedServiceMin: s.plannedServiceMin,
             done: !!vis && (!!vis.outcome || !!vis.departedAt),
             arrivedAt: vis && !vis.outcome && !vis.departedAt ? vis.arrivedAt : null,
+            ...(site ? { atStopRadiusM: atStopRadiusOf(atStop, site) } : {}),
           };
         }),
         avgSpeedKmh: cfg?.avgSpeedKmh ?? 40,
         distanceMultiplier: cfg?.distanceMultiplier ?? 1.3,
-        atStopRadiusM: (cfg?.ivmsStopRadiusM ?? IVMS_SETTING_DEFAULTS.ivmsStopRadiusM) + AT_STOP_MARGIN_M,
+        atStopRadiusM: atStop.atStopRadiusM,
       });
       const first = etas[0];
       if (first) {

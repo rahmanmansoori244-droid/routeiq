@@ -108,9 +108,16 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
     const target = customer;
     setBusy(true);
     const res = await api(`/api/customers/${target.customerId}`, { method: 'PATCH', json: r.patch });
+    // What the server says to check after a save (a GPS site radius with a neighbouring customer's pin inside
+    // it: review of 19 Oct 2026, PATCH /api/customers/:id). Saved all the same.
+    const warning = res.ok ? (res.data as { warning?: unknown } | null | undefined)?.warning : null;
+    const warn = () => {
+      if (typeof warning === 'string' && warning) toast.warning(warning, { duration: 15_000 });
+    };
     if (started !== shown.current) {
       if (res.ok) {
         toast.success(`Details saved for ${target.name}.`);
+        warn();
         onSaved();
       } else toast.error(`The details of ${target.name} were not saved: ${res.error ?? 'error'}`);
       return;
@@ -121,6 +128,7 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
       return;
     }
     toast.success('Customer details saved.');
+    warn();
     onOpenChange(false);
     onSaved();
   }

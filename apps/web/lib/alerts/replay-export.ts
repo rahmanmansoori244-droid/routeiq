@@ -42,8 +42,13 @@ import { DETECTOR_FIXED } from '../ivms/types';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
-/** The payload keys deriveVisit reads (never the photo keys, the lines or a GPS time). */
-const PAYLOAD_KEYS = ['outcome', 'reason', 'note', 'late', 'observed', 'gap', 'resumed', 'chained', 'noPhotoReason', 'coerced'] as const;
+/**
+ * The payload keys deriveVisit reads (never the photo keys, the lines or a position). segmentStartAt (a GPS
+ * event's stay start, a time) and the GPS stay summary's minutes away (`stay`, below): the visit rebuild
+ * reads them for a leave-and-return (owner request 19 Oct 2026, awayMinutesOf), so a replay with the GPS
+ * alerts measures the time on site as the live alerts do (review of 19 Oct 2026).
+ */
+const PAYLOAD_KEYS = ['outcome', 'reason', 'note', 'late', 'observed', 'gap', 'resumed', 'chained', 'noPhotoReason', 'coerced', 'segmentStartAt'] as const;
 const MAX_VERSIONS = 60;
 
 function payloadOf(json: unknown): Record<string, unknown> | null {
@@ -51,10 +56,18 @@ function payloadOf(json: unknown): Record<string, unknown> | null {
   const src = json as Record<string, unknown>;
   const out: Record<string, unknown> = {};
   for (const k of PAYLOAD_KEYS) if (k in src) out[k] = src[k];
+  // The GPS stay summary (lib/ivms/types.ts StaySummary, an ivms-v2 event): only its minutes away, the one
+  // value the rebuild reads; its presence also marks the event as written with a summary (visit.ts withGps).
+  const stay = src.stay;
+  if (stay && typeof stay === 'object' && !Array.isArray(stay)) {
+    const away = (stay as { awayMin?: unknown }).awayMin;
+    out.stay = { awayMin: typeof away === 'number' && Number.isFinite(away) ? away : null };
+  }
   return Object.keys(out).length ? out : null;
 }
 
-function eventOf(e: { kind: string; source: string; at: Date; receivedAt: Date; distanceM: number | null; accuracyM: number | null; payloadJson: unknown }): ExportEvent {
+/** One stop event as the export saves it: times, distances and the payload keys above (pure). */
+export function eventOf(e: { kind: string; source: string; at: Date; receivedAt: Date; distanceM: number | null; accuracyM: number | null; payloadJson: unknown }): ExportEvent {
   return { kind: e.kind, source: e.source, at: e.at.toISOString(), receivedAt: e.receivedAt.toISOString(), distanceM: e.distanceM, accuracyM: e.accuracyM, payload: payloadOf(e.payloadJson) };
 }
 

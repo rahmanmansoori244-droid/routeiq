@@ -16,7 +16,15 @@
  * radius never reaches past what counts as "on the site". Set it only for a customer whose trucks
  * really unload at several points of one site: a bigger radius for everyone made the study's results
  * worse (two customers' pins inside one circle: nothing written for either).
+ *
+ * Neighbours (review of 19 Oct 2026, real data: a big customer 235 m from the next customer on the same
+ * trip): the site radius takes over only once the truck stood at the pin, and a site stay ends where the
+ * truck reaches another open stop's pin (stops.ts staysAt), so a neighbour is not swallowed; still, when
+ * another active customer's pin lies within the site radius + the stop radius, the save says so
+ * (siteRadiusWarning, PATCH /api/customers/:id): the office then checks that the trucks really unload that
+ * far out, or sets a smaller radius.
  */
+import { distanceM } from '../dispatch/snapshots';
 
 /** The smallest and largest site radius the office can set (metres). */
 export const SITE_RADIUS_MIN_M = 100;
@@ -24,7 +32,7 @@ export const SITE_RADIUS_MAX_M = 500;
 
 /** The Details dialog's label and the hint under it. */
 export const SITE_RADIUS_FIELD_LABEL = 'GPS site radius (m)';
-export const SITE_RADIUS_HINT = `Big sites only (several drop points): GPS tracking counts the truck as still at this customer until it is this far from the pin. ${SITE_RADIUS_MIN_M}-${SITE_RADIUS_MAX_M} m; empty = the company's stop radius (Settings).`;
+export const SITE_RADIUS_HINT = `Big sites only (several drop points): GPS tracking counts the truck as still at this customer until it is this far from the pin. ${SITE_RADIUS_MIN_M}-${SITE_RADIUS_MAX_M} m; empty = the company's stop radius (Settings). Keep it smaller than the distance to a neighbouring customer: the save warns when another customer's pin is inside it.`;
 
 /** A stored or sent site radius that the detector may use: a whole number of metres in range, else null (the company's radius). */
 export function validSiteRadius(v: unknown): number | null {
@@ -41,4 +49,56 @@ export function readSiteRadius(raw: string | null | undefined): SiteRadiusParse 
   const n = Number(s);
   if (n < SITE_RADIUS_MIN_M || n > SITE_RADIUS_MAX_M) return { ok: false, error: `${SITE_RADIUS_FIELD_LABEL}: from ${SITE_RADIUS_MIN_M} to ${SITE_RADIUS_MAX_M} m, or empty.` };
   return { ok: true, radiusM: n };
+}
+
+/** Another active customer near a customer with a site radius (the save's warning). */
+export interface SiteNeighbour {
+  code: string;
+  branchCode: string | null;
+  name: string;
+  /** Pin to pin, whole metres. */
+  distanceM: number;
+}
+
+/**
+ * The other customers whose pin lies within the site radius + the stop radius of this customer's pin, nearest
+ * first (review of 19 Oct 2026): a truck at one of them is inside this customer's site circle, or arrives
+ * there within the stop radius. Pure; `others` without a pin are skipped.
+ */
+export function siteRadiusNeighbours(
+  pin: { lat: number; lng: number },
+  siteRadiusM: number,
+  stopRadiusM: number,
+  others: readonly { code: string; branchCode?: string | null; name: string; lat: number | null; lng: number | null }[],
+): SiteNeighbour[] {
+  const reach = siteRadiusM + stopRadiusM;
+  const out: SiteNeighbour[] = [];
+  for (const o of others) {
+    if (o.lat === null || o.lng === null || !Number.isFinite(o.lat) || !Number.isFinite(o.lng)) continue;
+    const d = distanceM(pin, { lat: o.lat, lng: o.lng });
+    if (d <= reach) out.push({ code: o.code, branchCode: o.branchCode ?? null, name: o.name, distanceM: Math.round(d) });
+  }
+  return out.sort((a, b) => a.distanceM - b.distanceM || a.code.localeCompare(b.code));
+}
+
+/** At most this many neighbours are named in the warning. */
+export const SITE_NEIGHBOURS_NAMED = 3;
+
+/**
+ * The save's warning for a site radius with neighbours (null: none). Plain words for the office: what GPS
+ * does with the neighbour, and what to check.
+ */
+export function siteRadiusWarning(siteRadiusM: number, stopRadiusM: number, neighbours: readonly SiteNeighbour[]): string | null {
+  if (!neighbours.length) return null;
+  const named = neighbours
+    .slice(0, SITE_NEIGHBOURS_NAMED)
+    .map((n) => `${n.code}${n.branchCode ? ` / ${n.branchCode}` : ''} (${n.name}, ${n.distanceM} m)`)
+    .join(', ');
+  const more = neighbours.length > SITE_NEIGHBOURS_NAMED ? ` and ${neighbours.length - SITE_NEIGHBOURS_NAMED} more` : '';
+  const one = neighbours.length === 1;
+  return (
+    `GPS site radius ${siteRadiusM} m saved. Check it: the pin of ${named}${more} ${one ? 'is' : 'are'} within ${siteRadiusM + stopRadiusM} m of this customer's pin (the site radius + the stop radius ${stopRadiusM} m). ` +
+    `When a truck visits ${one ? 'that customer' : 'them'} on the same trip, GPS ends this customer's stay where the truck reaches ${one ? 'its' : 'their'} pin; a stay that still overlaps gets no GPS times for either. ` +
+    `Keep the site radius only if trucks really unload that far from this pin, else make it smaller or empty.`
+  );
 }

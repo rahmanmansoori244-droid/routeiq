@@ -11,13 +11,20 @@
  *     still at the customer; the GPS departure is when it leaves the site, with the stay summary stored.
  *  3. A leave-and-return under the driver's own arrival and result: both GPS stays are written, the visit's
  *     departure is the second one's (it holds the result), and its minutes away are stored on the visit.
+ *  4. Review of 19 Oct 2026: a truck that parks 300 m off and goes quiet gets its departure once the truck-day's
+ *     pulled history (IvmsTruckDay.pulledTo less the 10-min overlap) is 10 min past it.
+ *  5. Review of 19 Oct 2026: PATCH /api/customers/:id saves a site radius and warns, naming the active customer
+ *     whose pin is within the radius + the stop radius (the box query on the real columns).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => null) }));
+// The session of section 5's PATCH (a PLANNER of the test company); null before it is set.
+const session = vi.hoisted(() => ({ user: { id: '', tenantId: '', role: 'PLANNER', name: 'Planner', email: 'planner@gpssite.test' } }));
+vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => (session.user.id ? { user: { ...session.user } } : null)) }));
 
 import { prisma as libPrisma } from '@/lib/db';
 import { processGpsTimes } from '@/lib/ivms/stop-events';
+import { PATCH as customerPatch } from '@/app/api/customers/[id]/route';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 
 const IMEI = '111111111111111';
@@ -78,6 +85,7 @@ beforeAll(async () => {
   tenantId = t.id;
   await prisma.tenantConfig.create({ data: { tenantId, ivmsMode: 'TIMES', timezone: 'Asia/Muscat' } });
   userId = (await prisma.user.create({ data: { tenantId, email: `admin@${slug}.test`, passwordHash: 'x', name: 'Admin', role: 'TENANT_ADMIN' } })).id;
+  session.user = { ...session.user, id: userId, tenantId, role: 'TENANT_ADMIN' };
   depotId = (await prisma.depot.create({ data: { tenantId, code: 'GSD', name: 'Example depot', ...at(0) } })).id;
   custSite = (await prisma.customer.create({ data: { tenantId, code: 'TST0001', name: 'Shop Example Big Site', ...at(3000) } })).id;
   custBack = (await prisma.customer.create({ data: { tenantId, code: 'TST0002', name: 'Shop Example Return', ...at(3000, 3000) } })).id;
@@ -166,5 +174,55 @@ describe('3. a leave-and-return under the driver\'s own times', () => {
     expect(v).toMatchObject({ arrivalSource: 'PHONE_MANUAL', departureSource: 'AYUN', outcome: 'DELIVERED' });
     expect(v.departedAt!.getTime()).toBe(gps[3]!.at.getTime());
     expect(v.awayMinutes).toBe(away);
+  });
+});
+
+describe('4. a held departure when the tracker goes quiet (review of 19 Oct 2026)', () => {
+  it('written once the pulled history is 10 min past it, with the truck still away and no point after it', async () => {
+    const quiet = await prisma.customer.create({ data: { tenantId, code: 'TST0005', name: 'Shop Example Quiet', ...at(3000, -3000) } });
+    // At the pin 10 min, then 300 m off; the tracker sends two more minutes, then nothing.
+    const { truckId } = await truckDay(
+      'GS3',
+      quiet.id,
+      trailOf((park, drive) => {
+        park(30);
+        drive(3000, -3000);
+        park(10);
+        drive(3000, -2700, 15);
+        park(2);
+      }),
+    );
+    const dep = () => prisma.stopEvent.findMany({ where: { tenantId, truckId, source: 'AYUN', kind: 'DEPARTED' } });
+    // Pulled to 07:30 (complete to 07:20): held.
+    await prisma.ivmsTruckDay.create({ data: { tenantId, truckId, deliveryDate: dayDate, pulledTo: L('07:30'), lastPullAt: L('07:30'), pulls: 1 } });
+    expect((await processGpsTimes(tenantId, truckId, D, new Date())).kept).toMatchObject({ HELD: 1 });
+    expect(await dep()).toEqual([]);
+    // Pulled to 07:40 (complete to 07:30, over 10 min past the exit): written.
+    await prisma.ivmsTruckDay.update({ where: { tenantId_truckId_deliveryDate: { tenantId, truckId, deliveryDate: dayDate } }, data: { pulledTo: L('07:40'), lastPullAt: L('07:40') } });
+    await processGpsTimes(tenantId, truckId, D, new Date());
+    const written = await dep();
+    expect(written).toHaveLength(1);
+    expect(written[0]!.at.getTime()).toBeLessThan(L('07:20').getTime());
+  });
+});
+
+describe("5. the site radius warning reads the neighbours' pins on the database (review of 19 Oct 2026)", () => {
+  it('saved, with the active neighbour 235 m away named; the inactive one and the far one are not', async () => {
+    const big = await prisma.customer.create({ data: { tenantId, code: 'TST0006', name: 'Shop Example Big Two', ...at(-3000, 0) } });
+    await prisma.customer.create({ data: { tenantId, code: 'TST0007', name: 'Shop Example Next Door', ...at(-3000, 235) } });
+    await prisma.customer.create({ data: { tenantId, code: 'TST0008', name: 'Shop Example Closed', active: false, ...at(-3000, -150) } });
+    await prisma.customer.create({ data: { tenantId, code: 'TST0009', name: 'Shop Example Far', ...at(-3000, 900) } });
+    const patch = async (body: unknown) => {
+      const res = await customerPatch(new Request(`http://localhost/api/customers/${big.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }), { params: { id: big.id } });
+      return { status: res.status, body: (await res.json()) as { data: { warning?: string; siteRadiusM: number | null } } };
+    };
+    const r = await patch({ siteRadiusM: 400 });
+    expect(r.status).toBe(200);
+    expect(r.body.data.siteRadiusM).toBe(400);
+    expect(r.body.data.warning).toMatch(/^GPS site radius 400 m saved\. Check it: the pin of TST0007 \(Shop Example Next Door, 235 m\) is within 500 m/);
+    expect(r.body.data.warning).not.toMatch(/TST0008|TST0009/);
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: big.id } })).siteRadiusM).toBe(400);
+    // A radius that does not reach it (100 + 100 m): saved, no warning.
+    expect((await patch({ siteRadiusM: 100 })).body.data.warning).toBeUndefined();
   });
 });

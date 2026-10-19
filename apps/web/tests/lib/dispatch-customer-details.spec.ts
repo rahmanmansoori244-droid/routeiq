@@ -15,6 +15,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Host, elements, textOf, typeName } from './hook-host';
 import { detailsFormOf, detailsPatch, parseServiceMinutes, windowText, type DetailsCustomer } from '@/app/t/[slug]/dispatch/customer-details';
+import { siteRadiusNeighbours, siteRadiusWarning } from '@/lib/ivms/site-radius';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
 
@@ -39,7 +40,7 @@ vi.mock('sonner', () => ({
 }));
 
 // PATCH /api/customers/:id around an in-memory customer.
-const route = vi.hoisted(() => ({ before: {} as Record<string, any>, updates: [] as Record<string, unknown>[] }));
+const route = vi.hoisted(() => ({ before: {} as Record<string, any>, updates: [] as Record<string, unknown>[], others: [] as Record<string, any>[], finds: [] as Record<string, any>[] }));
 vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: 'u1', tenantId: 'tA', role: 'PLANNER', name: 'P', email: 'p@a.example' } })) }));
 vi.mock('@/lib/audit', () => ({ audit: vi.fn(async () => undefined) }));
 vi.mock('@/lib/dispatch/open-orders', () => ({ openOrders: vi.fn(async () => ({})), deactivateWarning: vi.fn(() => null) }));
@@ -52,7 +53,14 @@ vi.mock('@/lib/tenant', () => ({
         route.updates.push(data);
         return { ...route.before, ...data };
       }),
+      // The other customers (review of 19 Oct 2026: the site radius warning reads the active ones in a box around the pin).
+      findMany: vi.fn(async ({ where }: { where: Record<string, any> }) => {
+        route.finds.push(where);
+        const inRange = (v: number | null, r?: { gte: number; lte: number }) => !r || (v !== null && v >= r.gte && v <= r.lte);
+        return route.others.filter((c) => c.id !== where.id?.not && (where.active === undefined || c.active === where.active) && inRange(c.lat, where.lat) && inRange(c.lng, where.lng));
+      }),
     },
+    tenantConfig: { findFirst: vi.fn(async () => ({ ivmsStopRadiusM: 100 })) },
     region: { findUnique: vi.fn(async () => null) },
   }),
 }));
@@ -563,5 +571,81 @@ describe('the loading instruction for the warehouse (owner request 16 Oct 2026)'
     vi.mocked(auth).mockResolvedValueOnce({ user: { id: 'u2', tenantId: 'tA', role: 'VIEWER', name: 'V', email: 'v@a.example' } } as never);
     expect((await send({ loadingInstruction: WATER })).status).toBe(403);
     expect(route.updates).toHaveLength(3);
+  });
+});
+
+/**
+ * Review of 19 Oct 2026 (real data: a big customer 235 m from the next customer on the same trip): a GPS site
+ * radius with another active customer's pin inside it + the stop radius is saved with a warning the dialog
+ * shows (lib/ivms/site-radius.ts siteRadiusWarning). Invented customers and pins (20.1 N, 55.1 E).
+ */
+describe("the GPS site radius warns about a neighbouring customer's pin (review of 19 Oct 2026)", () => {
+  const send = (body: unknown) =>
+    PATCH(new Request('http://localhost/api/customers/c1', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }), { params: { id: 'c1' } });
+  const PIN = { lat: 20.1, lng: 55.1 };
+  const north = (m: number) => ({ lat: PIN.lat + m / 111_320, lng: PIN.lng });
+  const BIG = { ...UNCONFIRMED, code: 'TST0001', name: 'Shop Example Big Site' };
+  const before = () => ({
+    id: 'c1', code: 'TST0001', branchKey: '__MAIN__', active: true, avgServiceTimeMin: 10, serviceTimeConfirmed: false, priority: 3, priorityConfirmed: false,
+    hardWindowStartMin: 360, hardWindowEndMin: 600, prefWindowStartMin: null, prefWindowEndMin: null, phone: null, loadingInstruction: null, siteRadiusM: null, ...PIN,
+  });
+
+  it('the rule alone: pins within the site radius + the stop radius, nearest first; the words name them and what to check', () => {
+    const others = [
+      { code: 'TST0003', name: 'Shop Example C', ...north(600) },
+      { code: 'TST0002', branchCode: 'B1', name: 'Shop Example B', ...north(235) },
+      { code: 'TST0004', name: 'Shop Example D', lat: null, lng: null },
+    ];
+    const near = siteRadiusNeighbours(PIN, 400, 100, others);
+    expect(near).toEqual([{ code: 'TST0002', branchCode: 'B1', name: 'Shop Example B', distanceM: 235 }]);
+    expect(siteRadiusNeighbours(PIN, 100, 100, others)).toEqual([]);
+    expect(siteRadiusWarning(400, 100, [])).toBeNull();
+    expect(siteRadiusWarning(400, 100, near)).toBe(
+      "GPS site radius 400 m saved. Check it: the pin of TST0002 / B1 (Shop Example B, 235 m) is within 500 m of this customer's pin (the site radius + the stop radius 100 m). " +
+        "When a truck visits that customer on the same trip, GPS ends this customer's stay where the truck reaches its pin; a stay that still overlaps gets no GPS times for either. " +
+        'Keep the site radius only if trucks really unload that far from this pin, else make it smaller or empty.',
+    );
+    const many = [235, 300, 350, 420, 480].map((m, i) => ({ code: `TST010${i}`, branchCode: null, name: `Shop Example ${i}`, distanceM: m }));
+    expect(siteRadiusWarning(400, 100, many)).toMatch(/TST0102 \(Shop Example 2, 350 m\) and 2 more are within 500 m/);
+  });
+
+  it('PATCH saves the radius and returns the warning when an active neighbour is inside it; none when it is not, or on another change', async () => {
+    route.before = before();
+    route.others = [
+      { id: 'c2', code: 'TST0002', branchCode: null, name: 'Shop Example B', active: true, ...north(235) },
+      { id: 'c3', code: 'TST0003', branchCode: null, name: 'Shop Example C', active: false, ...north(120) },
+      { id: 'c4', code: 'TST0004', branchCode: null, name: 'Shop Example D', active: true, ...north(900) },
+    ];
+    route.updates = [];
+    route.finds = [];
+    const res = await send({ siteRadiusM: 400 });
+    expect(res.status).toBe(200);
+    expect(route.updates).toEqual([{ siteRadiusM: 400 }]);
+    const body = await res.json();
+    expect(body.data.warning).toMatch(/^GPS site radius 400 m saved\. Check it: the pin of TST0002 \(Shop Example B, 235 m\) is within 500 m/);
+    // Only the active customers in a box around the pin are read (the inactive one 120 m away is not named).
+    expect(route.finds.at(-1)).toMatchObject({ id: { not: 'c1' }, active: true });
+    expect(body.data.warning).not.toContain('TST0003');
+    // A radius that does not reach the neighbour (100 + 100 < 235), clearing it, or the same value again: no warning.
+    expect((await (await send({ siteRadiusM: 100 })).json()).data.warning).toBeUndefined();
+    expect((await (await send({ siteRadiusM: null })).json()).data.warning).toBeUndefined();
+    route.before = { ...before(), siteRadiusM: 400 };
+    expect((await (await send({ siteRadiusM: 400 })).json()).data.warning).toBeUndefined();
+    expect((await (await send({ phone: '9123 4567' })).json()).data.warning).toBeUndefined();
+    // A customer without a pin: nothing to compare.
+    route.before = { ...before(), lat: null, lng: null };
+    expect((await (await send({ siteRadiusM: 400 })).json()).data.warning).toBeUndefined();
+  });
+
+  it('the dialog shows the warning after the save (and still closes: it is saved)', async () => {
+    const t = setup(BIG);
+    t.type('cd-site-radius', '400');
+    t.save();
+    expect(t.patches()[0].init.json).toEqual({ siteRadiusM: 400 });
+    t.patches()[0].resolve({ ok: true, status: 200, data: { warning: 'GPS site radius 400 m saved. Check it: ...' }, error: null, errorBody: null });
+    await t.host.settle();
+    expect(toasts).toEqual(['success: Customer details saved.', 'warning: GPS site radius 400 m saved. Check it: ...']);
+    expect(t.host.props.open).toBe(false);
+    expect(textOf(t.host.tree)).toContain('the save warns when another customer');
   });
 });

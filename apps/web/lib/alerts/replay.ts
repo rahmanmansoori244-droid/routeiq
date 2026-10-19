@@ -56,7 +56,10 @@ export interface ExportEvent {
   receivedAt: string;
   distanceM: number | null;
   accuracyM: number | null;
-  /** The keys deriveVisit reads (outcome, reason, note, late, observed, gap, ...). */
+  /**
+   * The keys deriveVisit reads (outcome, reason, note, late, observed, gap, ...; a GPS event's segmentStartAt
+   * and its stay summary's minutes away, `stay: { awayMin }`, from 19 Oct 2026: absent in an older export).
+   */
   payload: Record<string, unknown> | null;
 }
 

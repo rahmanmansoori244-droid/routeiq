@@ -60,6 +60,10 @@
  *    delete good points.
  * 7. A customer's site radius (Customer.siteRadiusM, 100-500 m; lib/ivms/site-radius.ts): the stay still
  *    begins within the company's stop radius, but ends only beyond the site radius. Empty: as before.
+ *    Review of 19 Oct 2026 (real data, a big customer 235 m from its neighbour): the site radius takes over
+ *    only once the truck stood within the stop radius (a slow point there), so a drive-by on the way to the
+ *    neighbour never opens a site stay; and a site stay ends where the truck reaches another open stop's pin
+ *    (exit rule OTHER_STOP), so the neighbour's visit is never swallowed (staysAt).
  * 8. Consecutive stays of one stop at its pin are one stay (mergeStays) when the next began less than
  *    MERGE_GAP_MIN after the last one ended, every trail point in between stayed within SITE_MAX_M of the
  *    pin, both are stops themselves (a slow point and the dwell: a drive-by never stretches a visit), and
@@ -68,6 +72,9 @@
  *    the last departure. A departure is FINAL only once the truck has been away HOLD_DEPARTED_MIN, gone
  *    beyond SITE_MAX_M or reached the depot: until then the writer holds it back (stop-events.ts), so a
  *    move between drop points never writes a departure (an observed GPS time is never moved once written).
+ *    "Away HOLD_DEPARTED_MIN" is a later trail point, or (review of 19 Oct 2026) a trail known complete that
+ *    long past the exit (DetectorInput.trailComplete: the tracker went quiet); after the truck-day's final
+ *    pull every departure is final.
  * 9. A later stay of the same stop after the truck went beyond SITE_MAX_M, or stood at another customer's
  *    pin, in between is a leave-and-return (a 6.3 km trip to another customer and a 94-minute park 1.2 km
  *    away in the study): its summary carries the minutes the truck was away like that (StaySummary.awayMin;
@@ -133,6 +140,15 @@ export interface DetectorInput {
   params: DetectorParams;
   /** The processing time: a stay that begins after it is never proposed (absent: no upper bound). */
   now?: Date;
+  /**
+   * How far the trail is complete (review of 19 Oct 2026, a held departure never written when the tracker
+   * went quiet near the customer): `to` - no trail point up to this time is still to come (lib/ivms/
+   * stop-events.ts: the truck-day's history pulled, less the next pull's overlap); `final` - none at all any
+   * more (the truck-day's final pull is done). A held departure is final once `to` is HOLD_DEPARTED_MIN past
+   * its exit and no stay at the pin began since, and every departure is final once `final`. Absent: only
+   * later trail points make a departure final.
+   */
+  trailComplete?: { to: Date; final: boolean } | null;
 }
 
 /** A depot move derived from the trail (stored as IvmsEvent origin TRAIL when no zone move confirms it). */
@@ -461,9 +477,17 @@ export interface Stay {
   exit: TrailPoint | null;
   gapBeforeExitSec: number | null;
   hasSlowPoint: boolean;
-  /** FAST: the exit point is beyond the radius at EXIT_FAST_KMH or more; TWO_FAR: the first of two points beyond radius + exitExtraM; null: no exit. */
-  exitRule: 'FAST' | 'TWO_FAR' | null;
-  /** The radius the stay ends with (m): the stop radius, or the customer's site radius when larger. */
+  /**
+   * FAST: the exit point is beyond the radius at EXIT_FAST_KMH or more; TWO_FAR: the first of two points
+   * beyond radius + exitExtraM; OTHER_STOP: a site-radius stay whose next point reached another open stop's
+   * pin (the exit is the stay's last point before it); null: no exit.
+   */
+  exitRule: 'FAST' | 'TWO_FAR' | 'OTHER_STOP' | null;
+  /**
+   * The radius the stay ends with (m): the stop radius, or the customer's site radius when larger - the
+   * latter only once the truck stood within the stop radius (review of 19 Oct 2026: a drive-by never
+   * opens a site-radius stay).
+   */
   radiusM: number;
   /** The furthest point from the pin (m), from the arrival to the exit (merged gaps included). */
   maxDistM: number;
@@ -483,10 +507,29 @@ export function prevIndexOf(all: readonly TrailPoint[]): PrevIndex {
 }
 
 /**
+ * Another stop's pin for a site-radius stay (review of 19 Oct 2026): the stay ends where the truck reaches
+ * it while that stop is open (still without a result: `openUntil` its result time in ms, null none yet).
+ */
+export interface OtherPin {
+  lat: number;
+  lng: number;
+  openUntil: number | null;
+}
+
+/**
  * The stays of a sorted trail (one trip's window) at one pin; `prevIdx` from prevIndexOf(all) (built here
  * when absent). A stay begins at the first point within the stop radius; `exitRadiusM` (a customer's site
  * radius, owner request 19 Oct 2026) only moves where it ends: the points within it keep the stay going.
  * Absent (or not larger than the stop radius): the stop radius, as before.
+ *
+ * Review of 19 Oct 2026 (real data: a truck passing 103-155 m from a big customer's pin at 10-26 km/h on its
+ * way to the neighbouring customer 235 m away opened a 400 m stay there that ran through both visits, so
+ * SEVERAL_PINS left both without GPS times): the site radius takes over only once the stay has a slow point
+ * within the stop radius (the truck stood at the pin); until then the stop radius ends it, exactly as
+ * without a site radius, so a drive-by never opens a site stay. And a site stay ends (OTHER_STOP) at its last
+ * point before the truck reaches the stop radius of another open stop's pin (`others`: the load's other
+ * stops, open until their result), so a neighbouring customer inside the site radius is never swallowed.
+ * Without a site radius neither rule changes anything.
  */
 export function staysAt(
   points: readonly TrailPoint[],
@@ -496,11 +539,15 @@ export function staysAt(
   p: DetectorParams,
   prevIdx?: PrevIndex,
   exitRadiusM?: number,
+  others: readonly OtherPin[] = [],
 ): Stay[] {
   const stays: Stay[] = [];
   const idx = prevIdx ?? prevIndexOf(all);
   const prevOf = (pt: TrailPoint) => idx.get(pt) ?? null;
-  const exitR = Math.max(p.stopRadiusM, exitRadiusM ?? p.stopRadiusM);
+  const siteR = Math.max(p.stopRadiusM, exitRadiusM ?? p.stopRadiusM);
+  // Only pins further than the stop radius from this one (a pin inside it is this stop's place too).
+  const near = siteR > p.stopRadiusM ? others.filter((o) => distanceM(o, pin) > p.stopRadiusM) : [];
+  const atOtherPin = (pt: TrailPoint) => near.some((o) => (o.openUntil === null || o.openUntil >= ms(pt.fixAt)) && distanceM(pt, o) <= p.stopRadiusM);
   let cur: Stay | null = null;
   let pendingExit: TrailPoint | null = null;
   // The stay's previous point and whether it stood there (for the minutes standing).
@@ -511,6 +558,10 @@ export function staysAt(
     s.points++;
     s.maxDistM = Math.max(s.maxDistM, d);
     lastPt = pt;
+  };
+  /** The truck stood within the stop radius (a slow point): from then on the site radius ends the stay. */
+  const anchor = (s: Stay, pt: TrailPoint, d: number) => {
+    if (d <= p.stopRadiusM && slow(pt, p.movingKmh)) s.radiusM = siteR;
   };
   for (const pt of points) {
     const d = distanceM(pt, pin);
@@ -526,15 +577,34 @@ export function staysAt(
         gapBeforeExitSec: null,
         hasSlowPoint: slow(pt, p.movingKmh),
         exitRule: null,
-        radiusM: exitR,
+        radiusM: p.stopRadiusM,
         maxDistM: d,
         points: 1,
         standMs: 0,
         merged: 0,
       };
+      anchor(cur, pt, d);
       pendingExit = null;
       lastPt = pt;
       lastSlow = slow(pt, p.movingKmh);
+      continue;
+    }
+    // The radius the stay ends with now: the site radius once anchored, else the stop radius.
+    const exitR = cur.radiusM;
+    if (exitR > p.stopRadiusM && d > p.stopRadiusM && lastPt && atOtherPin(pt)) {
+      // A site stay reaching another open stop's pin: it ends at its last point before it (that point's
+      // time, never the other stop's arrival, so the two stays never overlap).
+      const exit: TrailPoint = lastPt;
+      const before = prevOf(exit);
+      cur.exit = exit;
+      cur.exitRule = 'OTHER_STOP';
+      cur.gapBeforeExitSec = before ? (ms(exit.fixAt) - ms(before.fixAt)) / 1000 : null;
+      stays.push(cur);
+      cur = null;
+      pendingExit = null;
+      lastPt = null;
+      lastSlow = false;
+      // The point itself may begin this pin's next stay only within the stop radius: it is not (d > stop radius).
       continue;
     }
     if (d <= exitR) {
@@ -542,6 +612,7 @@ export function staysAt(
       cur.lastIn = pt;
       lastSlow = slow(pt, p.movingKmh);
       if (lastSlow) cur.hasSlowPoint = true;
+      anchor(cur, pt, d);
       pendingExit = null;
       continue;
     }
@@ -760,11 +831,14 @@ export function detectTruckDay(input: DetectorInput): DetectorOutput {
       const start = ms(stay.first.fixAt);
       return start >= notBefore && start <= notAfter && !unknownStart.has(start) && pending(s, stay.first.fixAt);
     };
-    // Each pin's stays, and the stops among them (a slow point and the dwell).
+    // Each pin's stays, and the stops among them (a slow point and the dwell). A site stay ends at the pin of
+    // another open stop of the load (review of 19 Oct 2026; open: no office arrival, no result yet).
+    const otherPinsOf = (s: DetectorStop): OtherPin[] =>
+      load.stops.filter((o) => o.sequence !== s.sequence && !!o.pin && !o.officeArrival).map((o) => ({ lat: o.pin!.lat, lng: o.pin!.lng, openUntil: o.resultAt ? ms(o.resultAt) : null }));
     const perStop = load.stops
       .filter((s) => !!s.pin)
       .map((s) => {
-        const all = staysAt(tripPoints, points, s.pin!, s.sequence, p, prevIdx, siteRadiusOf(s));
+        const all = staysAt(tripPoints, points, s.pin!, s.sequence, p, prevIdx, siteRadiusOf(s), otherPinsOf(s));
         return { stop: s, all, stops: all.filter((x) => isStop(x, p)), merged: [] as Stay[] };
       });
     // Owner request 19 Oct 2026: consecutive stays at one pin that are one visit of a big site are merged,
@@ -849,10 +923,15 @@ export function detectTruckDay(input: DetectorInput): DetectorOutput {
      * return to the pin that is a stop and was not merged (another open stop in between) leaves it final
      * too; one still in progress and not a stop yet keeps it held (it may become one). `stays`: every stay
      * of the stop's pin (stopping or not), in time order.
+     * Review of 19 Oct 2026: a trail that is complete (input.trailComplete) HOLD_DEPARTED_MIN past the exit
+     * with no point in it counts as followed too (the tracker went quiet with the truck parked near the site,
+     * ignition never being sent), and after the truck-day's final pull every departure is final (no point
+     * will ever come to merge it), so a held departure is never left unwritten for good.
      */
     const departureFinal = (exit: TrailPoint, pin: { lat: number; lng: number }, stays: readonly Stay[]): boolean => {
       const trip = own.map((i) => trips[i]!).find((t) => inside(t, exit.fixAt));
       if (trip?.inAt) return true;
+      if (input.trailComplete?.final) return true;
       const e = ms(exit.fixAt);
       let farAt = Infinity;
       let covered = false;
@@ -874,7 +953,8 @@ export function detectTruckDay(input: DetectorInput): DetectorOutput {
         if (isStop(c, p)) return true;
         if (!c.exit) return false;
       }
-      return covered || farAt < Infinity;
+      const quiet = !!input.trailComplete && ms(input.trailComplete.to) - e >= HOLD_DEPARTED_MIN * MIN;
+      return covered || farAt < Infinity || quiet;
     };
     const summaryOf = (stay: Stay, pin: { lat: number; lng: number }, awayMin: number | null): StaySummary => ({
       exitRule: stay.exit ? stay.exitRule : null,

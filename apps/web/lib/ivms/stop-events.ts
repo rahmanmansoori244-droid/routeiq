@@ -36,7 +36,9 @@
  * SITE_MAX_M of the pin, or reached the depot). A departure that is not final yet is HELD back here (kept
  * as HELD, written by a later run): an observed GPS time is never moved once written (correctGpsEvent
  * moves only an unobserved one, and only earlier), so a departure written at a move between drop points
- * would stay wrong once the stays merge. A real departure is still written within about 10 minutes. Each
+ * would stay wrong once the stays merge. A real departure is still written within about 10 minutes, also
+ * when the tracker goes quiet near the customer (review of 19 Oct 2026: the pulled history then says the trail
+ * is complete 10 min past the exit, trailCompleteOf; after the truck-day's final pull every departure is). Each
  * event's payload carries its stay's summary (`stay`: lib/ivms/types.ts StaySummary, distances and minutes
  * only), and each stop's customer's site radius (Customer.siteRadiusM) reaches the detector. The short
  * stays the detector rejected (SHORT_DWELL) are kept in the facts with the other rejected candidates,
@@ -65,6 +67,7 @@ import { plannedStopOf } from '../delivery/planned-stop';
 import { truckDayLoads, type TruckDayLoad } from '../driver-link/service';
 import { nextOpsStartOf } from './budget';
 import { readIvmsEnv } from './env';
+import { ROUTE_OVERLAP_MS } from './poll';
 import { IVMS_SETTING_DEFAULTS, ivmsModeAtLeast, ivmsModeOf } from './settings';
 import { detectTruckDay, detectorParams, trackerMismatch, type DetectorLoad, type DetectorOutput, type ZoneMove } from './stops';
 import { DETECTOR_FIXED, type StopAmbiguity, type StopCandidate } from './types';
@@ -206,7 +209,7 @@ export async function processGpsTimes(tenantId: string, truckId: string, date: s
   const res: GpsTimesResult = { truckId, date, skipped: null, written: 0, corrected: 0, removed: 0, kept: {}, busy: false, trailMoves: 0, facts: [] };
   const company = await companyGps(tenantId);
   if (typeof company === 'string') return { ...res, skipped: company };
-  const day = await prisma.ivmsTruckDay.findFirst({ where: { tenantId, truckId, deliveryDate: dateOnly(date) }, select: { id: true, suppressedAt: true, trailFrom: true } });
+  const day = await prisma.ivmsTruckDay.findFirst({ where: { tenantId, truckId, deliveryDate: dateOnly(date) }, select: { id: true, suppressedAt: true, trailFrom: true, pulledTo: true, finalPullAt: true } });
   if (day?.suppressedAt) return { ...res, skipped: 'SUPPRESSED' };
   const loads = (await truckDayLoads(prisma, tenantId, truckId, date)).filter((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED');
   if (!loads.length) return { ...res, skipped: 'NO_LOAD' };
@@ -233,7 +236,7 @@ export async function processGpsTimes(tenantId: string, truckId: string, date: s
   }
 
   const input = await detectorInput(tenantId, truckId, date, dayStart, loads, company, from, to);
-  const out = detectTruckDay({ ...input.detector, points, now });
+  const out = detectTruckDay({ ...input.detector, points, now, trailComplete: trailCompleteOf(day) });
   res.facts = gpsFactsOf(out);
 
   // Depot moves: the trail's (not confirmed by a provider zone move), and what the trail says of the zone moves.
@@ -305,6 +308,19 @@ export async function processGpsTimes(tenantId: string, truckId: string, date: s
 
 function bump(m: Record<string, number>, k: string, n = 1) {
   m[k] = (m[k] ?? 0) + n;
+}
+
+/**
+ * How far a truck-day's trail is complete, for the detector's held departures (review of 19 Oct 2026: a
+ * departure held while the truck stood within 500 m of the pin was never written when the tracker then went
+ * quiet - ignition is never sent - or the trail window ended). The history pulled up to `pulledTo` (provider
+ * time), less the overlap the next pull reads again (lib/ivms/poll.ts ROUTE_OVERLAP_MS: points the provider
+ * received late), holds every point it will ever hold; after the truck-day's final pull (finalPullAt, cleared
+ * again by a later regular pull) no point comes at all. Never pulled: null (only later points finalize).
+ */
+export function trailCompleteOf(day: { pulledTo?: Date | null; finalPullAt?: Date | null } | null | undefined): { to: Date; final: boolean } | null {
+  if (!day?.pulledTo) return null;
+  return { to: new Date(day.pulledTo.getTime() - ROUTE_OVERLAP_MS), final: !!day.finalPullAt };
 }
 
 /** What the detector needs about the truck-day: its loads in dispatch order with their stops, the depots, the zone moves. */

@@ -7,8 +7,33 @@ import { preferredCustomer } from '@/lib/dispatch/order-intake';
 import { customerKey, customerTwinsOf } from '@/lib/customer-code';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { canManageMasterData } from '@/lib/rbac';
+import { IVMS_SETTING_DEFAULTS } from '@/lib/ivms/settings';
+import { siteRadiusNeighbours, siteRadiusWarning } from '@/lib/ivms/site-radius';
+import type { TenantDb } from '@/lib/tenant';
 
 interface Params { params: { id: string } }
+
+/**
+ * Review of 19 Oct 2026 (real data: a big customer 235 m from the next customer on the same trip): the
+ * save's warning for a GPS site radius when another active customer's pin lies within it + the company's
+ * stop radius (lib/ivms/site-radius.ts siteRadiusWarning). Saved all the same: the detector ends a site stay
+ * at a neighbour's pin, and a big customer may need the radius; the office checks it. A box around the pin
+ * first (a little larger than the reach), then the distance. Null: no pin, or no neighbour.
+ */
+async function siteNeighbourWarning(db: TenantDb, c: { id: string; lat: number | null; lng: number | null }, siteRadiusM: number): Promise<string | null> {
+  if (c.lat === null || c.lng === null) return null;
+  const cfg = await db.tenantConfig.findFirst({ select: { ivmsStopRadiusM: true } });
+  const stopRadiusM = cfg?.ivmsStopRadiusM ?? IVMS_SETTING_DEFAULTS.ivmsStopRadiusM;
+  const reach = (siteRadiusM + stopRadiusM) * 1.05;
+  const dLat = reach / 111_000;
+  const dLng = reach / (111_000 * Math.max(0.05, Math.cos((c.lat * Math.PI) / 180)));
+  const near = await db.customer.findMany({
+    where: { id: { not: c.id }, active: true, lat: { gte: c.lat - dLat, lte: c.lat + dLat }, lng: { gte: c.lng - dLng, lte: c.lng + dLng } },
+    select: { code: true, branchCode: true, name: true, lat: true, lng: true },
+    take: 50,
+  });
+  return siteRadiusWarning(siteRadiusM, stopRadiusM, siteRadiusNeighbours({ lat: c.lat, lng: c.lng }, siteRadiusM, stopRadiusM, near));
+}
 
 export const GET = (req: Request, { params }: Params) =>
   withTenantApi(async (_r, { db }) => {
@@ -152,7 +177,11 @@ export const PATCH = (req: Request, { params }: Params) =>
         ip,
       });
       // Deactivating stops delivery of its open orders (left unserved at the next optimize).
-      const warning = before.active && !after.active ? deactivateWarning('customer', await openOrders(user.tenantId, { customerId: after.id })) : null;
+      const deactivated = before.active && !after.active ? deactivateWarning('customer', await openOrders(user.tenantId, { customerId: after.id })) : null;
+      // Review of 19 Oct 2026: a GPS site radius set (or changed) with another active customer's pin inside
+      // it + the stop radius is saved, with a warning (lib/ivms/site-radius.ts siteRadiusWarning).
+      const site = typeof input.siteRadiusM === 'number' && input.siteRadiusM !== before.siteRadiusM && after.active ? await siteNeighbourWarning(db, after, input.siteRadiusM) : null;
+      const warning = [deactivated, site].filter((w): w is string => !!w).join(' ') || null;
       return ok(warning ? { ...after, warning } : after);
     },
     { role: 'PLANNER' },

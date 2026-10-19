@@ -28,7 +28,11 @@
  *   begun before the result), of all the stays not left before the shown arrival - at a big customer the
  *   truck comes back to the pin, and the visit used to show the first stay's departure, up to 351 min too
  *   early. Without a result, the stay of the shown arrival (one that began at most 15 min after it), or
- *   none while the truck has come back to the pin and is there now (its last stay not left yet). The
+ *   none while the truck has come back to the pin and is there now (its last stay not left yet). A stay
+ *   begun more than 15 min after the shown arrival is taken only when its events carry the detector's stay
+ *   summary (ivms-v2; review of 19 Oct 2026): GPS events stored by the detector before (ivms-v1, 16-19 Oct)
+ *   have no minutes away, so for them the stay of the shown arrival stays the rule, as before - a rebuild or
+ *   the alerts replay of such a day never counts a leave-and-return as unloading. The
  *   15-minute rule after the result applies to a GPS departure too. A GPS arrival with a phone result and
  *   no departure ends at the result time, as any arrival.
  * - Time away (owner request 19 Oct 2026, the leave-and-return guard): a GPS stay that began after the
@@ -170,6 +174,11 @@ export const GPS_DEPARTURE_MATCH_MIN = 15;
 
 const t = (d: Date) => d.getTime();
 const isObserved = (e: VisitEvent) => e.payload?.observed !== false;
+/** A GPS event written with the detector's stay summary (payload.stay, ivms-v2: owner request 19 Oct 2026); ivms-v1 events have none. */
+const hasStaySummary = (e: VisitEvent) => {
+  const s = e.payload?.stay;
+  return !!s && typeof s === 'object' && !Array.isArray(s);
+};
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
 
@@ -345,20 +354,27 @@ function withGps(v: VisitState, gpsEvents: readonly VisitEvent[], ctx: VisitCont
     // The stays not left before the arrival shown, and those of them that began at most 15 min after it.
     const live = cycles.filter((c) => !c.departure || t(c.departure.at) > at);
     const near = live.filter((c) => c.start <= at + match);
+    // As before 19 Oct 2026: the GPS stay of the arrival shown, there at that time or begun at most 15 min after it.
+    const ofArrival = chooseCycle(near, outcomeAt) ?? near[0] ?? null;
+    let later: Cycle | null = null;
     if (outcomeAt !== null) {
       // Owner request 19 Oct 2026: the GPS stay that holds the result, wherever it began (the truck came
-      // back to the pin at a big customer), else the last one begun before the result, else (as before)
-      // the first that began at most 15 min after the arrival.
+      // back to the pin at a big customer), else the last one begun before the result.
       const holding = live.filter((c) => c.start <= outcomeAt && (!c.departure || t(c.departure.at) >= outcomeAt));
       const before = live.filter((c) => c.start <= outcomeAt);
-      stay = holding[holding.length - 1] ?? before[before.length - 1] ?? near[0] ?? null;
+      later = holding[holding.length - 1] ?? before[before.length - 1] ?? null;
     } else {
-      // No result yet: the GPS stay of the arrival shown, there at that time or begun at most 15 min after it;
-      // but a truck that came back to the pin and is there now (the last stay, not left yet) is at the stop
-      // again: no departure (owner request 19 Oct 2026; the minutes it was away are not unloading).
+      // No result yet: a truck that came back to the pin and is there now (the last stay, not left yet) is at
+      // the stop again: no departure (owner request 19 Oct 2026; the minutes it was away are not unloading).
       const last = live[live.length - 1];
-      stay = last && !last.departure ? last : chooseCycle(near, null);
+      later = last && !last.departure ? last : null;
     }
+    // Review of 19 Oct 2026: a stay begun more than 15 min after the arrival shown only when its events carry
+    // the detector's stay summary (ivms-v2, from 19 Oct 2026): only then is the time the truck was away before
+    // it known (awayMinutesOf), and taken off. Events of the detector before (ivms-v1, stored 16-19 Oct, also
+    // what the alerts replay rebuilds) have none: the stay of the arrival shown, as before, so a leave-and-
+    // return they hold is never counted as unloading.
+    stay = later && (later.start <= at + match || later.arrivals.some(hasStaySummary)) ? later : ofArrival;
   }
   // The result time is only a stand-in for a departure nobody saw, unless the phone's automatic timing ends
   // there ("Auto to result"): that one is never replaced (second review H-2).

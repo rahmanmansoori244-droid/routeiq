@@ -212,8 +212,12 @@ export interface GpsTrip {
  * showed when the event was written: an arrival written while the truck was still there has no exit yet.
  */
 export interface StaySummary {
-  /** How the stay ended: FAST (one point beyond the radius at EXIT_FAST_KMH or more), TWO_FAR (two points beyond the radius + exitExtraM); null: still there. */
-  exitRule: 'FAST' | 'TWO_FAR' | null;
+  /**
+   * How the stay ended: FAST (one point beyond the radius at EXIT_FAST_KMH or more), TWO_FAR (two points
+   * beyond the radius + exitExtraM), OTHER_STOP (a stay with the customer's site radius: the next point was
+   * within the stop radius of another open stop's pin, review of 19 Oct 2026); null: still there.
+   */
+  exitRule: 'FAST' | 'TWO_FAR' | 'OTHER_STOP' | null;
   /** The exit point's speed (km/h) and distance from the pin (m); null: still there. */
   exitKmh: number | null;
   exitDistM: number | null;

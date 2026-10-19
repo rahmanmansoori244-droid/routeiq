@@ -91,6 +91,31 @@ describe('the visit rebuild: the GPS departure of the stay that holds the result
     expect(deriveVisit([tap('07:56'), gpsIn('07:47'), gpsOut('08:27', '07:47'), gpsIn('09:20', 53), gpsOut('09:40', '09:20')], CTX)).toMatchObject({ departedAt: L('08:27'), awayMinutes: null });
   });
 
+  it('review of 19 Oct 2026: GPS events stored by the detector before (ivms-v1, no stay summary) keep the stay of the arrival - a leave-and-return is never counted as unloading', () => {
+    /** As production stored them 16-19 Oct 2026: no segmentStartAt, no stay summary. */
+    const v1In = (at: string) => ev('ARRIVED', 'AYUN', at, { observed: true, detector: 'ivms-v1' });
+    const v1Out = (at: string) => ev('DEPARTED', 'AYUN', at, { observed: true, detector: 'ivms-v1' });
+    // The study's 94-min park 1.2 km away: tapped 07:59, stays 07:59-08:11 and 09:47-10:42, result 10:36.
+    const parked = deriveVisit([tap('07:59'), v1In('07:59'), v1Out('08:11'), v1In('09:47'), v1Out('10:42'), result('10:36')], CTX);
+    expect(parked).toMatchObject({ departureSource: 'AYUN', awayMinutes: null });
+    expect(parked.departedAt).toEqual(L('08:11'));
+    // Before the fix: 07:59-10:42 with no minutes away, 163 min "on site" (94 of them parked away).
+    expect(actualMinutes(parked).min).toBe(12);
+    // The 50-min trip to another customer: tapped 07:56, stays 07:47-08:27 and 09:20-14:23, result 14:17.
+    const trip = deriveVisit([tap('07:56'), v1In('07:47'), v1Out('08:27'), v1In('09:20'), v1Out('14:23'), result('14:17')], CTX);
+    expect(trip.departedAt).toEqual(L('08:27'));
+    expect(trip.awayMinutes ?? null).toBeNull();
+    // The same stays written by the new detector (ivms-v2, the minutes away in the later stay's summary).
+    const v2 = deriveVisit([tap('07:59'), gpsIn('07:59'), gpsOut('08:11', '07:59'), gpsIn('09:47', 94), gpsOut('10:42', '09:47'), result('10:36')], CTX);
+    expect(v2).toMatchObject({ departureSource: 'AYUN', awayMinutes: 94 });
+    expect(v2.departedAt).toEqual(L('10:42'));
+    // The deploy day: the first stay written before (ivms-v1), the later one after (ivms-v2, with its summary).
+    const mixed = deriveVisit([tap('07:59'), v1In('07:59'), v1Out('08:11'), gpsIn('09:47', 94), gpsOut('10:42', '09:47'), result('10:36')], CTX);
+    expect(mixed).toMatchObject({ departedAt: L('10:42'), awayMinutes: 94 });
+    // An ivms-v1 stay within 15 min of the arrival is the arrival's stay, as always.
+    expect(deriveVisit([tap('10:00'), v1In('10:05'), v1Out('10:40'), result('10:38')], CTX).departedAt).toEqual(L('10:40'));
+  });
+
   it('awayMinutesOf: each absence [return - away, return], clipped to the visit, each stay once', () => {
     const evs = [gpsIn('09:20', 53), gpsIn('09:20', 53), gpsIn('12:00', 30), gpsIn('07:00', null), gpsIn('08:00', 0)];
     expect(awayMinutesOf(evs, L('07:56').getTime(), L('14:23').getTime())).toBe(83);

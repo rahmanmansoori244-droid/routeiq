@@ -23,7 +23,8 @@ import { T, Trail, at, hhmm } from './ivms-trail';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 
-const { processGpsTimes, gpsFactsOf, DETECTOR_VERSION } = await import('@/lib/ivms/stop-events');
+const { processGpsTimes, gpsFactsOf, DETECTOR_VERSION, trailCompleteOf } = await import('@/lib/ivms/stop-events');
+const { readLiveVehicles } = await import('@/lib/ivms/vehicles');
 const { resetDb } = await import('./fake-plan-db');
 
 const P: DetectorParams = { stopRadiusM: 100, dwellMin: 3, depotRadiusM: 300, ...DETECTOR_FIXED };
@@ -158,6 +159,102 @@ describe("a customer's site radius (Customer.siteRadiusM)", () => {
     expect(readSiteRadius('')).toEqual({ ok: true, radiusM: null });
     expect(readSiteRadius(' 400 ')).toEqual({ ok: true, radiusM: 400 });
     for (const bad of ['99', '501', '400 m', '-1', '1e3', '350.5']) expect(readSiteRadius(bad).ok, bad).toBe(false);
+  });
+});
+
+describe("review of 19 Oct 2026: a site radius next to another customer's pin", () => {
+  // Shop A has a 400 m site radius (3000 m east); shop B, the stop before it on the trip, is 235 m north of
+  // A's pin (the real case: a big customer 235 m from its neighbour; with 400 m the drive-by opened a stay
+  // that ran through both visits, so SEVERAL_PINS left both without GPS times).
+  const A = (over: Partial<DetectorStop> = {}) => stop(2, 3000, 0, { siteRadiusM: 400, ...over });
+  const B = (over: Partial<DetectorStop> = {}) => stop(1, 3000, 235, over);
+  /**
+   * Past A's pin at 15 km/h (a point every 5 s, the nearest 60-80 m from it, none slow) on the way to B; 40 min
+   * at B; to A: 20 min at the pin, 15 min at a second drop point 370 m south; away.
+   */
+  const driveBy = () =>
+    new Trail('06:30')
+      .park(30)
+      .drive(2900, -60, 40)
+      .drive(3100, -60, 15, { stepSec: 5 })
+      .drive(3000, 235, 15, { stepSec: 5 })
+      .park(40)
+      .drive(3000, 0, 15, { stepSec: 5 })
+      .park(20)
+      .drive(3000, -370, 14)
+      .park(15)
+      .drive(6000, -370, 40)
+      .park(10)
+      .drive(0)
+      .park(20);
+
+  it('a drive-by never opens a site stay: B and A both get their times (before: one 400 m stay over both, SEVERAL_PINS, nothing for either)', () => {
+    const out = detectTruckDay(input(driveBy().pts, [load(1, [B({ resultAt: T('07:40') }), A()])]));
+    expect(out.ambiguities.filter((a) => a.reason === 'SEVERAL_PINS')).toEqual([]);
+    expect(brief(out)).toEqual(['L1.1 ARRIVED 07:06', 'L1.1 DEPARTED 07:47', 'L1.2 ARRIVED 07:47', 'L1.2 DEPARTED 08:25']);
+    const [, bOut, aIn, aOut] = out.candidates;
+    expect(aIn!.at.getTime()).toBeGreaterThan(bOut!.at.getTime());
+    // A's stay is the visit at its pin and its second drop point, ended when the truck left the site.
+    expect(aOut!.stay).toMatchObject({ radiusM: 400, exitRule: 'FAST', merged: 0 });
+    expect(aOut!.stay!.exitDistM).toBeGreaterThan(400);
+    // The drive-by alone (past the pin, then by it again on the turn to B): stays ended at the stop radius (no slow
+    // point at the pin, so no site radius), never a stop, both over before the truck reached B.
+    const bIn = out.candidates[0]!.at.getTime();
+    const passing = staysAt(driveBy().pts, driveBy().pts, at(3000), 2, P, undefined, 400).filter((s) => s.first.fixAt.getTime() < bIn);
+    expect(passing).toHaveLength(2);
+    for (const s of passing) {
+      expect(s).toMatchObject({ radiusM: 100, hasSlowPoint: false, exitRule: 'FAST' });
+      expect(s.exit!.fixAt.getTime()).toBeLessThan(bIn);
+    }
+  });
+
+  it('without the site radius the same day is as before; with it only where the truck left the site changes', () => {
+    const plain = detectTruckDay(input(driveBy().pts, [load(1, [B({ resultAt: T('07:40') }), A({ siteRadiusM: null })])]));
+    // Without it A's departure is the move to the second drop point (08:08), as before.
+    expect(brief(plain)).toEqual(['L1.1 ARRIVED 07:06', 'L1.1 DEPARTED 07:47', 'L1.2 ARRIVED 07:47', 'L1.2 DEPARTED 08:08']);
+  });
+
+  it("a site stay ends where the truck reaches another open stop's pin (OTHER_STOP): the neighbour is never swallowed", () => {
+    // 20 min at A's pin, then at 10 km/h to B (235 m: inside A's 400 m all the way), 30 min at B, away.
+    const t = new Trail('06:30').park(30).drive(3000).park(20).drive(3000, 235, 10, { stepSec: 10 }).park(30).drive(6000, 235, 40).park(10).drive(0).park(20);
+    const out = detectTruckDay(input(t.pts, [load(1, [stop(1, 3000, 0, { siteRadiusM: 400 }), stop(2, 3000, 235)])]));
+    expect(out.ambiguities.filter((a) => a.reason === 'SEVERAL_PINS')).toEqual([]);
+    const [aIn, aOut, bIn, bOut] = out.candidates;
+    expect([aIn, aOut, bIn, bOut].map((c) => `${c!.sequence} ${c!.kind}`)).toEqual(['1 ARRIVED', '1 DEPARTED', '2 ARRIVED', '2 DEPARTED']);
+    // A's departure is its last point before B's stop radius, never B's arrival itself (no overlap), and final.
+    expect(aOut!.stay).toMatchObject({ exitRule: 'OTHER_STOP', radiusM: 400 });
+    expect(aOut!.final).toBe(true);
+    expect(bIn!.at.getTime() - aOut!.at.getTime()).toBe(10_000);
+    expect(aOut!.stay!.exitDistM).toBeGreaterThan(100);
+    expect(aOut!.stay!.exitDistM).toBeLessThan(135);
+    // Without the site radius A ends at its stop radius (as before), a little earlier.
+    const plain = detectTruckDay(input(t.pts, [load(1, [stop(1, 3000), stop(2, 3000, 235)])]));
+    expect(plain.candidates.map((c) => `${c.sequence} ${c.kind}`)).toEqual(['1 ARRIVED', '1 DEPARTED', '2 ARRIVED', '2 DEPARTED']);
+    expect(plain.candidates[1]!.at.getTime()).toBeLessThanOrEqual(aOut!.at.getTime());
+    expect(plain.candidates[2]!.at).toEqual(bIn!.at);
+  });
+});
+
+describe('review of 19 Oct 2026: a held departure is written once the trail is known complete past it', () => {
+  // Left the pin at 07:15 for a point 300 m away; the tracker sends two more minutes, then nothing (ignition is never sent).
+  const quiet = () => new Trail('06:30').park(30).drive(3000).park(10).drive(3000, 300, 15).park(2);
+  const dep = (over: Partial<DetectorInput> = {}, trail = quiet()) => detectTruckDay(input(trail.pts, [load(1, [stop(1, 3000)])], over)).candidates.find((c) => c.kind === 'DEPARTED')!;
+
+  it('the trail complete 10 min past the exit (the pulled history, less the overlap) makes it final; the clock alone does not', () => {
+    expect(dep()).toMatchObject({ final: false });
+    expect(hhmm(dep().at)).toBe('07:15');
+    // `now` alone is not enough: the history of the last minutes may not be pulled yet.
+    expect(dep({ now: T('07:45') })).toMatchObject({ final: false });
+    expect(dep({ trailComplete: { to: T('07:24:30'), final: false } })).toMatchObject({ final: false });
+    expect(dep({ trailComplete: { to: T('07:25'), final: false } })).toMatchObject({ final: true });
+    // After the truck-day's final pull no point will come: final at once.
+    expect(dep({ trailComplete: { to: T('07:17'), final: true } })).toMatchObject({ final: true });
+  });
+
+  it('a truck back at the pin when the tracker went quiet stays held (it may be unloading again) until the final pull', () => {
+    const back = quiet().drive(3000, 0, 15).park(1);
+    expect(dep({ trailComplete: { to: T('08:00'), final: false } }, back)).toMatchObject({ final: false });
+    expect(dep({ trailComplete: { to: T('08:00'), final: true } }, back)).toMatchObject({ final: true });
   });
 });
 
@@ -356,6 +453,47 @@ describe('the writer: a dock move never writes a departure; a real one is writte
     tables.truckTrailPoint = tables.truckTrailPoint!.filter((p) => p.fixAt <= T('07:26'));
     await processGpsTimes(TEN, 't5', DATE, T('07:26'));
     expect(gps(1).map((e) => `${e.kind} ${hhmm(e.at)}`)).toEqual(['ARRIVED 07:04', 'DEPARTED 07:15']);
+  });
+
+  it('review of 19 Oct 2026: a truck that parks 300 m off and goes quiet - the departure is written once the pulled history is 10 min past it', async () => {
+    const trail = new Trail('06:30').park(30).drive(3000).park(10).drive(3000, 300, 15).park(2);
+    const truckDay = (pulledTo: Date, finalPullAt: Date | null = null) => [{ id: 'td1', tenantId: TEN, truckId: 't5', deliveryDate: day, pulledTo, lastPullAt: pulledTo, finalPullAt, processedAt: null, suppressedAt: null, trailFrom: null }];
+    seed(trail);
+    // Pulled to 07:30: complete to 07:20 (the next pull reads the last 10 min again), only 5 min past the exit.
+    tables.ivmsTruckDay = truckDay(T('07:30'));
+    expect(await processGpsTimes(TEN, 't5', DATE, T('07:31'))).toMatchObject({ written: 1, kept: { HELD: 1 } });
+    // The next pull (to 07:36, complete to 07:26) brings no point: the tracker went quiet with the truck away.
+    tables.ivmsTruckDay![0]!.pulledTo = T('07:36');
+    await processGpsTimes(TEN, 't5', DATE, T('07:37'));
+    expect(gps(1).map((e) => `${e.kind} ${hhmm(e.at)}`)).toEqual(['ARRIVED 07:04', 'DEPARTED 07:15']);
+    // Before the fix it stayed HELD at every run, the final pull included. Now the final pull writes it at once.
+    seed(trail);
+    tables.ivmsTruckDay = truckDay(T('07:20'), T('07:21'));
+    await processGpsTimes(TEN, 't5', DATE, T('07:21'));
+    expect(gps(1).map((e) => e.kind)).toEqual(['ARRIVED', 'DEPARTED']);
+  });
+
+  it('trailCompleteOf: the history pulled less the 10-min overlap; final after the final pull; never pulled = none', () => {
+    expect(trailCompleteOf({ pulledTo: T('10:00'), finalPullAt: null })).toEqual({ to: T('09:50'), final: false });
+    expect(trailCompleteOf({ pulledTo: T('10:00'), finalPullAt: T('10:05') })).toEqual({ to: T('09:50'), final: true });
+    expect(trailCompleteOf({ pulledTo: null, finalPullAt: null })).toBeNull();
+    expect(trailCompleteOf(null)).toBeNull();
+  });
+
+  it("review of 19 Oct 2026: the live map's 'at the stop' reaches the customer's site radius, as the GPS alerts do", async () => {
+    // Arrived at shop A (the driver's tap), now unloading at a second drop point 370 m north of its pin.
+    const live = async (siteRadiusM: number | null) => {
+      seed(new Trail('06:30').park(1), { siteRadiusM });
+      tables.ivmsState = [];
+      tables.stopVisit!.push({ id: 'v1', tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't5', loadNo: 1, sequence: 1, customerId: 'C-A', outcome: null, arrivedAt: T('07:05'), departedAt: null });
+      tables.truckPosition = [{ id: 'p1', tenantId: TEN, truckId: 't5', fixAt: T('07:29:30'), receivedAt: T('07:29:40'), ...at(3000, 370), speedKmh: 0, heading: null, flags: [], movedAt: T('07:20') }];
+      const r = await readLiveVehicles(TEN, 'R1', T('07:30'));
+      return r!.vehicles[0]!.next;
+    };
+    // The company's radius (100 m + the margin): the truck has left stop 1, the next stop is 2.
+    expect(await live(null)).toMatchObject({ sequence: 2 });
+    // The customer's 400 m site radius: still at stop 1 (the GPS alerts say the same: lib/alerts/gps.ts atStopRadiusOf).
+    expect(await live(400)).toMatchObject({ sequence: 1 });
   });
 
   it("the customer's site radius reaches the detector: the departure is when the truck leaves the site", async () => {

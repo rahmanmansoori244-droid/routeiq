@@ -126,9 +126,16 @@ describe('the driver and the office always win (design 6.4, owner decision D-3 r
     expect(v.departureSource).not.toBe('AYUN');
   });
 
-  it('with a result, the GPS stay that holds it gives the departure, wherever it began (owner request 19 Oct 2026)', () => {
-    const v = deriveVisit([office('ARRIVED', '10:00'), gpsIn('10:30'), gpsOut('10:45'), result('10:40', 'DELIVERED')], CTX);
+  it('with a result, the GPS stay that holds it gives the departure, wherever it began, when its events carry the stay summary (ivms-v2, owner request 19 Oct 2026)', () => {
+    const v2 = (e: VisitEvent) => ({ ...e, payload: { ...e.payload, detector: 'ivms-v2', stay: { awayMin: 0, merged: 0 } } });
+    const v = deriveVisit([office('ARRIVED', '10:00'), v2(gpsIn('10:30')), v2(gpsOut('10:45')), result('10:40', 'DELIVERED')], CTX);
     expect(v).toMatchObject({ departureSource: 'AYUN', departedAt: L('10:45') });
+  });
+
+  it('stored ivms-v1 events (no stay summary, no minutes away): a GPS stay begun more than 15 min after the chosen arrival is not its departure, as before (review of 19 Oct 2026)', () => {
+    const v = deriveVisit([office('ARRIVED', '10:00'), gpsIn('10:30'), gpsOut('10:45'), result('10:40', 'DELIVERED')], CTX);
+    expect(v.departureSource).not.toBe('AYUN');
+    expect(v.awayMinutes ?? null).toBeNull();
   });
 
   it('the 15-minute rule after the result applies to a GPS departure too', () => {
@@ -296,10 +303,13 @@ describe('the operations alerts read the visit without its GPS times (merge revi
   const TIMES = ['arrivedAt', 'arrivalSource', 'arrivalDistanceM', 'arrivalAccuracyM', 'arrivalObserved', 'departedAt', 'departureSource', 'departedAtOutcome', 'outcome', 'outcomeAt', 'outcomeSource'] as const;
   const timesOf = (v: VisitTimes) => Object.fromEntries(TIMES.map((k) => [k, v[k]]));
 
-  it('withoutGpsTimes on the stored visit is the visit the driver and the office made (the link off), for every mix of events', () => {
-    // GPS stays (one near the arrival, one late, one unobserved), the phone's taps and automatic timing, its
-    // results, the office's entries: every subset of them, rebuilt with and without the AYUN events.
-    const pool = [
+  // GPS stays (one near the arrival, one late, one unobserved), the phone's taps and automatic timing, its
+  // results, the office's entries: every subset of them, rebuilt with and without the AYUN events. The GPS
+  // events as the detector before 19 Oct 2026 stored them (ivms-v1), and as it writes them since (ivms-v2,
+  // with the stay summary: the stay holding the result gives the departure, owner request 19 Oct 2026).
+  const withSummary = (e: VisitEvent): VisitEvent => (e.source === 'AYUN' ? { ...e, payload: { ...e.payload, detector: 'ivms-v2', stay: { awayMin: 0, merged: 0 } } } : e);
+  const poolOf = (v2: boolean) =>
+    [
       gpsIn('10:00'),
       gpsOut('10:28'),
       gpsIn('11:10', false),
@@ -312,7 +322,16 @@ describe('the operations alerts read the visit without its GPS times (merge revi
       office('ARRIVED', '10:01'),
       office('DEPARTED', '10:35'),
       result('11:20', 'PARTLY_DELIVERED'),
-    ];
+    ].map((e) => (v2 ? withSummary(e) : e));
+
+  // The pool really exercises what GPS fills: arrivals, departures and the result standing in for one. With the
+  // summary fewer differ: a result at 11:20 in the 11:10-11:40 stay keeps the result time (that stay's departure
+  // is more than 15 min after it), where the first stay's 10:28 is shown for ivms-v1 events, as before.
+  it.each([
+    ['ivms-v1', false, 500],
+    ['ivms-v2', true, 400],
+  ] as const)('withoutGpsTimes on the stored visit is the visit the driver and the office made (the link off), for every mix of events (%s)', (_name, v2, atLeast) => {
+    const pool = poolOf(v2);
     let gpsChanged = 0;
     for (let mask = 1; mask < 1 << pool.length; mask++) {
       const events = pool.filter((_, i) => mask & (1 << i));
@@ -324,11 +343,7 @@ describe('the operations alerts read the visit without its GPS times (merge revi
       if (JSON.stringify(timesOf(stored)) !== JSON.stringify(timesOf(own))) gpsChanged++;
       expect(timesOf(withoutGpsTimes(stored)), events.map((e) => `${e.kind}/${e.source}@${e.at.toISOString().slice(11, 16)}`).join(' ')).toEqual(timesOf(own));
     }
-    // The pool really exercises what GPS fills: arrivals, departures and the result standing in for one. (It
-    // was over 500 before the rebuild took the departure from the stay that holds the result, owner request
-    // 19 Oct 2026: a result at 11:20 in the 11:10-11:40 stay now keeps the result time, as that stay's
-    // departure is more than 15 min after it, where the first stay's 10:28 was shown before.)
-    expect(gpsChanged).toBeGreaterThan(400);
+    expect(gpsChanged).toBeGreaterThan(atLeast);
   });
 
   it('a GPS arrival and the driver result: for the alerts no arrival and no departure, as on the driver page; the result stays', () => {
