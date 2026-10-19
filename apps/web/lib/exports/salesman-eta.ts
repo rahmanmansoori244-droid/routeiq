@@ -284,8 +284,8 @@ export interface SalesmanEtaModel {
   sections: EtaSection[];
 }
 
-/** Loads that can no longer change when the day is re-planned. */
-const FIXED_STATUSES: ReadonlySet<string> = new Set(['LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED']);
+/** Loads that can no longer change when the day is re-planned (also read by the salesman link, lib/sales-link/day.ts). */
+export const FIXED_STATUSES: ReadonlySet<string> = new Set(['LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED']);
 
 export const NOT_LOCKED_NOTE = 'Not locked yet: times can change if the day is re-planned';
 export const NOT_PLANNED_HEADING = 'Not in the plan for this day (the office will advise)';
@@ -314,7 +314,8 @@ export function etaPalletsText(p: EtaPallets): string {
 
 const addPallets = (a: EtaPallets, b: EtaPallets): EtaPallets => ({ units: a.units + b.units, partial: a.partial || b.partial });
 const routeLabel = (route: string | null) => route ?? NO_SALES_ROUTE;
-const invoiceText = (so: string | null | undefined) => so?.trim() || NO_INVOICE;
+/** An invoice as the pages print it: its number, or NO_INVOICE (also read by the salesman link). */
+export const invoiceText = (so: string | null | undefined) => so?.trim() || NO_INVOICE;
 /** One invoice: its number (letter case aside), or the order for lines without one. */
 const invoiceKey = (so: string | null | undefined, orderId: string) => (so?.trim() ? `so:${so.trim().toUpperCase()}` : `order:${orderId}`);
 const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);

@@ -137,7 +137,8 @@ import {
 import { firstSignOf, leftHowText, plannedDriveOf, previousTrip, turnaroundOf, type TurnaroundIn } from '../delivery/turnaround';
 import type { StopEta } from '../ivms/eta';
 import type { GpsDepotMove, GpsTruckDayFact } from '../ivms/types';
-import { atStopRadiusOf, GPS_LEAVE_EARLY_MIN, gpsBackOf, gpsLiveOf, historyCoversFix, liveAt, liveEtasOf, motionWords, openStayEnd, outSince, outState, type AlertGpsSettings, type GpsLive, type OutState } from './gps';
+import { atStopRadiusOf, GPS_LEAVE_EARLY_MIN, gpsBackOf, gpsLiveOf, historyCoversFix, liveAt, motionWords, outSince, outState, type AlertGpsSettings, type GpsLive, type OutState } from './gps';
+import { firstPhotoAt, loadLiveEtas, phonePhoto, plannedServiceOf, projectionInputOf, projectionStopsOf, windowStartOf } from './load-eta';
 import { projectLoad, type ProjectedStop, type Projection, type ProjectionIn } from './projection';
 import {
   clockText,
@@ -464,22 +465,8 @@ function farArrival(v: FactVisit): boolean {
 }
 
 const windowEndOf = (s: FactStop) => (s.visit?.windowEndMin ?? null) ?? s.windowEndMin;
-const windowStartOf = (s: FactStop) => (s.visit?.windowStartMin ?? null) ?? s.windowStartMin;
-const plannedServiceOf = (s: FactStop) => (s.visit?.plannedServiceMin ?? null) ?? s.plannedServiceMin;
+// windowStartOf, plannedServiceOf, phonePhoto and firstPhotoAt: load-eta.ts (shared with the salesman link, 19 Oct 2026).
 const stopsWithoutResult = (l: FactLoad) => l.stops.filter((s) => !s.visit?.outcome).length;
-
-/** A photo of the driver's phone taken there and then (an office upload or an old gallery photo is no sign of the truck). */
-const phonePhoto = (p: FactPhoto) => (p.source === undefined || PHONE_SOURCES.has(p.source)) && !p.oldPhoto;
-/** The first delivery photo the driver's phone took at the stop (null: none). */
-function firstPhotoAt(v: FactVisit | null | undefined): Date | null {
-  let first: Date | null = null;
-  for (const p of v?.photos ?? []) {
-    if (!phonePhoto(p)) continue;
-    const t = p.takenAt ?? p.receivedAt;
-    if (!first || t < first) first = t;
-  }
-  return first;
-}
 
 /** The times a stop shows activity: arrival, departure, result, the first phone photo. */
 const activityTimes = (s: FactStop): Date[] => [s.visit?.arrivedAt, s.visit?.departedAt, s.visit?.outcomeAt, firstPhotoAt(s.visit)].filter((t): t is Date => !!t);
@@ -1619,42 +1606,14 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
     const gpsLive = gpsLiveOf(gps, now);
     // The live ETA only while the GPS history has caught up with the fresh fix (review of 18 Oct 2026, finding 1).
     const historyCurrent = gpsLive === 'LIVE' && historyCoversFix(gps);
-    const stopsIn = l.stops.map((s) => {
-      const v = s.visit;
-      let endAt = v?.departedAt ?? (v?.outcomeAt && v.outcomeSource !== 'DISPATCHER' ? v.outcomeAt : null);
-      // GPS: a stop with an arrival and nothing that ends it, where the GPS knows better than the clock
-      // (the truck away from it, or a GPS stay the trail lost sight of): its projected end (gps.ts openStayEnd).
-      if (gps && v?.arrivedAt && !v.departedAt && !v.outcome) {
-        endAt = openStayEnd({ arrivedAt: v.arrivedAt, gpsArrival: isGps(v.arrivalSource), plannedServiceMin: plannedServiceOf(s) }, liveAt(gps, s.pin, atStopRadiusOf(facts.gps!, s.siteRadiusM), now), gps, now);
-      }
-      // M3: a delivery photo of the driver's phone is the truck being there, when no arrival was recorded.
-      const arrAt = v?.arrivedAt ?? firstPhotoAt(v);
-      return {
-        sequence: s.sequence,
-        etaMin: s.etaMin,
-        serviceStartMin: s.serviceStartMin,
-        departureMin: s.departureMin,
-        plannedServiceMin: plannedServiceOf(s),
-        windowStartMin: windowStartOf(s),
-        arrivedMin: arrAt ? minutesOnDate(arrAt, l.date, tz) : null,
-        endMin: endAt ? minutesOnDate(endAt, l.date, tz) : null,
-        hasOutcome: !!v?.outcome,
-      };
-    });
+    // The projection's stops and input, and the live GPS ETA: load-eta.ts (one input for the alerts and the
+    // salesman link, 19 Oct 2026). With GPS (ALERTS) an open arrival ends where the GPS knows better
+    // (openStayEnd); a delivery photo of the driver's phone is the truck being there (M3).
+    const etaGps = gps ? { fact: gps, settings: facts.gps! } : null;
+    const stopsIn = projectionStopsOf(l.stops, { date: l.date, tz, now, gps: etaGps });
     const activity = stopsIn.map((s) => s.arrivedMin !== null || s.endMin !== null || s.hasOutcome);
     const laterActivity = activity.map((_, i) => activity.slice(i + 1).some(Boolean));
-    const projIn: ProjectionIn | null =
-      l.status === 'DISPATCHED'
-        ? {
-            departMin: l.departMin,
-            returnMin: l.returnMin,
-            dispatchMin: l.statusChangedAt ? minutesOnDate(l.statusChangedAt, l.date, tz) : null,
-            nowMin,
-            lateDispatchMin: lateDispatch,
-            phoneSeenMin: td?.lastSignal ? minutesOnDate(td.lastSignal.at, l.date, tz) : null,
-            stops: stopsIn,
-          }
-        : null;
+    const projIn: ProjectionIn | null = projectionInputOf(l, stopsIn, { tz, now, lateDispatchMin: lateDispatch, phoneSeenAt: td?.lastSignal?.at ?? null });
     const c: LoadCtx = {
       load: l,
       label: loadLabel(l.truckCode, l.loadNo),
@@ -1676,29 +1635,7 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
       // The live map's ETA of the stops ahead (a stop is behind once it has a result or a departure; an open
       // arrival is "at the stop" only while the fresh fix is near its pin: lib/ivms/eta.ts), only while the
       // GPS history has caught up with the fix.
-      liveEtas:
-        gps && historyCurrent && l.status === 'DISPATCHED'
-          ? liveEtasOf(
-              gps,
-              facts.gps!,
-              {
-                depotId: l.depotId,
-                departMin: l.departMin,
-                dayStart,
-                stops: l.stops.map((s) => ({
-                  sequence: s.sequence,
-                  pin: s.pin ?? null,
-                  etaMin: s.etaMin,
-                  plannedServiceMin: plannedServiceOf(s),
-                  done: !!s.visit?.outcome || !!s.visit?.departedAt,
-                  arrivedAt: s.visit && !s.visit.outcome && !s.visit.departedAt ? s.visit.arrivedAt : null,
-                  // A big customer's site radius (owner request 19 Oct 2026): at the stop that far from its pin.
-                  ...(s.siteRadiusM ? { atStopRadiusM: atStopRadiusOf(facts.gps!, s.siteRadiusM) } : {}),
-                })),
-              },
-              now,
-            )
-          : [],
+      liveEtas: loadLiveEtas(etaGps, { status: l.status, depotId: l.depotId, departMin: l.departMin, dayStart, stops: l.stops }, now),
     };
     const run = (rule: AlertRule, fn: () => void) => {
       if (out.on(rule) === null) return;

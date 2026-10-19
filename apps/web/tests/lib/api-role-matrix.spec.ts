@@ -121,6 +121,11 @@
  *   and dispatcher: its "Pins to review" sheet holds standing points worked out from the customer pins (office
  *   data, never a VIEWER's, never public). Reads only, through the caller's company; another company's depot is
  *   404. The nightly job that writes the facts has no route of its own (the janitor, and the cron route: TOKEN).
+ * - The salesman link (owner request 19 Oct 2026: a 24-hour link for the salesmen's WhatsApp group): GET
+ *   /api/s/view is SALES_LINK (the link token in the Authorization header, withSalesLink; read-only, no session
+ *   needed, another company's session 403); the links of a date (GET / POST /api/dispatch/sales-links, PATCH
+ *   /api/dispatch/sales-links/[id]) are PLANNER, like the driver links: the link shows customers to people outside
+ *   RouteIQ. Roles unchanged on GET|POST /api/tenant/start-fresh (also removes the salesman links in scope).
  * - The cause & action of an operations alert (owner request 20 Oct 2026): PATCH /api/alerts is PLANNER (the
  *   dispatcher and up record what was found and decided after checking an alert; every role reads it on GET
  *   /api/alerts). The alerts-only Excel is GET /api/analysis/export?only=alerts (PLANNER, unchanged).
@@ -188,6 +193,10 @@ const EXPECTED: Record<string, string> = {
   'GET /api/dispatch/driver-links': 'PLANNER',
   'POST /api/dispatch/driver-links': 'PLANNER',
   'PATCH /api/dispatch/driver-links/[id]': 'PLANNER',
+  // Owner request 19 Oct 2026: the salesman link of a date (the office side).
+  'GET /api/dispatch/sales-links': 'PLANNER',
+  'POST /api/dispatch/sales-links': 'PLANNER',
+  'PATCH /api/dispatch/sales-links/[id]': 'PLANNER',
   // Owner request 6 Oct 2026 (the hire suggestion): the dispatcher enters a one-day hired truck's plate.
   'PATCH /api/dispatch/hired-trucks/[id]': 'PLANNER',
   'POST /api/dispatch/late-order': 'PLANNER',
@@ -243,6 +252,8 @@ const EXPECTED: Record<string, string> = {
   'PATCH /api/products/[id]': 'TENANT_ADMIN',
   'DELETE /api/products/[id]': 'TENANT_ADMIN',
   'POST /api/products/import': 'TENANT_ADMIN',
+  // Owner request 19 Oct 2026: the salesman link's page data (token in a header, read-only).
+  'GET /api/s/view': 'SALES_LINK',
   'GET /api/regions': 'ANY',
   'POST /api/regions': 'TENANT_ADMIN',
   'PATCH /api/regions/[id]': 'TENANT_ADMIN',

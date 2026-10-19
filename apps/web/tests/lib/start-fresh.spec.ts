@@ -203,6 +203,11 @@ function seedCompany(tenantId: string, p: string) {
     { id: `${p}dl2`, truckId: `${p}t1`, deliveryDate: day('2026-10-02') },
     { id: `${p}dl6`, truckId: `${p}t1`, deliveryDate: day('2026-10-06') },
   ]);
+  // The salesman link (19 Oct 2026): one per delivery date, no foreign key but the company's.
+  push('salesLink', [
+    { id: `${p}sl2`, deliveryDate: day('2026-10-02') },
+    { id: `${p}sl6`, deliveryDate: day('2026-10-06') },
+  ]);
   push('stopVisit', [
     { id: `${p}v2`, depotId: `${p}dep`, truckId: `${p}t1`, customerId: `${p}c1`, deliveryDate: day('2026-10-02') },
     { id: `${p}v3`, depotId: `${p}dep`, truckId: `${p}t1`, customerId: `${p}c1`, deliveryDate: day('2026-10-03') },
@@ -315,6 +320,7 @@ describe('preview (nothing is changed)', () => {
       hiredTrucks: 0,
       baselines: 1,
       oldDriverApp: 3, // a shift, its position and its proof
+      salesLinks: 2, // a line of its own, only when there are some (like the GPS rows)
     });
     expect(r.kept).toEqual({ customers: 2, products: 1, trucks: 1, drivers: 1, dailyDrivers: 1, depots: 1, regions: 1, users: 2, auditRows: 2, orderFiles: 0 });
     expect(r.orderDates).toEqual({ from: '2026-10-02', to: '2026-10-06' });
@@ -341,6 +347,7 @@ describe('preview (nothing is changed)', () => {
       dailyDrivers: 2, // cas1 and cas3; cas4 is on the load of the 6th, cas2 a default driver
       baselines: 1,
       oldDriverApp: 3,
+      salesLinks: 1,
     });
     expect(r.kept.dailyDrivers).toBe(2);
     expect(r.kept.orderFiles).toBe(1); // b6
@@ -432,7 +439,7 @@ describe('run: everything', () => {
     const r = await run(null, {}, '10.0.0.1');
 
     // Nothing left of the activity data of company A.
-    for (const m of ['uploadBatch', 'order', 'orderLine', 'intakeLineKey', 'runPlan', 'scenarioResult', 'unservedOrder', 'planLoad', 'routeAssignment', 'runJob', 'manualBaseline', 'manualBaselineAssignment', 'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'driverShift', 'truckLocation', 'deliveryProof', 'opsAlert']) {
+    for (const m of ['uploadBatch', 'order', 'orderLine', 'intakeLineKey', 'runPlan', 'scenarioResult', 'unservedOrder', 'planLoad', 'routeAssignment', 'runJob', 'manualBaseline', 'manualBaselineAssignment', 'driverLink', 'salesLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'driverShift', 'truckLocation', 'deliveryProof', 'opsAlert']) {
       expect(idsOf(m, 'a'), m).toEqual([]);
     }
     // Operations alerts (16 Oct 2026): the alert rows go with their days; the e-mail records (counts only) stay.
@@ -715,6 +722,7 @@ describe('run: only before a date', () => {
     expect(idsOf('scenarioResult', 'a')).toEqual(['as6']);
     expect(idsOf('runJob', 'a')).toEqual(['aj6']);
     expect(idsOf('driverLink', 'a')).toEqual(['adl6']);
+    expect(idsOf('salesLink', 'a')).toEqual(['asl6']);
     expect(idsOf('stopVisit', 'a')).toEqual(['av6']);
     expect(idsOf('stopEvent', 'a')).toEqual(['ae6']);
     expect(idsOf('deliveryPhoto', 'a')).toEqual(['aph6']);

@@ -11,12 +11,25 @@
  * Pure and browser-safe (no lookbehind in the patterns: older iOS Safari would fail to parse them).
  */
 
-/** /d/<token> -> /d/[token]; /api/d/... is left alone (those paths carry no token). */
+/**
+ * /d/<token> -> /d/[token]; /api/d/... is left alone (those paths carry no token). The salesman link's page
+ * (owner request 19 Oct 2026): /s/<token> -> /s/[token] (scrubSalesToken), before the driver check returns early.
+ */
 export function scrubDriverToken(text: string): string {
   if (typeof text !== 'string') return text;
-  const t = scrubIvmsSecrets(text);
+  const t = scrubSalesToken(scrubIvmsSecrets(text));
   if (!t.includes('/d/')) return t;
   return t.replace(/(\/api)?\/d\/([A-Za-z0-9_-]+)/g, (m: string, api: string | undefined) => (api ? m : '/d/[token]'));
+}
+
+/**
+ * The salesman link's token in its page path: /s/<16 or more URL-safe characters> -> /s/[token], whatever follows
+ * it (".", "&", ")", a quote, the end; critique item 15). /api/s/view keeps its path (no token there: "view" is
+ * too short to be one).
+ */
+export function scrubSalesToken(text: string): string {
+  if (typeof text !== 'string' || !text.includes('/s/')) return text;
+  return text.replace(/\/s\/[A-Za-z0-9_-]{16,}/g, '/s/[token]');
 }
 
 /**
@@ -59,6 +72,12 @@ export function isDriverPath(s: string | null | undefined): boolean {
   return /^\/(api\/)?d(\/|$)/.test(pathOf(s));
 }
 
+/** The salesman link's page or API path: /s, /s/..., /api/s, /api/s/... (never traced, like the driver's). */
+export function isSalesPath(s: string | null | undefined): boolean {
+  if (!s) return false;
+  return /^\/(api\/)?s(\/|$)/.test(pathOf(s));
+}
+
 type Ctx = Record<string, unknown> & {
   name?: unknown;
   transactionContext?: { name?: unknown };
@@ -88,7 +107,7 @@ export function driverTracesSampler(rate: number) {
       ctx.location?.pathname,
       (globalThis as { location?: { pathname?: string } }).location?.pathname,
     ];
-    return candidates.some((c) => typeof c === 'string' && (isDriverPath(c) || isIvmsWebhookPath(c))) ? 0 : rate;
+    return candidates.some((c) => typeof c === 'string' && (isDriverPath(c) || isSalesPath(c) || isIvmsWebhookPath(c))) ? 0 : rate;
   };
 }
 

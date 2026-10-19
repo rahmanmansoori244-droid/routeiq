@@ -10,6 +10,7 @@
  * The endpoints are tested via real HTTP against the running dev server. Two
  * fresh tenants per test session keep the matrix self-contained.
  */
+import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   BASE,
@@ -82,6 +83,18 @@ beforeAll(async () => {
         status: 'DRAFT',
         totalOrders: 1,
         createdById: t.handle.userId,
+      },
+    });
+    // The salesman link of tomorrow (owner request 19 Oct 2026): the office changes it by id.
+    await prisma.salesLink.create({
+      data: {
+        id: `slxt${t.handle.tenantId}`.slice(0, 40),
+        tenantId: t.handle.tenantId,
+        deliveryDate: tomorrow,
+        salt: 'xt',
+        keyId: '0a1b2c3d',
+        tokenHash: createHash('sha256').update(`xt-${t.handle.tenantId}`).digest('hex'),
+        expiresAt: new Date(tomorrow.getTime() + 2 * 86_400_000),
       },
     });
   }
@@ -219,6 +232,15 @@ const PROBES: ProbeCase[] = [
     },
   },
   {
+    label: 'PATCH /api/dispatch/sales-links/{id-B}',
+    method: 'PATCH',
+    body: () => ({ action: 'REVOKE' }),
+    build: async () => {
+      const l = await prisma.salesLink.findFirstOrThrow({ where: { tenantId: tenantB.tenantId } });
+      return `${BASE}/api/dispatch/sales-links/${l.id}`;
+    },
+  },
+  {
     label: 'GET /api/runs/{id-B}/baseline',
     method: 'GET',
     build: async () => {
@@ -259,5 +281,7 @@ describe('cross-tenant per-endpoint matrix', () => {
     expect(product.name).not.toBe('XT');
     const region = await prisma.region.findFirstOrThrow({ where: { tenantId: tenantB.tenantId } });
     expect(region.name).not.toBe('XT');
+    const link = await prisma.salesLink.findFirstOrThrow({ where: { tenantId: tenantB.tenantId } });
+    expect(link.revokedAt).toBeNull();
   });
 });

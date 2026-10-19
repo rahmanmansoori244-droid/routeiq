@@ -57,12 +57,17 @@ export type StartFreshKeptKey = (typeof START_FRESH_KEPT)[number]['key'];
  * derived data and no line of their own). Present only when there are some; not in the total (the alerts are
  * not); compared for PREVIEW_STALE (human input: never more removed than shown).
  */
-export type StartFreshRemoved = Record<StartFreshRemovedKey, number> & { gpsTracking?: number; alertReviews?: number };
+export type StartFreshRemoved = Record<StartFreshRemovedKey, number> & { gpsTracking?: number; salesLinks?: number; alertReviews?: number };
 
 /** The panel's line for StartFreshRemoved.gpsTracking (shown only when present). */
 export const START_FRESH_GPS_LABEL = 'GPS tracking data of the trucks (live positions, trail, depot arrivals and departures)';
 /** The panel's line for StartFreshRemoved.alertReviews (shown only when present). */
 export const START_FRESH_ALERT_REVIEWS_LABEL = 'Alerts with a cause & action recorded by the office (removed with the alerts of these days)';
+/**
+ * The panel's line for StartFreshRemoved.salesLinks (owner request 19 Oct 2026: the salesman link of a delivery
+ * date), shown only when there are some, like the GPS line: a company that never made one sees the same panel.
+ */
+export const START_FRESH_SALES_LINK_LABEL = 'Salesman links (one per delivery date)';
 export type StartFreshKept = Record<StartFreshKeptKey, number>;
 
 /** Why Start fresh cannot run now. */
@@ -190,7 +195,7 @@ export const START_FRESH_BACKUP_REMINDER =
 
 /** The total of the removed rows, the "of which" lines not counted twice. */
 export function startFreshTotal(removed: Partial<StartFreshRemoved>): number {
-  return START_FRESH_REMOVED.reduce((sum, r) => sum + ('sub' in r && r.sub ? 0 : (removed[r.key] ?? 0)), 0) + (removed.gpsTracking ?? 0);
+  return START_FRESH_REMOVED.reduce((sum, r) => sum + ('sub' in r && r.sub ? 0 : (removed[r.key] ?? 0)), 0) + (removed.gpsTracking ?? 0) + (removed.salesLinks ?? 0);
 }
 
 /** The typed confirmation: the company code (its slug), case and spaces around it ignored. */

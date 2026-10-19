@@ -614,3 +614,61 @@ describe('the driver link and the driver page (owner request 4 Oct 2026)', () =>
     ]);
   });
 });
+
+describe('the salesman link and its page (owner request 19 Oct 2026)', () => {
+  const rel = (f: string) => path.relative(WEB, f).split(path.sep).join('/');
+  const filesUnder = (...dirs: string[]) => dirs.flatMap((d) => (existsSync(path.join(WEB, d)) ? walk(path.join(WEB, d), /\.(ts|tsx)$/) : []));
+
+  it('every app/api/s route goes through withSalesLink, has no write method, and no folder there is a [token] segment', () => {
+    const dir = path.join(WEB, 'app', 'api', 's');
+    const routes = walk(dir, /^route\.ts$/);
+    expect(routes.length).toBeGreaterThan(0);
+    expect(routes.filter((f) => !readFileSync(f, 'utf8').includes('withSalesLink(')).map(rel)).toEqual([]);
+    expect(routes.filter((f) => /export\s+(?:const|async function|function)\s+(POST|PUT|PATCH|DELETE)\b/.test(readFileSync(f, 'utf8'))).map(rel)).toEqual([]);
+    const dynamicFolders: string[] = [];
+    const visit = (d: string) => {
+      for (const name of readdirSync(d)) {
+        const p = path.join(d, name);
+        if (!statSync(p).isDirectory()) continue;
+        if (/^\[.*token.*\]$/i.test(name)) dynamicFolders.push(rel(p));
+        visit(p);
+      }
+    };
+    visit(dir);
+    expect(dynamicFolders).toEqual([]);
+  });
+
+  it('the page (app/s) and lib/sales-page never import the database, Prisma, node: or the server side of the link', () => {
+    const offenders = filesUnder(path.join('app', 's'), path.join('lib', 'sales-page')).filter((f) => {
+      const src = readFileSync(f, 'utf8');
+      return (
+        /from ['"](@\/lib\/db|@prisma\/client|\.\.?\/.*\bdb)['"]/.test(src) ||
+        /from ['"][^'"]*sales-link\/(service|guard|day-read|day|token)['"]/.test(src) ||
+        /from ['"]node:/.test(src)
+      );
+    });
+    expect(offenders.map(rel)).toEqual([]);
+  });
+
+  it('no console call in lib/sales-link takes a token; the answer types are type-only for the browser', () => {
+    const offenders = walk(path.join(WEB, 'lib', 'sales-link'), /\.ts$/).flatMap((f) =>
+      readFileSync(f, 'utf8')
+        .split(/\r?\n/)
+        .filter((l) => /console\.\w+\(/.test(l) && /token/i.test(l))
+        .map((l) => `${rel(f)}: ${l.trim()}`),
+    );
+    expect(offenders).toEqual([]);
+    expect(readFileSync(path.join(WEB, 'lib', 'sales-link', 'view-types.ts'), 'utf8')).not.toMatch(/^\s*import\s+(?!type\s)/m);
+  });
+
+  it('the middleware never asks /s or /api/s for a session; their headers keep the token out of Referer, caches and search engines', () => {
+    const mw = readFileSync(path.join(WEB, 'middleware.ts'), 'utf8');
+    const line = mw.split(/\r?\n/).find((l) => l.includes('const isProtected')) ?? '';
+    expect(line).toMatch(/startsWith\('\/t\/'\)/);
+    expect(line).not.toMatch(/'\/s/);
+    const cfg = readFileSync(path.join(WEB, 'next.config.js'), 'utf8');
+    const rule = cfg.slice(cfg.indexOf("'/s/:path*'"));
+    expect(rule.length).toBeGreaterThan(0);
+    for (const h of ["{ key: 'Referrer-Policy', value: 'strict-origin' }", "{ key: 'X-Robots-Tag', value: 'noindex, nofollow, noarchive' }", "{ key: 'Cache-Control', value: 'no-store' }"]) expect(rule).toContain(h);
+  });
+});

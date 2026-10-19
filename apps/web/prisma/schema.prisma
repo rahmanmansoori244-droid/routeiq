@@ -191,6 +191,7 @@ model Tenant {
   planLoads            PlanLoad[]
   intakeLineKeys       IntakeLineKey[]
   driverLinks          DriverLink[]
+  salesLinks           SalesLink[]
   stopVisits           StopVisit[]
   stopEvents           StopEvent[]
   deliveryPhotos       DeliveryPhoto[]
@@ -448,6 +449,8 @@ model User {
   ordersCancelled      Order[]              @relation("OrderCancelledBy")
   driverLinksIssued    DriverLink[]         @relation("DriverLinkIssuedBy")
   driverLinksRevoked   DriverLink[]         @relation("DriverLinkRevokedBy")
+  salesLinksIssued     SalesLink[]          @relation("SalesLinkIssuedBy")
+  salesLinksRevoked    SalesLink[]          @relation("SalesLinkRevokedBy")
   stopOutcomesSet      StopVisit[]          @relation("StopVisitOutcomeBy")
   stopEvents           StopEvent[]          @relation("StopEventUser")
   deliveryPhotos       DeliveryPhoto[]      @relation("DeliveryPhotoUser")
@@ -1066,8 +1069,9 @@ model OrderLine {
   /// The salesman's route that sold this invoice line (owner request 17 Oct 2026, "Salesman ETA"): the
   /// order file's "route" column, trimmed, inner spaces collapsed, upper-case, at most 40 characters
   /// (lib/dispatch/sales-route.ts). Null = the file had no route (or the line was added before it was
-  /// kept). A label for the Salesman ETA export only: never part of a duplicate or intake key, never read
-  /// by planning. Copied with the line when an order is brought forward or postponed.
+  /// kept). A label read by the Salesman ETA export and the salesman link (lib/sales-link/*, owner request
+  /// 19 Oct 2026): never part of a duplicate or intake key, never read by planning. Copied with the line
+  /// when an order is brought forward or postponed.
   salesRoute         String?
   intakeKey          IntakeLineKey?
 
@@ -1480,6 +1484,42 @@ model DriverLink {
 
   @@unique([tenantId, truckId, deliveryDate])
   @@index([tenantId, deliveryDate])
+}
+
+/// The salesman link (owner request 19 Oct 2026): one no-login, read-only link per company and delivery
+/// date for the salesmen's WhatsApp group (app/s/[token]). Each salesman types his route code (a filter,
+/// not a password: the owner's choice, an accepted risk in docs/SECURITY.md) and follows his customers'
+/// deliveries live. Only today's or tomorrow's date; works until 06:00 company time the day after the
+/// delivery date. Only the token's SHA-256 is kept (lib/sales-link/token.ts); the token is never stored,
+/// logged or audited. No foreign key to a truck or a plan: the page reads the plans in use every time.
+model SalesLink {
+  id            String    @id @default(cuid()) // newSalesLinkId() before the insert: the token is derived from it
+  tenantId      String
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deliveryDate  DateTime  @db.Date
+  generation    Int       @default(1)
+  salt          String // 16 random bytes, base64url; new on every reissue
+  keyId         String // first 8 hex of SHA-256(server key): resolve refuses a link made with an older key
+  tokenHash     String    @unique // SHA-256 hex of the token
+  /// The hash of the generation before the last reissue: that token answers 410 LINK_REPLACED.
+  prevTokenHash String?   @unique
+  expiresAt     DateTime  @db.Timestamptz(3) // 06:00 company time on the day after the delivery date
+  issuedAt      DateTime  @default(now()) @db.Timestamptz(3)
+  issuedById    String?
+  issuedBy      User?     @relation("SalesLinkIssuedBy", fields: [issuedById], references: [id], onDelete: SetNull)
+  revokedAt     DateTime? @db.Timestamptz(3)
+  revokedById   String?
+  revokedBy     User?     @relation("SalesLinkRevokedBy", fields: [revokedById], references: [id], onDelete: SetNull)
+  lastSeenAt    DateTime? @db.Timestamptz(3)
+  /// The browsers that opened this generation: a JSON array of the first 8 hex of SHA-256 of each page's
+  /// random id (at most 200; "opened on N phones"), appended atomically. The location retention turns
+  /// each into "" (the count stays).
+  devicesJson   Json?
+  /// The route codes looked up that had deliveries (normalised, at most 200), appended atomically: "routes
+  /// looked up". Never a code that matched nothing.
+  routesJson    Json?
+
+  @@unique([tenantId, deliveryDate])
 }
 
 /// One physical stop of a load that left the depot: the current state, rebuilt from its events.

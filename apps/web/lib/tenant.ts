@@ -44,6 +44,8 @@ const TENANT_SCOPED_MODELS = new Set([
   'IntakeLineKey',
   // Delivery outcome and the driver page (owner request 4 Oct 2026)
   'DriverLink',
+  // The salesman link (owner request 19 Oct 2026): one read-only link per company and delivery date.
+  'SalesLink',
   'StopVisit',
   'StopEvent',
   'DeliveryPhoto',

@@ -8,12 +8,15 @@ type Row = Record<string, any>;
 
 export const tables: Record<string, Row[]> = {};
 export const rawLog: string[] = [];
+/** The values of each $executeRaw call, in order (rawLog has its SQL with "?" for them). */
+export const rawValues: unknown[][] = [];
 let seq = 0;
 const newId = (p: string) => `${p}_${++seq}`;
 
 export function resetDb() {
   for (const k of Object.keys(tables)) delete tables[k];
   rawLog.length = 0;
+  rawValues.length = 0;
   seq = 0;
 }
 
@@ -269,6 +272,8 @@ const MODELS = [
   'product', 'intakeLineKey', 'manualBaseline', 'region',
   // Delivery outcome and the driver page (owner request 4 Oct 2026); users: the office side names who recorded a result.
   'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'user',
+  // The salesman link (owner request 19 Oct 2026).
+  'salesLink',
   // Start fresh (4 Oct 2026) also clears the comparison baselines and the retired driver app's rows.
   'manualBaselineAssignment', 'driverShift', 'truckLocation', 'deliveryProof',
   // The hire suggestion (6 Oct 2026): a plan job that saved its plan looks for hire options.
@@ -305,8 +310,9 @@ fakePrisma.$queryRaw = async (strings: TemplateStringsArray, ...values: unknown[
   }
   return [];
 };
-fakePrisma.$executeRaw = async (strings: TemplateStringsArray) => {
+fakePrisma.$executeRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
   rawLog.push(strings.join('?').replace(/\s+/g, ' ').trim());
+  rawValues.push(values);
   return 0;
 };
 fakePrisma.$executeRawUnsafe = async (sql: string) => {

@@ -3,7 +3,7 @@
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, FileText, History, Lock, Truck, Unlock, PackageCheck, Send, Flag, RefreshCw, Plus, Clock } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, FileText, History, Lock, Truck, Unlock, PackageCheck, Send, Flag, RefreshCw, Plus, Clock, Share2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -50,6 +50,7 @@ import type { DriverLinkView } from '@/lib/driver-link/manifest-types';
 import { reissuePrompt, reissuePromptText } from '@/lib/driver-link/reissue-prompt';
 import { lateDispatchNotes } from '@/lib/driver-link/plan-notes';
 import { DriverLinkDialog, ReissueLinkPrompt } from './driver-link-dialog';
+import { SalesLinkDialog, salesLinkDayOk } from './sales-link-dialog';
 import { CasualDriverDialog, type CasualDriverAnswer, type CasualDriverBody } from './casual-driver-dialog';
 import { LoadHelpersCell, type HelperOption } from './load-helpers-picker';
 import { helperClashes, helpersText } from '@/lib/dispatch/load-helpers';
@@ -254,6 +255,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const [linkDialog, setLinkDialog] = useState<{ truckId: string; loadId: string } | null>(null);
   const [casualFor, setCasualFor] = useState<DetailLoad | null>(null);
   const [reissueAsk, setReissueAsk] = useState<{ link: DriverLinkView; text: string } | null>(null);
+  // The salesman link of the plan's date (owner request 19 Oct 2026): one per company and date, for every depot.
+  const [salesLinkOpen, setSalesLinkOpen] = useState(false);
   const loadLinks = useCallback(async () => {
     if (!canPlan) return;
     const r = await api<DriverLinkView[]>(`/api/dispatch/driver-links?runId=${encodeURIComponent(runId)}`);
@@ -785,6 +788,20 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
               >
                 <Clock className="mr-1 h-4 w-4" /> Salesman ETA
               </a>
+            </Button>
+          ) : null}
+          {/* Salesman link (owner request 19 Oct 2026): the live version of the Salesman ETA, one read-only link per
+              company and date for the salesmen's WhatsApp group (only the company's today or tomorrow). The
+              plan's own today on the standalone version page, where the day screen's is not given (critique 19). */}
+          {canPlan && !superseded && salesLinkDayOk(d.run.runDate, today ?? d.today) ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSalesLinkOpen(true)}
+              data-testid="salesman-link"
+              title="One link for the salesmen's WhatsApp group: each salesman types his route code and follows his customers' deliveries live"
+            >
+              <Share2 className="mr-1 h-4 w-4" /> Salesman link
             </Button>
           ) : null}
           {d.loads.some((l) => ON_ROAD.has(l.status)) ? (
@@ -1582,6 +1599,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         </Card>
       ) : null}
 
+      {canPlan && salesLinkOpen ? (
+        <SalesLinkDialog open onOpenChange={(o) => !o && setSalesLinkOpen(false)} date={d.run.runDate} timezone={d.timezone || 'Asia/Muscat'} />
+      ) : null}
       {canPlan && linkDialog ? (
         <DriverLinkDialog
           open

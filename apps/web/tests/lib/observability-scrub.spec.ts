@@ -2,12 +2,13 @@
  * Driver-link tokens never reach Sentry (owner request 4 Oct 2026, spec section 16.1): the landing
  * path /d/<token> is rewritten in URLs, transaction names and breadcrumbs, the Authorization header
  * is dropped, the driver page and the driver API are never traced, and all four Sentry inits use
- * these hooks (a source scan).
+ * these hooks (a source scan). The salesman link (owner request 19 Oct 2026): /s/<token> likewise, whatever
+ * follows the token (critique item 15), and /s and /api/s are never traced.
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { driverTracesSampler, isDriverPath, scrubBreadcrumb, scrubDriverToken, scrubSentryEvent, sentryScrubOptions } from '@/lib/observability-scrub';
+import { driverTracesSampler, isDriverPath, isSalesPath, scrubBreadcrumb, scrubDriverToken, scrubSalesToken, scrubSentryEvent, sentryScrubOptions } from '@/lib/observability-scrub';
 
 const T = 'Ab3_dE5-gH7iJ9kL1mN3oP5q';
 
@@ -25,6 +26,32 @@ describe('scrubDriverToken', () => {
   it('knows a driver path', () => {
     for (const p of [`/d/${T}`, '/api/d/manifest', `https://x.example/d/${T}`, 'GET /api/d/actions', '/d']) expect(isDriverPath(p), p).toBe(true);
     for (const p of ['/dispatch', '/t/nmwc/d/x', '/api/drivers', '/api/dispatch/day', '', null]) expect(isDriverPath(p as string), String(p)).toBe(false);
+  });
+});
+
+describe('the salesman link: /s/<token> (owner request 19 Oct 2026, critique item 15)', () => {
+  it('rewrites the token in paths and URLs whatever follows it, before the driver check returns early; /api/s/view stays', () => {
+    expect(scrubDriverToken(`/s/${T}`)).toBe('/s/[token]');
+    expect(scrubDriverToken(`https://routeiq.example/s/${T}#R1`)).toBe('https://routeiq.example/s/[token]#R1');
+    expect(scrubDriverToken(`see https://routeiq.example/s/${T}.`)).toBe('see https://routeiq.example/s/[token].');
+    expect(scrubDriverToken(`a=1&u=/s/${T}&b=2`)).toBe('a=1&u=/s/[token]&b=2');
+    expect(scrubDriverToken(`(/s/${T}), "/s/${T}"`)).toBe('(/s/[token]), "/s/[token]"');
+    expect(scrubDriverToken('/api/s/view?route=R1')).toBe('/api/s/view?route=R1');
+    expect(scrubSalesToken(`/s/${T}`)).toBe('/s/[token]');
+    // Both kinds in one text.
+    expect(scrubDriverToken(`/d/${T} and /s/${T}`)).toBe('/d/[token] and /s/[token]');
+  });
+
+  it('knows a salesman path; the sampler never traces one; the Authorization header is dropped', () => {
+    for (const p of [`/s/${T}`, '/api/s/view', `https://x.example/s/${T}`, 'GET /api/s/view', '/s']) expect(isSalesPath(p), p).toBe(true);
+    for (const p of ['/settings', '/t/nmwc/s/x', '/api/sales', '/api/dispatch/sales-links', '', null]) expect(isSalesPath(p as string), String(p)).toBe(false);
+    const sampler = driverTracesSampler(0.5);
+    expect(sampler({ name: `GET /s/${T}` })).toBe(0);
+    expect(sampler({ name: 'GET /api/s/view' })).toBe(0);
+    expect(sampler({ name: 'GET /api/dispatch/sales-links' })).toBe(0.5);
+    const out = scrubSentryEvent({ request: { url: `https://routeiq.example/s/${T}`, headers: { Authorization: `SalesLink ${T}`, referer: `https://routeiq.example/s/${T}` } } });
+    expect(JSON.stringify(out)).not.toContain(T);
+    expect(out.request.headers).not.toHaveProperty('Authorization');
   });
 });
 
