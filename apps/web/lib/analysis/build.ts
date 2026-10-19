@@ -104,6 +104,7 @@ export interface StopIn {
   customerId: string;
   customerCode: string;
   customerType: string | null;
+  /** The base unloading the planner gives the stop before the per-case time (lib/analysis/job.ts baseServiceOf); null: not known. */
   baseServiceMin: number | null;
   etaMin: number | null;
   /** RouteAssignment.departureMin: the planned departure from the stop (local minutes). */
@@ -700,7 +701,12 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
       // Not seen: its window was searched on the trail (an arrival or a result when the GPS columns were built).
       else if (pin && rank.has(s.sequence) && g?.searched && !g.siteStartAt) flags.add('GPS_NOT_SEEN');
       const cases = v?.outcome && DONE.has(v.outcome) ? v.casesDelivered : null;
-      const usable = !!(v?.outcome && DONE.has(v.outcome) && cases && cases > 0 && unloadMin !== null && unloadMin > 0 && !resultChanged && !flags.has('SHARED_SITE') && !flags.has('PHOTO_FAR'));
+      const base = s.baseServiceMin;
+      const usable = !!(v?.outcome && DONE.has(v.outcome) && cases && cases > 0 && unloadMin !== null && unloadMin > 0 && base !== null && !resultChanged && !flags.has('SHARED_SITE') && !flags.has('PHOTO_FAR'));
+      // The per-case rate the plan's "unloading minutes per case" stands for: the base the stop was planned with
+      // is taken off first (the plan is base + per case x cases). Unloaded in less than the base: 0, never negative
+      // (CHECK), so a median over the visits stays where it is.
+      const minPerCase = usable ? r2(Math.max(0, unloadMin! - base!) / cases!) : null;
       const site0 = g?.siteStartAt ?? null;
       const substaysJson: SubstayJson[] | null = site0 && g
         ? capJson(g.substays.map((x) => ({ startOffsetSec: Math.round((ms(x.startAt) - ms(site0)) / 1000), minutes: r1(x.minutes)!, distM: r0(x.distM)!, bearingDeg: r0(x.bearingDeg)! })))
@@ -717,7 +723,7 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
         truckCode: input.truckCode,
         customerCode: s.customerCode,
         customerType: s.customerType,
-        baseServiceMin: s.baseServiceMin,
+        baseServiceMin: base,
         plannedEtaMin: s.etaMin,
         plannedServiceMin: s.plannedServiceMin,
         windowStartMin: s.windowStartMin,
@@ -766,7 +772,7 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
         unloadMin: r1(nonNeg(unloadMin)),
         unloadSource,
         usableForRate: usable,
-        minPerCase: usable ? r2(unloadMin! / cases!) : null,
+        minPerCase,
         flags: [...flags].sort(),
       });
     }

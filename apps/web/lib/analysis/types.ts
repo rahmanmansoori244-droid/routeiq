@@ -15,8 +15,13 @@
  * 20261019090000_analysis_facts CHECKs (tests/lib/analysis-contract.spec.ts compares them).
  */
 
-/** The builder's marker on every row (FactX.analysisVersion): a later rule change never mixes silently. */
-export const ANALYSIS_VERSION = 'analysis-v1';
+/**
+ * The builder's marker on every row (FactX.analysisVersion): a later rule change never mixes silently.
+ * analysis-v2 (19 Oct 2026): FactVisit.baseServiceMin is the base the planner used (an unconfirmed customer's
+ * type or company default, not its stored time) and minPerCase is (unloading - base) / cases. analysis-v1 rows
+ * (frozen before it) hold the customer's stored time and unloading / cases.
+ */
+export const ANALYSIS_VERSION = 'analysis-v2';
 
 /** TenantConfig.analysisRetentionDays: the bounds (database CHECK) and the default (2 years). */
 export const ANALYSIS_RETENTION_BOUNDS = { min: 30, max: 3650 } as const;
