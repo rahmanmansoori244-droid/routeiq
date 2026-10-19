@@ -9,11 +9,13 @@
  *    back to the form with the server's words and forgets the saved code.
  *  - A link that does not work stops everything; 429 waits Retry-After; a failed refresh keeps the data shown;
  *    the newest request wins (an answer for the route left behind is dropped); Change route drops the fragment.
+ *  - A first request that failed is asked again by itself (signal back, page back, every period); a server error
+ *    is said as such, not as "no connection"; a proxy's bare 503 is ridden out (review of 19 Oct 2026).
  */
 import { describe, expect, it, vi } from 'vitest';
 import { Host, deferred } from './hook-host';
 import { TOKEN, answer, lookup, routeView } from './sales-page-fixture';
-import type { SalesAnswer } from '@/lib/sales-page/api';
+import { readSalesAnswer, type SalesAnswer } from '@/lib/sales-page/api';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
 
@@ -337,5 +339,60 @@ describe('when things go wrong', () => {
     w.answer = () => ({ kind: 'error', status: 0 });
     await w.act((a) => a.submit('r1'));
     expect(w.state()).toMatchObject({ phase: 'form', formText: 'R1', formError: 'No connection. Check your signal and try again.' });
+    // A server error is not the signal.
+    w.answer = () => ({ kind: 'error', status: 500 });
+    await w.act((a) => a.submit('r1'));
+    expect(w.state().formError).toBe('The server could not answer just now. Try again in a minute.');
+  });
+
+  it('no connection at the start: asked again by itself when the signal returns, when the page comes back and every refresh period', async () => {
+    const w = world({ saved: 'R1', answer: () => ({ kind: 'error', status: 0 }) });
+    await w.mount();
+    expect(w.state()).toMatchObject({ phase: 'offline', serverError: false });
+    // Not more than every 15 s.
+    await w.fire('window', 'online');
+    expect(w.calls).toEqual(['R1']);
+    w.advance(WAKE_MIN_MS);
+    await w.fire('window', 'online');
+    expect(w.calls).toEqual(['R1', 'R1']);
+    // Hidden: nothing; back in front: asked again.
+    w.advance(WAKE_MIN_MS);
+    w.setVisible(false);
+    await w.tick();
+    expect(w.calls).toHaveLength(2);
+    w.setVisible(true);
+    await w.fire('document', 'visibilitychange');
+    expect(w.calls).toHaveLength(3);
+    // The refresh period while visible; the answer comes: the page shows the route and stops retrying as offline.
+    w.answer = () => ok(['R1']);
+    w.advance(60_000);
+    await w.tick();
+    expect(w.calls).toHaveLength(4);
+    expect(w.state().phase).toBe('ready');
+    expect(w.every.filter((t) => t.on)).toHaveLength(1);
+  });
+
+  it('a server error at the start says so (not "no connection") and is asked again by itself', async () => {
+    const w = world({ saved: 'R1', answer: () => ({ kind: 'error', status: 500 }) });
+    await w.mount();
+    expect(w.state()).toMatchObject({ phase: 'offline', serverError: true });
+    w.answer = () => ok(['R1']);
+    w.advance(60_000);
+    await w.tick();
+    expect(w.state().phase).toBe('ready');
+  });
+
+  it("a proxy's bare 503 during a refresh (a restart) keeps the data and the polling, never 'links not available'", async () => {
+    const w = world({ saved: 'R1', answer: () => ok(['R1']) });
+    await w.mount();
+    w.answer = () => readSalesAnswer(503, null, null);
+    w.advance(60_000);
+    await w.tick();
+    expect(w.state()).toMatchObject({ phase: 'ready', linkCode: null });
+    expect(w.state().staleSince).not.toBeNull();
+    w.answer = () => ok(['R1']);
+    w.advance(60_000);
+    await w.tick();
+    expect(w.state()).toMatchObject({ phase: 'ready', staleSince: null });
   });
 });

@@ -108,6 +108,25 @@ describe('the Salesman link dialog', () => {
     expect(toasts.list).toEqual(["Salesman link for Mon 19 Oct ready: send it to the salesmen's group."]);
   });
 
+  it('a failed read never says "no link yet" (one may already be in the group): the error and Try again, which reads again', async () => {
+    let reads = 0;
+    const d = await mount((url, method) => {
+      if (method !== 'GET') throw new Error(`unexpected ${method}`);
+      reads++;
+      return reads === 1 ? { ok: false, status: 0, data: null, error: 'The server could not be reached. Check the connection and try again.' } : { ok: true, status: 200, data: view(), error: null };
+    });
+    expect(textOf(d.byId('sales-link-error'))).toMatch(/could not be reached/);
+    expect(d.text()).not.toMatch(/No salesman link for/);
+    expect(d.byId('sales-link-make')).toBeUndefined();
+    expect(d.byId('sales-link-read-failed')).toBeTruthy();
+    await d.click('sales-link-read-again');
+    await d.host.settle();
+    expect(reads).toBe(2);
+    expect(net.calls.every((c) => c.method === 'GET')).toBe(true);
+    expect(d.byId('sales-link-error')).toBeUndefined();
+    expect(textOf(d.byId('sales-link-url'))).toBe(URL_);
+  });
+
   it('a refused Make the link says why (today or tomorrow only, links off)', async () => {
     const d = await mount((url, method) =>
       method === 'POST' ? { ok: false, status: 503, data: null, error: 'Salesman links are off: the server has no secret to make them (SALES_LINK_SECRET or NEXTAUTH_SECRET).' } : { ok: true, status: 200, data: null, error: null },

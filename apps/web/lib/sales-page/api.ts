@@ -117,7 +117,7 @@ const CODE_ERRORS: ReadonlySet<string> = new Set<SalesQueryErrorCode>(['ROUTE_CO
 
 export type SalesAnswer =
   | { kind: 'ok'; answer: SalesViewAnswer }
-  /** The link does not work (404 / 410 / 503 / 403): shown full-page, the page stops asking. */
+  /** The link does not work (404 / 410 / 503 / 403 with one of the link's codes): shown full-page, the page stops asking. */
   | { kind: 'link'; status: number; code: SalesLinkStateCode; date: string | null }
   /** The codes were refused (400): shown on the route form. */
   | { kind: 'badCode'; code: 'ROUTE_CODE_MISSING' | 'ROUTE_CODE_TOO_LONG' | 'TOO_MANY_CODES'; message: string }
@@ -134,11 +134,9 @@ export function readSalesAnswer(status: number, body: unknown, retryAfter: strin
   const code = typeof err.code === 'string' ? err.code : '';
   const date = typeof err.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(err.date) ? err.date : null;
   if (status === 403 && code === 'SIGNED_IN_OTHER_TENANT') return { kind: 'link', status, code, date: null };
-  if (status === 404 || status === 410 || status === 503) {
-    // A 404 / 410 / 503 is always about the link (an unknown token answers LINK_NOT_FOUND).
-    const known = LINK_CODES.has(code) ? (code as SalesLinkStateCode) : status === 503 ? 'SALES_LINKS_OFF' : 'LINK_NOT_FOUND';
-    return { kind: 'link', status, code: known, date };
-  }
+  // A 404 / 410 / 503 is about the link only with one of the link's codes (the server always sends one, an unknown
+  // token LINK_NOT_FOUND): a proxy's or the platform's own page during a restart is an error the page rides out.
+  if ((status === 404 || status === 410 || status === 503) && LINK_CODES.has(code)) return { kind: 'link', status, code: code as SalesLinkStateCode, date };
   if (status === 400 && CODE_ERRORS.has(code)) {
     return { kind: 'badCode', code: code as 'ROUTE_CODE_MISSING' | 'ROUTE_CODE_TOO_LONG' | 'TOO_MANY_CODES', message: typeof err.message === 'string' && err.message ? err.message : 'Check the route code.' };
   }

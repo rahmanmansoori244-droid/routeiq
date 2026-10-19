@@ -27,13 +27,19 @@ export const UI = {
   refresh: 'Refresh',
   loading: 'Loading…',
   offline: 'No connection. Check your signal and try again.',
+  /** The server answered with an error (not the signal): the page asks again by itself. */
+  serverError: 'The server could not answer just now. Trying again shortly.',
+  /** The same on the route form (asked again when the salesman presses Show). */
+  serverErrorForm: 'The server could not answer just now. Try again in a minute.',
   tryAgain: 'Try again',
   readOnly: (tz: string) => `Read-only. Times are company time (${tz}).`,
   refreshes: 'Refreshes every minute while open.',
   trucks: 'Trucks',
   deliveries: 'Deliveries',
-  offTruck: 'Not on a truck today',
+  // The link may be tomorrow's (sent the evening before): never "today" here.
+  offTruck: 'Not on a truck',
   noDeliveries: 'No deliveries on a truck for this route.',
+  notPlannedYet: 'Not planned yet - the plan is usually made the evening before. Check again later.',
   filtered: (n: number, of: number) => `Showing ${n} of ${of}`,
   showAll: 'Show all',
   share: 'Send to customer',
@@ -66,10 +72,13 @@ export const LINK_STATE_TEXT: Record<SalesLinkStateCode, string> = {
   SIGNED_IN_OTHER_TENANT: 'You are signed in to RouteIQ for another company. Sign out to use this link.',
 };
 
-/** The status chip's colours (Tailwind), the driver page's palette. */
+/**
+ * The status chip's colours (Tailwind), the driver page's palette. Every pair reads at 4.5:1 or better (WCAG AA for
+ * the chips' 14 px text; a salesman reads it outdoors): tests/lib/sales-page.spec.ts checks it.
+ */
 export const STATUS_TONE: Record<DeliveryStatus, string> = {
-  DELIVERED: 'bg-emerald-600 text-white',
-  PARTLY_DELIVERED: 'bg-amber-500 text-white',
+  DELIVERED: 'bg-emerald-700 text-white',
+  PARTLY_DELIVERED: 'bg-amber-700 text-white',
   NOT_DELIVERED: 'bg-red-700 text-white',
   NO_RESULT: 'bg-slate-500 text-white',
   VISITED: 'bg-slate-300 text-slate-900',
@@ -264,6 +273,15 @@ export function summaryChips(view: Pick<SalesRouteView, 'deliveries' | 'offTruck
   }))
     .filter((c) => c.always || c.n > 0)
     .map(({ key, label, n, tone }) => ({ key, label, n, tone }));
+}
+
+/**
+ * The line in place of the delivery list when the route has none on a truck: one calm line when every order of
+ * the route is only "not planned yet" (its depot's plan is not made: the evening before, for tomorrow's link).
+ */
+export function noDeliveriesText(view: Pick<SalesRouteView, 'deliveries' | 'offTruck'>): string {
+  if (!view.deliveries.length && view.offTruck.length && view.offTruck.every((o) => o.kind === 'NOT_PLANNED_YET')) return UI.notPlannedYet;
+  return UI.noDeliveries;
 }
 
 /** The deliveries and the not-on-a-truck entries a chip shows (all without a filter). */

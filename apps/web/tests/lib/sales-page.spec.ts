@@ -16,6 +16,7 @@
  *    and no link in the text.
  */
 import { describe, expect, it, vi } from 'vitest';
+import tailwindColors from 'tailwindcss/colors';
 
 vi.mock('@/lib/db', () => ({ prisma: {} }));
 
@@ -27,6 +28,8 @@ import {
   PIN_COLOR,
   STATUS_EDGE,
   STATUS_TONE,
+  TIMING_TONE,
+  UI,
   casesLine,
   casesText,
   codeText,
@@ -35,6 +38,7 @@ import {
   hasMapContent,
   hoursLine,
   mapModel,
+  noDeliveriesText,
   shareUrl,
   shortDayText,
   summaryChips,
@@ -178,9 +182,11 @@ describe('every answer of GET /api/s/view as the page reads it', () => {
     expect(readSalesAnswer(410, fail('LINK_EXPIRED', { date: '2026-10-18' }), null)).toMatchObject({ code: 'LINK_EXPIRED', date: '2026-10-18' });
     expect(readSalesAnswer(503, fail('SALES_LINKS_OFF'), null)).toMatchObject({ kind: 'link', code: 'SALES_LINKS_OFF' });
     expect(readSalesAnswer(403, fail('SIGNED_IN_OTHER_TENANT'), null)).toMatchObject({ kind: 'link', code: 'SIGNED_IN_OTHER_TENANT' });
-    // A proxy's own 404 or 503 page: still about the link, never a crash.
-    expect(readSalesAnswer(404, '<html>', null)).toMatchObject({ kind: 'link', code: 'LINK_NOT_FOUND' });
-    expect(readSalesAnswer(503, null, null)).toMatchObject({ kind: 'link', code: 'SALES_LINKS_OFF' });
+    // A proxy's or the platform's own 404 / 410 / 503 page (no code: a restart, a deploy): an error the page rides out
+    // (it keeps polling), never "the link does not work" for good.
+    expect(readSalesAnswer(404, '<html>', null)).toEqual({ kind: 'error', status: 404 });
+    expect(readSalesAnswer(503, null, null)).toEqual({ kind: 'error', status: 503 });
+    expect(readSalesAnswer(410, { data: null, error: { code: 'SOMETHING_ELSE' } }, null)).toEqual({ kind: 'error', status: 410 });
     expect(readSalesAnswer(410, fail('LINK_EXPIRED', { date: 'yesterday' }), null)).toMatchObject({ date: null });
   });
 
@@ -213,6 +219,25 @@ describe('colours, chips and lines', () => {
       expect(PIN_COLOR[s], s).toMatch(/^#[0-9a-f]{6}$/);
     }
     for (const k of ALL_KINDS) expect(OFF_TONE[k], k).toMatch(/bg-/);
+  });
+
+  it('every chip reads at 4.5:1 or better (WCAG AA for 14 px text, outdoors in the sun): "Partly delivered" above all', () => {
+    const palette = tailwindColors as unknown as Record<string, Record<string, string> | string>;
+    const hexOf = (cls: string, prefix: 'bg-' | 'text-'): string => {
+      const name = cls.split(/\s+/).find((c) => c.startsWith(prefix))!.slice(prefix.length);
+      if (name === 'white') return '#ffffff';
+      const m = /^([a-z]+)-(\d+)$/.exec(name)!;
+      return (palette[m[1]!] as Record<string, string>)[m[2]!]!;
+    };
+    const lum = (hex: string) => {
+      const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+      return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+    };
+    const contrast = (tone: string) => {
+      const [a, b] = [lum(hexOf(tone, 'bg-')), lum(hexOf(tone, 'text-'))].sort((x, y) => y - x);
+      return (a! + 0.05) / (b! + 0.05);
+    };
+    for (const [s, tone] of [...Object.entries(STATUS_TONE), ...Object.entries(OFF_TONE), ...Object.entries(TIMING_TONE)]) expect(contrast(tone), `${s}: ${tone}`).toBeGreaterThanOrEqual(4.5);
   });
 
   it('the timing chip is against the printed window: late and early with minutes, due now without, nothing without live updates', () => {
@@ -277,6 +302,14 @@ describe('colours, chips and lines', () => {
     // A delivery done is never "delayed", whatever its last time said.
     const done = delivery({ no: 1, status: 'DELIVERED', eta: { expected: '10:00', source: 'TRIP', timing: 'LATE', lateMin: 30, earlyMin: null, text: '' } });
     expect(summaryChips(routeView('R1', { deliveries: [done], offTruck: [] })).find((c) => c.key === 'delayed')?.n).toBe(0);
+  });
+
+  it('never "today" over the orders not on a truck (the link may be tomorrow\'s); a route only "not planned yet" says so calmly', () => {
+    expect(UI.offTruck).toBe('Not on a truck');
+    const notYet = offTruck({ kind: 'NOT_PLANNED_YET', kindText: 'Not planned yet', why: 'Not planned yet - the plan is made the evening before' });
+    expect(noDeliveriesText(routeView('R1', { deliveries: [], offTruck: [notYet, notYet] }))).toBe('Not planned yet - the plan is usually made the evening before. Check again later.');
+    expect(noDeliveriesText(routeView('R1', { deliveries: [], offTruck: [notYet, offTruck()] }))).toBe('No deliveries on a truck for this route.');
+    expect(noDeliveriesText(routeView('R1', { deliveries: [], offTruck: [] }))).toBe('No deliveries on a truck for this route.');
   });
 
   it('only the routes found are followed: an unknown code is never asked again', () => {

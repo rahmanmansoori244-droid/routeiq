@@ -18,6 +18,8 @@ import { followQuery, UI } from '@/lib/sales-page/format';
  *   form shows the server's "No deliveries for route R9 ..." and the saved code is forgotten.
  * - The newest request wins (a refresh answered after a route change is dropped); a 429 waits Retry-After; a
  *   failed refresh keeps what is shown with "Could not refresh"; a link that does not work stops everything.
+ * - A first request that failed (no signal, or the server's error - said as such) is asked again by itself every
+ *   refresh period while visible, and when the signal returns or the page comes back.
  */
 
 export type SalesPhase = 'loading' | 'link' | 'form' | 'ready' | 'offline';
@@ -40,6 +42,8 @@ export interface SalesViewState {
   waitSec: number | null;
   /** A refresh failed after data was shown (ms): the page keeps the data with "Could not refresh". */
   staleSince: number | null;
+  /** The first request failed with an answer from the server (not the signal): "the server could not answer". */
+  serverError: boolean;
 }
 
 /** What the page uses of the browser (the tests give their own). */
@@ -109,6 +113,7 @@ export const INITIAL_SALES_STATE: SalesViewState = {
   working: false,
   waitSec: null,
   staleSince: null,
+  serverError: false,
 };
 
 type Why = 'start' | 'submit' | 'poll' | 'refresh';
@@ -218,11 +223,12 @@ export function useSalesView(deps?: SalesViewDeps) {
         }
         return;
       }
-      // No answer (no signal, a timeout) or a server error.
+      // No answer (no signal, a timeout: status 0) or a server error (any other status): said as what it is.
+      const server = a.status !== 0;
       setState((prev) => {
         if (prev.phase === 'ready') return { ...prev, staleSince: prev.staleSince ?? d.now(), working: false };
-        if (why === 'submit') return { ...prev, phase: 'form', formText: route ?? prev.formText, formError: UI.offline, working: false };
-        return { ...prev, phase: 'offline', working: false };
+        if (why === 'submit') return { ...prev, phase: 'form', formText: route ?? prev.formText, formError: server ? UI.serverErrorForm : UI.offline, working: false };
+        return { ...prev, phase: 'offline', serverError: server, working: false };
       });
     },
     [patch],
@@ -279,6 +285,25 @@ export function useSalesView(deps?: SalesViewDeps) {
       offOnline();
     };
   }, [live, refreshMs, ask]);
+
+  // The first request failed (often a weak signal when WhatsApp opens the link): ask the same again every
+  // refresh period while visible, and at once when the signal returns or the page comes back (not more than every 15 s).
+  const offline = state.phase === 'offline';
+  useEffect(() => {
+    const d = dep.current;
+    if (!offline || !d) return;
+    const again = () => {
+      if (d.visible() && d.now() - lastAsk.current >= WAKE_MIN_MS) void ask(lastStart.current.route, lastStart.current.why);
+    };
+    const stopEvery = d.setEvery(again, refreshMs);
+    const offVisible = d.on('document', 'visibilitychange', again);
+    const offOnline = d.on('window', 'online', again);
+    return () => {
+      stopEvery();
+      offVisible();
+      offOnline();
+    };
+  }, [offline, refreshMs, ask]);
 
   /** The route form: "r1", "R1, R2X" (checked here first with the server's rule). */
   const submit = useCallback(

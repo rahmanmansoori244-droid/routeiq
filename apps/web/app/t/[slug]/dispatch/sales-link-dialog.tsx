@@ -79,6 +79,8 @@ const CONFIRM: Record<Change, { title: string; text: (day: string) => string; ac
 export function SalesLinkDialog({ open, onOpenChange, date, timezone }: { open: boolean; onOpenChange: (open: boolean) => void; date: string; timezone: string }) {
   const [view, setView] = useState<SalesLinkView | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // The read failed: whether a link exists is not known (never "no link yet").
+  const [readFailed, setReadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ask, setAsk] = useState<Change | null>(null);
@@ -94,6 +96,7 @@ export function SalesLinkDialog({ open, onOpenChange, date, timezone }: { open: 
     void api<SalesLinkView | null>(`/api/dispatch/sales-links?date=${encodeURIComponent(date)}`).then((r) => {
       if (!live) return;
       setLoaded(true);
+      setReadFailed(!r.ok);
       if (r.ok) setView(r.data ?? null);
       else setError(r.error ?? 'Could not read the salesman link.');
     });
@@ -170,7 +173,23 @@ export function SalesLinkDialog({ open, onOpenChange, date, timezone }: { open: 
             </p>
           ) : null}
           {!loaded && !v ? <p className="text-sm text-muted-foreground">Reading the link…</p> : null}
-          {loaded && !v ? (
+          {loaded && !v && readFailed ? (
+            <div className="space-y-3 text-sm" data-testid="sales-link-read-failed">
+              <p>Could not check whether {day} already has a salesman link.</p>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setError(null);
+                  setReadTick((n) => n + 1);
+                }}
+                data-testid="sales-link-read-again"
+              >
+                <RefreshCw className="mr-1 h-4 w-4" /> Try again
+              </Button>
+            </div>
+          ) : null}
+          {loaded && !v && !readFailed ? (
             <div className="space-y-3 text-sm" data-testid="sales-link-none">
               <p>No salesman link for {day} yet.</p>
               <Button size="sm" disabled={busy} onClick={() => void make()} data-testid="sales-link-make">

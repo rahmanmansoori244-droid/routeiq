@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { Info } from 'lucide-react';
 import type { SalesRouteView } from '@/lib/sales-link/view-types';
-import { filterView, rowKey, summaryChips, UI, type SummaryKey } from '@/lib/sales-page/format';
+import { filterView, noDeliveriesText, rowKey, summaryChips, UI, type SummaryKey } from '@/lib/sales-page/format';
 import { DeliveryCard } from './delivery-card';
 import { MapCard } from './map-card';
 import { OffTruckList } from './off-truck-list';
@@ -60,7 +60,9 @@ export function RouteView({ view }: { view: SalesRouteView }) {
               ))}
             </ul>
           ) : (
-            <p className="rounded-lg bg-white p-3 text-sm text-slate-600 ring-1 ring-slate-200">{UI.noDeliveries}</p>
+            <p className="rounded-lg bg-white p-3 text-sm text-slate-600 ring-1 ring-slate-200" data-testid="no-deliveries">
+              {filter ? UI.noDeliveries : noDeliveriesText(view)}
+            </p>
           )}
         </section>
       ) : null}

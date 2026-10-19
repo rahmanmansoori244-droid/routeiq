@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { RefreshCw, WifiOff } from 'lucide-react';
+import { AlertTriangle, RefreshCw, WifiOff } from 'lucide-react';
 import type { SalesMeta, SalesRouteView } from '@/lib/sales-link/view-types';
 import { UI } from '@/lib/sales-page/format';
 import { LinkState } from './link-state';
@@ -28,9 +28,11 @@ export function SalesPage() {
       <main className="mx-auto w-full max-w-xl space-y-4 px-3 pt-4 text-base">
         {s.phase === 'loading' ? <Loading waitSec={s.waitSec} /> : null}
         {s.phase === 'offline' ? (
-          <div className="space-y-3 rounded-lg bg-white p-4 text-center shadow-sm ring-1 ring-slate-200" data-testid="offline">
-            <WifiOff className="mx-auto h-10 w-10 text-slate-500" aria-hidden />
-            <p className="font-medium">{UI.offline}</p>
+          <div className="space-y-3 rounded-lg bg-white p-4 text-center shadow-sm ring-1 ring-slate-200" data-testid="offline" data-server-error={s.serverError ? 'true' : undefined}>
+            {s.serverError ? <AlertTriangle className="mx-auto h-10 w-10 text-slate-500" aria-hidden /> : <WifiOff className="mx-auto h-10 w-10 text-slate-500" aria-hidden />}
+            <p className="font-medium" aria-live="polite">
+              {s.serverError ? UI.serverError : UI.offline}
+            </p>
             <button type="button" onClick={retry} disabled={s.working} className="min-h-12 w-full rounded-md bg-slate-900 px-4 font-semibold text-white disabled:opacity-60">
               {s.working ? UI.loading : UI.tryAgain}
             </button>
