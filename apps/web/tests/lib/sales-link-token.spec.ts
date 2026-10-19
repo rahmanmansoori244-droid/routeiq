@@ -8,8 +8,9 @@
  *  - route codes (critique item 18): NFKC, Arabic-Indic digits, the stored rule, a compact key without spaces or
  *    hyphens (an exact match first; both routes when the compact key is shared), "R1, R2X", "Route not given"
  *    never reachable;
- *  - truck codes (owner decision of 20 Oct 2026): the same compact key, then a unique digits-only match; several
- *    trucks with the digits are offered (SEVERAL_TRUCKS); a route code that is also a truck's shows the route and
+ *  - truck codes (owner decision of 20 Oct 2026): the exact code first, then the same compact key, then a unique
+ *    digits-only match; several trucks with the compact key or the digits are offered (SEVERAL_TRUCKS: one code
+ *    typed never shows two trucks a pick could tell apart); a route code that is also a truck's shows the route and
  *    offers the truck (ALSO_TRUCK); "Truck X" looks among the trucks only; "C1, 5678" mixes both; the trucks found
  *    are kept in the link's list as "T:<code>" and read apart for the office;
  *  - the limits are keyed on the link and the public client IP, never on the page's device id; an unknown or
@@ -201,8 +202,39 @@ describe('the truck code a salesman types (owner decision of 20 Oct 2026)', () =
     const q = parseRouteQuery('5678, r2x, Truck test-01, zz9');
     expect(q).toEqual({ ok: true, codes: ['5678', 'R2X', 'TRUCK TEST-01', 'ZZ9'] });
     expect(matchLookup(q.ok ? q.codes : [], routes, trucks)).toEqual({ routes: ['R2X'], trucks: ['tk1', 'tk4'], notFound: ['ZZ9'], ambiguous: [], choices: [] });
-    // Two trucks of the day with one compact code (rare): both shown in code order, the code listed as ambiguous.
-    expect(matchLookup(['X-9'], [], [{ id: 'a', code: 'X-9' }, { id: 'b', code: 'X 9' }])).toEqual({ routes: [], trucks: ['b', 'a'], notFound: [], ambiguous: ['X-9'], choices: [] });
+  });
+
+  // Truck codes may hold '.', '-' and '_' (lib/schemas.ts codeSchema), so two trucks of one fleet can share a
+  // compact key (review of 20 Oct 2026): synthetic AB-1 and AB.1.
+  const twins = [
+    { id: 'tw1', code: 'AB-1' },
+    { id: 'tw2', code: 'AB.1' },
+    { id: 'tk4', code: 'TEST-01' },
+  ];
+
+  it('two trucks with one compact key: the exact code shows that truck only; the compact key offers both, none shown', () => {
+    expect(matchLookup(['AB-1'], [], twins)).toEqual({ routes: [], trucks: ['tw1'], notFound: [], ambiguous: [], choices: [] });
+    expect(matchLookup([normTypedRoute('ab.1')!], [], twins)).toEqual({ routes: [], trucks: ['tw2'], notFound: [], ambiguous: [], choices: [] });
+    expect(matchLookup([normTypedRoute('Truck ab-1')!], [], twins)).toMatchObject({ trucks: ['tw1'], choices: [] });
+    for (const typed of ['ab1', 'AB 1', 'Truck AB1']) {
+      const code = normTypedRoute(typed)!;
+      expect(matchLookup([code], [], twins), typed).toEqual({ routes: [], trucks: [], notFound: [], ambiguous: [], choices: [{ asked: code, why: 'SEVERAL_TRUCKS', routes: [], trucks: ['tw1', 'tw2'] }] });
+    }
+    // The trucks offered are picked in the explicit form, and each finds that one truck.
+    for (const t of twins.slice(0, 2)) expect(matchLookup([normTypedRoute(truckQuery(t.code))!], [], twins).trucks).toEqual([t.id]);
+    // A route code that is also a truck's offers the truck with that very code before the compact key's.
+    expect(matchLookup(['AB1'], ['AB1'], [...twins, { id: 'tw3', code: 'AB1' }]).choices).toEqual([{ asked: 'AB1', why: 'ALSO_TRUCK', routes: ['AB1'], trucks: ['tw3'] }]);
+    expect(matchLookup(['AB1'], ['AB1'], twins).choices).toEqual([{ asked: 'AB1', why: 'ALSO_TRUCK', routes: ['AB1'], trucks: ['tw1', 'tw2'] }]);
+    // Only codes that differ in letter case alone cannot be told apart by a pick: each shown, the code ambiguous.
+    expect(matchLookup(['X-9'], [], [{ id: 'a', code: 'X-9' }, { id: 'b', code: 'x-9' }, { id: 'c', code: 'X 9' }])).toEqual({ routes: [], trucks: ['a', 'b'], notFound: [], ambiguous: ['X-9'], choices: [] });
+  });
+
+  it('four routes and a code two trucks share: four results and the trucks offered, never six results to follow', () => {
+    const q = parseRouteQuery('R1, R2, R3, R4, ab1');
+    expect(q).toEqual({ ok: true, codes: ['R1', 'R2', 'R3', 'R4', 'AB1'] });
+    const m = matchLookup(q.ok ? q.codes : [], ['R1', 'R2', 'R3', 'R4'], twins);
+    expect(m).toEqual({ routes: ['R1', 'R2', 'R3', 'R4'], trucks: [], notFound: [], ambiguous: [], choices: [{ asked: 'AB1', why: 'SEVERAL_TRUCKS', routes: [], trucks: ['tw1', 'tw2'] }] });
+    expect(m.routes.length + m.trucks.length).toBeLessThanOrEqual(MAX_CODES);
   });
 
   it('the words: not found as a route or a truck; the choices', () => {

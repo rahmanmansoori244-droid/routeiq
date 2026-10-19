@@ -16,7 +16,8 @@
  *  - a truck code (owner decision of 20 Oct 2026): the truck's deliveries of the day, every route ("t05", "T-05",
  *    "Truck T05", Arabic-Indic digits), recorded as "T:T05"; a route and a truck at once; an unknown truck counted
  *    as a miss; several trucks with the digits offered, a route code that is also a truck's (the route shown, the
- *    truck offered in its place); choices never counted;
+ *    truck offered in its place); choices never counted; two trucks sharing a compact key (AB-1, AB.1): the exact
+ *    code shows one, the compact key offers both, and what the page then follows is answered (at most 5 codes);
  *  - the office: VIEWER 403; PLANNER makes the link (201, then 200, one audit row, never the token, its hash or
  *    the salt in it); only today or tomorrow; "Make a new link" (the old one answers replaced) and "Turn off"
  *    (idempotent); another company's link 404.
@@ -57,6 +58,8 @@ import { deriveToken, salesLinkExpiry, salesLinkKey, tokenHash } from '@/lib/sal
 import { _resetSalesDayMemo, salesDayBuilds } from '@/lib/sales-link/day-read';
 import { addDaysIso, dateOnly, todayIso } from '@/lib/dispatch/time';
 import type { SalesViewAnswer } from '@/lib/sales-link/view-types';
+import { MAX_CODES, parseRouteQuery } from '@/lib/sales-link/route-code';
+import { followQuery } from '@/lib/sales-page/format';
 
 const TZ = 'Asia/Muscat';
 const D = todayIso(TZ);
@@ -387,6 +390,56 @@ describe('the answer', () => {
     // None of it counted as a miss: the 40 misses of this link and address are all still there.
     for (let i = 0; i < 40; i++) expect((await view(token, { ip, route: `ZZ${i}` })).status).toBe(200);
     expect((await view(token, { ip, route: 'ZZ99' })).status).toBe(429);
+  });
+
+  it('two trucks sharing a compact key (review of 20 Oct 2026): the exact code shows one; with four routes the trucks are offered, and the refresh is answered', async () => {
+    const base = [ln('o1', 'o1-l1', 'INV-1', 20, 'R1'), ln('o1', 'o1-l2', 'INV-1', 10, 'R2X'), ln('o2', 'o2-l1', 'INV-2', 12, 'R1')];
+    const more = [ln('o5', 'o5-l1', 'INV-5', 4, 'R3'), ln('o6', 'o6-l1', 'INV-6', 6, 'R4'), ln('o7', 'o7-l1', 'INV-7', 3, 'R 10'), ln('o8', 'o8-l1', 'INV-8', 2, 'R10')];
+    const d = world.details.get('run-A') as PlanDetail;
+    const late = { status: 'LOCKED', departMin: hm(23, 30), returnMin: hm(23, 59) };
+    d.loads.push(
+      load({ ...late, id: 'L5', truckId: 't9', truckCode: 'AB-1', stops: [stop({ seq: 1, customerId: 'c5', code: 'TST0005', eta: hm(23, 40), lines: [more[0]!] }), stop({ seq: 2, customerId: 'c7', code: 'TST0007', eta: hm(23, 45), lines: [more[2]!] })] }),
+      load({ ...late, id: 'L6', truckId: 't10', truckCode: 'AB.1', stops: [stop({ seq: 1, customerId: 'c6', code: 'TST0006', eta: hm(23, 40), lines: [more[1]!] }), stop({ seq: 2, customerId: 'c8', code: 'TST0008', eta: hm(23, 45), lines: [more[3]!] })] }),
+    );
+    world.facts.set('run-A', factsOf([...base, ...more]));
+    const token = makeLink();
+    const ip = freshIp();
+    const ask = async (route: string) => body(await view(token, { ip, route }));
+    // The exact code: that truck only.
+    for (const [typed, code] of [['ab-1', 'AB-1'], ['Truck AB.1', 'AB.1']] as const) {
+      expect((await ask(typed)).data!.lookup!.results.map((x) => `${x.kind} ${x.code}`), typed).toEqual([`TRUCK ${code}`]);
+    }
+    // Four routes and the shared compact key: four results, both trucks offered (each pick at most 5 codes).
+    const five = (await ask('R1, R2X, R3, R4, ab1')).data!.lookup!;
+    expect(five.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['ROUTE R1', 'ROUTE R2X', 'ROUTE R3', 'ROUTE R4']);
+    expect(five.choices).toEqual([
+      {
+        asked: 'AB1',
+        kind: 'SEVERAL_TRUCKS',
+        text: 'AB1 matches 2 trucks today. Pick one:',
+        options: [
+          { code: 'AB-1', query: 'R1, R2X, R3, R4, Truck AB-1' },
+          { code: 'AB.1', query: 'R1, R2X, R3, R4, Truck AB.1' },
+        ],
+      },
+    ]);
+    // A code that matched two routes ("R-10": "R 10" and "R10") makes six results from five codes typed.
+    const six = (await ask('R1, R2X, R3, R4, r-10')).data!.lookup!;
+    expect(six.results).toHaveLength(6);
+    // What the page follows on its next refresh is never refused (400 TOO_MANY_CODES sent it back to the form).
+    for (const l of [five, six]) {
+      const follow = followQuery(l)!;
+      const q = parseRouteQuery(follow);
+      expect(q.ok && q.codes.length).toBeLessThanOrEqual(MAX_CODES);
+      const again = await view(token, { ip, route: follow });
+      expect(again.status, follow).toBe(200);
+      expect((await body(again)).data!.lookup!.results.map((x) => x.query)).toEqual(l.results.map((x) => x.query));
+    }
+    for (const o of five.choices[0]!.options) {
+      const picked = (await ask(o.query)).data!.lookup!;
+      expect(picked.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['ROUTE R1', 'ROUTE R2X', 'ROUTE R3', 'ROUTE R4', `TRUCK ${o.code}`]);
+      expect((await view(token, { ip, route: followQuery(picked)! })).status).toBe(200);
+    }
   });
 
   it('truck lookups that miss count against the per-link and IP limit like route codes', async () => {

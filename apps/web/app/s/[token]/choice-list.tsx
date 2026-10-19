@@ -5,8 +5,8 @@ import type { SalesChoice } from '@/lib/sales-link/view-types';
 import { UI } from '@/lib/sales-page/format';
 
 /**
- * The trucks the server offers for a code typed (owner decision of 20 Oct 2026): several trucks have the digits
- * ("5678 matches 2 trucks today. Pick one:"), or a route code is also a truck's code ("C1 is also a truck code. Show
+ * The trucks the server offers for a code typed (owner decision of 20 Oct 2026): several trucks have the digits or
+ * the compact key ("5678 matches 2 trucks today. Pick one:"), or a route code is also a truck's code ("C1 is also a truck code. Show
  * the truck instead:"). A tap sends the option's whole lookup ("Truck 1234-AB", or with the other codes shown).
  */
 export function ChoiceList({ choices, working, onPick }: { choices: readonly SalesChoice[]; working: boolean; onPick: (query: string) => void }) {

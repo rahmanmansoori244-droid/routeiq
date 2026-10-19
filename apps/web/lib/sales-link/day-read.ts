@@ -340,7 +340,7 @@ export async function salesView(req: Request, ctx: SalesLinkContext): Promise<Re
 }
 
 /**
- * The trucks offered for a code (several trucks with its digits; a route code that is also a truck's), each with
+ * The trucks offered for a code (several trucks with its digits or compact key; a route code that is also a truck's), each with
  * the whole lookup to send when picked: what is shown now (without the routes an ALSO_TRUCK code showed) and the
  * truck, at most MAX_CODES codes.
  */

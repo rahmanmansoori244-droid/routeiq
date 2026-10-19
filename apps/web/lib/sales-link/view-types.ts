@@ -245,8 +245,8 @@ export interface SalesChoiceOption {
 }
 
 /**
- * A typed code the page offers trucks for: several trucks have its digits ("5678": none is shown), or a route code
- * is also a truck's code (the route is shown, the truck offered).
+ * A typed code the page offers trucks for: several trucks have its digits ("5678") or its compact key ("ab1" for AB-1
+ * and AB.1): none is shown; or a route code is also a truck's code (the route is shown, the truck offered).
  */
 export interface SalesChoice {
   asked: string;
@@ -263,9 +263,9 @@ export interface SalesLookup {
   results: SalesRouteView[];
   /** The codes that matched no route and no truck with deliveries that day (unknown or not on that day: the same answer). */
   notFound: string[];
-  /** Codes that matched more than one route (or truck) by the compact key (each is in `results`). */
+  /** Codes that matched more than one route by the compact key, or trucks whose codes differ in letter case alone (each is in `results`). */
   ambiguous: string[];
-  /** Trucks to pick from (several trucks with the digits typed; a route code that is also a truck's). */
+  /** Trucks to pick from (several trucks with the compact key or the digits typed; a route code that is also a truck's). */
   choices: SalesChoice[];
   /** "No deliveries for route or truck R9 on Sun 19 Oct. ..."; null when every code matched. */
   notFoundText: string | null;

@@ -13,11 +13,14 @@
  *    is said as such, not as "no connection"; a proxy's bare 503 is ridden out (review of 19 Oct 2026).
  *  - A truck looked up (owner decision of 20 Oct 2026) is followed as "Truck X"; the trucks offered for a code are
  *    kept until the codes change, shown on the form when nothing else was found, and a pick asks for that truck.
+ *  - More results than 5 (a code typed matched two routes): the refresh asks for the codes typed, never 6 codes
+ *    the server refuses (review of 20 Oct 2026: the 400 sent the salesman back to the form).
  */
 import { describe, expect, it, vi } from 'vitest';
 import { Host, deferred } from './hook-host';
 import { TOKEN, answer, lookup, routeView, truckView } from './sales-page-fixture';
 import { readSalesAnswer, type SalesAnswer } from '@/lib/sales-page/api';
+import { parseRouteQuery } from '@/lib/sales-link/route-code';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
 
@@ -322,6 +325,29 @@ describe('a truck looked up (owner decision of 20 Oct 2026)', () => {
     expect(w.state().choices).toEqual([also]);
     await w.act((a) => a.changeRoute());
     expect(w.state()).toMatchObject({ phase: 'form', choices: [] });
+  });
+});
+
+describe('more results than codes (review of 20 Oct 2026)', () => {
+  it('six results from five codes typed: the refresh asks for the five codes typed and the page stays', async () => {
+    const typed = 'R1, R2, R3, R4, R-10';
+    const six = ['R1', 'R2', 'R3', 'R4', 'R 10', 'R10'];
+    const w = world({ answer: () => metaOnly });
+    await w.mount();
+    // As the server: more than 5 codes is 400 TOO_MANY_CODES.
+    w.answer = (r) => {
+      const q = parseRouteQuery(r);
+      if (!q.ok) return { kind: 'badCode', code: q.code, message: 'At most 5 codes at once.' };
+      return q.codes.join(', ') === typed ? ok(six, { asked: q.codes, ambiguous: ['R-10'] }) : ok([]);
+    };
+    await w.act((a) => a.submit('r1, r2, r3, r4, r-10'));
+    expect(w.state().phase).toBe('ready');
+    expect(w.state().lookup?.results).toHaveLength(6);
+    expect(w.data['riq.s.route']).toBe(typed);
+    await w.tick();
+    expect(w.calls).toEqual([null, typed, typed]);
+    expect(w.state()).toMatchObject({ phase: 'ready', formError: null });
+    expect(w.state().lookup?.results).toHaveLength(6);
   });
 });
 

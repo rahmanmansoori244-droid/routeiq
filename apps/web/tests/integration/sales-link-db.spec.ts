@@ -10,8 +10,9 @@
  *  2. The salesman's page: R1 shows its delivered stop (R1's line fully delivered on a stop partly delivered
  *     overall) and its planned stop; R2X the same stop not delivered, with the driver's reason; the order
  *     cancelled before planning under "Cancelled" with the reason's label, never the office's note; an unknown
- *     code answers "no deliveries"; nothing of the other company (the relation filters, real here). A truck code
- *     ("t05", "T-05", its digits "05", "Truck T05"; owner decision of 20 Oct 2026) shows both trips of T05 with every
+ *     code answers "no deliveries"; nothing of the other company, which has a plan of the same day too: its own
+ *     truck T05 carrying its order TSTB01 of route R1 (the relation filters, real here). A truck code ("t05",
+ *     "T-05", its digits "05", "Truck T05"; owner decision of 20 Oct 2026) shows both trips of T05 with every
  *     route's lines on the stop (partly delivered: 20 of 30, the driver's reason); never the other company's T05.
  *  3. Tenant scoping: the other company's planner changing this link: 404; signed in to the other company on
  *     the page: 403.
@@ -109,7 +110,7 @@ const day = new Date(`${T}T00:00:00.000Z`);
 const at = (hhmmZ: string) => new Date(`${T}T${hhmmZ}:00Z`);
 const slugA = `sl-a-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
 const slugB = `sl-b-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
-const ids = { a: '', b: '', plannerA: '', plannerB: '', depotA: '', truckA: '', productA: '', runA: '' };
+const ids = { a: '', b: '', plannerA: '', plannerB: '', depotA: '', truckA: '', productA: '', runA: '', truckB: '', runB: '' };
 let prevSecret: string | undefined;
 
 const as = (who: 'A' | 'B' | null, role = 'PLANNER') => {
@@ -186,7 +187,7 @@ beforeAll(async () => {
   }
   const a = await company(slugA, 'Example Water Co');
   const b = await company(slugB, 'Other Example Co');
-  Object.assign(ids, { a: a.tenantId, b: b.tenantId, plannerA: a.plannerId, plannerB: b.plannerId, depotA: a.depotId, truckA: a.truckId, productA: a.productId });
+  Object.assign(ids, { a: a.tenantId, b: b.tenantId, plannerA: a.plannerId, plannerB: b.plannerId, depotA: a.depotId, truckA: a.truckId, productA: a.productId, truckB: b.truckId });
   // Company A: one stop holding two salesmen's lines, one stop of R1, and an order of R1 cancelled before planning.
   o1 = await addOrder(a.tenantId, a.depotId, a.productId, 'TST0001', [
     { so: 'INV-1', cases: 20, route: 'R1' },
@@ -194,14 +195,22 @@ beforeAll(async () => {
   ]);
   await addOrder(a.tenantId, a.depotId, a.productId, 'TST0002', [{ so: 'INV-2', cases: 12, route: 'R1' }]);
   await addOrder(a.tenantId, a.depotId, a.productId, 'TST0003', [{ so: 'INV-3', cases: 7, route: 'R1' }], { cancelledAt: new Date(), cancelReason: 'CUSTOMER_CANCELLED', cancelNote: 'OFFICE-NOTE-SENTINEL', cancelledById: a.plannerId });
-  // Company B: an order of route R1 too, on a depot without a plan.
-  await addOrder(b.tenantId, b.depotId, b.productId, 'TSTB01', [{ so: 'INV-B', cases: 5, route: 'R1' }]);
+  // Company B: an order of route R1 too, planned on B's own truck T05 the same day (below).
+  const oB = await addOrder(b.tenantId, b.depotId, b.productId, 'TSTB01', [{ so: 'INV-B', cases: 5, route: 'R1' }]);
 
   const { run } = await getOrCreatePlan(a.tenantId, a.depotId, T, a.plannerId);
   ids.runA = run.id;
   const morningBefore = new Date(at('02:00').getTime() - 2 * 86_400_000);
   expect((await startDispatchOptimize(a.tenantId, run.id, { id: a.plannerId }, null, { now: morningBefore })).status).toBe(202);
   expect((await jobsDone(run.id)).status).toBe('READY');
+  // Company B's plan of the same day: its T05 carries TSTB01, so a route or truck lookup that lost its company
+  // filter would find B's R1 line or B's T05 (review of 20 Oct 2026: without it the check could not fail).
+  const { run: runB } = await getOrCreatePlan(b.tenantId, b.depotId, T, b.plannerId);
+  ids.runB = runB.id;
+  expect((await startDispatchOptimize(b.tenantId, runB.id, { id: b.plannerId }, null, { now: morningBefore })).status).toBe(202);
+  expect((await jobsDone(runB.id)).status).toBe('READY');
+  const loadsB = await prisma.planLoad.findMany({ where: { runId: runB.id }, include: { assignments: true } });
+  expect(loadsB.map((l) => [l.truckId, l.assignments.map((x) => x.orderId)])).toEqual([[b.truckId, [oB.id]]]);
   const loads = await prisma.planLoad.findMany({ where: { runId: run.id, truckId: a.truckId }, orderBy: { loadNo: 'asc' }, include: { assignments: true } });
   await withDriver(a.tenantId, loads.map((l) => l.id));
   const first = loads.find((l) => l.assignments.some((x) => x.orderId === o1.id))!;
@@ -293,7 +302,7 @@ describe("2. the salesman's page", () => {
     const r2x = (await answer(await view(tokenOf(url), { route: 'R2X' }))).data!.lookup!.results[0]!;
     expect(r2x.deliveries.map((d) => [d.customerCode, d.status, d.cases, d.reason])).toEqual([['TST0001', 'NOT_DELIVERED', 10, 'Shop closed (as reported by the driver)']]);
     const text = JSON.stringify([r1, r2x]);
-    for (const s of ['TSTB01', 'INV-B', 'OFFICE-NOTE-SENTINEL', 'DRIVER-NOTE-SENTINEL', 'ORDER-NOTE-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', 'Rule 20 Driver', ids.truckA, ids.depotA, ids.runA]) expect(text).not.toContain(s);
+    for (const s of ['TSTB01', 'INV-B', 'OFFICE-NOTE-SENTINEL', 'DRIVER-NOTE-SENTINEL', 'ORDER-NOTE-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', 'Rule 20 Driver', ids.truckA, ids.depotA, ids.runA, ids.truckB, ids.runB]) expect(text).not.toContain(s);
     const unknown = (await answer(await view(tokenOf(url), { route: 'R9' }))).data!.lookup!;
     expect(unknown).toMatchObject({ results: [], notFound: ['R9'] });
   });
@@ -316,11 +325,12 @@ describe("2. the salesman's page", () => {
     expect(new Set(t.deliveries.map((d) => d.loadNo)).size).toBe(2);
     // The order cancelled before planning was never on the truck.
     expect(t.offTruck).toEqual([]);
-    // A route and the truck at once; the other company's truck (also T05) is never found.
+    // A route and the truck at once. The other company's T05, on its own plan of the same day with TSTB01, is never
+    // found: each lookup above named one truck (a second T05 would be a second result), and none of B's lines.
     const mixed = (await answer(await view(tokenOf(url), { route: 'R2X, T05' }))).data!.lookup!;
     expect(mixed.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['ROUTE R2X', 'TRUCK T05']);
-    const text = JSON.stringify(mixed);
-    for (const s of ['TSTB01', 'INV-B', 'DRIVER-NOTE-SENTINEL', 'ORDER-NOTE-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', ids.truckA, ids.depotA, ids.runA]) expect(text).not.toContain(s);
+    const text = JSON.stringify([t, mixed]);
+    for (const s of ['TSTB01', 'INV-B', 'DRIVER-NOTE-SENTINEL', 'ORDER-NOTE-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', ids.truckA, ids.depotA, ids.runA, ids.truckB, ids.runB]) expect(text).not.toContain(s);
   });
 });
 

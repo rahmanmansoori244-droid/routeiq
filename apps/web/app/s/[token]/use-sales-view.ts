@@ -13,9 +13,10 @@ import { followQuery, UI } from '@/lib/sales-page/format';
  * - The route (or truck) codes come from the link's fragment ("/s/<token>#R1": WhatsApp's in-app browser may not
  *   keep localStorage), else from what this browser last found (`riq.s.route`), else the route form.
  * - Found codes are followed: the page asks for exactly the routes and trucks the server found (a truck as
- *   "Truck 1234-AB"), every `meta.refreshSec` (60 s) while the page is visible, and again when it comes back to
- *   the front or the signal returns.
- * - Trucks the server offers for a code (several trucks with the digits typed; a route code that is also a
+ *   "Truck 1234-AB"; never more than 5 codes, else the codes typed that found them: format.ts followQuery), every
+ *   `meta.refreshSec` (60 s) while the page is visible, and again when it comes back to the front or the signal
+ *   returns.
+ * - Trucks the server offers for a code (several trucks with the digits or compact key typed; a route code that is also a
  *   truck's) are kept as `choices` until the codes change; picking one sends its whole lookup (`submit`).
  * - A code that matched nothing is never asked again by itself (each one counts against the link's limit): the
  *   form shows the server's "No deliveries for route R9 ..." and the saved code is forgotten.

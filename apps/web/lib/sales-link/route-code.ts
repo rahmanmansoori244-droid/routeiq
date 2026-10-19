@@ -11,10 +11,13 @@
  *   (no spaces, hyphens, dots, slashes or underscores: "r 1", "R-1" and "r1" are one key) - every one of
  *   them when several share it (the salesman sees both and picks his);
  * - a code that is no route of the day is looked up among the day's TRUCKS, each by the code the plan shows (a
- *   day-hired truck by its plate: lib/dispatch/hire.ts shownTruckCode): the truck with the same compact key
- *   ("5678xy", "5678 XY" and "5678-XY" are one key; every truck when several share it), else, for a code of
- *   digits only, the ONE truck whose code has exactly those digits ("5678" for "5678-XY"); several such trucks
- *   are not shown but offered as choices (SEVERAL_TRUCKS);
+ *   day-hired truck by its plate: lib/dispatch/hire.ts shownTruckCode): the truck whose code is exactly the code
+ *   typed (after the rule above: "1234-ab" is truck 1234-AB even when 1234.AB runs the same day), else the truck
+ *   with the same compact key ("5678xy", "5678 XY" and "5678-XY" are one key), else, for a code of digits only,
+ *   the ONE truck whose code has exactly those digits ("5678" for "5678-XY"). Several trucks with the same compact
+ *   key, or with the digits, are not shown but offered as choices (SEVERAL_TRUCKS: one typed code never shows two
+ *   trucks a pick could tell apart). Only trucks whose codes differ in letter case alone ("ab-1" and "AB-1": a
+ *   pick could not tell them apart) are each shown, the code listed as ambiguous;
  * - a route code that is also a truck's code shows the ROUTE (the route is preferred) and offers the truck as a
  *   choice (ALSO_TRUCK); "Truck 5678-XY" (also "truck: 5678xy") looks among the trucks only: the page sends that
  *   form for a truck it shows or the salesman picks;
@@ -149,8 +152,8 @@ export interface DayTruckRef {
 }
 
 /**
- * A typed code the page offers choices for: several trucks have its digits (SEVERAL_TRUCKS: none of them is
- * shown), or a route code is also a truck's code (ALSO_TRUCK: the route is shown).
+ * A typed code the page offers choices for: several trucks have its compact key or its digits (SEVERAL_TRUCKS:
+ * none of them is shown), or a route code is also a truck's code (ALSO_TRUCK: the route is shown).
  */
 export interface LookupChoice {
   asked: string;
@@ -172,20 +175,28 @@ const byTruckCode = (a: DayTruckRef, b: DayTruckRef) => compareSalesRoutes(a.cod
 /**
  * The day's routes and trucks the typed codes name (the file comment): per code, an explicit "Truck X" among the
  * trucks only; else a route (exact, else compact key) first, offering a truck with that code as a choice; else a
- * truck (compact key, else a unique digits-only match; several: choices); else not found.
+ * truck (exact code, else compact key, else a unique digits-only match; several: choices); else not found.
  */
 export function matchLookup(codes: readonly string[], knownRoutes: Iterable<string>, knownTrucks: Iterable<DayTruckRef>): LookupMatch {
   const routeList = [...knownRoutes];
   const trucks = [...new Map([...knownTrucks].map((t) => [t.id, t])).values()].sort(byTruckCode);
+  const normOf = new Map(trucks.map((t) => [t.id, normTypedRoute(t.code)]));
   const keyOf = new Map(trucks.map((t) => [t.id, compactTruckKey(t.code)]));
   const digitsOf = new Map(trucks.map((t) => [t.id, codeDigits(t.code)]));
-  /** The trucks a code names: the same compact key, else (a code of digits only) the trucks with exactly those digits. */
-  const truckHits = (code: string): { exact: DayTruckRef[]; digits: DayTruckRef[] } => {
+  /**
+   * The trucks a code names, the first rule that finds any: `same` the trucks whose code is the code typed
+   * (normalised; several only when their codes differ in letter case alone), else `several` the trucks with the
+   * same compact key, else (a code of digits only) the trucks with exactly those digits.
+   */
+  const truckHits = (code: string): { same: DayTruckRef[]; several: DayTruckRef[] } => {
+    const norm = normTypedRoute(code);
     const key = compactTruckKey(code);
-    if (!key) return { exact: [], digits: [] };
-    const exact = trucks.filter((t) => keyOf.get(t.id) === key);
-    if (exact.length || !/^\d+$/.test(key)) return { exact, digits: [] };
-    return { exact, digits: trucks.filter((t) => digitsOf.get(t.id) === key) };
+    if (!norm || !key) return { same: [], several: [] };
+    const same = trucks.filter((t) => normOf.get(t.id) === norm);
+    if (same.length) return { same, several: [] };
+    const compact = trucks.filter((t) => keyOf.get(t.id) === key);
+    if (compact.length || !/^\d+$/.test(key)) return { same: [], several: compact };
+    return { same: [], several: trucks.filter((t) => digitsOf.get(t.id) === key) };
   };
 
   const routes = new Set<string>();
@@ -193,20 +204,23 @@ export function matchLookup(codes: readonly string[], knownRoutes: Iterable<stri
   const notFound: string[] = [];
   const ambiguous: string[] = [];
   const choices: LookupChoice[] = [];
-  /** A code among the trucks only: shown (the one, or every one with that exact key), offered as choices, or false. */
+  /**
+   * A code among the trucks only: the truck shown (trucks whose codes differ in letter case alone: each, the code
+   * ambiguous), several offered as choices (none shown), or false.
+   */
   const asTruck = (asked: string, code: string): boolean => {
-    const { exact, digits } = truckHits(code);
-    if (exact.length) {
-      if (exact.length > 1) ambiguous.push(asked);
-      for (const t of exact) found.add(t.id);
+    const { same, several } = truckHits(code);
+    if (same.length) {
+      if (same.length > 1) ambiguous.push(asked);
+      for (const t of same) found.add(t.id);
       return true;
     }
-    if (digits.length === 1) {
-      found.add(digits[0]!.id);
+    if (several.length === 1) {
+      found.add(several[0]!.id);
       return true;
     }
-    if (digits.length > 1) {
-      choices.push({ asked, why: 'SEVERAL_TRUCKS', routes: [], trucks: digits.map((t) => t.id) });
+    if (several.length > 1) {
+      choices.push({ asked, why: 'SEVERAL_TRUCKS', routes: [], trucks: several.map((t) => t.id) });
       return true;
     }
     return false;
@@ -222,8 +236,8 @@ export function matchLookup(codes: readonly string[], knownRoutes: Iterable<stri
       // The route is preferred; a truck with that code is offered.
       for (const x of r.routes) routes.add(x);
       ambiguous.push(...r.ambiguous);
-      const { exact, digits } = truckHits(c);
-      const also = exact.length ? exact : digits;
+      const { same, several } = truckHits(c);
+      const also = same.length ? same : several;
       if (also.length) choices.push({ asked: c, why: 'ALSO_TRUCK', routes: r.routes, trucks: also.map((t) => t.id) });
       continue;
     }

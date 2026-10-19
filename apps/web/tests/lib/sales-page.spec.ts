@@ -9,7 +9,8 @@
  *  - Every answer of GET /api/s/view is read as the page needs it: ok, link states full-page (with the link's
  *    date), refused codes on the form, 429 with Retry-After, anything else an error.
  *  - Every status and kind has its colours; the timing chip against the printed window (critique 5); the count
- *    chips agree with the lists they filter; only the routes FOUND are followed (no unknown code re-asked).
+ *    chips agree with the lists they filter; only the routes FOUND are followed (no unknown code re-asked), never
+ *    more than 5 codes (the server's limit): with more results, the codes typed that found them.
  *  - The map: only deliveries still to come and the trucks the server places, no names; fitted once per route
  *    and pins; the WebGL check (critique 20: no-WebGL fallback).
  *  - The delivery card: the reason as the driver reported it, "Send to customer" as wa.me/?text= with no number
@@ -52,6 +53,7 @@ import {
   windowLine,
 } from '@/lib/sales-page/format';
 import { SALES_STATE_TEXT } from '@/lib/sales-link/service';
+import { MAX_CODES, parseRouteQuery } from '@/lib/sales-link/route-code';
 import { shortDayText as serverShortDay, STATUS_TEXT, OFF_KIND_TEXT } from '@/lib/sales-link/text';
 import type { DeliveryStatus, OffTruckKind } from '@/lib/sales-link/view-types';
 import { DeliveryCard } from '@/app/s/[token]/delivery-card';
@@ -323,6 +325,24 @@ describe('colours, chips and lines', () => {
     expect(followQuery(null)).toBeNull();
     // A truck is followed in the explicit form (owner decision of 20 Oct 2026): a refresh never turns it into a route.
     expect(followQuery(lookup([routeView('C1'), truckView('1234-AB')], { asked: ['C1', '1234'] }))).toBe('C1, Truck 1234-AB');
+  });
+
+  it('never more than 5 codes to follow (the server answers 400 TOO_MANY_CODES): with more results, the codes typed that found them', () => {
+    // One code typed matched two routes ("R-10": "R 10" and "R10"): six results from five codes.
+    const six = lookup(['R1', 'R2', 'R3', 'R4', 'R 10', 'R10'].map((r) => routeView(r)), { asked: ['R1', 'R2', 'R3', 'R4', 'R-10'], ambiguous: ['R-10'] });
+    expect(followQuery(six)).toBe('R1, R2, R3, R4, R-10');
+    // A code that matched nothing, or only offered trucks (none shown), is not followed.
+    const several = { asked: 'AB1', kind: 'SEVERAL_TRUCKS' as const, text: 'AB1 matches 2 trucks today. Pick one:', options: [{ code: 'AB-1', query: 'Truck AB-1' }, { code: 'AB.1', query: 'Truck AB.1' }] };
+    const mixed = lookup(['R 10', 'R10', 'R 20', 'R20', 'R 30', 'R30'].map((r) => routeView(r)), { asked: ['R-10', 'R-20', 'R9', 'R-30', 'AB1'], notFound: ['R9'], ambiguous: ['R-10', 'R-20', 'R-30'], choices: [several] });
+    expect(followQuery(mixed)).toBe('R-10, R-20, R-30');
+    // The same code twice (two trucks whose codes differ in letter case: "Truck ab-1" is "Truck AB-1") is asked once.
+    const twice = lookup([routeView('R1'), truckView('ab-1'), truckView('AB-1')], { asked: ['R1', 'AB-1'], ambiguous: ['AB-1'] });
+    expect(followQuery(twice)).toBe('R1, Truck ab-1');
+    for (const l of [six, mixed, twice, lookup([routeView('R1'), truckView('1234-AB')])]) {
+      const q = parseRouteQuery(followQuery(l));
+      expect(q.ok).toBe(true);
+      expect(q.ok && q.codes.length).toBeLessThanOrEqual(MAX_CODES);
+    }
   });
 
   it('a route or a truck: its title, and keys unique when a route and a truck share a code', () => {

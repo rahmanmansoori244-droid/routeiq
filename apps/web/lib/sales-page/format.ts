@@ -6,6 +6,7 @@
  */
 import type { DeliveryStatus, EtaTiming, OffTruckKind, SalesDelivery, SalesEta, SalesLinkStateCode, SalesLookup, SalesOffTruck, SalesRouteView } from '../sales-link/view-types';
 import { fmtDayMonth } from '../dispatch/time';
+import { MAX_CODES, normTypedRoute } from '../sales-link/route-code';
 
 const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -307,10 +308,26 @@ export function filterView(view: Pick<SalesRouteView, 'deliveries' | 'offTruck'>
  * What the page asks for on each refresh: the routes and trucks the lookup FOUND, as the day names them
  * ("R1, R2X", "C1, Truck 1234-AB": a truck in the explicit form, so a refresh never turns it into a route).
  * A code that matched nothing is never asked again (each one counts against the link's limit); null = none found.
+ * Never more than MAX_CODES codes (the server refuses more with 400 TOO_MANY_CODES, which would send the salesman
+ * back to the form): when the results are more than that (a code typed matched two routes, "R-10" both "R 10" and
+ * "R10"), the codes TYPED that found something are followed instead, at most MAX_CODES by the server's own rule.
  */
-export function followQuery(lookup: Pick<SalesLookup, 'results'> | null): string | null {
-  const codes = lookup?.results.map((r) => r.query) ?? [];
-  return codes.length ? codes.join(', ') : null;
+export function followQuery(lookup: Pick<SalesLookup, 'results' | 'asked' | 'notFound' | 'choices'> | null): string | null {
+  if (!lookup) return null;
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (const r of lookup.results) {
+    const key = normTypedRoute(r.query);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    found.push(r.query);
+  }
+  if (!found.length) return null;
+  if (found.length <= MAX_CODES) return found.join(', ');
+  // A code that only offered trucks (none shown) found nothing to follow.
+  const offeredOnly = new Set((lookup.choices ?? []).filter((c) => c.kind === 'SEVERAL_TRUCKS').map((c) => c.asked));
+  const typed = lookup.asked.filter((c) => !lookup.notFound.includes(c) && !offeredOnly.has(c)).slice(0, MAX_CODES);
+  return typed.length ? typed.join(', ') : found.slice(0, MAX_CODES).join(', ');
 }
 
 /** A key unique on a page that shows several results (the answer's keys are unique per result only): the result's query and the key. */

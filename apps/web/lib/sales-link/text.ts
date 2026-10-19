@@ -69,7 +69,7 @@ export function notFoundText(codes: readonly string[], dayShort: string): string
   return `No deliveries for ${which} on ${dayShort}. Check the route code on your Salesman ETA page, or the truck code.`;
 }
 
-/** The line above the trucks offered for a code: several trucks with its digits, or a route code that is also a truck's. */
+/** The line above the trucks offered for a code: several trucks with its digits or compact key, or a route code that is also a truck's. */
 export function choiceText(kind: 'SEVERAL_TRUCKS' | 'ALSO_TRUCK', asked: string, trucks: number): string {
   return kind === 'SEVERAL_TRUCKS' ? `${asked} matches ${trucks} trucks today. Pick one:` : `${asked} is also a truck code. Show the truck instead:`;
 }
