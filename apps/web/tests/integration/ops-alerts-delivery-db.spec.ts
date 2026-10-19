@@ -14,6 +14,13 @@
  *     rows carry emailedTier = tier; a WARN row, an acknowledged row, a history row (mayEmail false) and
  *     a row closed as not in the plan are not e-mailed; the next send within 15 min is TOO_SOON; a failed
  *     e-mail puts every row back to the tier it had and counts the attempt.
+ *  4. The day's end (owner request 19 Oct 2026: yesterday's alerts looked like today's on the bell): the bell
+ *     counts and lists today's open rows only, with the company's today; yesterday's (one closed as Day
+ *     ended with who acknowledged it, one still open because the sweep has not run since midnight) stay on
+ *     the Alerts page for that date. Review of the branch (19 Oct 2026): yesterday's Load not closed raised
+ *     after midnight (finding 2) counts on the bell and is e-mailed like today's; a row closed as Day ended
+ *     that was never e-mailed goes once (finding 1: a HIGH of the evening before the quiet hours), one
+ *     e-mailed before, one still open from yesterday and one written closed are not claimed.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -24,7 +31,7 @@ import { GET as LIST } from '@/app/api/alerts/route';
 import { GET as SUMMARY } from '@/app/api/alerts/summary/route';
 import { POST as ACK } from '@/app/api/alerts/ack/route';
 import { prismaDigestStore, sendAlertDigest } from '@/lib/alerts/notify';
-import { todayIso } from '@/lib/dispatch/time';
+import { addDaysIso, todayIso, zonedDayStart } from '@/lib/dispatch/time';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 
 const TZ = 'Asia/Muscat';
@@ -179,7 +186,7 @@ describe('the e-mail digest on PostgreSQL', () => {
     for (const r of [h1, h2, over]) expect([r.id, by.get(r.id)!.emailedTier]).toEqual([r.id, r.tier]);
     for (const r of [warn, acked, history, notInPlan]) expect([r.id, by.get(r.id)!.emailedTier]).toEqual([r.id, r.emailedTier]);
     expect((fetches[0] as { to: string[] }).to).toEqual([`owner@${A.slug}.test`]);
-    expect(await prismaDigestStore(prisma).claim(A.tenantId, new Date(now.getTime() + 60_000), { everyMin: 15, minSeverity: 'HIGH', dayStart: day, recipients: 1 })).toEqual({ ok: false, skip: 'TOO_SOON' });
+    expect(await prismaDigestStore(prisma).claim(A.tenantId, new Date(now.getTime() + 60_000), { everyMin: 15, minSeverity: 'HIGH', dayStart: day, today, recipients: 1 })).toEqual({ ok: false, skip: 'TOO_SOON' });
   });
 
   it('a failed e-mail puts every row back to the tier it had, counts the attempt, and the digest is FAILED', async () => {
@@ -194,5 +201,76 @@ describe('the e-mail digest on PostgreSQL', () => {
     expect([b!.emailedTier, b!.emailAttempts]).toEqual([2, 1]);
     const digest = await prisma.opsAlertDigest.findFirst({ where: { tenantId: B.tenantId } });
     expect(digest).toMatchObject({ status: 'FAILED', alertCount: 2, highCount: 2, recipientCount: 1, error: 'provider answered 403' });
+  });
+});
+
+describe("the day's end (owner request 19 Oct 2026: yesterday's alerts looked like today's)", () => {
+  const yIso = addDaysIso(today, -1);
+  const yesterday = new Date(`${yIso}T00:00:00.000Z`);
+
+  it("the bell counts and lists today's open rows only; yesterday's stay on the Alerts page with their state", async () => {
+    await prisma.opsAlert.deleteMany({ where: { tenantId: A.tenantId } });
+    const mine = await alert(A);
+    // The sweep has not run since midnight: still open, but not on the bell.
+    const stillOpen = await alert(A, { deliveryDate: yesterday });
+    const ended = await alert(A, { deliveryDate: yesterday, resolvedAt: new Date(), resolvedReason: 'DAY_ENDED', ackedAt: new Date(Date.now() - 3_600_000), ackedById: A.plannerId });
+    as(A, 'VIEWER');
+    const bell = await call(SUMMARY, '/api/alerts/summary');
+    expect(bell.body.data).toMatchObject({ enabled: true, today, open: 1, high: 1 });
+    expect(bell.body.data.latest.map((r: any) => r.id)).toEqual([mine.id]);
+    const list = await call(LIST, `/api/alerts?date=${yIso}`);
+    expect(list.body.data.today).toBe(today);
+    const by = new Map<string, any>(list.body.data.rows.map((r: any) => [r.id, r]));
+    expect([...by.keys()].sort()).toEqual([stillOpen.id, ended.id].sort());
+    expect(by.get(ended.id)).toMatchObject({ state: 'RESOLVED', resolvedReason: 'DAY_ENDED', ackedByName: 'Dispatcher Example', deliveryDate: yIso });
+    expect(by.get(stillOpen.id)).toMatchObject({ state: 'OPEN', deliveryDate: yIso });
+  });
+
+  it("review of the branch (finding 2): yesterday's Load not closed raised after midnight counts on the bell under its day; one raised before midnight and still open (the sweep has not run) does not", async () => {
+    await prisma.opsAlert.deleteMany({ where: { tenantId: A.tenantId } });
+    const mine = await alert(A);
+    const evening = new Date(zonedDayStart(yIso, TZ).getTime() + 21 * 3_600_000);
+    const lateFollowUp = await alert(A, { deliveryDate: yesterday, rule: 'LOAD_NOT_CLOSED', firstSeenAt: new Date() });
+    await alert(A, { deliveryDate: yesterday, rule: 'LOAD_NOT_CLOSED', firstSeenAt: evening });
+    await alert(A, { deliveryDate: yesterday, firstSeenAt: new Date() });
+    as(A, 'VIEWER');
+    const bell = await call(SUMMARY, '/api/alerts/summary');
+    expect(bell.body.data).toMatchObject({ enabled: true, today, open: 2, high: 2 });
+    expect(bell.body.data.latest.map((r: any) => r.id).sort()).toEqual([mine.id, lateFollowUp.id].sort());
+    expect(bell.body.data.latest.find((r: any) => r.id === lateFollowUp.id)).toMatchObject({ deliveryDate: yIso, rule: 'LOAD_NOT_CLOSED', state: 'OPEN' });
+  });
+
+  it("the e-mail: a day that is over is never e-mailed again; a row closed as Day ended that was never e-mailed goes once (finding 1); yesterday's follow-up raised after midnight goes like today's (finding 2)", async () => {
+    await prisma.opsAlert.deleteMany({ where: { tenantId: B.tenantId } });
+    await prisma.opsAlertDigest.deleteMany({ where: { tenantId: B.tenantId } });
+    // The claim runs at 06:05 of the company's today (a fixed clock: the 12 h look back must not depend on when the test runs).
+    const dayStart = zonedDayStart(today, TZ);
+    const now = new Date(dayStart.getTime() + (6 * 60 + 5) * 60_000);
+    const after = (min: number) => new Date(dayStart.getTime() + min * 60_000);
+    const evening = new Date(zonedDayStart(yIso, TZ).getTime() + (21 * 60 + 50) * 60_000);
+    const fresh = await alert(B);
+    // A HIGH of 21:50 yesterday, closed at midnight, never e-mailed (the quiet hours began at 22:00): goes once.
+    const dayEnded = await alert(B, { deliveryDate: yesterday, firstSeenAt: evening, lastSeenAt: evening, resolvedAt: after(2), resolvedReason: 'DAY_ENDED' });
+    // Already e-mailed (at its tier, or at a lower one before it got worse): never again once its day ended.
+    await alert(B, { deliveryDate: yesterday, firstSeenAt: evening, lastSeenAt: evening, resolvedAt: after(2), resolvedReason: 'DAY_ENDED', emailedTier: 2 });
+    await alert(B, { deliveryDate: yesterday, firstSeenAt: evening, lastSeenAt: evening, resolvedAt: after(2), resolvedReason: 'DAY_ENDED', emailedTier: 1 });
+    // Not seen for more than 12 h (the look back), acknowledged, or written closed after midnight (mayEmail false): not claimed.
+    await alert(B, { deliveryDate: yesterday, firstSeenAt: evening, lastSeenAt: new Date(now.getTime() - 13 * 3_600_000), resolvedAt: after(2), resolvedReason: 'DAY_ENDED' });
+    await alert(B, { deliveryDate: yesterday, firstSeenAt: evening, lastSeenAt: evening, resolvedAt: after(2), resolvedReason: 'DAY_ENDED', ackedAt: evening, ackedById: B.plannerId });
+    await alert(B, { deliveryDate: yesterday, firstSeenAt: after(40), lastSeenAt: after(40), resolvedAt: after(40), resolvedReason: 'DAY_ENDED', mayToast: false, mayEmail: false });
+    // Yesterday's, still open because the sweep has not run since midnight: not e-mailed as open.
+    await alert(B, { deliveryDate: yesterday, firstSeenAt: evening, lastSeenAt: evening });
+    // Yesterday's Load not closed raised after midnight (a load planned back late): like a row of today.
+    const followUp = await alert(B, { deliveryDate: yesterday, rule: 'LOAD_NOT_CLOSED', firstSeenAt: after(35), lastSeenAt: after(35) });
+    const store = prismaDigestStore(prisma);
+    const out = await store.claim(B.tenantId, now, { everyMin: 15, minSeverity: 'HIGH', dayStart, today, recipients: 1 });
+    expect(out.ok).toBe(true);
+    const claimed = (out as { digestId: string; rows: { id: string; resolvedReason?: string | null; emailedTier: number }[] }).rows;
+    expect(claimed.map((r) => r.id).sort()).toEqual([fresh.id, dayEnded.id, followUp.id].sort());
+    expect(claimed.find((r) => r.id === dayEnded.id)).toMatchObject({ resolvedReason: 'DAY_ENDED', emailedTier: 0 });
+    // Once: the claim set emailedTier = tier; after the e-mail went, the next claim finds nothing new.
+    expect((await prisma.opsAlert.findUniqueOrThrow({ where: { id: dayEnded.id } })).emailedTier).toBe(2);
+    await store.finish(B.tenantId, (out as { digestId: string }).digestId, claimed as never, now, { ok: true });
+    expect(await store.claim(B.tenantId, new Date(now.getTime() + 16 * 60_000), { everyMin: 15, minSeverity: 'HIGH', dayStart, today, recipients: 1 })).toEqual({ ok: false, skip: 'NOTHING_NEW' });
   });
 });

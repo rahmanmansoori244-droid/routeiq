@@ -11,7 +11,8 @@
  * - the company is on the server's list ALERT_EMAIL_TENANTS (catalog.ts alertEmailAllowed; review of 16 Oct
  *   2026, H1: signup is open, so without it anyone could send to any address through our sender);
  * - it is not the company's quiet hours (22:00-06:00 by default; the alerts still show in RouteIQ, and
- *   what is still worth sending goes in the first e-mail after them - not what ended overnight).
+ *   what is still worth sending goes in the first e-mail after them - a HIGH of the evening closed at
+ *   midnight as "day ended" and never e-mailed included, not what ended overnight).
  *
  * Then, in ONE transaction that holds the company's e-mail lock (pg_try_advisory_xact_lock: a second
  * sweep during a deploy overlap skips the company instead of sending twice): the throttle (no e-mail
@@ -28,6 +29,18 @@
  * - still open, or over by itself since the last e-mail ("(over at 10:50)"), not what ended during the
  *   quiet hours; a row closed because its load left the plan, its date passed, its rule was switched off,
  *   it is no longer followed or its result was corrected is not news;
+ * - of the company's today or later (owner request 19 Oct 2026): after midnight the day before is history.
+ *   The sweep closes its open rows as DAY_ENDED before this step runs (store.ts); a row of the day before
+ *   still open (that company's sweep failed this tick) is not e-mailed as open. Two kinds of row of the day
+ *   before are still e-mailed (review of the branch, 19 Oct 2026; nothing is sent twice):
+ *   - a row closed as DAY_ENDED that was never e-mailed (emailedTier 0), once, marked "(day ended)" (finding
+ *     1). Without it a HIGH raised at 21:50, after the 21:45 e-mail and before the quiet hours (22:00-06:00
+ *     by default), was never e-mailed: closed at 00:02 and out of the date guard by 06:00. The same for a
+ *     HIGH raised at 23:50 when the next e-mail is due after midnight, and for the rows left once the daily
+ *     cap is reached (still within the 12 h above). A row e-mailed before at a lower tier is not sent again
+ *     once its day ended (the owner's "e-mail digests must not re-send closed ones");
+ *   - the day's follow-up raised after this midnight (Load not closed for a load planned back late: catalog.ts
+ *     ALERT_AFTER_DAY_RULES, firstSeenAt at or after the day's start), as a row of today (finding 2);
  * - HIGH first by rank, never by the alphabet (L5), at most ALERT_DIGEST_MAX_ROWS.
  * The claimed rows get emailedTier = tier and the digest's id; then the transaction commits and the
  * e-mail goes out. A failure puts each row's emailedTier back, counts the attempt and keeps a short reason;
@@ -45,6 +58,7 @@ import { addDaysIso, fmtDayMonth, fmtHhmm, isoOf, localMinutes, todayIso, zonedD
 import { plainEmailConfigured, sendPlainEmail, type SendResult } from '../email';
 import { resetBaseUrl } from '../password-reset';
 import {
+  ALERT_AFTER_DAY_RULES,
   ALERT_EMAIL_LOOKBACK_H,
   ALERT_EMAIL_MAX_ATTEMPTS,
   ALERT_EMAILS_ALL_PER_DAY,
@@ -118,6 +132,8 @@ export interface DigestRow {
   text: string;
   occurredAt: Date;
   resolvedAt: Date | null;
+  /** Why it closed (null while open): "(day ended)" for DAY_ENDED, else "(over at 10:50)". */
+  resolvedReason?: string | null;
 }
 
 export type ClaimResult =
@@ -127,7 +143,7 @@ export type ClaimResult =
 /** The database side of the digest (prismaDigestStore; a fake in the unit tests). */
 export interface DigestStore {
   readConfig(tenantId: string): Promise<(DigestConfig & { name: string; slug: string }) | null>;
-  claim(tenantId: string, now: Date, opts: { everyMin: number; minSeverity: string; dayStart: Date; recipients: number; quietEndedAt?: Date | null }): Promise<ClaimResult>;
+  claim(tenantId: string, now: Date, opts: { everyMin: number; minSeverity: string; dayStart: Date; today: string; recipients: number; quietEndedAt?: Date | null }): Promise<ClaimResult>;
   depotLabels(tenantId: string, depotIds: string[]): Promise<Map<string, string>>;
   finish(tenantId: string, digestId: string, rows: DigestRow[], now: Date, result: SendResult): Promise<void>;
 }
@@ -210,7 +226,9 @@ export function buildDigestEmail(input: {
       lines.push(`  ${SAFE(truck)}`);
       for (const r of [...list].sort(byRow)) {
         const label = isAlertRule(r.rule) ? ALERT_RULE_SPECS[r.rule].label : r.rule;
-        const notes = [r.emailedTier > 0 ? 'worse since the last e-mail' : null, r.resolvedAt ? `over at ${hhmm(r.resolvedAt)}` : null].filter(Boolean);
+        // A row closed at the end of its day was still open then: "day ended", not "over" (review of the branch, finding 1).
+        const closed = r.resolvedReason === 'DAY_ENDED' ? 'day ended' : r.resolvedAt ? `over at ${hhmm(r.resolvedAt)}` : null;
+        const notes = [r.emailedTier > 0 ? 'worse since the last e-mail' : null, closed].filter(Boolean);
         lines.push(`    [${r.severity}] ${hhmm(r.occurredAt)} ${label}: ${SAFE(r.text)}${notes.length ? ` (${notes.join('; ')})` : ''}`);
       }
     }
@@ -242,11 +260,13 @@ export async function sendAlertDigest(
     const gate = digestGate(cfg, now, env);
     if (!gate.ok) return { sent: false, skip: gate.skip, alerts: 0, high: 0 };
     if (!cfg) return { sent: false, skip: 'ALERTS_OFF', alerts: 0, high: 0 };
-    const dayStart = zonedDayStart(todayIso(cfg.timezone, now), cfg.timezone);
+    const today = todayIso(cfg.timezone, now);
+    const dayStart = zonedDayStart(today, cfg.timezone);
     const claim = await store.claim(tenantId, now, {
       everyMin: cfg.alertEmailEveryMin,
       minSeverity: cfg.alertEmailMinSeverity,
       dayStart,
+      today,
       recipients: gate.recipients.length,
       quietEndedAt: lastQuietEnd(now, cfg.timezone, cfg.alertQuietFromMin, cfg.alertQuietToMin),
     });
@@ -292,18 +312,24 @@ interface ClaimSqlRow {
   text: string;
   occurredAt: Date;
   resolvedAt: Date | null;
+  resolvedReason: string | null;
 }
 
 /**
  * The claim query (exported for the unit test of its SQL). A row over by itself (ENDED) is news only when
  * it ended after `endedSince` (the last e-mail; for the first e-mail, the last "every N min"): the first
  * e-mail after recipients are added does not list what ended during the days alerts showed in RouteIQ only.
+ * Open or over by itself only for rows of the company's `today` (YYYY-MM-DD) or later, or the day's
+ * follow-up raised since `dayStart` (the start of that today: review of the branch, 19 Oct 2026, finding 2);
+ * a row of yesterday still open because the sweep has not run since midnight is not e-mailed as open (owner
+ * request 19 Oct 2026). A row closed as DAY_ENDED goes once if it was never e-mailed (finding 1: its
+ * emailedTier becomes its tier, so it never goes again); one e-mailed before is not sent again.
  */
-export function claimSql(tenantId: string, now: Date, minSeverity: string, endedSince: Date): Prisma.Sql {
+export function claimSql(tenantId: string, now: Date, minSeverity: string, endedSince: Date, today: string, dayStart: Date): Prisma.Sql {
   const lookback = new Date(now.getTime() - ALERT_EMAIL_LOOKBACK_H * 3_600_000);
   const anySeverity = minSeverity === 'WARN';
   return Prisma.sql`
-    SELECT "id", "rule", "severity", "tier", "emailedTier", "depotId", "deliveryDate", "truckCode", "text", "occurredAt", "resolvedAt"
+    SELECT "id", "rule", "severity", "tier", "emailedTier", "depotId", "deliveryDate", "truckCode", "text", "occurredAt", "resolvedAt", "resolvedReason"
     FROM "OpsAlert"
     WHERE "tenantId" = ${tenantId}
       AND "ackedAt" IS NULL
@@ -311,7 +337,11 @@ export function claimSql(tenantId: string, now: Date, minSeverity: string, ended
       AND "emailedTier" < "tier"
       AND "emailAttempts" < ${ALERT_EMAIL_MAX_ATTEMPTS}
       AND "lastSeenAt" > ${lookback}
-      AND ("resolvedAt" IS NULL OR ("resolvedReason" = 'ENDED' AND "resolvedAt" > ${endedSince}))
+      AND (
+        (("deliveryDate" >= ${today}::date OR ("firstSeenAt" >= ${dayStart} AND "rule" IN (${Prisma.join([...ALERT_AFTER_DAY_RULES])})))
+          AND ("resolvedAt" IS NULL OR ("resolvedReason" = 'ENDED' AND "resolvedAt" > ${endedSince})))
+        OR ("resolvedReason" = 'DAY_ENDED' AND "emailedTier" = 0)
+      )
       AND (${anySeverity} OR "severity" = 'HIGH')
     ORDER BY ${Prisma.raw(SEVERITY_ORDER_SQL)}, "firstSeenAt", "id"
     LIMIT ${ALERT_DIGEST_MAX_ROWS}
@@ -379,7 +409,7 @@ export function prismaDigestStore(db: AppPrismaClient): DigestStore {
         const sinceLast = last?.createdAt ?? new Date(now.getTime() - opts.everyMin * 60_000);
         // The first e-mail after the quiet hours leaves out what ended during them (L5).
         const endedSince = opts.quietEndedAt && opts.quietEndedAt > sinceLast ? opts.quietEndedAt : sinceLast;
-        const found = await tx.$queryRaw<ClaimSqlRow[]>(claimSql(tenantId, now, opts.minSeverity, endedSince));
+        const found = await tx.$queryRaw<ClaimSqlRow[]>(claimSql(tenantId, now, opts.minSeverity, endedSince, opts.today, opts.dayStart));
         const rows: DigestRow[] = found
           .filter((r) => emailSeverityPasses(r.severity as AlertSeverity, opts.minSeverity))
           .map((r) => ({ ...r, severity: r.severity as AlertSeverity, tier: Number(r.tier), emailedTier: Number(r.emailedTier) }));

@@ -1,8 +1,14 @@
 /**
  * Operations alerts on the screens (owner request 16 Oct 2026): the words and groupings the bell, the day
  * screen's Alerts card and the Alerts page share. Pure and browser-safe.
+ *
+ * Dates (owner request 19 Oct 2026: "alerts of yesterday looked like today's because only the time is
+ * shown"; "ok add the date fix"): the bell and the Alerts page show the date of any alert whose delivery
+ * date is not the company's today - "Yesterday 17:20", "18 Oct 17:20" - and today's keep the time only
+ * (alertWhen); the bell puts a small date header over the rows of another day (alertDayGroups). "Today"
+ * is the company's, in its time zone, from the server's answer.
  */
-import { fmtHhmm, localMinutes } from '../dispatch/time';
+import { daysBetween, fmtDayMonth, fmtHhmm, localDateIso, localMinutes } from '../dispatch/time';
 import { ALERT_RULE_SPECS, ALERT_TOAST_MAX, RESOLVED_REASON_TEXT, SEVERITY_RANK, isAlertRule, type AlertSeverity } from './catalog';
 import type { OpsAlertRow, SweepCheck } from './types';
 
@@ -22,10 +28,85 @@ export function alertTime(iso: string | null | undefined, timezone: string): str
   return Number.isNaN(d.getTime()) ? '' : fmtHhmm(localMinutes(d, timezone));
 }
 
-/** "Open", "Acknowledged by Sam 10:42", "Over 10:50", "No longer in the plan 11:02". */
-export function alertStateText(r: OpsAlertRow, timezone: string): string {
-  if (r.state === 'RESOLVED') return `${r.resolvedReason ? RESOLVED_REASON_TEXT[r.resolvedReason] : 'Over'} ${alertTime(r.resolvedAt, timezone)}`.trim();
-  if (r.state === 'ACKED') return `Acknowledged${r.ackedByName ? ` by ${r.ackedByName}` : ''} ${alertTime(r.ackedAt, timezone)}`.trim();
+/**
+ * A day as seen from the company's today: null for today, "Yesterday", "Tomorrow", else "18 Oct". `today` is
+ * the company's (todayIso in its time zone: the summary and the list answer carry it, so a browser whose
+ * clock or zone is off does not move it).
+ */
+export function alertDayWord(date: string, today: string): string | null {
+  const d = daysBetween(today, date);
+  if (d === 0) return null;
+  if (d === -1) return 'Yesterday';
+  if (d === 1) return 'Tomorrow';
+  return fmtDayMonth(date);
+}
+
+/**
+ * When an alert began, was last seen, closed or was acknowledged, as the bell and the Alerts page show it
+ * (owner request 19 Oct 2026): the time only for an alert of today at a time of today ("17:20"); otherwise
+ * the day of that time too - "Yesterday 17:20", "18 Oct 17:20", and "Today 00:40" for yesterday's alert
+ * seen after midnight or tomorrow's seen this evening (the bell's day header and the Alerts page's Day
+ * column say whose day it is). Every label is the instant's own date and clock in the company's time zone,
+ * so a summer-time change or a browser in another zone does not move it. '' without a time.
+ */
+export function alertWhen(iso: string | null | undefined, deliveryDate: string, timezone: string, today: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const clock = fmtHhmm(localMinutes(d, timezone));
+  const on = localDateIso(d, timezone);
+  if (deliveryDate === today && on === today) return clock;
+  return `${alertDayWord(on, today) ?? 'Today'} ${clock}`;
+}
+
+/** The bell's small date header over the rows of one delivery day: "Today", "Yesterday, 18 Oct", "Tomorrow, 20 Oct", "16 Oct". */
+export function alertDayHeader(deliveryDate: string, today: string): string {
+  const word = alertDayWord(deliveryDate, today);
+  if (word === null) return 'Today';
+  return word === 'Yesterday' || word === 'Tomorrow' ? `${word}, ${fmtDayMonth(deliveryDate)}` : word;
+}
+
+/**
+ * The rows by delivery day, each day in the order the rows came (open and HIGH first): today first, then the
+ * days ahead, then the days before, the latest first. `header` is null when every row is of today: the bell
+ * then looks as before (owner request 19 Oct 2026: "grouping or a small date header is fine").
+ */
+export function alertDayGroups<T extends Pick<OpsAlertRow, 'deliveryDate'>>(rows: readonly T[], today: string): { date: string; header: string | null; rows: T[] }[] {
+  const by = new Map<string, T[]>();
+  for (const r of rows) {
+    const list = by.get(r.deliveryDate);
+    if (list) list.push(r);
+    else by.set(r.deliveryDate, [r]);
+  }
+  const rank = (date: string) => {
+    const d = daysBetween(today, date);
+    return d === 0 ? [0, 0] : d > 0 ? [1, d] : [2, -d];
+  };
+  const dates = [...by.keys()].sort((a, b) => {
+    const [ga, da] = rank(a);
+    const [gb, db] = rank(b);
+    return ga! - gb! || da! - db!;
+  });
+  const onlyToday = dates.length === 1 && dates[0] === today;
+  return dates.map((date) => ({ date, header: onlyToday ? null : alertDayHeader(date, today), rows: by.get(date)! }));
+}
+
+/**
+ * "Open", "Acknowledged by Sam 10:42", "Over 10:50", "No longer in the plan 11:02", "Day ended". With the
+ * company's `today` (the bell and the Alerts page), a time that is not of today says its day too ("Over
+ * yesterday 17:40", owner request 19 Oct 2026); without it (the day screen's card and the truck's day, which
+ * show one day) the time only, as before. A row closed at the day's end says so without the time (it is
+ * always the first check after the midnight that followed its day), and who had acknowledged it, which the
+ * close keeps: "Day ended (acknowledged by Sam 10:42)".
+ */
+export function alertStateText(r: OpsAlertRow, timezone: string, today?: string): string {
+  const when = (iso: string | null) => (today ? alertWhen(iso, r.deliveryDate, timezone, today).replace(/^(Today|Yesterday|Tomorrow)\b/, (w) => w.toLowerCase()) : alertTime(iso, timezone));
+  const acked = () => `${r.ackedByName ? ` by ${r.ackedByName}` : ''} ${when(r.ackedAt)}`.trimEnd();
+  if (r.state === 'RESOLVED') {
+    if (r.resolvedReason === 'DAY_ENDED') return r.ackedAt ? `${RESOLVED_REASON_TEXT.DAY_ENDED} (acknowledged${acked()})` : RESOLVED_REASON_TEXT.DAY_ENDED;
+    return `${r.resolvedReason ? RESOLVED_REASON_TEXT[r.resolvedReason] : 'Over'} ${when(r.resolvedAt)}`.trim();
+  }
+  if (r.state === 'ACKED') return `Acknowledged${acked()}`;
   return 'Open';
 }
 

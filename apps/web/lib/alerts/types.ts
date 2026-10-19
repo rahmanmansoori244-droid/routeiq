@@ -87,7 +87,8 @@ export interface Evaluation {
 /**
  * Open: needs someone to look (it counts on the bell). Acked: a CONDITION still true that someone has
  * seen, or an EVENT someone dealt with. Resolved: over (a CONDITION that ended, an EVENT corrected, or a
- * row closed as not in the plan, expired or rule off): history, it needs no acknowledgement.
+ * row closed as not in the plan, expired, rule off or at the end of its day): history, it needs no
+ * acknowledgement.
  */
 export type AlertState = 'OPEN' | 'ACKED' | 'RESOLVED';
 
@@ -139,7 +140,12 @@ export interface OpsAlertRow {
 export interface AlertSummary {
   /** TenantConfig.alertsEnabled: the bell hides itself when false. */
   enabled: boolean;
-  /** Rows that need attention (needsAttention). */
+  /**
+   * The company's today (YYYY-MM-DD in its time zone; absent while alerts are off): the bell shows the day of
+   * a row of another day from it (view.ts alertWhen, owner request 19 Oct 2026), not from the browser's clock.
+   */
+  today?: string;
+  /** Rows that need attention (needsAttention): today's and tomorrow's (inbox.ts bellWindow). */
   open: number;
   /** Of them, HIGH. */
   high: number;

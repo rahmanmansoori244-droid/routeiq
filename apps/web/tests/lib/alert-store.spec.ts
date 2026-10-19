@@ -14,13 +14,16 @@ import { alertsLockKey, lockTenantAlerts, tryLockTenantAlerts } from '@/lib/aler
 import { ALERT_RULES, subjectKeyOf, type AlertRule } from '@/lib/alerts/catalog';
 import { applyPlan, applyPlanInMemory, planApply, storedOf, type MemAlert, type PlanContext, type StoredAlert } from '@/lib/alerts/store';
 import { alertStateOf, needsAttention, type Candidate, type Evaluation } from '@/lib/alerts/types';
+import { alertDates } from '@/lib/alerts/facts';
+import { zonedDayStart } from '@/lib/dispatch/time';
 
 const NOW = new Date('2026-10-20T06:00:00Z');
 const ON = new Date('2026-10-20T03:00:00Z');
 const D = '2026-10-20';
 const KEY = subjectKeyOf({ depotId: 'D1', date: D, truckId: 'TR1', loadNo: 1 });
 const STOP = subjectKeyOf({ depotId: 'D1', date: D, truckId: 'TR1', loadNo: 1, sequence: 2 });
-const CTX: PlanContext = { now: NOW, alertsEnabledAt: ON, windowFrom: '2026-10-19', rulesOn: [...ALERT_RULES] };
+const TZ = 'Asia/Muscat';
+const CTX: PlanContext = { now: NOW, alertsEnabledAt: ON, windowFrom: '2026-10-19', today: D, todayStart: zonedDayStart(D, TZ), rulesOn: [...ALERT_RULES] };
 
 function cand(over: Partial<Candidate> = {}): Candidate {
   return {
@@ -215,7 +218,8 @@ describe('planApply: closing (H2, H4)', () => {
     ]);
     // The acknowledgement is not touched by the close (applyPlan writes resolvedAt, the reason and the words only).
     const mem: MemAlert[] = [];
-    applyPlanInMemory(mem, planApply([], ev({ active: [cand({ rule: 'PROOF_FAR', kind: 'EVENT', subjectKey: oldEvent.subjectKey, deliveryDate: '2026-10-17' })] }), { ...CTX, windowFrom: '2026-10-16' }), NOW);
+    // Raised on its own day (17 Oct), then no sweep ran until the 20th (alerts were off, say).
+    applyPlanInMemory(mem, planApply([], ev({ active: [cand({ rule: 'PROOF_FAR', kind: 'EVENT', subjectKey: oldEvent.subjectKey, deliveryDate: '2026-10-17' })] }), { ...CTX, windowFrom: '2026-10-16', today: '2026-10-17' }), NOW);
     mem[0]!.ackedAt = NOW;
     applyPlanInMemory(mem, planApply(mem.map(storedOf), ev({ scopes: [] }), CTX), NOW);
     expect(mem[0]).toMatchObject({ resolvedReason: 'EXPIRED', ackedAt: NOW });
@@ -233,6 +237,157 @@ describe('planApply: closing (H2, H4)', () => {
       ['a1', 'RULE_OFF'],
       ['n1', 'RULE_OFF'],
     ]);
+  });
+});
+
+describe("planApply: the day's end (owner request 19 Oct 2026: alerts of yesterday looked like today's)", () => {
+  // 21 Oct 00:02 in Muscat: the first sweep after the midnight that follows 20 Oct (D). 20 Oct 23:58: the last before it.
+  const AFTER = new Date('2026-10-20T20:02:00Z');
+  const BEFORE = new Date('2026-10-20T19:58:00Z');
+  const NEXT = '2026-10-21';
+  const AT_MIDNIGHT: PlanContext = { now: AFTER, alertsEnabledAt: ON, windowFrom: D, today: NEXT, todayStart: zonedDayStart(NEXT, TZ), rulesOn: [...ALERT_RULES] };
+  const NEXT_KEY = subjectKeyOf({ depotId: 'D1', date: NEXT, truckId: 'TR1', loadNo: 1 });
+
+  it('the first sweep after midnight closes every row of the day before still open: a condition still true, an event, a held row, one nobody answered for', () => {
+    const still = row({ id: 'c1' });
+    const event = row({ id: 'e1', rule: 'DELIVERED_WITH_NOTE', kind: 'EVENT', subjectKey: STOP, text: 'T05 L1 stop 2 delivered with a note.' });
+    const held = row({ id: 'h1', rule: 'AFTER_CLOSING', subjectKey: STOP });
+    const gone = row({ id: 'g1', subjectKey: subjectKeyOf({ depotId: 'D1', date: D, truckId: 'TR1', loadNo: 2 }) });
+    // The rule still finds ETA_LATE true, and worse: no escalation, no new words, closed as it is.
+    const p = planApply([still, event, held, gone], ev({ active: [cand({ tier: 2, value: 70 })], held: [{ rule: 'AFTER_CLOSING', subjectKey: STOP }] }), AT_MIDNIGHT);
+    expect(p.resolves).toEqual([
+      { id: 'c1', reason: 'DAY_ENDED', text: `${still.text} (day ended)` },
+      { id: 'e1', reason: 'DAY_ENDED', text: `${event.text} (day ended)` },
+      { id: 'h1', reason: 'DAY_ENDED', text: `${held.text} (day ended)` },
+      { id: 'g1', reason: 'DAY_ENDED', text: `${gone.text} (day ended)` },
+    ]);
+    expect([p.escalations, p.updates, p.reopens, p.creates]).toEqual([[], [], [], []]);
+    expect(p.counts.resolved).toEqual({ DAY_ENDED: 4 });
+  });
+
+  it('the acknowledgement is kept: the close writes the time, the reason and the words only', () => {
+    const mem: MemAlert[] = [];
+    applyPlanInMemory(mem, planApply([], ev({ active: [cand()] }), CTX), NOW);
+    mem[0]!.ackedAt = NOW;
+    applyPlanInMemory(mem, planApply(mem.map(storedOf), ev({ active: [cand()] }), AT_MIDNIGHT), AFTER);
+    expect(mem[0]).toMatchObject({ resolvedAt: AFTER, resolvedReason: 'DAY_ENDED', ackedAt: NOW, tier: 1 });
+    expect(alertStateOf(mem[0]!)).toBe('RESOLVED');
+  });
+
+  it("a rule's own final words still win in that sweep (over, corrected, no longer followed, a history row); a rule switched off stays RULE_OFF", () => {
+    const rows = [row({ id: 'o1' }), row({ id: 'o2', rule: 'PRIORITY_NOT_DELIVERED', kind: 'EVENT', subjectKey: STOP }), row({ id: 'o3', rule: 'LOAD_NOT_CLOSED' }), row({ id: 'o4', rule: 'UNLOAD_OVER', subjectKey: STOP })];
+    const p = planApply(
+      [...rows, row({ id: 'o5', rule: 'DRIVER_SILENT' })],
+      ev({
+        active: [cand({ rule: 'UNLOAD_OVER', subjectKey: STOP, history: true, text: 'took 1 h 10 min' })],
+        ended: [
+          { rule: 'ETA_LATE', subjectKey: KEY, reason: 'ENDED', text: 'back on time 23:50' },
+          { rule: 'PRIORITY_NOT_DELIVERED', subjectKey: STOP, reason: 'ENDED', text: 'now Delivered' },
+          { rule: 'LOAD_NOT_CLOSED', subjectKey: KEY, reason: 'NOT_FOLLOWED', text: 'no longer followed' },
+        ],
+      }),
+      { ...AT_MIDNIGHT, rulesOn: ALERT_RULES.filter((r) => r !== 'DRIVER_SILENT') },
+    );
+    expect(p.resolves.map((r) => [r.id, r.reason, r.text])).toEqual([
+      ['o4', 'ENDED', 'took 1 h 10 min'],
+      ['o1', 'ENDED', 'back on time 23:50'],
+      ['o2', 'CORRECTED', 'now Delivered'],
+      ['o3', 'NOT_FOLLOWED', 'no longer followed'],
+      ['o5', 'RULE_OFF', `${row().text} (rule switched off)`],
+    ]);
+  });
+
+  it("after that the day is history: a closed row of it never reopens, even worse; one found true only after midnight is written closed (no toast, no e-mail), except the day's follow-up (next test)", () => {
+    const closed = row({ id: 'd1', resolvedAt: AFTER, resolvedReason: 'DAY_ENDED' });
+    const ended = row({ id: 'd2', rule: 'DRIVER_SILENT', resolvedAt: BEFORE, resolvedReason: 'ENDED' });
+    const later = new Date(AFTER.getTime() + 2 * 60_000);
+    const p = planApply([closed, ended], ev({ active: [cand({ tier: 3, value: 95 }), cand({ rule: 'DRIVER_SILENT' })] }), { ...AT_MIDNIGHT, now: later });
+    expect([p.reopens, p.escalations, p.updates, p.resolves, p.creates]).toEqual([[], [], [], [], []]);
+    expect(p.counts).toMatchObject({ reopened: 0, raised: 0 });
+
+    // A truck of the day running late, first over its limit after midnight (R3), and a priority stop's result tapped after midnight.
+    const running = cand({ tier: 2, value: 65, text: 'T05 L1 is running about 65 min late.', occurredAt: AFTER });
+    const priority = cand({ rule: 'PRIORITY_NOT_DELIVERED', kind: 'EVENT', subjectKey: STOP, tier: 2, value: 1, threshold: 2, text: 'T05 L1 stop 2 Not delivered.', occurredAt: later });
+    const q = planApply([], ev({ active: [running, priority] }), { ...AT_MIDNIGHT, now: later });
+    expect(q.creates).toHaveLength(2);
+    for (const c of q.creates) expect(c).toMatchObject({ deliveryDate: D, resolvedAt: later, resolvedReason: 'DAY_ENDED', mayToast: false, mayEmail: false, severity: 'HIGH' });
+    expect(q.creates[0]!.text).toBe('T05 L1 is running about 65 min late. (day ended)');
+    expect(q.counts).toMatchObject({ raised: 0, history: 2 });
+    // The next sweep: the closed rows are there (raised after midnight, but not the day's follow-up); nothing more, even worse.
+    const mem: MemAlert[] = [];
+    applyPlanInMemory(mem, q, later);
+    const r = planApply(mem.map(storedOf), ev({ active: [{ ...running, tier: 3, value: 95 }, priority] }), { ...AT_MIDNIGHT, now: new Date(later.getTime() + 120_000) });
+    expect([r.creates, r.reopens, r.resolves, r.updates, r.escalations]).toEqual([[], [], [], [], []]);
+    // A history candidate of the day keeps its own reason (ENDED, with its final words); one that began before the switch-on is still backlog.
+    expect(planApply([], ev({ active: [cand({ rule: 'DEPART_LATE', history: true, tier: 2 })] }), AT_MIDNIGHT).creates[0]).toMatchObject({ resolvedReason: 'ENDED', text: cand().text });
+    expect(planApply([], ev({ active: [cand({ occurredAt: new Date('2026-10-20T02:00:00Z') })] }), AT_MIDNIGHT)).toMatchObject({ creates: [], counts: { backlog: 1, history: 0 } });
+  });
+
+  it("review of the branch (finding 2): the day's follow-up first true after midnight - Load not closed for a load planned back at 22:30 - is raised open, escalates, closes with its own words and expires at the next midnight; one open at midnight still closes as Day ended", () => {
+    // Planned back at 22:30, threshold 120 min: over it from 00:31 on 21 Oct (Muscat); 00:35 is the first sweep that sees it.
+    const at = (hhmm: string, day = NEXT) => new Date(zonedDayStart(day, TZ).getTime() + (Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3))) * 60_000);
+    const notClosed = (tier: 1 | 2, value: number, hhmm: string) =>
+      cand({ rule: 'LOAD_NOT_CLOSED', tier, value, threshold: 120, text: `T05 L1 still not closed at ${hhmm}: planned back 22:30, no Back at depot, 1 of 3 stops without a result. Record the results, then Completed.`, occurredAt: at('00:30') });
+    const p = planApply([], ev({ active: [notClosed(1, 125, '00:35')] }), { ...AT_MIDNIGHT, now: at('00:35') });
+    expect(p.creates).toHaveLength(1);
+    expect(p.creates[0]).toMatchObject({ rule: 'LOAD_NOT_CLOSED', deliveryDate: D, resolvedAt: null, resolvedReason: null, mayToast: true, mayEmail: true, severity: 'WARN', firstSeenAt: at('00:35') });
+    expect(p.creates[0]!.text).not.toMatch(/day ended/);
+    expect(p.counts).toMatchObject({ raised: 1, history: 0 });
+    const mem: MemAlert[] = [];
+    applyPlanInMemory(mem, p, at('00:35'));
+    const id = mem[0]!.id;
+    // The next sweeps: still open (never Day ended), and worse at 02:35: escalated to HIGH (a toast, an e-mail).
+    expect(planApply(mem.map(storedOf), ev({ active: [notClosed(1, 127, '00:37')] }), { ...AT_MIDNIGHT, now: at('00:37') })).toMatchObject({ resolves: [], escalations: [] });
+    const worse = planApply(mem.map(storedOf), ev({ active: [notClosed(2, 245, '02:35')] }), { ...AT_MIDNIGHT, now: at('02:35') });
+    expect(worse.resolves).toEqual([]);
+    expect(worse.escalations).toMatchObject([{ id, tier: 2, data: { severity: 'HIGH', mayToast: true, mayEmail: true, lastSeenAt: at('02:35') } }]);
+    applyPlanInMemory(mem, worse, at('02:35'));
+    // The office closes the load at 07:10: the row closes with the rule's own words.
+    const done = planApply(mem.map(storedOf), ev({ ended: [{ rule: 'LOAD_NOT_CLOSED', subjectKey: KEY, reason: 'ENDED', text: 'T05 L1: Completed at 07:10.' }] }), { ...AT_MIDNIGHT, now: at('07:10') });
+    expect(done.resolves).toEqual([{ id, reason: 'ENDED', text: 'T05 L1: Completed at 07:10.' }]);
+    // Never closed: at the next midnight its date has left the sweep's window (Date passed), not Day ended.
+    const nextMidnight: PlanContext = { now: at('00:02', '2026-10-22'), alertsEnabledAt: ON, windowFrom: NEXT, today: '2026-10-22', todayStart: zonedDayStart('2026-10-22', TZ), rulesOn: [...ALERT_RULES] };
+    expect(planApply(mem.map(storedOf), ev({ scopes: [] }), nextMidnight).resolves.map((r) => [r.id, r.reason])).toEqual([[id, 'EXPIRED']]);
+    // A Load not closed row already open at midnight (raised at 23:10, on the bell during its day) closes as Day ended.
+    const before = row({ id: 'b1', rule: 'LOAD_NOT_CLOSED', firstSeenAt: at('23:10', D) });
+    const q = planApply([before], ev({ active: [notClosed(2, 260, '00:02')] }), AT_MIDNIGHT);
+    expect(q.resolves.map((r) => [r.id, r.reason])).toEqual([['b1', 'DAY_ENDED']]);
+    expect([q.escalations, q.creates]).toEqual([[], []]);
+    // And once closed it never reopens after midnight, even worse.
+    expect(planApply([{ ...before, resolvedAt: AFTER, resolvedReason: 'DAY_ENDED' }], ev({ active: [notClosed(2, 300, '00:40')] }), { ...AT_MIDNIGHT, now: at('00:40') })).toMatchObject({ reopens: [], creates: [] });
+  });
+
+  it("no change for today's alerts: one minute before midnight nothing closes, and right after it the new day's rows are raised, escalated and updated as before", () => {
+    const before: PlanContext = { ...CTX, now: BEFORE };
+    const open = row({ id: 't1' });
+    const p = planApply([open, row({ id: 't2', rule: 'PROOF_FAR', kind: 'EVENT', subjectKey: STOP })], ev({ active: [cand({ tier: 2, value: 65 })] }), before);
+    expect(p.resolves).toEqual([]);
+    expect(p.escalations.map((e) => e.id)).toEqual(['t1']);
+    // 00:02 on the new day: its own rows behave exactly as before.
+    const today = (over: Partial<Candidate> = {}) => cand({ subjectKey: NEXT_KEY, deliveryDate: NEXT, occurredAt: AFTER, ...over });
+    const raised = planApply([], ev({ active: [today()], scopes: [{ depotId: 'D1', deliveryDate: NEXT, rulesOn: [...ALERT_RULES] }] }), AT_MIDNIGHT);
+    expect(raised.creates[0]).toMatchObject({ deliveryDate: NEXT, resolvedAt: null, resolvedReason: null, mayToast: true, mayEmail: true, text: today().text });
+    expect(raised.counts).toMatchObject({ raised: 1, history: 0 });
+    const mine = row({ id: 'n1', subjectKey: NEXT_KEY, deliveryDate: NEXT });
+    const worse = planApply([mine], ev({ active: [today({ tier: 2, value: 65 })] }), AT_MIDNIGHT);
+    expect([worse.escalations.map((e) => e.id), worse.resolves]).toEqual([['n1'], []]);
+    // A row of tomorrow is not touched either.
+    const tomorrow = row({ id: 'm1', deliveryDate: '2026-10-22', subjectKey: subjectKeyOf({ depotId: 'D1', date: '2026-10-22', truckId: 'TR1', loadNo: 1 }) });
+    expect(planApply([tomorrow], ev({ scopes: [] }), AT_MIDNIGHT).resolves).toEqual([]);
+  });
+
+  it("the company's midnight, not the server's: the same instant ends the day in Muscat and not yet in London", () => {
+    const instant = new Date('2026-10-20T20:01:00Z');
+    // Muscat (UTC+4): 21 Oct 00:01. London (summer time until 25 Oct, UTC+1): 20 Oct 21:01.
+    expect(alertDates('Asia/Muscat', instant)).toEqual(['2026-10-20', '2026-10-21', '2026-10-22']);
+    expect(alertDates('Europe/London', instant)).toEqual(['2026-10-19', '2026-10-20', '2026-10-21']);
+    const ctxOf = (tz: string): PlanContext => {
+      const dates = alertDates(tz, instant);
+      return { now: instant, alertsEnabledAt: ON, windowFrom: dates[0]!, today: dates[1]!, todayStart: zonedDayStart(dates[1]!, tz), rulesOn: [...ALERT_RULES] };
+    };
+    const open = row({ id: 'z1' });
+    expect(planApply([open], ev({ active: [cand()] }), ctxOf('Asia/Muscat')).resolves.map((r) => r.reason)).toEqual(['DAY_ENDED']);
+    expect(planApply([open], ev({ active: [cand()] }), ctxOf('Europe/London')).resolves).toEqual([]);
   });
 });
 
