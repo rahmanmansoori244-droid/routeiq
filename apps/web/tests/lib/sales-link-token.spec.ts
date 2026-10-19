@@ -1,0 +1,181 @@
+/**
+ * The salesman link (owner request 19 Oct 2026): its token (lib/sales-link/token.ts), the route code a salesman
+ * types (lib/sales-link/route-code.ts) and the rate-limit keys (lib/sales-link/guard.ts). Pure; invented data.
+ *
+ *  - the key is the driver link's scheme under another HKDF salt: the same secret gives another key and keyId,
+ *    and a driver token of the same id, generation and salt is another token; SALES_LINK_SECRET first; none: off;
+ *  - the link works until 06:00 company time the day after the delivery date;
+ *  - route codes (critique item 18): NFKC, Arabic-Indic digits, the stored rule, a compact key without spaces or
+ *    hyphens (an exact match first; both routes when the compact key is shared), "R1, R2X", "Route not given"
+ *    never reachable;
+ *  - the limits are keyed on the link and the public client IP, never on the page's device id; an unknown or
+ *    internal IP shares one larger bucket per link; unknown tokens count only for a public IP (critique item 9).
+ */
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => null) }));
+vi.mock('@/lib/db', () => ({ prisma: {} }));
+
+import { deriveToken as driverDerive, driverLinkKey } from '@/lib/driver-link/token';
+import {
+  deriveToken,
+  looksLikeSalesToken,
+  newSalesLinkId,
+  salesDeviceHash,
+  salesLinkExpiry,
+  salesLinkIkm,
+  salesLinkKey,
+  salesLinkUrl,
+  SALES_LINK_TOKEN_RE,
+  tokenHash,
+} from '@/lib/sales-link/token';
+import { asciiDigits, compactRouteKey, matchRoutes, MAX_CODES, normTypedRoute, parseRouteQuery } from '@/lib/sales-link/route-code';
+import { salesBadTokenKey, salesDeviceFromHeader, salesIpKey, salesMissLimit, salesTokenFromHeader, salesViewLimit, SALES_HEADERS } from '@/lib/sales-link/guard';
+import { salesLinkDateProblem, salesTouchPlan } from '@/lib/sales-link/service';
+import { LIMITS } from '@/lib/rate-limit';
+import { expiryText, salesLinkMessage, shortDayText } from '@/lib/sales-link/text';
+
+const ENV = { NEXTAUTH_SECRET: 'sales-link-token-test-secret' } as unknown as NodeJS.ProcessEnv;
+
+describe('the token', () => {
+  it('another key than the driver link from the same secret: a driver token never passes as a salesman token', () => {
+    const s = salesLinkKey(ENV)!;
+    const d = driverLinkKey(ENV)!;
+    expect(s.key.equals(d.key)).toBe(false);
+    expect(s.keyId).not.toBe(d.keyId);
+    expect(s.keyId).toMatch(/^[0-9a-f]{8}$/);
+    const t = deriveToken(s.key, 'sl0123', 1, 'salt');
+    expect(t).toMatch(SALES_LINK_TOKEN_RE);
+    expect(t).not.toBe(driverDerive(d.key, 'sl0123', 1, 'salt'));
+    // Deterministic, and every input counts.
+    expect(deriveToken(s.key, 'sl0123', 1, 'salt')).toBe(t);
+    expect(deriveToken(s.key, 'sl0123', 2, 'salt')).not.toBe(t);
+    expect(deriveToken(s.key, 'sl0123', 1, 'salt2')).not.toBe(t);
+    expect(tokenHash(t)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('SALES_LINK_SECRET first (rotates only the salesman links), else the driver link secret; none: off', () => {
+    expect(salesLinkIkm({ SALES_LINK_SECRET: ' own ', NEXTAUTH_SECRET: 'shared' } as unknown as NodeJS.ProcessEnv)).toBe('own');
+    expect(salesLinkIkm({ DRIVER_LINK_SECRET: 'drv', NEXTAUTH_SECRET: 'shared' } as unknown as NodeJS.ProcessEnv)).toBe('drv');
+    expect(salesLinkIkm({ AUTH_SECRET: 'auth' } as unknown as NodeJS.ProcessEnv)).toBe('auth');
+    expect(salesLinkKey({} as unknown as NodeJS.ProcessEnv)).toBeNull();
+    expect(salesLinkKey({ SALES_LINK_SECRET: 'a', NEXTAUTH_SECRET: 'x' } as unknown as NodeJS.ProcessEnv)!.keyId).not.toBe(salesLinkKey({ SALES_LINK_SECRET: 'b', NEXTAUTH_SECRET: 'x' } as unknown as NodeJS.ProcessEnv)!.keyId);
+  });
+
+  it('the shape, the id, the URL, the device hash', () => {
+    expect(looksLikeSalesToken('A'.repeat(24))).toBe(true);
+    expect(looksLikeSalesToken('A'.repeat(23))).toBe(false);
+    expect(looksLikeSalesToken('A'.repeat(23) + '/')).toBe(false);
+    expect(looksLikeSalesToken(null)).toBe(false);
+    expect(newSalesLinkId()).toMatch(/^sl[0-9a-f]{24}$/);
+    expect(salesLinkUrl('https://routeiq.example', 'tok')).toBe('https://routeiq.example/s/tok');
+    expect(salesDeviceHash('0123456789abcdef0123456789abcdef')).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('works until 06:00 company time the day after the delivery date', () => {
+    expect(salesLinkExpiry('2026-10-19', 'Asia/Muscat').toISOString()).toBe('2026-10-20T02:00:00.000Z');
+    expect(salesLinkExpiry('2026-12-31', 'Asia/Muscat').toISOString()).toBe('2027-01-01T02:00:00.000Z');
+    expect(expiryText('2026-10-19', '2026-10-20', 6)).toBe('Works until Tue 20 Oct 06:00');
+    expect(shortDayText('2026-10-19')).toBe('Mon 19 Oct');
+  });
+
+  it("only the company's today or tomorrow (critique item 11); a day whose link is over", () => {
+    const now = new Date('2026-10-19T06:00:00Z'); // 10:00 in Muscat
+    expect(salesLinkDateProblem('2026-10-19', 'Asia/Muscat', now)).toBeNull();
+    expect(salesLinkDateProblem('2026-10-20', 'Asia/Muscat', now)).toBeNull();
+    expect(salesLinkDateProblem('2026-10-21', 'Asia/Muscat', now)).toMatchObject({ status: 400, code: 'DATE_OUT_OF_RANGE' });
+    expect(salesLinkDateProblem('2026-10-18', 'Asia/Muscat', now)).toMatchObject({ status: 400, code: 'DATE_OUT_OF_RANGE' });
+    expect(salesLinkDateProblem('19/10/2026', 'Asia/Muscat', now)).toMatchObject({ status: 400 });
+    // 21:30 UTC = 01:30 in Muscat the next day: "today" is the 20th already.
+    expect(salesLinkDateProblem('2026-10-21', 'Asia/Muscat', new Date('2026-10-19T21:30:00Z'))).toBeNull();
+  });
+
+  it('the WhatsApp message: the day, the company, the link, its end, "do not forward"', () => {
+    const m = salesLinkMessage({ dayShort: 'Mon 19 Oct', company: 'Example Water Co', url: 'https://routeiq.example/s/tok', expiryText: 'Works until Tue 20 Oct 06:00' });
+    expect(m.split('\n')).toEqual([
+      'RouteIQ - live deliveries for Mon 19 Oct (Example Water Co): https://routeiq.example/s/tok',
+      "Open it, type your route code (as on your Salesman ETA page) and see each customer's delivery: delivered, on the way with the expected time, delayed, not delivered or cancelled.",
+      'Works until Tue 20 Oct 06:00. For the sales team only - please do not forward.',
+    ]);
+  });
+});
+
+describe('the route code a salesman types (critique item 18)', () => {
+  it('NFKC, Arabic-Indic and Eastern Arabic-Indic digits, then the stored rule', () => {
+    expect(asciiDigits('٣٤')).toBe('34');
+    expect(asciiDigits('۱۲')).toBe('12');
+    expect(normTypedRoute(' r2x ')).toBe('R2X');
+    expect(normTypedRoute('Ｒ１０')).toBe('R10'); // full-width R10
+    expect(normTypedRoute('r١٠')).toBe('R10');
+    expect(normTypedRoute('   ')).toBeNull();
+  });
+
+  it('the compact key leaves out spaces, hyphens, dots, slashes and underscores', () => {
+    expect(compactRouteKey('r-1')).toBe('R1');
+    expect(compactRouteKey('R 1')).toBe('R1');
+    expect(compactRouteKey('r_1.')).toBe('R1');
+    expect(compactRouteKey('R2X')).toBe('R2X');
+  });
+
+  it('"R1, R2X" (a salesman with two routes), the Arabic comma, semicolons; refused: empty, too long, too many', () => {
+    expect(parseRouteQuery('r1, R2X')).toEqual({ ok: true, codes: ['R1', 'R2X'] });
+    expect(parseRouteQuery('R1، R10; r1')).toEqual({ ok: true, codes: ['R1', 'R10'] });
+    expect(parseRouteQuery('')).toEqual({ ok: false, code: 'ROUTE_CODE_MISSING' });
+    expect(parseRouteQuery(' , ; ')).toEqual({ ok: false, code: 'ROUTE_CODE_MISSING' });
+    expect(parseRouteQuery('R'.repeat(41))).toEqual({ ok: false, code: 'ROUTE_CODE_TOO_LONG' });
+    expect(parseRouteQuery('R'.repeat(40))).toEqual({ ok: true, codes: ['R'.repeat(40)] });
+    expect(parseRouteQuery('A,B,C,D,E,F')).toEqual({ ok: false, code: 'TOO_MANY_CODES' });
+    expect(MAX_CODES).toBe(5);
+  });
+
+  it('an exact code first; else every route with the same compact key; unknown and "Route not given" match nothing', () => {
+    const known = ['R1', 'R2X', 'R10', 'R 10', 'X-7'];
+    expect(matchRoutes(['R10'], known)).toEqual({ routes: ['R10'], notFound: [], ambiguous: [] });
+    expect(matchRoutes(['R 10'], known)).toEqual({ routes: ['R 10'], notFound: [], ambiguous: [] });
+    expect(matchRoutes(['R-10'], known)).toEqual({ routes: ['R 10', 'R10'], notFound: [], ambiguous: ['R-10'] });
+    expect(matchRoutes(['X7'], known)).toEqual({ routes: ['X-7'], notFound: [], ambiguous: [] });
+    expect(matchRoutes(['R1', 'R9'], known)).toEqual({ routes: ['R1'], notFound: ['R9'], ambiguous: [] });
+    expect(matchRoutes(['ROUTE NOT GIVEN'], known).notFound).toEqual(['ROUTE NOT GIVEN']);
+    expect(matchRoutes(['R2X', 'R1'], known).routes).toEqual(['R1', 'R2X']);
+  });
+});
+
+describe('the rate-limit keys (critique item 9) and the request parts', () => {
+  it('per link and public IP; an unknown or internal IP shares one larger bucket of the link', () => {
+    expect(salesViewLimit('sl1', '203.0.113.7')).toEqual({ key: 'sl-view:sl1:203.0.113.7', ...LIMITS.salesView });
+    expect(salesViewLimit('sl1', '10.0.0.5')).toEqual({ key: 'sl-view:sl1:shared', ...LIMITS.salesViewShared });
+    expect(salesViewLimit('sl1', '100.64.1.2')).toEqual({ key: 'sl-view:sl1:shared', ...LIMITS.salesViewShared });
+    expect(salesViewLimit('sl1', null)).toEqual({ key: 'sl-view:sl1:shared', ...LIMITS.salesViewShared });
+    expect(salesViewLimit('sl2', '203.0.113.7').key).not.toBe(salesViewLimit('sl1', '203.0.113.7').key);
+    expect(salesMissLimit('sl1', '203.0.113.7')).toEqual({ key: 'sl-miss:sl1:203.0.113.7', ...LIMITS.salesRouteMiss });
+    expect(salesMissLimit('sl1', '192.168.1.9')).toEqual({ key: 'sl-miss:sl1:shared', ...LIMITS.salesRouteMissShared });
+    expect(salesIpKey('2001:db8::1')).toBe('2001:db8::1');
+    expect(salesIpKey('fd00::1')).toBe('shared');
+  });
+
+  it('unknown tokens count only against a known public IP', () => {
+    expect(salesBadTokenKey('203.0.113.7')).toBe('sl-bad:203.0.113.7');
+    expect(salesBadTokenKey('10.1.2.3')).toBeNull();
+    expect(salesBadTokenKey(null)).toBeNull();
+  });
+
+  it('the token only from "Authorization: SalesLink"; the device id only as 32 hex, hashed', () => {
+    const req = (h: Record<string, string>) => new Request('https://routeiq.example/api/s/view', { headers: h });
+    expect(salesTokenFromHeader(req({ authorization: 'SalesLink abc' }))).toBe('abc');
+    expect(salesTokenFromHeader(req({ authorization: 'DriverLink abc' }))).toBeNull();
+    expect(salesTokenFromHeader(req({}))).toBeNull();
+    expect(salesDeviceFromHeader(req({ 'x-sales-device': '0123456789ABCDEF0123456789abcdef' }))).toMatch(/^[0-9a-f]{8}$/);
+    expect(salesDeviceFromHeader(req({ 'x-sales-device': 'not-a-device' }))).toBeNull();
+    expect(SALES_HEADERS).toEqual({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'strict-origin', 'X-Robots-Tag': 'noindex, nofollow, noarchive' });
+  });
+
+  it('what a request adds to the link: a new phone, new routes, lastSeenAt at most every 5 minutes', () => {
+    const now = new Date('2026-10-19T06:00:00Z');
+    const fresh = { lastSeenAt: new Date(now.getTime() - 60_000), devicesJson: ['aaaaaaaa'], routesJson: ['R1'] };
+    expect(salesTouchPlan(fresh, 'aaaaaaaa', ['R1'], now)).toBeNull();
+    expect(salesTouchPlan(fresh, 'bbbbbbbb', ['R1', 'R2X'], now)).toEqual({ device: 'bbbbbbbb', routes: ['R2X'], seen: false });
+    expect(salesTouchPlan({ ...fresh, lastSeenAt: new Date(now.getTime() - 6 * 60_000) }, null, [], now)).toEqual({ device: null, routes: [], seen: true });
+    const full = { lastSeenAt: now, devicesJson: Array.from({ length: 200 }, (_, i) => i.toString(16).padStart(8, '0')), routesJson: [] };
+    expect(salesTouchPlan(full, 'ffffffff', [], now)).toBeNull();
+  });
+});

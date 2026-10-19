@@ -13,6 +13,8 @@ export default auth((req) => {
   const { pathname, search } = req.nextUrl;
   const session = req.auth;
 
+  // Everything else is public here: the token pages /d/<token> (driver link) and /s/<token> (salesman link) and
+  // their APIs /api/d/* and /api/s/* check their own token (withDriverLink / withSalesLink) and never need a session.
   const isProtected = pathname.startsWith('/t/') || pathname.startsWith('/admin');
 
   if (isProtected && !session?.user) {

@@ -228,3 +228,25 @@ One link per truck and delivery date opens the driver's phone page (`/d/<token>`
 - The retention janitor (`lib/jobs/delivery-janitor.ts`) runs at most every 10 minutes and writes one audit row per company and sweep (`DELIVERY_PHOTOS_PURGED`, `DELIVERY_LOCATIONS_PURGED`, `CASUAL_DRIVERS_CLEARED`).
 - **The backup horizon.** The deletions reach the live database only. Railway's volume backups keep the old data until those backups expire (daily backups 6 days, weekly 27 days), so the real deletion time is the retention plus the backup retention. A `pg_dump` kept elsewhere extends it by its own retention.
 - Photos are served only to signed-in users of the company (`GET /api/delivery-photos/:id`, any role, private cache) and to the same valid driver link (`GET /api/d/photos/:id`), with `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. The "Delivery actuals" Excel (per-driver performance data) is PLANNER and above; "Pin may be wrong" is company admin only.
+
+## Salesman link (19 Oct 2026)
+
+One link per company and delivery date (`/s/<token>`) for the salesmen's WhatsApp group: read-only, no account. Each salesman types his route code and sees his customers' deliveries of that day live (code: `apps/web/lib/sales-link/*`, handbook 3.23). It is a fourth principal next to users, the janitor token and the driver link.
+
+**Owner decision (19 Oct 2026): one shared link, the route code is a filter, not a password.** Route codes are short and in sequence, so **anyone holding the link - the whole group, and anyone a message is forwarded to - can look up any route of that day**: customer names and codes, invoice numbers, cases, expected times, results, the truck code and, while a trip still has that route's deliveries to make, the truck's approximate position. The owner chose this over one link (or a PIN) per salesman. **Accepted risk**, with these mitigations:
+
+| Exposure | Mitigation |
+|---|---|
+| How long a link works | Only the company's today or tomorrow can have a link; it stops at 06:00 company time the day after the delivery date (at most about 34 h after it is sent the evening before); a reissue never extends it |
+| A link forwarded outside the group | **Make a new link** (the old one answers "replaced" at once) or **Turn off** on the plan screen's Salesman link dialog; the office sees "opened on N phones" and the route codes looked up |
+| What a holder sees | No customer phone, address, access note or loading instruction; no order note, cancel note or the driver's free-text note (a result's reason as its label only, "as reported by the driver"); no money, priority, driver name or phone, helper, IMEI or internal id; other routes' customers only when their code is typed; customer pins at about 10 m (4 decimals), the truck at about 100 m (3 decimals), shown only while the trip on the road has that route's deliveries left, and a fix at most 60 min old |
+| Guessing route codes, scraping | Requests are limited per link AND public client IP (240 a minute; route codes with no deliveries: 40 per 10 minutes), never on a value the page chooses (the page's random device id only counts phones), and there is no limit for the whole link, so one holder cannot lock the group out; unknown tokens are counted per public IP (30 per 10 minutes) |
+| Guessing a token | 144-bit tokens; a shape check before any database work; its own HKDF key (`routeiq-sales-link`), header scheme (`Authorization: SalesLink <token>`), table and guard: a driver token never passes as a salesman token, nor the reverse; the salesman link can only read |
+| The token in Referer, caches, search engines | `Referrer-Policy: strict-origin` on `/s/*` and `/api/s/*` (map tiles get the origin only, never the token's path), `X-Robots-Tag: noindex`, `Cache-Control: no-store`; the page is an empty shell (link previews learn nothing) |
+| The token in our logs and Sentry | Never logged or audited (only its SHA-256 is stored, `SalesLink.tokenHash`); the API paths carry none; Sentry rewrites `/s/<token>` to `/s/[token]` and never traces `/s` or `/api/s` |
+| **Accepted:** Railway's HTTP logs and `wa.me` | The page path is logged once per page open; the WhatsApp message with the link passes through `wa.me` (Meta). Expiry and a new link are the mitigation |
+| A signed-in user of another company | 403; the link's own company's session is the office looking, never counted as a salesman's phone |
+
+**Key rotation.** `SALES_LINK_SECRET` (else the driver link's secret) is the key's source: rotating it makes every salesman link answer "replaced" until the office opens the dialog again (a new token is written then). Only the salesman links are affected when `SALES_LINK_SECRET` is set.
+
+**Retention.** The phones a link was opened on (8 hex of a hash of each page's random id) are erased with the location retention (the count stays); Start fresh removes the links of the days it removes.

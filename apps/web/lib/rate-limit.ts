@@ -190,4 +190,18 @@ export const LIMITS = {
    */
   ivmsBadSecret: { limit: 20, windowMs: 10 * 60_000 },
   ivmsWebhook: { limit: 300, windowMs: 60_000 },
+  /**
+   * The salesman link (lib/sales-link/guard.ts, owner request 19 Oct 2026; critique item 9). Unknown tokens per
+   * public IP, as the driver link. Everything else is keyed on the link AND the public client IP (lib/client-ip.ts),
+   * never on a header the page chooses (the device id only counts "opened on N phones"), and there is no limit
+   * for the whole link: one holder can never lock the other salesmen out. Salesmen share mobile CGNAT addresses,
+   * so the per-IP limits leave room for a crowd behind one address (each request is a 30 s memo hit). An unknown or
+   * internal IP (a proxy: every user would share it) is counted under one "shared" key per link with a larger limit.
+   */
+  salesBadToken: { limit: 30, windowMs: 10 * 60_000 },
+  salesView: { limit: 240, windowMs: 60_000 },
+  salesViewShared: { limit: 900, windowMs: 60_000 },
+  /** Route codes with no deliveries that day, per link and IP: guessing codes is slowed, typos are not punished. */
+  salesRouteMiss: { limit: 40, windowMs: 10 * 60_000 },
+  salesRouteMissShared: { limit: 150, windowMs: 10 * 60_000 },
 } as const;

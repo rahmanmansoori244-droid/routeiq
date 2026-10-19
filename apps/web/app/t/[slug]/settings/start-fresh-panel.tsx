@@ -16,6 +16,7 @@ import {
   START_FRESH_LIVE_TICK,
   START_FRESH_PREVIEW_MAX_AGE_MS,
   START_FRESH_GPS_LABEL,
+  START_FRESH_SALES_LINK_LABEL,
   START_FRESH_REMOVED,
   startFreshConfirmMatches,
   startFreshHasLive,
@@ -276,10 +277,12 @@ export function StartFreshPanel({ slug }: { slug: string }) {
   );
 }
 
-/** The removed counts as the panel lists them; the GPS tracking line only when the report has one (IVMS live link). */
+/** The removed counts as the panel lists them; the GPS tracking and salesman link lines only when the report has them. */
 function removedRows(removed: StartFreshRemoved): { label: string; value: number; sub?: boolean }[] {
-  const rows = START_FRESH_REMOVED.map((r) => ({ label: r.label, value: removed[r.key], sub: 'sub' in r && r.sub }));
-  return removed.gpsTracking === undefined ? rows : [...rows, { label: START_FRESH_GPS_LABEL, value: removed.gpsTracking }];
+  const rows: { label: string; value: number; sub?: boolean }[] = START_FRESH_REMOVED.map((r) => ({ label: r.label, value: removed[r.key], sub: 'sub' in r && r.sub }));
+  if (removed.gpsTracking !== undefined) rows.push({ label: START_FRESH_GPS_LABEL, value: removed.gpsTracking });
+  if (removed.salesLinks !== undefined) rows.push({ label: START_FRESH_SALES_LINK_LABEL, value: removed.salesLinks });
+  return rows;
 }
 
 function CountTable({

@@ -98,6 +98,8 @@ export const START_FRESH_DELETE_ORDER = [
   'stopEvent',
   'stopVisit',
   'driverLink',
+  // The salesman link (19 Oct 2026): one per company and delivery date, no foreign key but the company's.
+  'salesLink',
   // IVMS live link (16 Oct 2026): the GPS tracking rows in scope (IvmsState and the tracker mapping stay).
   'truckTrailPoint',
   'truckPosition',
@@ -525,6 +527,7 @@ async function collect(db: Db, s: Scope): Promise<{ sets: Sets; report: StartFre
   const sets: Sets = { runIds, scenarioIds, orderIds, batchIds, shiftIds, baselineIds, casualIds: casual.removable, hiredTruckIds };
 
   const gps = await gpsRowsInScope(db, s);
+  const salesLinks = await db.salesLink.count({ where: dayWhere });
   const removed: StartFreshRemoved = {
     uploadBatches: batchIds.length,
     orders: orderIds.length,
@@ -550,6 +553,7 @@ async function collect(db: Db, s: Scope): Promise<{ sets: Sets; report: StartFre
       (await countIn(shiftIds, (part) => db.truckLocation.count({ where: { tenantId: t, shiftId: { in: part } } }))) +
       (await countIn(shiftIds, (part) => db.deliveryProof.count({ where: { tenantId: t, shiftId: { in: part } } }))),
     ...(gps > 0 ? { gpsTracking: gps } : {}),
+    ...(salesLinks > 0 ? { salesLinks } : {}),
   };
   const kept: StartFreshKept = {
     customers: await db.customer.count({ where: { tenantId: t } }),
@@ -638,6 +642,8 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<{ removed: Parti
   events += await deleteIn(visitIds, (part) => tx.stopEvent.deleteMany({ where: { tenantId: t, visitId: { in: part } } }));
   const visits = (await tx.stopVisit.deleteMany({ where: dayWhere })).count;
   const links = (await tx.driverLink.deleteMany({ where: dayWhere })).count;
+  // The salesman links of those days (19 Oct 2026): their pages then answer "does not work".
+  const salesLinks = (await tx.salesLink.deleteMany({ where: dayWhere })).count;
   // The GPS tracking rows in scope (IVMS live link): none for a company that never used it.
   const gw = gpsWhereOf(s);
   const gps =
@@ -685,6 +691,7 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<{ removed: Parti
       baselines,
       oldDriverApp: shifts + positions + proofs,
       ...(gps > 0 ? { gpsTracking: gps } : {}),
+      ...(salesLinks > 0 ? { salesLinks } : {}),
     },
     alerts,
     facts,
@@ -743,6 +750,7 @@ export async function runStartFresh(
       const result: StartFreshReport = { ...report, removed: { ...report.removed, ...done } };
       // The preview counted GPS rows and the run found none left (the janitor's retention got there first).
       if (result.removed.gpsTracking !== undefined && done.gpsTracking === undefined) result.removed.gpsTracking = 0;
+      if (result.removed.salesLinks !== undefined && done.salesLinks === undefined) result.removed.salesLinks = 0;
       await audit(
         {
           tenantId,

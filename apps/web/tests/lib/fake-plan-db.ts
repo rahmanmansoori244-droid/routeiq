@@ -269,6 +269,8 @@ const MODELS = [
   'product', 'intakeLineKey', 'manualBaseline', 'region',
   // Delivery outcome and the driver page (owner request 4 Oct 2026); users: the office side names who recorded a result.
   'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'user',
+  // The salesman link (owner request 19 Oct 2026).
+  'salesLink',
   // Start fresh (4 Oct 2026) also clears the comparison baselines and the retired driver app's rows.
   'manualBaselineAssignment', 'driverShift', 'truckLocation', 'deliveryProof',
   // The hire suggestion (6 Oct 2026): a plan job that saved its plan looks for hire options.
