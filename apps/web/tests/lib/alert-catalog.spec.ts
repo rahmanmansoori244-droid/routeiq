@@ -468,7 +468,27 @@ describe('cause & action: the pick-lists (lib/alerts/review.ts)', () => {
   });
 
   it('GPS is no rule: a GPS or tracker problem is offered wherever a rule can read the GPS or a position', () => {
-    for (const f of ['LATENESS', 'UNLOADING', 'DEPOT', 'PIN', 'DRIVER_APP'] as const) expect(REVIEW_FAMILY_CAUSES[f], f).toContain('GPS_ISSUE');
+    for (const f of ['LATENESS', 'UNLOADING', 'DEPOT', 'PIN', 'TRUCK_OUT', 'DRIVER_APP'] as const) expect(REVIEW_FAMILY_CAUSES[f], f).toContain('GPS_ISSUE');
+  });
+
+  it('finding 7: Driver silent and Load not closed (the truck is still out, usually a long trip) offer the lateness causes and the move-it actions; the page not opened keeps the taps and phone list', () => {
+    expect([REVIEW_FAMILY_OF.DRIVER_SILENT, REVIEW_FAMILY_OF.LOAD_NOT_CLOSED, REVIEW_FAMILY_OF.PAGE_NOT_OPENED]).toEqual(['TRUCK_OUT', 'TRUCK_OUT', 'DRIVER_APP']);
+    for (const rule of ['DRIVER_SILENT', 'LOAD_NOT_CLOSED']) {
+      const { causes, actions } = reviewCodesFor(rule);
+      for (const c of ['TRAFFIC', 'EARLIER_STOPS_LONG', 'WAITING_AT_CUSTOMER', 'LONG_UNLOADING', 'OUT_OF_TIME', 'PLAN_WRONG', 'DRIVER_DID_NOT_TAP', 'PHONE_ISSUE', 'TRUCK_BREAKDOWN']) expect(causes, `${rule}: ${c}`).toContain(c);
+      for (const a of ['CALLED_DRIVER', 'CALLED_CUSTOMER', 'POSTPONED', 'MOVED_TRUCK', 'REPLANNED', 'REMINDED_DRIVER', 'UPDATED_ROUTEIQ']) expect(actions, `${rule}: ${a}`).toContain(a);
+      expect(normaliseReview(rule, { cause: 'TRAFFIC', action: 'CALLED_DRIVER' }, null).ok, rule).toBe(true);
+      expect(normaliseReview(rule, { cause: 'WAITING_AT_CUSTOMER', action: 'POSTPONED' }, null).ok, rule).toBe(true);
+    }
+    expect(reviewCodesFor('PAGE_NOT_OPENED').causes).not.toContain('TRAFFIC');
+    // The incident of the review: traffic raised Running late and Driver silent on one truck; one cause & action fits both.
+    expect(reviewFitsRule('DRIVER_SILENT', { cause: 'TRAFFIC', action: 'CALLED_DRIVER' })).toBe(true);
+    expect(reviewFitsRule('ETA_LATE', { cause: 'TRAFFIC', action: 'CALLED_DRIVER' })).toBe(true);
+    // Lateness from the taps is solved with the driver or in RouteIQ; a wrong result is corrected by the office, stock short by the warehouse.
+    expect(normaliseReview('ETA_LATE', { cause: 'DRIVER_DID_NOT_TAP', action: 'REMINDED_DRIVER' }, null).ok).toBe(true);
+    expect(normaliseReview('ETA_LATE', { cause: 'GPS_ISSUE', action: 'UPDATED_ROUTEIQ' }, null).ok).toBe(true);
+    expect(normaliseReview('PRIORITY_NOT_DELIVERED', { cause: 'STOCK_SHORT', action: 'CALLED_WAREHOUSE' }, null).ok).toBe(true);
+    expect(normaliseReview('DELIVERED_WITH_NOTE', { cause: 'FALSE_ALARM', action: 'UPDATED_ROUTEIQ' }, null).ok).toBe(true);
   });
 
   it('the NMWC options the owner named, and the critique additions (items 10c and 10d)', () => {
@@ -564,9 +584,12 @@ describe('migration 20261020000000_alert_notes and the schema', () => {
   const statements = SQL.split('\n').filter((l) => l.trim() && !l.trim().startsWith('--'));
   const body = statements.join('\n');
 
-  it("sorts after every migration before it and after the parallel branch's 20261019180000; it is the last on disk", () => {
+  it("is on disk and sorts after every migration before it and after the parallel branch's 20261019180000 (later releases add theirs after it)", () => {
     const dirs = readdirSync(path.join(WEB, 'prisma/migrations')).filter((n) => /^\d{14}_/.test(n)).sort();
-    expect(dirs.at(-1)).toBe(NAME);
+    // Review of the branch (20 Oct 2026), finding 14: never "the last on disk", which the next migration of any
+    // feature would break; only its own order against the migrations it follows.
+    expect(dirs).toContain(NAME);
+    expect(dirs.indexOf(NAME)).toBeGreaterThan(dirs.indexOf('20261019120000_gps_site_radius_away'));
     expect(NAME > '20261019120000_gps_site_radius_away').toBe(true);
     expect(NAME > '20261019180000_sales_link').toBe(true);
     expect(SQL).toContain(`DELETE FROM "_prisma_migrations" WHERE migration_name = '${NAME}';`);

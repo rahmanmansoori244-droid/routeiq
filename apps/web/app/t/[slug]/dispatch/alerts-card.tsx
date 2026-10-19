@@ -7,11 +7,11 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { acknowledgeAlerts } from '@/components/alerts-api';
-import { AlertReviewDialog } from '@/components/alert-review-dialog';
+import { AlertReviewDialog, reviewNoteNode } from '@/components/alert-review-dialog';
 import { daysBetween } from '@/lib/dispatch/time';
 import { ALERT_DAYS_AHEAD, ALERT_DAYS_BACK, ALERT_POLL_MS } from '@/lib/alerts/catalog';
 import type { OpsAlertRow } from '@/lib/alerts/types';
-import { alertReviewText, alertStateText, alertText, alertTime, alertWhere, groupByTruck, ruleLabel, SEVERITY_BADGE } from '@/lib/alerts/view';
+import { alertReviewFlags, alertReviewText, alertStateText, alertText, alertTime, alertWhere, groupByTruck, ruleLabel, SEVERITY_BADGE } from '@/lib/alerts/view';
 import { api } from './client-api';
 
 interface ListAnswer {
@@ -147,9 +147,18 @@ export function AlertsCard({
                       <span className="font-medium">{ruleLabel(r.rule)}</span> - {alertText(r)}
                       <span className="ms-1 text-xs text-muted-foreground">({r.state === 'OPEN' ? alertWhere(r) : alertStateText(r, timezone)})</span>
                       {r.review ? (
-                        <span className="block text-xs text-muted-foreground" data-testid="alerts-card-review-line">
-                          {alertReviewText(r, timezone)}
-                          {r.review.followUp ? ' · follow-up' : ''}
+                        <span className="block text-xs text-muted-foreground">
+                          {/* With the company's today: a save of another day than the card's says its day (finding 8). */}
+                          <span className="block" data-testid="alerts-card-review-line">
+                            {alertReviewText(r, timezone, today)}
+                            {r.review.followUp ? ' · follow-up' : ''}
+                          </span>
+                          {r.review.note ? reviewNoteNode(r.review.note, 'alerts-card-review-note') : null}
+                          {alertReviewFlags(r).length ? (
+                            <span className="block text-amber-700" data-testid="alerts-card-review-flags">
+                              ({alertReviewFlags(r).join(', ')})
+                            </span>
+                          ) : null}
                         </span>
                       ) : null}
                     </span>
@@ -160,7 +169,7 @@ export function AlertsCard({
                     ) : null}
                     {canAck ? (
                       <Button size="sm" variant="outline" className="h-6 whitespace-nowrap px-2 text-xs" onClick={() => setReviewing(r)} data-testid="alerts-card-review">
-                        {r.review ? 'Edit cause' : 'Cause & action'}
+                        {r.review ? 'Edit cause & action' : 'Cause & action'}
                       </Button>
                     ) : null}
                   </li>

@@ -563,9 +563,10 @@ export interface AlertPurgeCounts {
  * The alerts' retention. E-mail records older than `digestCutoff` are deleted. Alert rows of a delivery date
  * before `cutoffIso` (the company's today - ALERT_RETENTION_DAYS: they hold customer names and shortened driver
  * notes) lose them:
- * - without `keepUntilIso` (as before the cause & action): they are deleted;
- * - with `keepUntilIso` (an earlier date: the analysis data's retention, owner request 20 Oct 2026; critique of
- *   the design, items 2-4): every row is kept until then, so the share of alerts with a cause & action and the
+ * - without `keepUntilIso` (as before the cause & action, and the default: lib/jobs/delivery-janitor.ts
+ *   alertRowsKeptForAnalysis): they are deleted;
+ * - with `keepUntilIso` (an earlier date: the analysis data's retention, only with ALERT_KEEP_FOR_ANALYSIS=1 while
+ *   the owner decides; critique of the design, items 2-4): every row is kept until then, so the share of alerts with a cause & action and the
  *   false alarms per rule can still be counted for a range older than 90 days. Its details are removed: the
  *   text becomes '', the facts only "by GPS" ({"gps":true} or NULL), the e-mail error and the cause & action's
  *   free texts (note, Other texts) NULL; the codes, numbers, times and names stay; detailsRemovedAt makes it

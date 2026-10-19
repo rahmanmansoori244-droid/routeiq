@@ -16,9 +16,11 @@
  *   phone); after locationRetentionDays without a load their phone number is erased (the name stays:
  *   plans and audit rows show it).
  * - purgeOldAlerts (once a day, operations alerts of 16 Oct 2026): alert e-mail records older than 90 days
- *   are deleted; alert rows of a delivery date older than 90 days lose their text, facts and free texts (a
- *   row still open is closed first), and are deleted once older than the analysis data's retention (owner
- *   request 20 Oct 2026: their cause & action is decision data, lib/alerts/store.ts purgeOldAlertRows).
+ *   are deleted; alert rows of a delivery date older than 90 days are deleted with their cause & action (as
+ *   before it), and the cause & action audit rows of those alerts lose their free texts. Only with
+ *   ALERT_KEEP_FOR_ANALYSIS=1 on the server (owner decision pending, 20 Oct 2026) are the rows kept until the
+ *   analysis data's retention, their text, facts and free texts removed at 90 days (a row still open closed
+ *   first; lib/alerts/store.ts purgeOldAlertRows).
  *
  * Each sweep works per company in batches of 200, at most 5 batches, and writes one audit row per
  * company per sweep that changed something (the alerts: OPS_ALERTS_PURGED, counts only). The deletions
@@ -32,6 +34,7 @@ import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, todayIso } from '../dispatch/t
 import { DEFAULT_LOCATION_RETENTION_DAYS, DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
 import { ALERT_RETENTION_DAYS } from '../alerts/catalog';
 import { purgeOldAlertRows } from '../alerts/store';
+import { scrubReviewAuditTexts } from '../alerts/inbox';
 import { ANALYSIS_RETENTION_BOUNDS, DEFAULT_ANALYSIS_RETENTION_DAYS } from '../analysis/types';
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -220,33 +223,56 @@ export async function clearIdleCasualDrivers(now: Date = new Date(), db: Db = pr
 }
 
 /**
+ * Whether alert rows are kept past 90 days, until the company's analysis data retention (Keep analysis data,
+ * 730 days by default, never less than 90), so the causes and actions recorded (owner request 20 Oct 2026) can
+ * still be counted for an older range. OWNER DECISION PENDING (review of the branch, 20 Oct 2026, finding 4):
+ * off unless ALERT_KEEP_FOR_ANALYSIS=1 on `web`, so merging keeps the documented retention (every alert row
+ * deleted 90 days after its date).
+ */
+export function alertRowsKeptForAnalysis(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.ALERT_KEEP_FOR_ANALYSIS === '1';
+}
+
+/**
  * Operations alerts (owner request 16 Oct 2026): alert e-mail records older than ALERT_RETENTION_DAYS (90) are
- * deleted. Alert rows of a delivery date older than 90 days (they hold customer names and shortened driver
- * notes) lose their text, facts and the cause & action's free texts, a row still open closing first as EXPIRED;
- * the rows themselves stay until the company's analysis data retention (Keep analysis data, 730 days by
- * default, never less than 90), so the causes and actions recorded (owner request 20 Oct 2026) and the share of
- * alerts with one can still be counted (lib/alerts/store.ts purgeOldAlertRows). Per company, by its own today.
- * One audit row OPS_ALERTS_PURGED (counts only) when rows changed: the rows now hold the office's own input.
- * To go back to deleting every row at 90 days, pass no keepUntilIso.
+ * deleted, and alert rows of a delivery date older than 90 days (they hold customer names, shortened driver notes
+ * and the office's cause & action) are deleted, as before the cause & action. With ALERT_KEEP_FOR_ANALYSIS=1
+ * (alertRowsKeptForAnalysis) they are kept until the analysis data's retention instead: their text, facts and
+ * free texts removed, a row still open closing first as EXPIRED (lib/alerts/store.ts purgeOldAlertRows). Either
+ * way the cause & action audit rows of alerts older than 90 days lose their free texts (inbox.ts
+ * scrubReviewAuditTexts: the note and the Other texts leave the audit log with the alert). Per company, by its
+ * own today. One audit row OPS_ALERTS_PURGED (counts only) when something changed: the rows hold the office's
+ * own input.
  */
 export async function purgeOldAlerts(
   now: Date = new Date(),
   db: Db = prisma,
-): Promise<{ alerts: number; reviewed: number; closed: number; detailsRemoved: number; digests: number }> {
-  const out = { alerts: 0, reviewed: 0, closed: 0, detailsRemoved: 0, digests: 0 };
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ alerts: number; reviewed: number; closed: number; detailsRemoved: number; digests: number; auditTexts: number }> {
+  const out = { alerts: 0, reviewed: 0, closed: 0, detailsRemoved: 0, digests: 0, auditTexts: 0 };
+  const keep = alertRowsKeptForAnalysis(env);
   for (const t of await tenants(db)) {
     const today = todayIso(t.timezone, now);
     const cutoffIso = addDaysIso(today, -ALERT_RETENTION_DAYS);
-    const keepDays = Math.max(ALERT_RETENTION_DAYS, t.analysisRetentionDays);
-    const r = await purgeOldAlertRows(db, t.tenantId, cutoffIso, new Date(now.getTime() - ALERT_RETENTION_DAYS * DAY_MS), { keepUntilIso: addDaysIso(today, -keepDays), now });
-    if (r.alerts || r.closed || r.detailsRemoved) {
+    const keepDays = keep ? Math.max(ALERT_RETENTION_DAYS, t.analysisRetentionDays) : ALERT_RETENTION_DAYS;
+    const r = await purgeOldAlertRows(db, t.tenantId, cutoffIso, new Date(now.getTime() - ALERT_RETENTION_DAYS * DAY_MS), keep ? { keepUntilIso: addDaysIso(today, -keepDays), now } : {});
+    const auditTexts = await scrubReviewAuditTexts(db, t.tenantId, cutoffIso);
+    if (r.alerts || r.closed || r.detailsRemoved || auditTexts) {
       await audit({
         tenantId: t.tenantId,
         userId: null,
         action: 'OPS_ALERTS_PURGED',
         entity: 'Tenant',
         entityId: t.tenantId,
-        afterJson: { deleted: r.alerts, deletedWithCauseAndAction: r.reviewed, closedAsExpired: r.closed, detailsRemoved: r.detailsRemoved, detailsAfterDays: ALERT_RETENTION_DAYS, rowsAfterDays: keepDays } as never,
+        afterJson: {
+          deleted: r.alerts,
+          deletedWithCauseAndAction: r.reviewed,
+          closedAsExpired: r.closed,
+          detailsRemoved: r.detailsRemoved,
+          auditTextsRemoved: auditTexts,
+          detailsAfterDays: ALERT_RETENTION_DAYS,
+          rowsAfterDays: keepDays,
+        } as never,
       });
     }
     out.alerts += r.alerts;
@@ -254,6 +280,7 @@ export async function purgeOldAlerts(
     out.closed += r.closed;
     out.detailsRemoved += r.detailsRemoved;
     out.digests += r.digests;
+    out.auditTexts += auditTexts;
   }
   return out;
 }

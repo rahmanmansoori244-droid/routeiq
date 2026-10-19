@@ -2,13 +2,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { acknowledgeAlerts } from '@/components/alerts-api';
-import { AlertReviewDialog } from '@/components/alert-review-dialog';
+import { AlertReviewDialog, reviewNoteNode } from '@/components/alert-review-dialog';
 import { api } from '@/app/t/[slug]/dispatch/client-api';
 import { ALERT_POLL_MS, ALERT_RULE_LIST } from '@/lib/alerts/catalog';
 import { ALERT_FOLLOWUP_DAYS } from '@/lib/alerts/review';
@@ -42,7 +44,15 @@ interface ListAnswer extends Partial<SweepCheck> {
   rows: OpsAlertRow[];
   truncated: boolean;
   reviewCounts?: ReviewCounts;
+  /** Set by the page: the query this answer was read for (alertsQuery) and the read's number (a deep link waits for a newer read of its filters). */
+  forQuery?: string;
+  readNo?: number;
 }
+
+type Initial = { from: string; to: string; depotId: string; state: string; review?: string };
+
+/** The filters a link (the page's URL) asks for: its dates, depot, state and cause & action, every rule. */
+const filtersOf = (initial: Initial): Filters => ({ ...initial, rule: '', review: initial.review ?? 'all' });
 
 const STATES = [
   { value: 'all', label: 'All' },
@@ -67,15 +77,16 @@ export function alertsQuery(f: Filters): string {
   return q.toString();
 }
 
-/** "12 of 40 alerts of these dates have a cause & action (2 say Other) · 3 to follow up (last 92 days)". */
+/**
+ * "12 of 40 alerts of these dates have a cause & action (2 say Other) · 3 to follow up (last 92 days)": the dates
+ * chosen, whatever the cause & action filter (Follow-up too), and the follow-ups of the last 92 days, both with the
+ * depot, rule and state chosen (lib/alerts/inbox.ts alertReviewCounts).
+ */
 export function reviewCountText(c: ReviewCounts | undefined): string | null {
   if (!c) return null;
-  const other = c.other ? ` (${c.other} say Other: worth a code of its own when it comes back often)` : '';
+  const other = c.other ? ` (${c.other} say Other)` : '';
   return `${c.saved} of ${c.alerts} alert${c.alerts === 1 ? '' : 's'} of these dates ${c.saved === 1 ? 'has' : 'have'} a cause & action${other} · ${c.followUp} to follow up (last ${ALERT_FOLLOWUP_DAYS} days)`;
 }
-
-/** The note as the row shows it: at most 120 characters (the whole note in the tooltip). */
-const shortNote = (note: string) => (Array.from(note).length > 120 ? `${Array.from(note).slice(0, 119).join('')}…` : note);
 
 /**
  * The Alerts page (operations alerts, owner request 16 Oct 2026): the filters, then every alert of the
@@ -107,28 +118,37 @@ export function AlertsClient({
   timezone: string;
   today: string;
   depots: { id: string; code: string; name: string }[];
-  initial: { from: string; to: string; depotId: string; state: string; review?: string };
+  initial: Initial;
   initialReviewId?: string | null;
 }) {
-  const [f, setF] = useState<Filters>({ ...initial, rule: '', review: initial.review ?? 'all' });
+  const router = useRouter();
+  const [f, setF] = useState<Filters>(() => filtersOf(initial));
   const [answer, setAnswer] = useState<ListAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // A snapshot of the alert whose cause & action is being edited: the poll never resets the dialog.
   const [reviewing, setReviewing] = useState<OpsAlertRow | null>(null);
-  const deepLinked = useRef(false);
+  // The bell's link (reviewId): the last one taken in hand, and the one waiting for a read of its filters made after it.
+  const linkTaken = useRef<string | null>(null);
+  const linkWaiting = useRef<{ id: string; query: string; afterRead: number } | null>(null);
+  const reads = useRef(0);
+  const filters = useRef(f);
+  filters.current = f;
 
   const read = useCallback(async () => {
-    const r = await api<ListAnswer>(`/api/alerts?${alertsQuery(f)}`);
+    const query = alertsQuery(f);
+    const readNo = ++reads.current;
+    const r = await api<ListAnswer>(`/api/alerts?${query}`);
     if (!r.ok || !r.data) {
       setError(r.error ?? 'Could not read the alerts.');
       return;
     }
     setError(null);
-    setAnswer(r.data);
+    setAnswer({ ...r.data, forQuery: query, readNo });
   }, [f]);
 
-  const live = f.from <= today && today <= f.to;
+  // Follow-up lists the last 92 days up to tomorrow, whatever the dates: it reaches today.
+  const live = f.review === 'followup' || (f.from <= today && today <= f.to);
   useEffect(() => {
     void read();
     if (!live || !enabled) return;
@@ -138,13 +158,45 @@ export function AlertsClient({
     return () => clearInterval(t);
   }, [read, live, enabled]);
 
-  // The bell's "Cause & action" link: open that alert's dialog once its row is read.
+  // The bell's "Cause & action" link (review of the branch, 20 Oct 2026, finding 5). Next keeps this page mounted
+  // when only its search changes, so a link followed while the page is open comes as new props: each new reviewId
+  // puts the filters back to the link's (its date, every depot, state and rule) and waits for that list.
+  const linkFilters = alertsQuery(filtersOf(initial));
   useEffect(() => {
-    if (deepLinked.current || !initialReviewId || !canAck || !answer) return;
-    deepLinked.current = true;
-    const row = answer.rows.find((r) => r.id === initialReviewId);
-    if (row) setReviewing(row);
-  }, [answer, initialReviewId, canAck]);
+    if (!initialReviewId) {
+      // The link left the address (below): the same alert's link works again.
+      linkTaken.current = null;
+      return;
+    }
+    if (linkTaken.current === initialReviewId) return;
+    linkTaken.current = initialReviewId;
+    const next = filtersOf(initial);
+    const query = alertsQuery(next);
+    // A read of these filters made from now on (an answer read before the link may miss a new alert).
+    linkWaiting.current = { id: initialReviewId, query, afterRead: reads.current };
+    if (alertsQuery(filters.current) === query) void read();
+    else setF(next);
+    // `initial` is new on every server render; its filters are in linkFilters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialReviewId, linkFilters]);
+
+  // Once that list is read: open the alert's dialog, or say why not; then take reviewId out of the address, so a
+  // refresh does not open the dialog again and the same alert's link works again.
+  useEffect(() => {
+    const w = linkWaiting.current;
+    if (!w || !answer || answer.forQuery !== w.query || (answer.readNo ?? 0) <= w.afterRead) return;
+    linkWaiting.current = null;
+    if (canAck) {
+      const row = answer.rows.find((r) => r.id === w.id);
+      if (row) setReviewing(row);
+      else toast.warning('This alert is not in the list of its day: it may have been removed. Check the filters.');
+    }
+    if (typeof window !== 'undefined' && window.location) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('reviewId');
+      router.replace(`${url.pathname}${url.search}`, { scroll: false });
+    }
+  }, [answer, canAck, router]);
 
   async function ack(rows: OpsAlertRow[]) {
     setBusy(true);
@@ -250,7 +302,7 @@ export function AlertsClient({
       </div>
       {f.review === 'followup' ? (
         <p className="text-xs text-muted-foreground" data-testid="alerts-followup-note">
-          Follow-up lists the alerts that need it from the last {ALERT_FOLLOWUP_DAYS} days, whatever the dates above.
+          Follow-up lists the alerts that need it from the last {ALERT_FOLLOWUP_DAYS} days, whatever the dates above (the count below is of the dates above).
         </p>
       ) : null}
       {counts ? (
@@ -307,11 +359,7 @@ export function AlertsClient({
                               Follow-up
                             </Badge>
                           ) : null}
-                          {r.review.note ? (
-                            <span className="block" title={r.review.note}>
-                              Note: {shortNote(r.review.note)}
-                            </span>
-                          ) : null}
+                          {r.review.note ? reviewNoteNode(r.review.note, 'alerts-review-note') : null}
                           {flags.length ? <span className="block text-amber-700">({flags.join(', ')})</span> : null}
                         </div>
                       ) : null}

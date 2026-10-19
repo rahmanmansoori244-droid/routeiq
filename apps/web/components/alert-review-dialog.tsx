@@ -14,20 +14,45 @@ import {
   ALERT_REVIEW_NOTE_MAX,
   ALERT_REVIEW_OTHER_MAX,
   charCount,
+  cleanReviewText,
   forcesFollowUp,
   normaliseReview,
   reviewFitsRule,
   reviewOptions,
 } from '@/lib/alerts/review';
+import { oneLine } from '@/lib/alerts/text';
 import type { AlertReviewView, OpsAlertRow } from '@/lib/alerts/types';
 import { alertReviewFlags, alertStateText, alertText, alertWhen, alertTime, alertWhere, reviewActionText, reviewCauseText, ruleLabel } from '@/lib/alerts/view';
 
 const EMPTY: ReviewDraft = { cause: '', causeOther: '', action: '', actionOther: '', note: '', followUp: false };
 
-function draftOf(v: AlertReviewView | null): ReviewDraft {
+/**
+ * The draft of a saved cause & action. A follow-up that was only FORCED ("Nothing yet" / "Not found yet") is not
+ * carried into the draft (review of the branch, 20 Oct 2026, finding 6): once the real cause and action are picked
+ * the box is unticked, so a resolved alert does not stay on the Follow-up list. One ticked by hand with other codes
+ * stays ticked (it was never forced).
+ */
+export function draftOf(v: AlertReviewView | null): ReviewDraft {
   if (!v) return EMPTY;
-  return { cause: v.cause, causeOther: v.causeOther ?? '', action: v.action, actionOther: v.actionOther ?? '', note: v.note ?? '', followUp: v.followUp };
+  return { cause: v.cause, causeOther: v.causeOther ?? '', action: v.action, actionOther: v.actionOther ?? '', note: v.note ?? '', followUp: v.followUp && !forcesFollowUp(v) };
 }
+
+/**
+ * The text a free text will be saved as, when that differs from what was typed (review of the branch, 20 Oct
+ * 2026, finding 12): runs of 6 or more digits removed (a time range written with dots, "10.30-11.45", or a date,
+ * "20/10/2026", becomes "[number]"), lines folded into one, cut. Null when it is saved as typed (spaces aside).
+ */
+export function savedAsPreview(typed: string, max: number): string | null {
+  const cleaned = cleanReviewText(typed, max);
+  if (!cleaned) return null;
+  return cleaned === oneLine(typed) && !/[\r\n]/.test(typed.trim()) ? null : cleaned;
+}
+
+/** Shown under the form before anything was picked: a hint, not an error (finding 11). */
+export const REVIEW_START_HINT = 'Pick a cause and an action to save.';
+
+/** The line under the note: always there, so the rule is not lost once typing starts (finding 12). */
+export const REVIEW_NOTE_HELP = 'Numbers of 6 digits or more are removed (phone numbers, and dates or times written with digits and dots, like 20/10/2026 or 10.30-11.45): write times like 10:30.';
 
 const SKIP_WORDS: Record<string, string> = {
   ALREADY_SAVED: 'someone saved one meanwhile',
@@ -36,6 +61,38 @@ const SKIP_WORDS: Record<string, string> = {
   DETAILS_REMOVED: 'older than 90 days',
   NOT_FOUND: 'no longer exists',
 };
+
+/** A note longer than this shows its start and a "more" to open the whole of it. */
+export const REVIEW_NOTE_SHORT = 120;
+
+/**
+ * The note of a cause & action under an alert, for EVERY role (owner request: visible to everyone who sees alerts;
+ * review of the branch, 20 Oct 2026, finding 8): up to 120 characters as it is; a longer one shows its start and
+ * "more", which opens the whole note in place (a details element: no tooltip, which a phone never shows, and
+ * nothing to load). A plain function (not a component), so the screens' trees hold its elements.
+ */
+export function reviewNoteNode(note: string, testId: string) {
+  const chars = Array.from(note);
+  if (chars.length <= REVIEW_NOTE_SHORT) {
+    return (
+      <span className="block" data-testid={testId}>
+        Note: {note}
+      </span>
+    );
+  }
+  return (
+    <details className="group" data-testid={testId} data-long="true">
+      <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+        <span className="group-open:hidden">
+          Note: {chars.slice(0, REVIEW_NOTE_SHORT - 1).join('')}… <span className="text-primary underline">more</span>
+        </span>
+        <span className="hidden group-open:inline">
+          Note: {note} <span className="text-primary underline">less</span>
+        </span>
+      </summary>
+    </details>
+  );
+}
 
 /** The other alerts the dialog offers to fill too: the same truck and day, none of their own, not read-only. */
 export function incidentAlerts(target: OpsAlertRow, rows: readonly OpsAlertRow[]): OpsAlertRow[] {
@@ -82,11 +139,14 @@ export function AlertReviewDialog({
   const [also, setAlso] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // A field was changed: until then a missing pick is a hint, not a red error (finding 11).
+  const [touched, setTouched] = useState(false);
   const shown = useRef(0);
 
   useEffect(() => {
     shown.current++;
     setBusy(false);
+    setTouched(false);
     setNotice(null);
     setAlso([]);
     setAck(true);
@@ -105,8 +165,19 @@ export function AlertReviewDialog({
   const fits = (r: OpsAlertRow) => (checked.ok ? reviewFitsRule(r.rule, checked.value) : true);
   const alsoIds = also.filter((id) => others.some((o) => o.id === id && fits(o)));
   const flags = current ? alertReviewFlags({ ...target, review: current }) : [];
-  const set = (patch: Partial<ReviewDraft>) => setDraft((d) => ({ ...d, ...patch }));
+  const set = (patch: Partial<ReviewDraft>) => {
+    setTouched(true);
+    setDraft((d) => ({ ...d, ...patch }));
+  };
   const readOnly = target.detailsRemoved;
+  // Before a field was changed, or while a code is still to be picked: a neutral hint; a real problem (Other
+  // without its text) in red once the user is at it.
+  const missingPick = !checked.ok && (checked.code === 'REVIEW_CAUSE_REQUIRED' || checked.code === 'REVIEW_ACTION_REQUIRED');
+  const problemText = readOnly || !problem ? '' : touched ? problem : REVIEW_START_HINT;
+  const problemIsError = !!problemText && touched && !missingPick;
+  const notePreview = readOnly ? null : savedAsPreview(draft.note, ALERT_REVIEW_NOTE_MAX);
+  const causeOtherPreview = readOnly || draft.cause !== 'OTHER' ? null : savedAsPreview(draft.causeOther, ALERT_REVIEW_OTHER_MAX);
+  const actionOtherPreview = readOnly || draft.action !== 'OTHER' ? null : savedAsPreview(draft.actionOther, ALERT_REVIEW_OTHER_MAX);
 
   async function answer(r: ReviewAnswer, started: number, removed: boolean) {
     if (started !== shown.current || !target) return;
@@ -234,6 +305,11 @@ export function AlertReviewDialog({
                 data-testid="alert-review-cause-other"
               />
             ) : null}
+            {causeOtherPreview ? (
+              <p className="text-xs text-amber-800" data-testid="alert-review-cause-other-preview">
+                Will be saved as: {causeOtherPreview}
+              </p>
+            ) : null}
           </div>
           <div className="space-y-1">
             <Label htmlFor="ar-action">Action taken or decided</Label>
@@ -263,6 +339,11 @@ export function AlertReviewDialog({
                 data-testid="alert-review-action-other"
               />
             ) : null}
+            {actionOtherPreview ? (
+              <p className="text-xs text-amber-800" data-testid="alert-review-action-other-preview">
+                Will be saved as: {actionOtherPreview}
+              </p>
+            ) : null}
           </div>
           <div className="space-y-1">
             <Label htmlFor="ar-note">Note (optional)</Label>
@@ -270,15 +351,26 @@ export function AlertReviewDialog({
               id="ar-note"
               rows={3}
               maxLength={ALERT_REVIEW_NOTE_MAX}
-              placeholder="What you found and what was decided. No phone numbers: any number of 6 digits or more (dates and times written with digits too) is removed."
+              placeholder="What you found and what was decided."
+              aria-describedby="ar-note-help"
               value={draft.note}
               disabled={readOnly}
               onChange={(e) => set({ note: e.target.value })}
               data-testid="alert-review-note"
             />
-            <p className="text-right text-xs text-muted-foreground">
-              {charCount(draft.note)}/{ALERT_REVIEW_NOTE_MAX}
-            </p>
+            <div className="flex items-start justify-between gap-2 text-xs text-muted-foreground">
+              <p id="ar-note-help" data-testid="alert-review-note-help">
+                {REVIEW_NOTE_HELP}
+              </p>
+              <p className="shrink-0">
+                {charCount(draft.note)}/{ALERT_REVIEW_NOTE_MAX}
+              </p>
+            </div>
+            {notePreview ? (
+              <p className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900" data-testid="alert-review-note-preview">
+                Will be saved as: {notePreview}
+              </p>
+            ) : null}
           </div>
           <label className="flex items-center gap-2">
             <Checkbox
@@ -322,8 +414,13 @@ export function AlertReviewDialog({
               ) : null}
             </div>
           ) : null}
-          <p className="min-h-[1rem] text-xs text-destructive" aria-live="polite" data-testid="alert-review-problem">
-            {readOnly ? '' : (problem ?? '')}
+          <p
+            className={`min-h-[1rem] text-xs ${problemIsError ? 'text-destructive' : 'text-muted-foreground'}`}
+            aria-live="polite"
+            data-testid="alert-review-problem"
+            data-error={problemIsError ? 'true' : 'false'}
+          >
+            {problemText}
           </p>
         </div>
         <DialogFooter className="gap-2">

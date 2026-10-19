@@ -162,7 +162,9 @@ export async function readAnalysis(
     db.depot.findMany({ where: { tenantId }, select: { id: true, code: true } }),
     db.opsAlert.findMany({ where, select: ALERT_EXPORT_SELECT, orderBy: [{ deliveryDate: 'asc' }, { truckCode: 'asc' }, { occurredAt: 'asc' }, { id: 'asc' }] }),
   ]);
-  const customerIds = [...new Set([...visits.map((v) => v.customerId), ...alerts.map((a) => a.customerId).filter((c): c is string => !!c)])];
+  // The alerts' customers now and when their cause & action was saved (a re-plan can put another customer at the stop).
+  const alertCustomers = alerts.flatMap((a) => [a.customerId, a.reviewCustomerId]).filter((c): c is string => !!c);
+  const customerIds = [...new Set([...visits.map((v) => v.customerId), ...alertCustomers])];
   const offsetVisitIds = [...new Set(visits.filter((v) => v.pinOffset && v.visitId).map((v) => v.visitId!))];
   const [customers, pins] = await Promise.all([
     findInParts(customerIds, (part) => db.customer.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, code: true, branchCode: true, name: true, lat: true, lng: true } })),
@@ -312,8 +314,9 @@ export const ALERT_SHEET = 'Alert causes & actions';
 export const README_ALERTS_LINES: string[] = [
   `${ALERT_SHEET} (owner request 20 Oct 2026): every operations alert of the range - one row per rule and subject (a stop, a load or a truck-day) per day - with the cause & action the office recorded after checking it (empty when nobody did), so the share of alerts with one, the causes per rule and the decisions taken can be counted. An alert that closed and came back keeps one cause & action ("Came back after the save").`,
   'Incident: the alerts of one truck and day saved together with one cause & action share a number (count incidents, not alerts). Minutes from first seen to first save: from when the alert was first shown (empty when saved before, which happens when it came back). "Saved while the alert was open" tells live decisions from labelling after the fact.',
-  'Retention: 90 days after its date an alert loses its text, its facts (but "By GPS"), the note and the Other texts ("Details removed"); the row with its codes stays as long as the analysis data (Settings: Keep analysis data). Today\'s alerts can still change after the download.',
-  'Other: read the Other causes and actions once a month; one that comes back often can become a code of its own (lib/alerts/review.ts, no database change).',
+  'Customer: the customer of the stop now; "Customer when saved" is the one the cause & action was saved for (a re-plan can put another customer at the same stop: count causes per customer with that column).',
+  'Retention: an alert is deleted with its cause & action 90 days after its date (keep this file to count older ones). Only where the company keeps alerts as long as the analysis data does the row stay, its text, facts (but "By GPS"), note and Other texts removed ("Details removed"). Today\'s alerts can still change after the download.',
+  'Other: read the Other causes and actions once a month; tell RouteIQ support when one comes back often: it can become a choice of its own.',
 ];
 
 /** One workbook streamed sheet by sheet with a turn for the web process every 200 rows (rows in, bytes out). */
@@ -431,6 +434,10 @@ export function alertSheetColumns(data: Pick<AnalysisData, 'tz' | 'depots' | 'cu
     { header: 'Came back after the save', width: 8, value: (r) => yes(r, r.reviewOccurrences !== null && r.occurrences > r.reviewOccurrences) },
     { header: 'Got worse after the save', width: 8, value: (r) => yes(r, r.reviewTier !== null && r.tier > r.reviewTier) },
     { header: 'Now about another customer', width: 8, value: (r) => yes(r, (r.customerId ?? null) !== (r.reviewCustomerId ?? null)) },
+    // The customer the cause & action was saved for (review of the branch, 20 Oct 2026, finding 10): the Customer
+    // columns name the stop's customer now, which a re-plan can change.
+    { header: 'Customer code when saved', width: 12, value: (r) => (saved(r) ? (cust(r.reviewCustomerId)?.code ?? null) : null) },
+    { header: 'Customer when saved', width: 26, value: (r) => (saved(r) ? (cust(r.reviewCustomerId)?.name ?? null) : null) },
     { header: 'Incident', width: 7, value: (r) => (r.reviewGroupId ? (incident.get(r.reviewGroupId) ?? null) : null) },
   ];
 }

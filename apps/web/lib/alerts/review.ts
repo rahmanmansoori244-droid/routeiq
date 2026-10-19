@@ -7,8 +7,8 @@
  * What the office records after checking an alert (PLANNER and up; every role reads it):
  * - the main CAUSE and the ACTION taken or decided, each a code from a pick-list so the answers can be
  *   counted (the export's "Alert causes & actions" sheet). Each list depends on the rule's family (running
- *   late, unloading, depot turn, delivery result, pin, driver's page) and ends with the same codes in every
- *   family (SETTING_TOO_TIGHT, FALSE_ALARM, NOT_KNOWN, OTHER; NO_ACTION, NONE_YET, OTHER). OTHER takes a short
+ *   late, unloading, depot turn, delivery result, pin, truck still out, driver's page) and ends with the same
+ *   codes in every family (SETTING_TOO_TIGHT, FALSE_ALARM, NOT_KNOWN, OTHER; NO_ACTION, NONE_YET, OTHER). OTHER takes a short
  *   text of its own (3-120 characters). The selects start empty: a default would skew the counts;
  * - an optional note (at most 500 characters, folded to one line, every run of 6 or more digits removed like
  *   any alert text: no phone number, and dates and times written with digits become "[number]" too);
@@ -151,7 +151,7 @@ export const ALERT_REVIEW_ACTION_TEXT: Record<AlertReviewAction, string> = {
 };
 
 /** The rule families whose cause and action lists differ. */
-export const REVIEW_FAMILIES = ['LATENESS', 'UNLOADING', 'DEPOT', 'DELIVERY', 'PIN', 'DRIVER_APP'] as const;
+export const REVIEW_FAMILIES = ['LATENESS', 'UNLOADING', 'DEPOT', 'DELIVERY', 'PIN', 'TRUCK_OUT', 'DRIVER_APP'] as const;
 export type ReviewFamily = (typeof REVIEW_FAMILIES)[number];
 
 export const REVIEW_FAMILY_LABEL: Record<ReviewFamily, string> = {
@@ -160,6 +160,7 @@ export const REVIEW_FAMILY_LABEL: Record<ReviewFamily, string> = {
   DEPOT: 'Depot turn and dispatch',
   DELIVERY: 'Delivery result',
   PIN: 'Pin and proof',
+  TRUCK_OUT: 'Truck still out (silent, load not closed)',
   DRIVER_APP: "Driver's page and taps",
 };
 
@@ -173,8 +174,11 @@ export const REVIEW_FAMILY_OF: Record<AlertRule, ReviewFamily> = {
   PRIORITY_NOT_DELIVERED: 'DELIVERY',
   DELIVERED_WITH_NOTE: 'DELIVERY',
   PROOF_FAR: 'PIN',
-  DRIVER_SILENT: 'DRIVER_APP',
-  LOAD_NOT_CLOSED: 'DRIVER_APP',
+  // The truck is still out (review of the branch, 20 Oct 2026, finding 7): next stop overdue with nothing from the
+  // phone, or not Completed after the planned return - usually a long trip (traffic, waiting, long unloading), so
+  // these share the lateness causes and the "move it" actions, with the taps and phone ones.
+  DRIVER_SILENT: 'TRUCK_OUT',
+  LOAD_NOT_CLOSED: 'TRUCK_OUT',
   PAGE_NOT_OPENED: 'DRIVER_APP',
 };
 
@@ -257,6 +261,26 @@ export const REVIEW_FAMILY_CAUSES: Record<ReviewFamily, readonly AlertReviewCaus
     ...REVIEW_CAUSE_TAIL,
   ],
   PIN: ['WRONG_PIN', 'SECOND_DROP_POINT', 'LATE_TAP', 'GPS_ISSUE', 'PHONE_ISSUE', 'NEW_DRIVER', ...REVIEW_CAUSE_TAIL],
+  TRUCK_OUT: [
+    'TRAFFIC',
+    'EARLIER_STOPS_LONG',
+    'WAITING_AT_CUSTOMER',
+    'LONG_UNLOADING',
+    'CUSTOMER_NOT_READY',
+    'OUT_OF_TIME',
+    'PLAN_WRONG',
+    'PLAN_CHANGED',
+    'LATE_DEPOT_START',
+    'NO_CREW',
+    'DRIVER_BREAK',
+    'TRUCK_BREAKDOWN',
+    'DRIVER_DID_NOT_TAP',
+    'NEW_DRIVER',
+    'PHONE_ISSUE',
+    'OFFICE_DID_NOT_UPDATE',
+    'GPS_ISSUE',
+    ...REVIEW_CAUSE_TAIL,
+  ],
   DRIVER_APP: [
     'DRIVER_DID_NOT_TAP',
     'NEW_DRIVER',
@@ -287,6 +311,9 @@ export const REVIEW_FAMILY_ACTIONS: Record<ReviewFamily, readonly AlertReviewAct
     'CHANGED_CUSTOMER_TIMES',
     'FIXED_PIN',
     'SENT_HELP',
+    // The ETA comes from the driver's taps: a lateness caused by taps is solved with the driver or in RouteIQ.
+    'REMINDED_DRIVER',
+    'UPDATED_ROUTEIQ',
     'CHANGED_SETTING',
     'ESCALATED',
     ...REVIEW_ACTION_TAIL,
@@ -328,10 +355,29 @@ export const REVIEW_FAMILY_ACTIONS: Record<ReviewFamily, readonly AlertReviewAct
     'CANCELLED_ORDER',
     'FIXED_PIN',
     'CHANGED_CUSTOMER_TIMES',
+    // A result recorded by mistake, corrected by the office; stock short on the truck.
+    'UPDATED_ROUTEIQ',
+    'CALLED_WAREHOUSE',
     'ESCALATED',
     ...REVIEW_ACTION_TAIL,
   ],
   PIN: ['FIXED_PIN', 'CALLED_DRIVER', 'CALLED_CUSTOMER', 'REMINDED_DRIVER', 'SHOWED_DRIVER_PAGE', 'CHANGED_SETTING', ...REVIEW_ACTION_TAIL],
+  TRUCK_OUT: [
+    'CALLED_DRIVER',
+    'CALLED_CUSTOMER',
+    'REPLANNED',
+    'MOVED_TRUCK',
+    'POSTPONED',
+    'DELIVERED_LATER',
+    'SENT_HELP',
+    'REMINDED_DRIVER',
+    'SHOWED_DRIVER_PAGE',
+    'UPDATED_ROUTEIQ',
+    'RESENT_LINK',
+    'CHANGED_SETTING',
+    'ESCALATED',
+    ...REVIEW_ACTION_TAIL,
+  ],
   DRIVER_APP: [
     'CALLED_DRIVER',
     'REMINDED_DRIVER',

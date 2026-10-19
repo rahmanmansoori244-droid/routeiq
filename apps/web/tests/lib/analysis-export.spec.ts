@@ -329,6 +329,23 @@ describe('the alert causes & actions (owner request 20 Oct 2026)', () => {
     expect((await GET(req(`from=${D1}&to=${D2}&only=alerts`))).status).toBe(403);
   });
 
+  it('finding 10: an alert whose stop now names another customer (a re-plan) still says whom its cause & action was saved for; the ReadMe names no code file', async () => {
+    as('PLANNER');
+    const db = store.db!;
+    const orig = db.opsAlert.findMany;
+    db.opsAlert.findMany = async (a: unknown) => (await orig(a)).map((r: Record<string, unknown>) => (r.id === 'al-1' ? { ...r, customerId: 'cust-2' } : r));
+    // The alerts alone: no visit names a customer, so both customers come from the alert row.
+    const s = await sheets(await GET(req(`from=${D1}&to=${D2}&only=alerts`)));
+    const [one, , none] = sheetOf(s) as Record<string, unknown>[];
+    expect(one).toMatchObject({ 'Customer code': 'TST0002', Customer: 'Shop Example Two', 'Now about another customer': 'Yes', 'Customer code when saved': 'TST0001', 'Customer when saved': 'Shop Example One' });
+    expect(none).toMatchObject({ 'Customer code when saved': null, 'Customer when saved': null });
+    const readme = JSON.stringify(s['ReadMe']);
+    expect(readme).toContain('Customer when saved');
+    expect(readme).toContain('deleted with its cause & action 90 days after its date');
+    // Finding 13: no source file in a file the owner may pass on.
+    expect(readme).not.toMatch(/lib\/alerts|review\.ts/);
+  });
+
   it('the browser-side link and range rules of the Alerts page', () => {
     expect(analysisExportUrl(D1, D2, 'dep-1', { only: 'alerts' })).toBe(`/api/analysis/export?from=${D1}&to=${D2}&depotId=dep-1&only=alerts`);
     expect(analysisRangeProblem('2025-10-20', '2026-10-20', 'alerts')).toBeNull();

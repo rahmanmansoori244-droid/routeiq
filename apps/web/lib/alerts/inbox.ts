@@ -15,7 +15,7 @@
  * alert with its day (view.ts alertWhen).
  */
 import { Prisma, type OpsAlert } from '@prisma/client';
-import { prisma } from '../db';
+import { prisma, type AppPrismaClient } from '../db';
 import type { TenantDb } from '../tenant';
 import { addDaysIso, dateOnly, daysBetween, todayIso, zonedDayStart } from '../dispatch/time';
 import { isRealIsoDate } from '../schemas';
@@ -34,7 +34,8 @@ import { ALERT_ROW_USERS, toOpsAlertRow, type AlertState, type AlertSummary, typ
 export { ALERT_ROW_USERS } from './types';
 import { ALERT_FOLLOWUP_DAYS, charCount, type AlertReviewValue } from './review';
 import { setLockTimeout } from '../dispatch/plan-locks';
-import { capWhere, emailCapReached } from './notify';
+import { capWhere, emailCapReached, lockTenantDigest } from './notify';
+import { lockTenantAlerts } from './locks';
 
 /** The Alerts page lists at most this many rows (open ones first). */
 export const ALERT_LIST_MAX = 500;
@@ -58,15 +59,20 @@ export function compareAlertRows(a: OpsAlertRow, b: OpsAlertRow): number {
 
 /**
  * The cause & action filter (owner request 20 Oct 2026, lib/alerts/review.ts): every alert, those without one,
- * those with one, and those that need follow-up. "followup" reads the last ALERT_FOLLOWUP_DAYS days (and
- * tomorrow) whatever dates were chosen, so a follow-up of five weeks ago is not lost (critique item 12).
+ * those with one, and those that need follow-up. "followup" LISTS the last ALERT_FOLLOWUP_DAYS days (and
+ * tomorrow) whatever dates were chosen, so a follow-up of five weeks ago is not lost (critique item 12); the
+ * count line still counts the dates chosen (review of the branch, 20 Oct 2026, findings 3 and 9).
  */
 export const ALERT_REVIEW_FILTERS = ['all', 'missing', 'saved', 'followup'] as const;
 export type AlertReviewFilter = (typeof ALERT_REVIEW_FILTERS)[number];
 
 export interface AlertListQuery {
+  /** The dates chosen (the count line's "of these dates"). */
   from: string;
   to: string;
+  /** The dates the list reads: the dates chosen, or the follow-up window with review=followup. */
+  listFrom: string;
+  listTo: string;
   depotId: string | null;
   state: AlertStateFilter;
   rule: AlertRule | null;
@@ -78,22 +84,26 @@ export function followUpWindow(today: string): { from: string; to: string } {
   return { from: addDaysIso(today, -(ALERT_FOLLOWUP_DAYS - 1)), to: addDaysIso(today, ALERT_DAYS_AHEAD) };
 }
 
-/** The Alerts page's filters from the URL: today by default, at most ALERT_LIST_MAX_DAYS days. */
+/**
+ * The Alerts page's filters from the URL: today by default, at most ALERT_LIST_MAX_DAYS days. With
+ * review=followup the list reads the follow-up window (listFrom / listTo) and the dates chosen only feed the
+ * count line, so they are not held to the 31 days (they are still real dates in order).
+ */
 export function readAlertListQuery(params: URLSearchParams, today: string): { ok: true; query: AlertListQuery } | { ok: false; error: string } {
   const from = params.get('from') || params.get('date') || today;
   const to = params.get('to') || params.get('date') || from;
   if (!isRealIsoDate(from) || !isRealIsoDate(to)) return { ok: false, error: 'Dates are YYYY-MM-DD.' };
   if (daysBetween(from, to) < 0) return { ok: false, error: 'The end date is before the start date.' };
-  if (daysBetween(from, to) >= ALERT_LIST_MAX_DAYS) return { ok: false, error: `At most ${ALERT_LIST_MAX_DAYS} days at once.` };
+  const review = (params.get('review') || 'all') as AlertReviewFilter;
+  if (!(ALERT_REVIEW_FILTERS as readonly string[]).includes(review)) return { ok: false, error: 'review is all, missing, saved or followup.' };
+  if (review !== 'followup' && daysBetween(from, to) >= ALERT_LIST_MAX_DAYS) return { ok: false, error: `At most ${ALERT_LIST_MAX_DAYS} days at once.` };
   const state = (params.get('state') || 'all') as AlertStateFilter;
   if (!(ALERT_STATE_FILTERS as readonly string[]).includes(state)) return { ok: false, error: 'state is open, acked, resolved or all.' };
   const ruleRaw = params.get('rule');
   if (ruleRaw && !isAlertRule(ruleRaw)) return { ok: false, error: 'Unknown rule.' };
-  const review = (params.get('review') || 'all') as AlertReviewFilter;
-  if (!(ALERT_REVIEW_FILTERS as readonly string[]).includes(review)) return { ok: false, error: 'review is all, missing, saved or followup.' };
   const depotId = params.get('depotId') || params.get('depot') || null;
-  const dates = review === 'followup' ? followUpWindow(today) : { from, to };
-  return { ok: true, query: { ...dates, depotId, state, rule: (ruleRaw as AlertRule | null) ?? null, review } };
+  const list = review === 'followup' ? followUpWindow(today) : { from, to };
+  return { ok: true, query: { from, to, listFrom: list.from, listTo: list.to, depotId, state, rule: (ruleRaw as AlertRule | null) ?? null, review } };
 }
 
 function stateWhere(state: AlertStateFilter): Prisma.OpsAlertWhereInput {
@@ -114,20 +124,25 @@ type UserName = { name: string } | null;
 type RowWithUser = OpsAlert & { ackedBy: UserName; reviewedBy?: UserName; reviewFirstBy?: UserName };
 const withUser = ALERT_ROW_USERS;
 
-/** The where of a list query, without its cause & action filter (the counts read every row of the dates). */
-function listWhere(q: AlertListQuery): Prisma.OpsAlertWhereInput {
+/** The where of the dates `from`..`to` with the depot, rule and state chosen (no cause & action filter). */
+function filterWhere(q: AlertListQuery, from: string, to: string): Prisma.OpsAlertWhereInput {
   return {
-    deliveryDate: { gte: dateOnly(q.from), lte: dateOnly(q.to) },
+    deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) },
     ...(q.depotId ? { depotId: q.depotId } : {}),
     ...(q.rule ? { rule: q.rule } : {}),
     ...stateWhere(q.state),
   };
 }
 
+/** The where of the list: its dates (the follow-up window with review=followup) and every filter. */
+export function listWhere(q: AlertListQuery): Prisma.OpsAlertWhereInput {
+  return { ...filterWhere(q, q.listFrom, q.listTo), ...reviewWhere(q.review) };
+}
+
 /** The rows of the Alerts page (and the day screen's card: one date and depot). */
 export async function listAlerts(db: TenantDb, q: AlertListQuery): Promise<{ rows: OpsAlertRow[]; truncated: boolean }> {
   const found = (await db.opsAlert.findMany({
-    where: { ...listWhere(q), ...reviewWhere(q.review) },
+    where: listWhere(q),
     include: withUser,
     // Open and acknowledged rows before history, so a long history never pushes them out of the list.
     orderBy: [{ resolvedAt: { sort: 'desc', nulls: 'first' } }, { lastSeenAt: 'desc' }],
@@ -139,9 +154,10 @@ export async function listAlerts(db: TenantDb, q: AlertListQuery): Promise<{ row
 
 /**
  * The Alerts page's count line (critique item 12: counted on the server, not from the rows shown, which a
- * filter or the 500-row cap would make wrong): the alerts of the dates, depot, rule and state chosen (whatever
- * the cause & action filter), how many have a cause & action, how many of those say Other, and how many alerts
- * need follow-up over the last ALERT_FOLLOWUP_DAYS days (the depot only).
+ * filter or the 500-row cap would make wrong): the alerts of the DATES CHOSEN with the depot, rule and state
+ * chosen (whatever the cause & action filter, Follow-up included: review of the branch, 20 Oct 2026, findings 3
+ * and 9), how many have a cause & action, how many of those say Other; and how many alerts need follow-up over
+ * the last ALERT_FOLLOWUP_DAYS days with the same depot, rule and state (what the Follow-up filter lists).
  */
 export interface AlertReviewCounts {
   alerts: number;
@@ -151,13 +167,13 @@ export interface AlertReviewCounts {
 }
 
 export async function alertReviewCounts(db: TenantDb, q: AlertListQuery, today: string): Promise<AlertReviewCounts> {
-  const base = listWhere(q);
+  const base = filterWhere(q, q.from, q.to);
   const w = followUpWindow(today);
   const [alerts, saved, other, followUp] = await Promise.all([
     db.opsAlert.count({ where: base }),
     db.opsAlert.count({ where: { ...base, reviewedAt: { not: null } } }),
     db.opsAlert.count({ where: { ...base, OR: [{ reviewCause: 'OTHER' }, { reviewAction: 'OTHER' }] } }),
-    db.opsAlert.count({ where: { reviewFollowUp: true, deliveryDate: { gte: dateOnly(w.from), lte: dateOnly(w.to) }, ...(q.depotId ? { depotId: q.depotId } : {}) } }),
+    db.opsAlert.count({ where: { ...filterWhere(q, w.from, w.to), reviewFollowUp: true } }),
   ]);
   return { alerts, saved, other, followUp };
 }
@@ -373,10 +389,28 @@ function reviewData(row: ReviewRow, value: AlertReviewValue, userId: string, at:
 }
 
 /**
+ * The locks a cause & action save or removal takes BEFORE it writes a row (review of the branch, 20 Oct 2026,
+ * finding 1), each waiting under the transaction's 5 s lock timeout (then 409 ALERT_BUSY):
+ * - the company's alert lock (locks.ts): a sweep in flight finishes first, and a sweep that starts meanwhile
+ *   skips the company to its next run (2 min), so the two never hold each other's rows in opposite orders (a
+ *   deadlock that could abort the sweep's whole run);
+ * - then the company's e-mail lock (notify.ts lockTenantDigest): a claim in flight finishes first, and a claim
+ *   that starts meanwhile answers BUSY and creates no digest. Before, the claim's FOR UPDATE SKIP LOCKED
+ *   skipped the rows the save held and could e-mail the others: an alert over by itself (ENDED, news in one
+ *   e-mail only, the next claim reading only what ended after that digest) was then never e-mailed.
+ * The order is the same everywhere (alert lock, then e-mail lock; the claim takes the e-mail lock alone, the
+ * sweep and Start fresh the alert lock alone), so the locks never close a cycle.
+ */
+export async function lockForReview(tx: Prisma.TransactionClient, tenantId: string): Promise<void> {
+  await lockTenantAlerts(tx, tenantId);
+  await lockTenantDigest(tx, tenantId);
+}
+
+/**
  * Save the cause & action of `row` (and fill it into `also`, other alerts of the same truck and day without one:
- * one incident, critique item 1). One transaction with a 5 s lock wait (a sweep holding the rows: the route
- * answers 409 ALERT_BUSY). The row is written only while its last save is still `base` (the one the editor saw;
- * 'CHANGED' otherwise, nothing written) and its details were not removed; an alert of `also` only while it has
+ * one incident, critique item 1). One transaction with a 5 s lock wait (lockForReview, then the rows; held longer,
+ * the route answers 409 ALERT_BUSY). The row is written only while its last save is still `base` (the one the
+ * editor saw; 'CHANGED' otherwise, nothing written) and its details were not removed; an alert of `also` only while it has
  * none (never overwritten: skipped as ALREADY_SAVED). `unchanged`: the row's own cause & action is already this
  * one (only the others are filled; the row gets the incident's group id when it had none). Never touches the
  * alert itself (state, tier, acknowledgement, e-mail).
@@ -395,6 +429,7 @@ export async function saveAlertReview(args: {
   const { tenantId, userId, row, value, base } = args;
   return prisma.$transaction(async (tx) => {
     await setLockTimeout(tx);
+    await lockForReview(tx, tenantId);
     const at = reviewSaveTime(row.reviewedAt, args.now);
     const groupId = args.also.length ? (row.reviewGroupId ?? row.id) : (row.reviewGroupId ?? null);
     const saved: ReviewSaved[] = [];
@@ -442,11 +477,13 @@ export const REVIEW_CLEARED = {
 
 /**
  * Remove a cause & action saved on the wrong alert (critique item 13), while its last save is still `base`
- * and its details were not removed: 'CHANGED' otherwise, nothing written. Audited by `afterRemove`.
+ * and its details were not removed: 'CHANGED' otherwise, nothing written. Audited by `afterRemove`. The same
+ * locks as a save first (lockForReview).
  */
 export async function removeAlertReview(args: { tenantId: string; row: ReviewRow; base: Date; afterRemove: (tx: Prisma.TransactionClient) => Promise<unknown> }): Promise<'REMOVED' | 'CHANGED'> {
   return prisma.$transaction(async (tx) => {
     await setLockTimeout(tx);
+    await lockForReview(tx, args.tenantId);
     const n = (await tx.opsAlert.updateMany({ where: { tenantId: args.tenantId, id: args.row.id, reviewedAt: args.base, detailsRemovedAt: null }, data: REVIEW_CLEARED })).count;
     if (!n) return 'CHANGED' as const;
     await args.afterRemove(tx);
@@ -454,10 +491,15 @@ export async function removeAlertReview(args: { tenantId: string; row: ReviewRow
   });
 }
 
+/** The keys of a cause & action's free texts in its audit rows: removed 90 days after the alert's date (scrubReviewAuditTexts). */
+export const REVIEW_AUDIT_TEXT_KEYS = ['causeOther', 'actionOther', 'note'] as const;
+
 /**
- * A cause & action as the audit row keeps it: the codes and follow-up, and only the LENGTH of each free text
- * (like DELIVERY_OUTCOME_SET, which keeps no note: the audit log is never deleted, while the free texts go
- * after 90 days with the alert's text; critique item 2). Null: none.
+ * A cause & action as the audit row keeps it: the codes, follow-up, the free texts (the Other texts and the note)
+ * and the LENGTH of each. The texts are the history of an edit or a removal (owner request 20 Oct 2026: "editable,
+ * history kept in the audit log"; review of the branch, finding 2: before only the lengths were kept, so an edit
+ * lost the earlier note). They go 90 days after the alert's date, like the alert's own text and free texts
+ * (scrubReviewAuditTexts, the nightly retention); the codes, follow-up and lengths stay. Null: none.
  */
 export function reviewAuditValue(v: AlertReviewValue | null): Record<string, string | number | boolean | null> | null {
   if (!v) return null;
@@ -465,10 +507,38 @@ export function reviewAuditValue(v: AlertReviewValue | null): Record<string, str
     cause: v.cause,
     action: v.action,
     followUp: v.followUp,
+    causeOther: v.causeOther,
+    actionOther: v.actionOther,
+    note: v.note,
     causeOtherChars: v.causeOther ? charCount(v.causeOther) : null,
     actionOtherChars: v.actionOther ? charCount(v.actionOther) : null,
     noteChars: v.note ? charCount(v.note) : null,
   };
+}
+
+/** The audit actions whose rows carry a cause & action's free texts. */
+export const REVIEW_AUDIT_ACTIONS = ['ALERT_REVIEW_SAVED', 'ALERT_REVIEW_REMOVED'] as const;
+
+/**
+ * The free texts of the cause & action audit rows of alerts dated before `cutoffIso` (the company's today - 90
+ * days), removed (the nightly alert retention, lib/jobs/delivery-janitor.ts purgeOldAlerts): the note and the
+ * Other texts leave the audit log when they leave the alert row. The row stays, with the codes, follow-up and
+ * the texts' lengths. The alert's date is the `deliveryDate` its audit rows name (reviewAuditSubject). Only JSON
+ * objects are touched (the same guard as migration 20260926090000). Returns the rows changed.
+ */
+export async function scrubReviewAuditTexts(db: Prisma.TransactionClient | AppPrismaClient, tenantId: string, cutoffIso: string): Promise<number> {
+  const keys = [...REVIEW_AUDIT_TEXT_KEYS];
+  const actions = [...REVIEW_AUDIT_ACTIONS];
+  return db.$executeRaw`
+    UPDATE "AuditLog"
+    SET "beforeJson" = CASE WHEN jsonb_typeof("beforeJson") = 'object' THEN "beforeJson" - ${keys}::text[] ELSE "beforeJson" END,
+        "afterJson" = CASE WHEN jsonb_typeof("afterJson") = 'object' THEN "afterJson" - ${keys}::text[] ELSE "afterJson" END
+    WHERE "tenantId" = ${tenantId}
+      AND "entity" = 'OpsAlert'
+      AND "action" = ANY(${actions}::text[])
+      AND jsonb_typeof("afterJson") = 'object'
+      AND ("afterJson"->>'deliveryDate') < ${cutoffIso}
+      AND (("afterJson" - ${keys}::text[]) <> "afterJson" OR (jsonb_typeof("beforeJson") = 'object' AND ("beforeJson" - ${keys}::text[]) <> "beforeJson"))`;
 }
 
 /** The alert an audit row of a cause & action is about (the codes and numbers that name it, never its text). */

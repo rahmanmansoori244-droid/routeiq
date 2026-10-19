@@ -21,6 +21,11 @@
  *     after midnight (finding 2) counts on the bell and is e-mailed like today's; a row closed as Day ended
  *     that was never e-mailed goes once (finding 1: a HIGH of the evening before the quiet hours), one
  *     e-mailed before, one still open from yesterday and one written closed are not claimed.
+ *  5. Cause & action (owner request 20 Oct 2026, PATCH /api/alerts; needs 20261020000000_alert_notes too): the
+ *     guarded save and its audit row (with the texts: the history of an edit), any state and day, another
+ *     company's id, the CHECKs, the filter and the counts (Follow-up counts the dates chosen), the incident, the
+ *     removal, the 90-day clean-up (rows kept only with keepUntilIso), a save's locks (a claim answers BUSY, a
+ *     sweep skips the company) and the removal of the texts from the audit rows of alerts older than 90 days.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -29,6 +34,8 @@ vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => (session.user ? { user: s
 
 import { GET as LIST, PATCH } from '@/app/api/alerts/route';
 import { purgeOldAlertRows } from '@/lib/alerts/store';
+import { REVIEW_ROW_SELECT, saveAlertReview, scrubReviewAuditTexts, type ReviewRow } from '@/lib/alerts/inbox';
+import { tryLockTenantAlerts } from '@/lib/alerts/locks';
 import { GET as SUMMARY } from '@/app/api/alerts/summary/route';
 import { POST as ACK } from '@/app/api/alerts/ack/route';
 import { prismaDigestStore, sendAlertDigest } from '@/lib/alerts/notify';
@@ -304,7 +311,9 @@ describe('cause & action (owner request 20 Oct 2026)', () => {
     const audits = await prisma.auditLog.findMany({ where: { tenantId: A.tenantId, action: 'ALERT_REVIEW_SAVED', entityId: a.id } });
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({ userId: A.plannerId, entity: 'OpsAlert', beforeJson: null });
-    expect(JSON.stringify(audits[0]!.afterJson)).not.toContain('gate');
+    // The texts are the history (review of the branch, finding 2), as cleaned: never the phone number.
+    expect(audits[0]!.afterJson).toMatchObject({ cause: 'TRAFFIC', note: 'Driver says call [number] at the gate', noteChars: 37 });
+    expect(JSON.stringify(audits[0]!.afterJson)).not.toContain('9123');
   });
 
   it('works on acknowledged, over and yesterday\'s Day-ended alerts; their state stays', async () => {
@@ -372,16 +381,24 @@ describe('cause & action (owner request 20 Oct 2026)', () => {
     const iso = addDaysIso(today, -3);
     const none = await alert(A, { deliveryDate: d });
     const done = await alert(A, { deliveryDate: d });
+    // A follow-up of another date of the last 92 days: in the follow-up count, not in the alerts of the dates.
+    const earlier = await alert(A, { deliveryDate: new Date(`${addDaysIso(today, -10)}T00:00:00.000Z`) });
     as(A);
     await patch(save(done.id, { action: 'NONE_YET' }));
+    await patch(save(earlier.id, { cause: 'NOT_KNOWN' }));
     as(A, 'VIEWER');
     const missing = await call(LIST, `/api/alerts?date=${iso}&review=missing`);
     expect(missing.body.data.rows.map((r: any) => r.id)).toEqual([none.id]);
     const saved = await call(LIST, `/api/alerts?date=${iso}&review=saved`);
     expect(saved.body.data.rows.map((r: any) => [r.id, r.review.byName, r.review.followUp])).toEqual([[done.id, 'Dispatcher Example', true]]);
-    expect(saved.body.data.reviewCounts).toMatchObject({ alerts: 2, saved: 1, other: 0 });
+    // Finding 15: saved and followUp differ here (1 and 2), so two counts swapped would show.
+    expect(saved.body.data.reviewCounts).toEqual({ alerts: 2, saved: 1, other: 0, followUp: 2 });
     const follow = await call(LIST, `/api/alerts?date=${today}&review=followup`);
-    expect(follow.body.data.rows.map((r: any) => r.id)).toContain(done.id);
+    expect(follow.body.data.rows.map((r: any) => r.id)).toEqual(expect.arrayContaining([done.id, earlier.id]));
+    // Findings 3 and 9: with Follow-up the line still counts the date chosen, not the 92 days.
+    const followOfDate = await call(LIST, `/api/alerts?date=${iso}&review=followup`);
+    expect(followOfDate.body.data.reviewCounts).toEqual({ alerts: 2, saved: 1, other: 0, followUp: 2 });
+    expect(followOfDate.body.data.rows.map((r: any) => r.id).sort()).toEqual([done.id, earlier.id].sort());
   });
 
   it('one incident: the other alerts of the truck and day without one are filled, never one that has its own; remove clears it', async () => {
@@ -425,5 +442,63 @@ describe('cause & action (owner request 20 Oct 2026)', () => {
     as(B);
     const locked = await patch(save(kept.id, { baseReviewedAt: reviewedAt.toISOString() }));
     expect([locked.status, locked.body.error.code]).toEqual([409, 'REVIEW_LOCKED']);
+  });
+
+  it('finding 1: while a save holds its locks an e-mail claim answers BUSY and creates no digest (so an alert over by itself is never skipped past), and a sweep skips the company; both are free again after it', async () => {
+    const a = await alert(A, { resolvedAt: new Date(), resolvedReason: 'ENDED' });
+    const row = (await prisma.opsAlert.findUniqueOrThrow({ where: { id: a.id }, select: REVIEW_ROW_SELECT })) as unknown as ReviewRow;
+    const digests = await prisma.opsAlertDigest.count({ where: { tenantId: A.tenantId } });
+    const claim = () => prismaDigestStore(prisma).claim(A.tenantId, new Date(), { everyMin: 15, minSeverity: 'HIGH', dayStart: zonedDayStart(today, TZ), today, recipients: 1 });
+    const sweepLock = () => prisma.$transaction((tx) => tryLockTenantAlerts(tx, A.tenantId));
+    let during: unknown[] = [];
+    const r = await saveAlertReview({
+      tenantId: A.tenantId,
+      userId: A.plannerId,
+      row,
+      value: { cause: 'TRAFFIC', causeOther: null, action: 'CALLED_DRIVER', actionOther: null, note: null, followUp: false },
+      base: null,
+      unchanged: false,
+      also: [],
+      // Inside the save's transaction, after its row is written: other connections try what the e-mail and the sweep do.
+      afterSave: async () => {
+        during = [await claim(), await sweepLock()];
+      },
+    });
+    expect(r.result).toBe('SAVED');
+    expect(during).toEqual([{ ok: false, skip: 'BUSY' }, false]);
+    expect(await prisma.opsAlertDigest.count({ where: { tenantId: A.tenantId } })).toBe(digests);
+    expect(await sweepLock()).toBe(true);
+    const after = await claim();
+    expect(after.ok ? 'CLAIMED' : after.skip).not.toBe('BUSY');
+  });
+
+  it("finding 2: an edit keeps the earlier note in the audit log; the nightly retention removes the texts of alerts older than 90 days from it, keeping the codes and lengths", async () => {
+    const a = await alert(A);
+    as(A);
+    await patch(save(a.id, { note: 'Gate closed, sales agreed a new slot' }));
+    const first = await prisma.opsAlert.findUniqueOrThrow({ where: { id: a.id } });
+    await patch(save(a.id, { baseReviewedAt: first.reviewedAt!.toISOString(), note: 'Driver late' }));
+    const edit = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: A.tenantId, action: 'ALERT_REVIEW_SAVED', entityId: a.id }, orderBy: { createdAt: 'desc' } });
+    expect(edit.beforeJson).toMatchObject({ note: 'Gate closed, sales agreed a new slot', noteChars: 36 });
+    expect(edit.afterJson).toMatchObject({ note: 'Driver late', noteChars: 11, noteChanged: true });
+    // The audit rows of an alert 100 days old, as a save and a removal wrote them, and one of another company.
+    const oldDate = addDaysIso(today, -100);
+    const mk = (tenantId: string, action: string, beforeJson: Record<string, unknown>, afterJson: Record<string, unknown>) =>
+      prisma.auditLog.create({ data: { tenantId, action, entity: 'OpsAlert', entityId: 'alert-gone', beforeJson: beforeJson as never, afterJson: afterJson as never } });
+    const old = await mk(A.tenantId, 'ALERT_REVIEW_SAVED', { cause: 'TRAFFIC', note: 'old note', noteChars: 8 }, { rule: 'ETA_LATE', deliveryDate: oldDate, cause: 'OTHER', causeOther: 'Road closed', causeOtherChars: 11, actionOther: null, note: 'later note', noteChars: 10 });
+    const removed = await mk(A.tenantId, 'ALERT_REVIEW_REMOVED', { cause: 'OTHER', causeOther: 'Road closed', note: 'later note', noteChars: 10 }, { rule: 'ETA_LATE', deliveryDate: oldDate });
+    const foreign = await mk(B.tenantId, 'ALERT_REVIEW_SAVED', { cause: 'TRAFFIC', note: 'old note' }, { rule: 'ETA_LATE', deliveryDate: oldDate, note: 'kept' });
+    expect(await scrubReviewAuditTexts(prisma, A.tenantId, addDaysIso(today, -90))).toBe(2);
+    expect(await prisma.auditLog.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({
+      beforeJson: { cause: 'TRAFFIC', noteChars: 8 },
+      afterJson: { rule: 'ETA_LATE', deliveryDate: oldDate, cause: 'OTHER', causeOtherChars: 11, noteChars: 10 },
+    });
+    const oldAfter = (await prisma.auditLog.findUniqueOrThrow({ where: { id: old.id } })).afterJson as Record<string, unknown>;
+    expect(Object.keys(oldAfter).sort()).toEqual(['cause', 'causeOtherChars', 'deliveryDate', 'noteChars', 'rule']);
+    expect((await prisma.auditLog.findUniqueOrThrow({ where: { id: removed.id } })).beforeJson).toEqual({ cause: 'OTHER', noteChars: 10 });
+    expect((await prisma.auditLog.findUniqueOrThrow({ where: { id: foreign.id } })).afterJson).toMatchObject({ note: 'kept' });
+    expect((await prisma.auditLog.findUniqueOrThrow({ where: { id: edit.id } })).afterJson).toMatchObject({ note: 'Driver late' });
+    // Nothing left to remove: a second night changes nothing.
+    expect(await scrubReviewAuditTexts(prisma, A.tenantId, addDaysIso(today, -90))).toBe(0);
   });
 });

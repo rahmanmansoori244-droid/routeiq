@@ -30,9 +30,10 @@ export const dynamic = 'force-dynamic';
 // the day screen's Alerts card: today by default, at most 31 days, every state by default; open rows first, HIGH
 // before WARN, at most 500 rows (`truncated`). Every role reads them, like the plan. `enabled`: alerts are
 // switched on; checkedAt / checkStale / checkFailed: the company's last good sweep (review M2). Each row carries
-// its cause & action (owner request 20 Oct 2026); `review=followup` reads the last 92 days whatever the dates;
-// `reviewCounts` counts the alerts of the dates, those with a cause & action, those saying Other, and the
-// follow-ups of the last 92 days (lib/alerts/inbox.ts alertReviewCounts).
+// its cause & action (owner request 20 Oct 2026); `review=followup` lists the last 92 days whatever the dates
+// (`listFrom` / `listTo`; the dates chosen are then not held to 31 days); `reviewCounts` counts the alerts of the
+// dates chosen (Follow-up too), those with a cause & action and those saying Other, and the follow-ups of the last
+// 92 days, each with the depot, rule and state chosen (lib/alerts/inbox.ts alertReviewCounts).
 export const GET = withTenantApi(
   async (req, { db, user }) => {
     const cfg = await db.tenantConfig.findFirst({ select: { timezone: true, alertsEnabled: true, alertsEnabledAt: true } });
@@ -103,8 +104,11 @@ const iso = (d: Date | null) => (d ? d.toISOString() : null);
 // the codes is skipped and listed). A save that changes nothing writes nothing. `remove`: the cause & action goes
 // (saved on the wrong alert). An alert whose details were removed after 90 days is read-only (409
 // REVIEW_LOCKED). Another company's id answers 404. Never changes the alert itself (state, acknowledgement,
-// e-mail). One audit row per alert written: ALERT_REVIEW_SAVED / ALERT_REVIEW_REMOVED (codes and the lengths of
-// the free texts, never the texts).
+// e-mail). One audit row per alert written: ALERT_REVIEW_SAVED / ALERT_REVIEW_REMOVED with the version before and
+// after (codes, follow-up, the free texts and their lengths: the history of an edit or a removal; the texts leave
+// the audit rows 90 days after the alert's date, lib/alerts/inbox.ts scrubReviewAuditTexts). A save or a removal
+// first waits for the company's alert and e-mail locks (inbox.ts lockForReview), so the sweep and the e-mail claim
+// never meet its row locks.
 export const PATCH = withTenantApi(
   async (req, { db, user }) => {
     const body = await parseBody(req, patchSchema);
