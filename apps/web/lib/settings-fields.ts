@@ -82,6 +82,9 @@ export const SETTINGS_FIELDS = [
   // The IVMS live link (Ayun GPS trackers, 16 Oct 2026): company admin only, never read by the planner
   // (lib/ivms/settings.ts IVMS_SETTINGS_FIELDS, the same order).
   ...IVMS_SETTINGS_FIELDS,
+  // The analysis dataset (owner request 19 Oct 2026, lib/analysis/*): how long its facts are kept. Company
+  // admin only, never read by the planner.
+  'analysisRetentionDays',
 ] as const satisfies readonly (keyof TenantConfig)[];
 
 /**

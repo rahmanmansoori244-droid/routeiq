@@ -281,6 +281,8 @@ const MODELS = [
   'opsAlert', 'opsAlertDigest',
   // IVMS live link (16 Oct 2026): Start fresh removes the GPS tracking rows in scope and keeps ivmsState.
   'truckTrailPoint', 'truckPosition', 'ivmsEvent', 'ivmsTruckDay', 'ivmsState',
+  // The analysis dataset (19 Oct 2026): Start fresh removes the facts of the days in scope.
+  'factVisit', 'factLeg', 'factDepotTurn', 'factTruckDay',
 ];
 
 export const fakePrisma: Row = {};

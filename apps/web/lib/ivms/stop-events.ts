@@ -55,12 +55,12 @@ import { nextOpsStartOf } from './budget';
 import { readIvmsEnv } from './env';
 import { IVMS_SETTING_DEFAULTS, ivmsModeAtLeast, ivmsModeOf } from './settings';
 import { detectTruckDay, detectorParams, trackerMismatch, type DetectorLoad, type DetectorOutput, type ZoneMove } from './stops';
-import { DETECTOR_FIXED, type StopAmbiguity, type StopCandidate } from './types';
+import { DETECTOR_FIXED, DETECTOR_VERSION, type StopAmbiguity, type StopCandidate } from './types';
 
 type Tx = Prisma.TransactionClient;
 
-/** The detector's marker on every event it writes (payloadJson.detector). */
-export const DETECTOR_VERSION = 'ivms-v1';
+/** The detector's marker on every event it writes (payloadJson.detector): lib/ivms/types.ts, shared with the analysis facts. */
+export { DETECTOR_VERSION };
 /** At most this many AYUN arrivals and departures per stop. */
 export const MAX_AYUN_EVENTS_PER_VISIT = 4;
 /** No GPS event once the stop holds this many arrivals, departures and results (of the shared 40). */

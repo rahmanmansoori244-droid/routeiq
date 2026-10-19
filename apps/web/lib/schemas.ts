@@ -20,6 +20,7 @@ import { readLoadingInstruction } from './dispatch/loading-instruction';
 import { WINDOW_RULES } from './dispatch/window-rule';
 import { IVMS_MODES } from './ivms/types';
 import { IVMS_SETTING_BOUNDS, type IvmsNumberSetting } from './ivms/settings';
+import { ANALYSIS_RETENTION_BOUNDS } from './analysis/types';
 
 /** A number inside a planner bound (lib/planner-bounds.ts: never outside what the optimizer accepts). */
 function bounded(b: Bound) {
@@ -542,6 +543,9 @@ export const tenantConfigSchema = z
     ivmsStopDwellMin: ivmsSetting('ivmsStopDwellMin'),
     ivmsDepotRadiusM: ivmsSetting('ivmsDepotRadiusM'),
     ivmsTrailDays: ivmsSetting('ivmsTrailDays'),
+    // The analysis dataset (owner request 19 Oct 2026): days its facts are kept. Web only, company admin; the
+    // bounds are the database CHECK (lib/analysis/types.ts, migration 20261019090000_analysis_facts).
+    analysisRetentionDays: z.number().int().min(ANALYSIS_RETENTION_BOUNDS.min).max(ANALYSIS_RETENTION_BOUNDS.max),
   })
   .strict();
 export type TenantConfigInput = z.infer<typeof tenantConfigSchema>;

@@ -209,6 +209,11 @@ model Tenant {
   ivmsEvents           IvmsEvent[]
   ivmsState            IvmsState?
   ivmsTruckDays        IvmsTruckDay[]
+  // The analysis dataset (owner request 19 Oct 2026): lib/analysis/*.
+  factTruckDays        FactTruckDay[]
+  factVisits           FactVisit[]
+  factLegs             FactLeg[]
+  factDepotTurns       FactDepotTurn[]
 }
 
 model TenantConfig {
@@ -394,6 +399,11 @@ model TenantConfig {
   ivmsDepotRadiusM         Int      @default(300)
   // Days the trucks' GPS trail is kept (1-7): written only while a load is out, never exported.
   ivmsTrailDays            Int      @default(2)
+  // The analysis dataset (owner request 19 Oct 2026, "build on more data for our analysis later and
+  // improvement"; lib/analysis/*): the per-visit, per-leg, per-depot-turn and per-truck-day facts are kept
+  // this many days after their delivery date (30-3650, database CHECK in 20261019090000_analysis_facts), then
+  // deleted by lib/ivms/retention.ts purgeAnalysisFacts. Company admin. No raw position is ever kept in them.
+  analysisRetentionDays    Int      @default(730)
 }
 
 // Defaults per customer type; a customer's own values always win.
@@ -1894,5 +1904,298 @@ model IvmsTruckDay {
   trailFrom      DateTime? @db.Timestamptz(3)
 
   @@unique([tenantId, truckId, deliveryDate])
+  @@index([tenantId, deliveryDate])
+}
+
+// The analysis dataset (owner request 19 Oct 2026: "build on more data for our analysis later and
+// improvement"; the GPS study of 19 Oct 2026). The trucks' GPS trail is kept only ivmsTrailDays (2 by
+// default), and a StopVisit keeps only its final rebuilt times and result: what the study could tell apart
+// (a second drop point, a pin 200 m off, a late result tap, a trip out and back) is gone two days later.
+// These four tables keep, per delivery date, small facts derived from the plan, the visits, the driver's
+// taps and the trail, for TenantConfig.analysisRetentionDays (730 by default). Written only by the nightly
+// job (lib/analysis/job.ts, about 03:00 company time for the day before, while the trail still exists);
+// the columns that do not come from the trail are refreshed until 4 days after the delivery date (late
+// results), then the rows are frozen (frozenAt). Never a raw position: a standing spot is kept as a
+// distance and a bearing from the customer's pin, never a truck latitude or longitude. Every row keeps the
+// plan values and the settings in force when it was built (serviceMinPerCase, reloadMinutes, the stop
+// radius, the dwell, the detector version), so a later change of a setting never rewrites history.
+// Tenant-scoped (lib/tenant.ts); no foreign key to a truck, customer or depot (history: master data may be
+// deactivated or removed). Read only by the "Analysis data" export (GET /api/analysis/export, PLANNER).
+
+/// One truck and delivery date: time out, km, time at customer sites, moving and idle, overtime, loads.
+model FactTruckDay {
+  id                 String    @id @default(cuid())
+  tenantId           String
+  tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// The depot of the truck's first load that day (no foreign key, like StopVisit.depotId).
+  depotId            String
+  deliveryDate       DateTime  @db.Date
+  truckId            String
+  /// As shown that day (a hired truck's own plate).
+  truckCode          String
+  /// The truck had a GPS tracker (Truck.ivmsImei) when the facts were built.
+  tracked            Boolean   @default(false)
+  loads              Int
+  stopsPlanned       Int
+  stopsWithResult    Int
+  delivered          Int
+  partlyDelivered    Int
+  notDelivered       Int
+  casesPlanned       Int
+  casesDelivered     Int
+  /// The plan: first departure and last return (local minutes), minutes out and km (PlanLoad).
+  plannedDepartMin   Int?
+  plannedReturnMin   Int?
+  plannedOutMin      Int?
+  plannedKm          Float?
+  /// GPS (null without a usable trail): the first depot OUT and the last depot IN of the day.
+  firstOutAt         DateTime? @db.Timestamptz(3)
+  lastInAt           DateTime? @db.Timestamptz(3)
+  /// TRAIL (the trail's own depot IN) or DEVICE_EVENT (the tracker's depot IN when the trail ended before
+  /// the truck came back): CHECK.
+  lastInFrom         String?
+  outMin             Float?
+  /// outMin over overtimeAfterMin (the setting in force, below).
+  overtimeMin        Float?
+  kmGps              Float?
+  movingMin          Float?
+  /// The customer sites of the day's visits (lib/analysis/gps.ts site spans), overlaps counted once.
+  atSitesMin         Float?
+  /// Standstills of 3 min or more away from every customer site and the depot: a count and minutes only.
+  idleStops          Int?
+  idleMin            Float?
+  gpsTrips           Int?
+  /// The trail's quality: points, first and last fix time, the longest gap, minutes in gaps over 5 min,
+  /// frozen-position runs (the same position repeated for 60 s or more at 5 km/h or more), single-point
+  /// spikes (a pairwise check, never a plain speed filter) and whether any point carried the ignition.
+  trailPoints        Int       @default(0)
+  trailFrom          DateTime? @db.Timestamptz(3)
+  trailTo            DateTime? @db.Timestamptz(3)
+  maxGapMin          Float?
+  gapMinOver5        Float?
+  frozenRuns         Int?
+  frozenMin          Float?
+  spikes             Int?
+  ignitionSeen       Boolean?
+  /// Why the GPS columns are empty: NO_TRACKER, NO_TRAIL, SUPPRESSED (CHECK).
+  gpsNote            String?
+  // The settings in force when built (kept on refresh).
+  overtimeAfterMin   Int
+  serviceMinPerCase  Float
+  reloadMinutes      Int
+  loadingMinPerCase  Float
+  distanceMultiplier Float
+  avgSpeedKmh        Float
+  roadTimeFactor     Float
+  stopRadiusM        Int
+  dwellMin           Int
+  detectorVersion    String
+  analysisVersion    String
+  builtAt            DateTime  @db.Timestamptz(3)
+  /// When the GPS columns were computed (null: no usable trail then; they are never computed again).
+  gpsBuiltAt         DateTime? @db.Timestamptz(3)
+  refreshedAt        DateTime  @db.Timestamptz(3)
+  /// Set at the last refresh (4 days after the delivery date): the row is never written again.
+  frozenAt           DateTime? @db.Timestamptz(3)
+
+  @@unique([tenantId, deliveryDate, truckId])
+  @@index([tenantId, deliveryDate])
+}
+
+/// One planned stop of a load that left (the StopVisit key): plan against actual, wait, unloading on site
+/// and by taps, the GPS sub-stays, the result and its changes, a late result tap, a pin offset.
+model FactVisit {
+  id                 String    @id @default(cuid())
+  tenantId           String
+  tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  depotId            String
+  deliveryDate       DateTime  @db.Date
+  truckId            String
+  loadNo             Int
+  sequence           Int
+  customerId         String
+  /// The StopVisit row (no foreign key: traceability only); null when the stop has no visit row.
+  visitId            String?
+  truckCode          String
+  customerCode       String
+  /// The customer type and base unloading time as planned (null: untyped / not known).
+  customerType       String?
+  baseServiceMin     Int?
+  // The plan (frozen).
+  plannedEtaMin      Int?
+  plannedServiceMin  Int?
+  windowStartMin     Int?
+  windowEndMin       Int?
+  plannedKmFromPrev  Float?
+  casesPlanned       Int
+  /// The stop's place in the order the truck really drove (by the arrival RouteIQ holds), 1-based.
+  actualOrder        Int?
+  // As RouteIQ holds the visit (sources: StopEventSource names).
+  arrivedAt          DateTime? @db.Timestamptz(3)
+  arrivalSource      String?
+  departedAt         DateTime? @db.Timestamptz(3)
+  departureSource    String?
+  departedAtOutcome  Boolean   @default(false)
+  /// The arrival (local minutes) minus the planned ETA.
+  arrivalVsEtaMin    Float?
+  // The result and its changes.
+  outcome            String?
+  reason             String?
+  outcomeAt          DateTime? @db.Timestamptz(3)
+  outcomeSource      String?
+  /// The first result saved (CLEARED when the first OUTCOME event cleared it) and when.
+  firstOutcome       String?
+  firstOutcomeAt     DateTime? @db.Timestamptz(3)
+  outcomeEvents      Int       @default(0)
+  resultChanged      Boolean   @default(false)
+  casesDelivered     Int?
+  /// The driver's result tap the truck's distance was measured at, and that distance from the pin (GPS).
+  resultTapAt        DateTime? @db.Timestamptz(3)
+  truckDistAtResultM Float?
+  /// The truck was more than 500 m from the pin at the driver's result tap (null: not known).
+  lateResultTap      Boolean?
+  // The GPS customer site (lib/analysis/gps.ts): from the first point on site to leaving it.
+  siteStartAt        DateTime? @db.Timestamptz(3)
+  siteEndAt          DateTime? @db.Timestamptz(3)
+  onSiteMin          Float?
+  /// Trips away from the site and back (beyond 500 m, or nearer another customer's pin): never unloading.
+  awayCount          Int?
+  awayMin            Float?
+  /// [{ startOffsetSec, minutes, maxDistM }] from siteStartAt (CHECK: a JSON array, at most 8 KB).
+  awayJson           Json?
+  /// Slow periods of 2 min or more on site: [{ startOffsetSec, minutes, distM, bearingDeg }] (CHECK as above).
+  substays           Int?
+  substaysJson       Json?
+  /// Sub-stays more than 50 m apart.
+  dropPoints         Int?
+  /// The furthest the truck stood from the pin on site, and the closest it came.
+  maxDistM           Float?
+  closestM           Float?
+  /// Where it stood to unload (the sub-stay holding the result tap, else the longest): from the pin only.
+  standDistM         Float?
+  standBearingDeg    Float?
+  /// The truck stood 120-500 m from the pin (null: not known): the pin may be wrong (office review).
+  pinOffset          Boolean?
+  /// The live detector's stays (lib/ivms/stops.ts staysAt) inside the site.
+  detectorStays      Int?
+  // Unloading, minutes: never negative (CHECK).
+  servedBeforeWindow Boolean?
+  waitMin            Float?
+  /// On site after the window opened, less the time away (GPS site start and end).
+  unloadSiteMin      Float?
+  /// From the arrival to the departure as RouteIQ holds them (window clipped on both sides).
+  unloadVisitMin     Float?
+  /// The same from the driver's and the office's own times (GPS left out: by taps).
+  unloadTapMin       Float?
+  unloadMin          Float?
+  /// GPS_SITE or VISIT (CHECK).
+  unloadSource       String?
+  usableForRate      Boolean   @default(false)
+  minPerCase         Float?
+  /// lib/analysis/types.ts FACT_VISIT_FLAGS (CHECK).
+  flags              String[]  @default([])
+  // The settings in force when built.
+  serviceMinPerCase  Float
+  reloadMinutes      Int
+  stopRadiusM        Int
+  dwellMin           Int
+  detectorVersion    String
+  analysisVersion    String
+  builtAt            DateTime  @db.Timestamptz(3)
+  gpsBuiltAt         DateTime? @db.Timestamptz(3)
+  refreshedAt        DateTime  @db.Timestamptz(3)
+  frozenAt           DateTime? @db.Timestamptz(3)
+
+  @@unique([tenantId, depotId, deliveryDate, truckId, loadNo, sequence])
+  @@index([tenantId, deliveryDate])
+  @@index([tenantId, customerId, deliveryDate])
+}
+
+/// One drive of a load in the order driven (depot -> stop, stop -> stop, stop -> depot): planned against
+/// actual drive minutes and km, the time of day.
+model FactLeg {
+  id                 String    @id @default(cuid())
+  tenantId           String
+  tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  depotId            String
+  deliveryDate       DateTime  @db.Date
+  truckId            String
+  truckCode          String
+  loadNo             Int
+  legNo              Int
+  /// The stop numbers; null = the depot.
+  fromSeq            Int?
+  toSeq              Int?
+  /// The two stops are consecutive in the plan (null for a leg from or to the depot).
+  inPlanOrder        Boolean?
+  /// Left the stop (or the depot) and reached the next (GPS site or trip times, else the visit's).
+  leftAt             DateTime? @db.Timestamptz(3)
+  arrivedAt          DateTime? @db.Timestamptz(3)
+  leftMin            Int?
+  hourOfDay          Int?
+  driveMin           Float?
+  /// From the departure to the next arrival as RouteIQ holds them.
+  driveMinVisit      Float?
+  plannedDriveMin    Int?
+  kmGps              Float?
+  plannedKm          Float?
+  /// Pin to pin, as the crow flies.
+  kmStraight         Float?
+  /// SHARED_SITE, TRAIL_ENDED, NO_GPS, PLAN_HAS_IDLE (space separated).
+  note               String?
+  serviceMinPerCase  Float
+  reloadMinutes      Int
+  distanceMultiplier Float
+  avgSpeedKmh        Float
+  roadTimeFactor     Float
+  stopRadiusM        Int
+  dwellMin           Int
+  detectorVersion    String
+  analysisVersion    String
+  builtAt            DateTime  @db.Timestamptz(3)
+  gpsBuiltAt         DateTime? @db.Timestamptz(3)
+  refreshedAt        DateTime  @db.Timestamptz(3)
+  frozenAt           DateTime? @db.Timestamptz(3)
+
+  @@unique([tenantId, depotId, deliveryDate, truckId, loadNo, legNo])
+  @@index([tenantId, deliveryDate])
+}
+
+/// One return to the depot between two loads of a truck-day: back -> leave, by GPS and by the driver's
+/// taps, and the cases loaded for the next load.
+model FactDepotTurn {
+  id                 String    @id @default(cuid())
+  tenantId           String
+  tenant             Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// The depot of the next load (where the truck was loaded).
+  depotId            String
+  deliveryDate       DateTime  @db.Date
+  truckId            String
+  truckCode          String
+  afterLoadNo        Int
+  nextLoadNo         Int
+  backGpsAt          DateTime? @db.Timestamptz(3)
+  leaveGpsAt         DateTime? @db.Timestamptz(3)
+  turnMinGps         Float?
+  backTapAt          DateTime? @db.Timestamptz(3)
+  leaveTapAt         DateTime? @db.Timestamptz(3)
+  turnMinTaps        Float?
+  casesLoaded        Int
+  /// The plan: the next departure minus the return before (minutes).
+  plannedTurnMin     Int?
+  minPerCaseLoading  Float?
+  serviceMinPerCase  Float
+  reloadMinutes      Int
+  loadingMinPerCase  Float
+  stopRadiusM        Int
+  dwellMin           Int
+  detectorVersion    String
+  analysisVersion    String
+  builtAt            DateTime  @db.Timestamptz(3)
+  gpsBuiltAt         DateTime? @db.Timestamptz(3)
+  refreshedAt        DateTime  @db.Timestamptz(3)
+  frozenAt           DateTime? @db.Timestamptz(3)
+
+  @@unique([tenantId, depotId, deliveryDate, truckId, afterLoadNo])
   @@index([tenantId, deliveryDate])
 }
