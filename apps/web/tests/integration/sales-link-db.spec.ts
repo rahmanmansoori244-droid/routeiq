@@ -169,9 +169,18 @@ async function jobsDone(runId: string) {
 
 let o1: Awaited<ReturnType<typeof addOrder>>;
 
+// The link's address prefers AUTH_URL / NEXTAUTH_URL over the request's origin (driverLinkBaseUrl), and CI sets
+// NEXTAUTH_URL for the whole job: the suite runs without them, as a server with neither (review of 19 Oct 2026).
+const URL_VARS = ['AUTH_URL', 'NEXTAUTH_URL'] as const;
+const prevUrls: Partial<Record<(typeof URL_VARS)[number], string>> = {};
+
 beforeAll(async () => {
   prevSecret = process.env.NEXTAUTH_SECRET;
   process.env.NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET || 'sales-link-db-test-secret';
+  for (const k of URL_VARS) {
+    prevUrls[k] = process.env[k];
+    delete process.env[k];
+  }
   const a = await company(slugA, 'Example Water Co');
   const b = await company(slugB, 'Other Example Co');
   Object.assign(ids, { a: a.tenantId, b: b.tenantId, plannerA: a.plannerId, plannerB: b.plannerId, depotA: a.depotId, truckA: a.truckId, productA: a.productId });
@@ -223,6 +232,10 @@ beforeAll(async () => {
 afterAll(async () => {
   if (prevSecret === undefined) delete process.env.NEXTAUTH_SECRET;
   else process.env.NEXTAUTH_SECRET = prevSecret;
+  for (const k of URL_VARS) {
+    if (prevUrls[k] === undefined) delete process.env[k];
+    else process.env[k] = prevUrls[k];
+  }
   session.value = null;
   await cleanupTenant(slugA);
   await cleanupTenant(slugB);
@@ -305,7 +318,8 @@ describe('4. phones opening the page at once', () => {
     const row = await prisma.salesLink.findUniqueOrThrow({ where: { id: linkId } });
     expect((row.devicesJson as string[]).length).toBe(6);
     expect(new Set(row.devicesJson as string[]).size).toBe(6);
-    expect(row.routesJson).toEqual(['R1']);
+    // Section 2's salesman (no office session) found R1 and R2X; six phones finding R1 again add nothing.
+    expect(row.routesJson).toEqual(['R1', 'R2X']);
     expect(row.lastSeenAt).not.toBeNull();
   });
 });

@@ -59,6 +59,10 @@ const D = todayIso(TZ);
 const SECRET = 'sales-link-routes-test-secret';
 let prevSecret: string | undefined;
 let prevSales: string | undefined;
+// The link's address prefers AUTH_URL / NEXTAUTH_URL over the request's origin (driverLinkBaseUrl), and CI sets
+// NEXTAUTH_URL for the whole job: the suite runs without them, as a server with neither (review of 19 Oct 2026).
+const URL_VARS = ['AUTH_URL', 'NEXTAUTH_URL'] as const;
+const prevUrls: Partial<Record<(typeof URL_VARS)[number], string>> = {};
 const BASE = 'https://routeiq.example';
 
 beforeAll(() => {
@@ -66,12 +70,20 @@ beforeAll(() => {
   prevSales = process.env.SALES_LINK_SECRET;
   process.env.NEXTAUTH_SECRET = SECRET;
   delete process.env.SALES_LINK_SECRET;
+  for (const k of URL_VARS) {
+    prevUrls[k] = process.env[k];
+    delete process.env[k];
+  }
 });
 afterAll(() => {
   if (prevSecret === undefined) delete process.env.NEXTAUTH_SECRET;
   else process.env.NEXTAUTH_SECRET = prevSecret;
   if (prevSales === undefined) delete process.env.SALES_LINK_SECRET;
   else process.env.SALES_LINK_SECRET = prevSales;
+  for (const k of URL_VARS) {
+    if (prevUrls[k] === undefined) delete process.env[k];
+    else process.env[k] = prevUrls[k];
+  }
 });
 
 let seq = 0;
