@@ -183,6 +183,13 @@ export interface DetectorParams {
   depotDwellMin: number;
 }
 
+/**
+ * The detector's marker on every event it writes (StopEvent payloadJson.detector, lib/ivms/stop-events.ts) and
+ * on every analysis fact built with it (lib/analysis/*, FactX.detectorVersion). Kept here, in the shared
+ * contract, so the nightly analysis job names it without loading the writer (moved 19 Oct 2026, unchanged).
+ */
+export const DETECTOR_VERSION = 'ivms-v2';
+
 /** The fixed parts of DetectorParams (the rest are the company's settings). */
 export const DETECTOR_FIXED = {
   exitExtraM: 50,

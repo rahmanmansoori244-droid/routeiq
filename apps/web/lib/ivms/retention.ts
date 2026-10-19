@@ -12,11 +12,17 @@
  * Positions on GPS stop events (StopEvent source AYUN) are erased with every other source's by
  * lib/jobs/delivery-janitor.ts purgeOldLocations. Nothing at all is read beyond one EXISTS while no GPS data
  * exists (a company that never switched the link on). No audit row: these are not company records.
+ *
+ * The analysis dataset (owner request 19 Oct 2026, lib/analysis/*): purgeAnalysisFacts below deletes the
+ * nightly facts (FactTruckDay, FactVisit, FactLeg, FactDepotTurn) older than analysisRetentionDays (730 by
+ * default). The nightly job (lib/analysis/job.ts) calls it once a night per company, after its build: the
+ * facts outlive the trail by design (they hold no position), so they are not part of purgeIvmsData.
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { addDaysIso, dateOnly, DEFAULT_TZ, todayIso } from '../dispatch/time';
 import { DEFAULT_LOCATION_RETENTION_DAYS, DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
+import { ANALYSIS_RETENTION_BOUNDS, DEFAULT_ANALYSIS_RETENTION_DAYS } from '../analysis/types';
 import { ivmsModeOf } from './settings';
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -32,6 +38,16 @@ export interface IvmsRetentionResult {
   eventsErased: number;
   eventsDeleted: number;
   truckDays: number;
+}
+
+/**
+ * The trail retention's cutoff: a fix older than this is deleted (ivmsTrailDays, clamped to 1-7). One
+ * expression for the sweep below and for the analysis job (lib/analysis/job.ts trailWhole), which must never
+ * build a truck-day's GPS facts from a trail whose start this sweep has already deleted (review of 19 Oct 2026).
+ */
+export function trailCutoffOf(now: Date, ivmsTrailDays: number): Date {
+  const trailDays = Math.min(7, Math.max(1, ivmsTrailDays));
+  return new Date(now.getTime() - trailDays * DAY_MS);
 }
 
 /** Is there any GPS data at all? One statement: false for every company that never used the link. */
@@ -51,10 +67,9 @@ export async function purgeIvmsData(now: Date = new Date(), db: Db = prisma): Pr
   });
   for (const c of configs) {
     const t = c.tenantId;
-    const trailDays = Math.min(7, Math.max(1, c.ivmsTrailDays));
     // As the driver positions: never kept longer than the photos, at least 30 days (delivery-janitor.ts).
     const keepDays = Math.max(30, Math.min(c.locationRetentionDays ?? DEFAULT_LOCATION_RETENTION_DAYS, c.photoRetentionDays ?? DEFAULT_PHOTO_RETENTION_DAYS));
-    const trailCutoff = new Date(now.getTime() - trailDays * DAY_MS);
+    const trailCutoff = trailCutoffOf(now, c.ivmsTrailDays);
     const keepCutoff = new Date(now.getTime() - keepDays * DAY_MS);
     out.trailPoints += (await db.truckTrailPoint.deleteMany({ where: { tenantId: t, fixAt: { lt: trailCutoff } } })).count;
     out.positions += (
@@ -84,4 +99,33 @@ export async function runIvmsRetention(now: Date = new Date(), opts: { force?: b
 /** Did a retention sweep change anything? */
 export function ivmsRetentionChanged(r: IvmsRetentionResult | null): boolean {
   return !!r && Object.values(r).some((n) => n > 0);
+}
+
+export interface AnalysisRetentionResult {
+  truckDays: number;
+  visits: number;
+  legs: number;
+  turns: number;
+}
+
+/**
+ * The analysis dataset (owner request 19 Oct 2026, lib/analysis/*): the fact rows of a delivery date older
+ * than TenantConfig.analysisRetentionDays (730 by default, 30-3650) before the company's today are deleted,
+ * frozen or not. One company (the nightly job calls it once a night per company, after its build) or every
+ * company. Four statements per company on the (tenantId, deliveryDate) indexes; nothing else is read. The
+ * rows are derived data (no audit row), and they hold no position: the GPS trail itself keeps its own, much
+ * shorter, ivmsTrailDays above.
+ */
+export async function purgeAnalysisFacts(now: Date = new Date(), db: Db = prisma, tenantId?: string): Promise<AnalysisRetentionResult> {
+  const out: AnalysisRetentionResult = { truckDays: 0, visits: 0, legs: 0, turns: 0 };
+  const configs = await db.tenantConfig.findMany({ where: tenantId ? { tenantId } : {}, select: { tenantId: true, timezone: true, analysisRetentionDays: true } });
+  for (const c of configs) {
+    const days = Math.min(ANALYSIS_RETENTION_BOUNDS.max, Math.max(ANALYSIS_RETENTION_BOUNDS.min, c.analysisRetentionDays ?? DEFAULT_ANALYSIS_RETENTION_DAYS));
+    const where = { tenantId: c.tenantId, deliveryDate: { lt: dateOnly(addDaysIso(todayIso(c.timezone || DEFAULT_TZ, now), -days)) } };
+    out.visits += (await db.factVisit.deleteMany({ where })).count;
+    out.legs += (await db.factLeg.deleteMany({ where })).count;
+    out.turns += (await db.factDepotTurn.deleteMany({ where })).count;
+    out.truckDays += (await db.factTruckDay.deleteMany({ where })).count;
+  }
+  return out;
 }

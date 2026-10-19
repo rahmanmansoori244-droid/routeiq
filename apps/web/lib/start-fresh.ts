@@ -45,7 +45,9 @@
  * UnservedOrder.orderId and the Bring forward links (NO ACTION) never refuse; delivery results,
  * driver links and the operations alerts of those days by the company and the date, so a row written
  * before those statements goes too. The alerts are derived from what is removed: they are counted in the
- * audit row (alertsRemoved), not on the panel.
+ * audit row (alertsRemoved), not on the panel. So are the analysis facts of those days (owner request 19 Oct
+ * 2026, lib/analysis/*: FactVisit, FactLeg, FactDepotTurn, FactTruckDay, frozen or not): test days must not
+ * stay in the analysis data (analysisFactsRemoved in the audit row).
  * Every statement names the company (tenantId) or ids read for it. Lists are sent in parts
  * (IN_LIST_PART: PostgreSQL's bind parameter limit).
  */
@@ -103,6 +105,11 @@ export const START_FRESH_DELETE_ORDER = [
   'ivmsTruckDay',
   // Operations alerts (16 Oct 2026): the days' alert rows (no foreign keys; derived from the rows above).
   'opsAlert',
+  // The analysis dataset (19 Oct 2026): the days' facts (no foreign keys; derived from the rows above).
+  'factVisit',
+  'factLeg',
+  'factDepotTurn',
+  'factTruckDay',
   'driver',
 ] as const;
 
@@ -585,7 +592,7 @@ export async function previewStartFresh(tenantId: string, before: string | null,
  * Delete everything in `sets` and the delivery results in scope, children first (START_FRESH_DELETE_ORDER).
  * The numbers actually deleted, and the operations alerts of those days (not a panel line: derived data).
  */
-async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<{ removed: Partial<StartFreshRemoved>; alerts: number }> {
+async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<{ removed: Partial<StartFreshRemoved>; alerts: number; facts: number }> {
   const t = s.tenantId;
   // 1. Plans: the rows that name orders (stops, unserved rows) and the retired driver app's rows first.
   const unserved = await deleteIn(sets.scenarioIds, (part) => tx.unservedOrder.deleteMany({ where: { scenarioId: { in: part } } }));
@@ -641,6 +648,14 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<{ removed: Parti
   // The operations alerts of those days (16 Oct 2026), by the company and the date as well: the company's
   // alert lock (taken last in runStartFresh) keeps a sweep from writing new ones until the run commits.
   const alerts = (await tx.opsAlert.deleteMany({ where: dayWhere })).count;
+  // The analysis facts of those days (19 Oct 2026, lib/analysis/*), by the company and the date as well: test
+  // days never stay in the analysis data. The nightly job builds only dates before today (company time) from
+  // the plans in use, so it cannot write them again once their plans are gone.
+  const facts =
+    (await tx.factVisit.deleteMany({ where: dayWhere })).count +
+    (await tx.factLeg.deleteMany({ where: dayWhere })).count +
+    (await tx.factDepotTurn.deleteMany({ where: dayWhere })).count +
+    (await tx.factTruckDay.deleteMany({ where: dayWhere })).count;
 
   // 4. One-day hired trucks of the days in scope, read again here (a truck rented since the check
   // goes too): deleted, or retired while a row that stays names one.
@@ -672,6 +687,7 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<{ removed: Parti
       ...(gps > 0 ? { gpsTracking: gps } : {}),
     },
     alerts,
+    facts,
   };
 }
 
@@ -723,7 +739,7 @@ export async function runStartFresh(
       if (startFreshHasLive(report.live) && opts.liveDataConfirmed !== true) {
         throw new StartFreshRefused(`${startFreshLiveText(report.live)} Nothing was removed. If they are test data, tick that and press Remove again.`, 'LIVE_DATA_CONFIRM');
       }
-      const { removed: done, alerts } = await removeAll(tx, s, sets);
+      const { removed: done, alerts, facts } = await removeAll(tx, s, sets);
       const result: StartFreshReport = { ...report, removed: { ...report.removed, ...done } };
       // The preview counted GPS rows and the run found none left (the janitor's retention got there first).
       if (result.removed.gpsTracking !== undefined && done.gpsTracking === undefined) result.removed.gpsTracking = 0;
@@ -744,6 +760,8 @@ export async function runStartFresh(
             liveDataConfirmed: opts.liveDataConfirmed === true,
             // Operations alerts of the removed days (derived from them; not a line on the panel).
             alertsRemoved: alerts,
+            // The analysis facts of the removed days (derived from them; not a line on the panel either).
+            analysisFactsRemoved: facts,
             by: { name: actor.name ?? null, email: actor.email ?? null },
           } as unknown as Prisma.InputJsonValue,
           ip,

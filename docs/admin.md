@@ -178,6 +178,7 @@ If you need to scale beyond one web instance, swap the inflight map for Redis-ba
 - Settings (company admin): **keep delivery photos** (30-1095 days, default 90 since the owner decision of 5 Oct 2026: "photos 90 days is enough"; the driver-page migration creates the setting at 90; where it had already run with the old default of 365, `20261005090000_driver_page_owner_decisions` moves a company still on 365 to 90 - unless its admin saved that value in Settings - and writes an audit row for it) and **keep driver positions** (30 days up to the photo time, default 90). The retention janitor runs in the web process at most every 10 minutes (and on `POST /api/cron/janitor`): it drops photo bytes older than the photo time (the record stays), erases positions, IPs and browser ids older than the position time (distances stay; on a driver link the browser ids are blanked and "used on N phones" keeps its count), and hides daily drivers with no load for 30 days (their phone is erased after the position time). One audit row per company and sweep. Audit rows written by a driver link keep no IP and no phone id at all (those live only on the stop events, the photos and the link's phone list, and go with the position time).
 - **Expected growth at NMWC volume** (about 300 stops and 360 photos a day at about 220 KB, 26 working days a month): about 79 MB a day, 2.1 GB a month, and about **6 GB** in steady state at the 90 days decided on 5 Oct 2026 (about a quarter of the 25 GB a year of photos that 365 days would keep; 12 GB at 180); events and visits under 1 MB a day (about 0.3 GB a year). The database backups grow by the same amount. The `postgres-volume` is 4.6 GB today: raise it to at least 10 GB before the photos reach about 3 GB (about 38 delivery days, 7 weeks, at NMWC volume), and watch its size (Railway → Postgres → Metrics) after the first months.
 - **Space is not returned to the disk by itself.** PostgreSQL reuses the space of purged photo bytes (autovacuum), so the volume stops growing once the retention is reached, but it does not shrink. To shrink it after a large purge (or after lowering the photo time), an operator runs `VACUUM FULL "DeliveryPhoto";` in a quiet hour (it locks the table: the driver page cannot upload photos meanwhile; take a backup first), or `pg_repack` if it is installed.
+- **Keep analysis data** (Settings, company admin, 30-3650 days, default 730; 19 Oct 2026): the nightly facts of *Analysis data* below. They hold no position and stay small (about 25 MB a year for 9 trucks), so they are deleted by their own setting, not with the photos or the positions.
 - **The backup horizon.** Deleted photos and positions stay in the Railway backups until those expire (daily 6 days, weekly 27 days), and in any `pg_dump` copy until it is deleted: the real deletion time is the retention plus the backup retention. Say so when someone asks how long driver data is kept.
 
 ---
@@ -293,6 +294,27 @@ FROM "StopEvent"
 WHERE "tenantId" = '<tenantId>' AND source = 'AYUN' AND "deliveryDate" = '2026-10-20'
 ORDER BY "truckId", "at";
 ```
+
+## Analysis data (19 Oct 2026)
+
+Owner request of 19 Oct 2026: "build on more data for our analysis later and improvement" (the GPS study of 19 Oct 2026). The trail is deleted after `ivmsTrailDays` and a visit keeps only its final times, so a nightly job keeps small facts per delivery date in four tables (`FactTruckDay`, `FactVisit`, `FactLeg`, `FactDepotTurn`; `lib/analysis/*`, migration `20261019090000_analysis_facts`): times, minutes, distances from the customer's pin, the result and its changes, the plan values and the settings in force. **No position** of a truck is ever kept in them (a standing spot is a distance and a bearing from the pin), no driver, no phone, no IP.
+
+- **When it runs.** In the web process's janitor (no Railway cron needed), at most every 10 minutes, in its own try: from 03:00 company time the day before is built while its trail still exists (so leave `ivmsTrailDays` at 2 or more: with 1, a job that runs late loses the morning's trail); the 2nd to 4th days before are refreshed once a night (late results, office corrections); the 4th day's refresh freezes the rows. A night the web was down is caught up to 7 days back, with GPS only from a whole trail: a truck-day whose trail start (its operating hours' start) the GPS retention already deleted keeps no GPS column (`gpsNote` `PARTIAL_TRAIL`; a deploy in the afternoon with the 2-day trail builds the day 2 days back this way). When a truck-day's trail is pulled again after its build (a load the office completes the next morning gets its final pull then), the next night's refresh computes its GPS columns again while the trail is whole. At most 20 s of work per run; the rest continues 10 minutes later, and a date is read again until all of it is done. A truck-day that fails (a deadlock, a lost connection; logged by its code) is tried again at the next run the same night, at most 3 times, then the next night. `POST /api/cron/janitor` runs it too (last, its own step; its answer has `analysis` only when something was built, refreshed, frozen or deleted).
+- **Retention.** Settings, card **Driver page and delivery results**, **Keep analysis data** (company admin, 30-3650 days, 730 by default): older facts are deleted every night, frozen or not. The backups keep them until they expire, as for photos and positions.
+- **Size.** About 200 rows and 70 KB a day for 9 trucks (the study's estimate), about 25 MB a year; double that at 20 trucks. Far below the photos.
+- **Who sees it.** Dashboard, **Analysis data (Excel)** (`GET /api/analysis/export?from&to&depotId`, at most 92 days): Planner, Supervisor and company admin only (Viewer 403). Its **Pins to review** sheet holds standing points worked out from the customers' pins: office data, do not forward it. To fix a pin, a company admin moves it on the Customers page after checking with the driver.
+- **Turn it off**: `ROUTEIQ_DISABLE_ANALYSIS=1` on the web service and redeploy (the rows stay; the export still works). Start fresh removes the facts of the days it clears.
+- **Read only checks:**
+
+```sql
+-- Facts of one company and day (no positions).
+SELECT "truckCode", "loads", "kmGps", "outMin", "overtimeMin", "gpsNote", "builtAt", "refreshedAt", "frozenAt"
+FROM "FactTruckDay" WHERE "tenantId" = '<tenantId>' AND "deliveryDate" = '2026-10-20' ORDER BY "truckCode";
+-- Has the job run? The newest delivery date built per company.
+SELECT "tenantId", max("deliveryDate") FROM "FactTruckDay" GROUP BY "tenantId";
+```
+
+---
 
 ## Drivers page: the dispatcher's since 6 Oct 2026
 Owner request of 6 Oct 2026: the dispatcher (role **Planner**, and Supervisor) keeps the **Drivers** page: adds drivers, edits names and mobiles, deactivates and reactivates them, makes a daily driver a regular one, enters **leave** (from, until, an optional cover driver and note) and sets each truck's **usual (default) driver**. A **Viewer** only reads it.

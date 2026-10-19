@@ -23,6 +23,7 @@ import { AlertSettingsCard, alertSettingsProblem } from './alert-settings-card';
 import { IVMS_SETTING_BOUNDS, ivmsHoursSaveProblem, ivmsModeAtLeast, ivmsModeOf, type IvmsNumberSetting } from '@/lib/ivms/settings';
 import { classShares } from '@/lib/ivms/budget';
 import { IVMS_MODES, type IvmsMode } from '@/lib/ivms/types';
+import { ANALYSIS_RETENTION_BOUNDS } from '@/lib/analysis/types';
 
 interface TenantFields {
   name: string;
@@ -184,6 +185,14 @@ export function SettingsForm({
     if (retention) {
       toast.error(retention);
       return;
+    }
+    // The analysis dataset (owner request 19 Oct 2026): whole days within the database CHECK.
+    {
+      const b = ANALYSIS_RETENTION_BOUNDS;
+      if ('analysisRetentionDays' in configDiff.changes && !(Number.isInteger(c.analysisRetentionDays) && c.analysisRetentionDays >= b.min && c.analysisRetentionDays <= b.max)) {
+        toast.error(`Keep analysis data must be a whole number from ${b.min} to ${b.max} days.`);
+        return;
+      }
     }
     // GPS tracking (IVMS live link): whole numbers within the database CHECKs, hours that do not cross midnight.
     for (const k of Object.keys(IVMS_SETTING_BOUNDS) as IvmsNumberSetting[]) {
@@ -609,6 +618,21 @@ export function SettingsForm({
                 : 'Where each arrival, result and photo happened. Never longer than the photos. The distances from the pin are kept.'
             }
             changed={'locationRetentionDays' in configDiff.changes}
+          />
+          <NumField
+            id="analysisRetentionDays"
+            label="Keep analysis data"
+            unit="days"
+            value={c.analysisRetentionDays}
+            onChange={(v) => setC({ ...c, analysisRetentionDays: v })}
+            step={1}
+            bound={{ solver: null, int: true, ...ANALYSIS_RETENTION_BOUNDS }}
+            hint={
+              c.analysisRetentionDays < baseline.config.analysisRetentionDays
+                ? `Analysis facts older than ${c.analysisRetentionDays} days will be deleted for good at the next nightly run.`
+                : 'The nightly facts per visit, drive, depot turn and truck-day (Dashboard > Analysis data). Times, minutes and distances from the pin only: never a position.'
+            }
+            changed={'analysisRetentionDays' in configDiff.changes}
           />
           <div className="space-y-1.5">
             <Label htmlFor="dispatcherPhone">

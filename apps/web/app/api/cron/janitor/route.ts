@@ -34,6 +34,7 @@ import { runAlertSweep } from '@/lib/alerts/sweep';
 import { sendAlertDigest } from '@/lib/alerts/notify';
 import { runIvmsTick } from '@/lib/ivms/poll';
 import { runIvmsRetention } from '@/lib/ivms/retention';
+import { analysisChanged, runAnalysisJob } from '@/lib/analysis/job';
 
 export const dynamic = 'force-dynamic';
 
@@ -73,7 +74,14 @@ async function runJanitor() {
   // answer or turns it into a 500; a monitor watches /api/health `alerts` for a failing sweep). The sweep
   // never reads the GPS times the tick writes (lib/alerts/facts.ts alertVisitRow).
   const alerts = await step('alerts', () => runAlertSweep(new Date(), { force: true, notify: sendAlertDigest }));
-  return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts, ...(ivms ? { ivms } : {}) };
+  // The analysis dataset (owner request 19 Oct 2026, lib/analysis/job.ts): the nightly facts now (`force` skips
+  // the 10-minute wait; the schedule - the day before built from 03:00 company time, refreshed to the 4th day,
+  // then frozen - and the 20 s budget stay). Last, in its own try: it never delays or hides another step. The
+  // answer gains `analysis` only when it built, refreshed, froze or purged something (or failed), so the answer
+  // of a quiet run is the same bytes as before (tests/lib/ivms-off.spec.ts).
+  const analysisRun = await step('analysis', () => runAnalysisJob(new Date(), { force: true }));
+  const analysis = analysisRun && ('error' in analysisRun || analysisChanged(analysisRun)) ? analysisRun : null;
+  return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts, ...(ivms ? { ivms } : {}), ...(analysis ? { analysis } : {}) };
 }
 
 export async function POST(req: Request) {

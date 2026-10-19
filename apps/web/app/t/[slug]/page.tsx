@@ -6,12 +6,14 @@ import { getDashboardData } from '@/lib/dashboard';
 import { countOf, reasonLabel } from '@/lib/delivery/office-text';
 import { CAMERA_ALERT_PER_DAY, cameraShareText } from '@/lib/delivery/camera-exceptions';
 import { canPlan } from '@/lib/rbac';
+import { DEFAULT_TZ, todayIso } from '@/lib/dispatch/time';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { KpiCard } from './kpi-card';
 import { TrendChart } from './trend-chart';
+import { AnalysisExport } from './analysis-export';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,9 +30,11 @@ const STATUS_VARIANT: Record<RunStatus, 'default' | 'success' | 'warning' | 'sec
 };
 
 export default async function DashboardPage({ params }: { params: { slug: string } }) {
-  const { tenant, user } = await getCurrentTenant(params.slug);
+  const { tenant, user, db } = await getCurrentTenant(params.slug);
   const data = await getDashboardData(tenant.id);
   const isPlanner = canPlan(user.role);
+  // The analysis data's default range ends yesterday in company time (owner request 19 Oct 2026).
+  const tz = isPlanner ? ((await db.tenantConfig.findFirst({ select: { timezone: true } }))?.timezone ?? DEFAULT_TZ) : DEFAULT_TZ;
 
   const kmLabel = data.distanceIsEstimated ? 'Estimated km' : 'Km';
 
@@ -176,6 +180,9 @@ export default async function DashboardPage({ params }: { params: { slug: string
           </CardContent>
         </Card>
       ) : null}
+
+      {/* Owner request 19 Oct 2026: the nightly analysis facts (office use: PLANNER and up, as the route). */}
+      {isPlanner ? <AnalysisExport today={todayIso(tz)} /> : null}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2">

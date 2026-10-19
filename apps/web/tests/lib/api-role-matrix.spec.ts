@@ -116,12 +116,19 @@
  *   it was doing"): GET /api/ivms/trucks/[id]/day is PLANNER, like the day screen's live trucks (GET
  *   /api/runs/[id]/vehicles): positions of people at work, never for a VIEWER. Reads only; another
  *   company's truck is 404.
+ * - The analysis dataset (owner request 19 Oct 2026: "build on more data for our analysis later and
+ *   improvement"): GET /api/analysis/export ("Analysis data" Excel, at most 92 days) is PLANNER, company admin
+ *   and dispatcher: its "Pins to review" sheet holds standing points worked out from the customer pins (office
+ *   data, never a VIEWER's, never public). Reads only, through the caller's company; another company's depot is
+ *   404. The nightly job that writes the facts has no route of its own (the janitor, and the cron route: TOKEN).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { apiRoleMatrix } from './api-role-matrix';
 
 const EXPECTED: Record<string, string> = {
+  // Owner request 19 Oct 2026: the analysis facts (office data: the pins to review), company admin and dispatcher.
+  'GET /api/analysis/export': 'PLANNER',
   // Operations alerts (owner request 16 Oct 2026): every role reads them; the dispatcher and up acknowledge;
   // the test e-mail is the company admin's (Settings > Operations alerts).
   'GET /api/alerts': 'ANY',

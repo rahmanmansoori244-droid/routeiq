@@ -237,6 +237,14 @@ function seedCompany(tenantId: string, p: string) {
   tables.hireSuggestion ??= [];
   // IVMS live link (16 Oct 2026): the GPS tracking tables exist, empty (a company that never used the link).
   for (const m of ['truckTrailPoint', 'truckPosition', 'ivmsEvent', 'ivmsTruckDay']) tables[m] ??= [];
+  // The analysis dataset (19 Oct 2026): the nightly facts of the 2nd (one frozen) and of the 6th.
+  push('factTruckDay', [
+    { id: `${p}ftd2`, depotId: `${p}dep`, deliveryDate: day('2026-10-02'), truckId: `${p}t1`, frozenAt: new Date('2026-10-06T00:00:00Z') },
+    { id: `${p}ftd6`, depotId: `${p}dep`, deliveryDate: day('2026-10-06'), truckId: `${p}t1`, frozenAt: null },
+  ]);
+  push('factVisit', [{ id: `${p}fv2`, depotId: `${p}dep`, deliveryDate: day('2026-10-02'), truckId: `${p}t1`, loadNo: 1, sequence: 1 }]);
+  push('factLeg', [{ id: `${p}fl6`, depotId: `${p}dep`, deliveryDate: day('2026-10-06'), truckId: `${p}t1`, loadNo: 1, legNo: 1 }]);
+  push('factDepotTurn', [{ id: `${p}fdt2`, depotId: `${p}dep`, deliveryDate: day('2026-10-02'), truckId: `${p}t1`, afterLoadNo: 1 }]);
 }
 
 const MASTERS = ['tenant', 'tenantConfig', 'user', 'depot', 'region', 'customer', 'product', 'truck', 'customerTypeProfile'];
@@ -428,6 +436,9 @@ describe('run: everything', () => {
     expect(r.removed).toMatchObject({ orders: 4, planVersions: 4, dailyDrivers: 3, stopEvents: 4, oldDriverApp: 3 });
     // The alerts are not a line of the panel (derived data: a new alert would make the preview stale).
     expect(r.removed).not.toHaveProperty('opsAlerts');
+    // The analysis facts of the days (19 Oct 2026), frozen ones too: counted in the audit row, not on the panel.
+    for (const m of ['factTruckDay', 'factVisit', 'factLeg', 'factDepotTurn']) expect(idsOf(m, 'a'), m).toEqual([]);
+    expect(row.afterJson).toMatchObject({ analysisFactsRemoved: 5 });
   });
 
   it('deletes children before the rows they point at (the documented order)', async () => {
@@ -675,6 +686,8 @@ describe('run: only before a date', () => {
     const other = companyRows('tB', 'b');
     const r = await run('2026-10-04');
     expect(idsOf('order', 'a')).toEqual(['ao6']);
+    // The analysis facts (19 Oct 2026): only the days before the date go.
+    expect(['factTruckDay', 'factVisit', 'factLeg', 'factDepotTurn'].flatMap((m) => idsOf(m, 'a')).sort()).toEqual(['afl6', 'aftd6']);
     expect(idsOf('orderLine', 'a')).toEqual(['al-o6']);
     expect(idsOf('intakeLineKey', 'a')).toEqual(['ak-o6']);
     expect(idsOf('uploadBatch', 'a')).toEqual(['ab6']);

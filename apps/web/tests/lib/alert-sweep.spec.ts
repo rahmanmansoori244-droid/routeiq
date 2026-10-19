@@ -202,7 +202,8 @@ describe('the hooks', () => {
     // route's `step`: a database error answers `alerts: { error }`, never a 500; tests/lib/ivms-off.spec.ts).
     expect(cron).toContain("const alerts = await step('alerts', () => runAlertSweep(new Date(), { force: true, notify: sendAlertDigest }));");
     expect(cron).toContain("import { sendAlertDigest } from '@/lib/alerts/notify';");
-    expect(cron).toContain('return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts, ...(ivms ? { ivms } : {}) };');
+    // The analysis dataset (19 Oct 2026) runs after the sweep, its own step, in the answer only when it did something.
+    expect(cron).toContain('return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts, ...(ivms ? { ivms } : {}), ...(analysis ? { analysis } : {}) };');
   });
 
   it('nothing in the driver, office or load-status paths calls the alerts engine', () => {

@@ -223,6 +223,8 @@ describe('tenantConfigSchema', () => {
     alertQuietToMin: 360,
     // The IVMS live link (Ayun GPS trackers, 16 Oct 2026): the defaults, mode OFF.
     ...IVMS_SETTING_DEFAULTS,
+    // The analysis dataset (owner request 19 Oct 2026): facts kept 2 years by default.
+    analysisRetentionDays: 730,
   };
   it('refuses the old controls that changed nothing (strict), whole or partial', () => {
     for (const k of ['solverTimeLimitSeconds', 'labelEstimatedDistances', 'returnToDepot', 'weightObjectiveTrucks', 'costPerKmDefault']) {
