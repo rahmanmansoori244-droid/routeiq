@@ -8,17 +8,22 @@
  * RESOLVED is history. The bell counts the OPEN rows of today and tomorrow only (owner request 19 Oct 2026:
  * "the bell shows only today's open alerts"): the first sweep after midnight closes what is still open of
  * the day before (DAY_ENDED, store.ts), and between midnight and that sweep - or while the sweep is not
- * running - a row of yesterday is not counted either. Every day stays on the Alerts page. The summary
- * carries the company's today, so the bell labels another day's alert with its day (view.ts alertWhen).
+ * running - a row of yesterday is not counted either. One exception (review of the branch, 19 Oct 2026,
+ * finding 2): yesterday's follow-up raised after this midnight (Load not closed for a load planned back
+ * late: catalog.ts ALERT_AFTER_DAY_RULES) is open and counts, under its day ("Yesterday, 18 Oct"). Every day
+ * stays on the Alerts page. The summary carries the company's today, so the bell labels another day's
+ * alert with its day (view.ts alertWhen).
  */
 import { Prisma, type OpsAlert } from '@prisma/client';
 import { prisma } from '../db';
 import type { TenantDb } from '../tenant';
-import { addDaysIso, dateOnly, daysBetween, todayIso } from '../dispatch/time';
+import { addDaysIso, dateOnly, daysBetween, todayIso, zonedDayStart } from '../dispatch/time';
 import { isRealIsoDate } from '../schemas';
 import {
   ALERT_ACK_MAX_IDS,
+  ALERT_AFTER_DAY_RULES,
   ALERT_DAYS_AHEAD,
+  ALERT_DAYS_BACK,
   ALERT_LATEST_COUNT,
   ALERT_MAX_TIER,
   SEVERITY_RANK,
@@ -108,6 +113,25 @@ export function bellWindow(today: string): { from: Date; to: Date } {
   return { from: dateOnly(today), to: dateOnly(addDaysIso(today, ALERT_DAYS_AHEAD)) };
 }
 
+/**
+ * The bell's open rows: those of bellWindow, and yesterday's follow-up raised after this midnight (review of
+ * the branch, 19 Oct 2026, finding 2: Load not closed for a load planned back late, which the sweep raises
+ * open for a day that is over: catalog.ts ALERT_AFTER_DAY_RULES; the bell shows it under "Yesterday, 18
+ * Oct"). Every other row of yesterday is closed by the first sweep after midnight, and is not counted before
+ * it either (it was raised before `todayStart`, the start of the company's today).
+ */
+export function bellOpenWhere(today: string, todayStart: Date): Prisma.OpsAlertWhereInput {
+  const w = bellWindow(today);
+  return {
+    resolvedAt: null,
+    ackedAt: null,
+    OR: [
+      { deliveryDate: { gte: w.from, lte: w.to } },
+      { deliveryDate: dateOnly(addDaysIso(today, -ALERT_DAYS_BACK)), rule: { in: [...ALERT_AFTER_DAY_RULES] }, firstSeenAt: { gte: todayStart } },
+    ],
+  };
+}
+
 export const DISABLED_SUMMARY: AlertSummary = { enabled: false, open: 0, high: 0, latest: [], emailCapReached: false, checkedAt: null, checkStale: false, checkFailed: false };
 
 /** The bell: how many rows need attention, how many of them are HIGH, the newest ones (HIGH first). */
@@ -120,8 +144,7 @@ export async function alertSummary(
 ): Promise<AlertSummary> {
   if (!cfg.alertsEnabled) return DISABLED_SUMMARY;
   const today = todayIso(cfg.timezone, now);
-  const w = bellWindow(today);
-  const open: Prisma.OpsAlertWhereInput = { deliveryDate: { gte: w.from, lte: w.to }, resolvedAt: null, ackedAt: null };
+  const open = bellOpenWhere(today, zonedDayStart(today, cfg.timezone));
   const [count, high, highRows, warnRows] = await Promise.all([
     db.opsAlert.count({ where: open }),
     db.opsAlert.count({ where: { ...open, severity: 'HIGH' } }),

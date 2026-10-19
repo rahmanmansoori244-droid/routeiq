@@ -200,6 +200,14 @@ describe('the digest e-mail', () => {
     expect(text).toContain('Settings > Operations alerts');
   });
 
+  it("review of the branch (finding 1): a row closed at the end of its day says \"(day ended)\", never \"over at\" the midnight sweep", () => {
+    const { text } = build([row({ deliveryDate: new Date('2026-10-15T00:00:00.000Z'), occurredAt: at('21:50', '2026-10-15'), resolvedAt: at('00:02'), resolvedReason: 'DAY_ENDED' })]);
+    expect(text).toContain('MCT Muscat - 15 Oct');
+    expect(text).toContain('    [HIGH] 21:50 Running late: T05 L1 is running about 65 min late');
+    expect(text).toContain('(day ended)');
+    expect(text).not.toContain('over at');
+  });
+
   it('no link without a public address; a full e-mail says there may be more', () => {
     const { text } = build([row()], { baseUrl: null, full: false });
     expect(text).not.toContain('Open the day in RouteIQ');
@@ -261,6 +269,28 @@ describe('sendAlertDigest', () => {
     expect(late.calls.claim[0]![2]).toMatchObject({ today: '2026-10-16' });
   });
 
+  it("review of the branch (finding 1): a HIGH raised at 21:50, after the 21:45 e-mail and before the quiet hours, closed at midnight as Day ended, goes in the first e-mail after them (06:02), marked \"(day ended)\"", async () => {
+    const evening = row({ id: 'late', deliveryDate: new Date('2026-10-16T00:00:00.000Z'), occurredAt: at('21:50'), resolvedAt: at('00:02', '2026-10-17'), resolvedReason: 'DAY_ENDED' });
+    const { store, calls } = fakeStore({
+      claim: async (...a) => {
+        calls.claim.push(a);
+        return { ok: true, digestId: 'dg2', rows: [evening] };
+      },
+    });
+    // 23:00: the quiet hours (22:00-06:00): no e-mail, nothing claimed.
+    expect(await sendAlertDigest('tA', at('23:00'), { store, env: ENV, fetchImpl: (async () => new Response('{}', { status: 200 })) as never })).toMatchObject({ sent: false, skip: 'QUIET_HOURS' });
+    expect(calls.claim).toEqual([]);
+    const f = vi.fn(async () => new Response('{}', { status: 200 }));
+    const out = await sendAlertDigest('tA', at('06:02', '2026-10-17'), { store, env: ENV, fetchImpl: f as never });
+    expect(out).toEqual({ sent: true, alerts: 1, high: 1, digestId: 'dg2' });
+    // The claim reads the new day and its start (the day before's rows: only one closed at its end, never e-mailed).
+    expect(calls.claim[0]![2]).toMatchObject({ today: '2026-10-17', dayStart: new Date('2026-10-16T20:00:00.000Z'), quietEndedAt: at('06:00', '2026-10-17') });
+    const body = JSON.parse(((f.mock.calls[0] as unknown as [string, RequestInit])[1].body as string));
+    expect(body.text).toContain('MCT Muscat - 16 Oct');
+    expect(body.text).toContain('[HIGH] 21:50 Running late: T05 L1 is running about 65 min late');
+    expect(body.text).toContain('(day ended)');
+  });
+
   it('a failed e-mail is handed to finish (the rows go back) and answered as not sent', async () => {
     const { store, calls } = fakeStore();
     const out = await sendAlertDigest('tA', NOW, { store, env: ENV, fetchImpl: (async () => new Response('', { status: 403 })) as never });
@@ -297,7 +327,8 @@ describe('sendAlertDigest', () => {
 
 describe('the claim SQL (review L5)', () => {
   const since = new Date(NOW.getTime() - 15 * 60_000);
-  const sql = claimSql('tA', NOW, 'HIGH', since, '2026-10-16');
+  const DAY_START = new Date('2026-10-15T20:00:00.000Z');
+  const sql = claimSql('tA', NOW, 'HIGH', since, '2026-10-16', DAY_START);
   it('HIGH first by rank (a CASE, not the alphabet), then the oldest; skips rows another sweep holds', () => {
     expect(sql.sql).toMatch(/ORDER BY CASE "severity" WHEN 'HIGH' THEN 0 ELSE 1 END, "firstSeenAt", "id"/);
     expect(sql.sql).toMatch(/FOR UPDATE SKIP LOCKED/);
@@ -307,7 +338,8 @@ describe('the claim SQL (review L5)', () => {
     expect(sql.sql).toMatch(/"mayEmail" = true/);
     expect(sql.sql).toMatch(/"emailedTier" < "tier"/);
     expect(sql.sql).toMatch(/"lastSeenAt" > \?/);
-    expect(sql.sql).not.toMatch(/"firstSeenAt" >/);
+    // The 12 h look back reads lastSeenAt; firstSeenAt is read only for the day's follow-up raised since the day's start (below).
+    expect(sql.sql).not.toMatch(/"firstSeenAt" > \?/);
     expect(sql.sql).toMatch(/\("resolvedAt" IS NULL OR \("resolvedReason" = 'ENDED' AND "resolvedAt" > \?\)\)/);
     expect(sql.values).toContainEqual(since);
     expect(sql.values).toContain('tA');
@@ -315,14 +347,27 @@ describe('the claim SQL (review L5)', () => {
     expect(sql.values).toContain(ALERT_DIGEST_MAX_ROWS);
     // HIGH only by default; WARN too when the company e-mails warnings.
     expect(sql.values).toContain(false);
-    expect(claimSql('tA', NOW, 'WARN', since, '2026-10-16').values).toContain(true);
+    expect(claimSql('tA', NOW, 'WARN', since, '2026-10-16', DAY_START).values).toContain(true);
   });
-  it("owner request 19 Oct 2026: only rows of the company's today or later; a day that is over is never e-mailed again", () => {
-    // A row closed at the end of its day (DAY_ENDED) is neither open nor "over by itself"; a row of
-    // yesterday still open because the sweep has not run since midnight is left out by its date.
-    expect(sql.sql).toMatch(/AND "deliveryDate" >= \?::date/);
-    expect(sql.sql).not.toMatch(/DAY_ENDED/);
+  it("owner request 19 Oct 2026: open or over by itself only for rows of the company's today or later (a row of yesterday still open because the sweep has not run since midnight is not e-mailed as open)", () => {
+    const flat = sql.sql.replace(/\s+/g, ' ');
+    expect(flat).toMatch(/\(\("deliveryDate" >= \?::date OR \("firstSeenAt" >= \? AND "rule" IN \(\?\)\)\) AND \("resolvedAt" IS NULL OR \("resolvedReason" = 'ENDED' AND "resolvedAt" > \?\)\)\)/);
     expect(sql.values).toContain('2026-10-16');
+  });
+
+  it("review of the branch (finding 1): a row closed at the end of its day goes once if it was never e-mailed; one e-mailed before is never sent again", () => {
+    const flat = sql.sql.replace(/\s+/g, ' ');
+    // Any day (it is always the day before): DAY_ENDED and emailedTier 0, besides every other condition (not
+    // acknowledged, mayEmail, seen in the last 12 h, the severity). The claim sets emailedTier = tier: once.
+    expect(flat).toMatch(/OR \("resolvedReason" = 'DAY_ENDED' AND "emailedTier" = 0\) \) AND/);
+    expect(flat).toMatch(/WHERE "tenantId" = \? AND "ackedAt" IS NULL AND "mayEmail" = true AND "emailedTier" < "tier" AND "emailAttempts" < \? AND "lastSeenAt" > \? AND \(/);
+    // No other closed reason is news: not EXPIRED, NOT_IN_PLAN, RULE_OFF, NOT_FOLLOWED or CORRECTED.
+    for (const reason of ['EXPIRED', 'NOT_IN_PLAN', 'RULE_OFF', 'NOT_FOLLOWED', 'CORRECTED']) expect(flat).not.toContain(reason);
+  });
+
+  it("review of the branch (finding 2): the day's follow-up raised since the start of the company's today (Load not closed for a load planned back late) is e-mailed like a row of today", () => {
+    expect(sql.values).toContainEqual(DAY_START);
+    expect(sql.values).toContain('LOAD_NOT_CLOSED');
   });
 });
 

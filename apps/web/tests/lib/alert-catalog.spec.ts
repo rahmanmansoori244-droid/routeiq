@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('@/lib/db', () => ({ prisma: {} }));
 
 import {
+  ALERT_AFTER_DAY_RULES,
   ALERT_EMAIL_DEFAULTS,
   ALERT_EVIDENCE_MAX_ACCURACY_M,
   ALERT_RULE_LIST,
@@ -379,5 +380,10 @@ describe('alert e-mail only for the companies the server lists (review H1 of 16 
     expect(RESOLVED_REASON_TEXT.DAY_ENDED).toBe('Day ended');
     // Every reason has its words (the Alerts page and the closing text read them).
     for (const r of RESOLVED_REASONS) expect(RESOLVED_REASON_TEXT[r]).toMatch(/^[A-Z][a-z ]+$/);
+  });
+
+  it("review of the branch (19 Oct 2026, finding 2): only the day's follow-up, Load not closed, is still raised open for a day that is over; it fires after the planned return, a CONDITION of a load", () => {
+    expect(ALERT_AFTER_DAY_RULES).toEqual(['LOAD_NOT_CLOSED']);
+    for (const r of ALERT_AFTER_DAY_RULES) expect(ALERT_RULE_SPECS[r]).toMatchObject({ kind: 'CONDITION', subject: 'LOAD', threshold: 120 });
   });
 });

@@ -409,8 +409,9 @@ export function replayDay(exp: AlertDayExport, opts: ReplayOptions = {}): Replay
     const facts = factsAsOf(exp, now, rows, opts.radiusM, { gps });
     const ev = evaluate(facts, now, thresholds);
     // The company's today at this step: a replay that runs past midnight closes the day's rows still open
-    // as DAY_ENDED at the first step after it, as the live sweep does (owner request 19 Oct 2026).
-    const plan = planApply(rows, ev, { now, alertsEnabledAt: switchOn, windowFrom: exp.date, today: facts.today, rulesOn: on });
+    // as DAY_ENDED at the first step after it, as the live sweep does (owner request 19 Oct 2026), and
+    // raises the day's follow-up (Load not closed) found only after it open (review of the branch, finding 2).
+    const plan = planApply(rows, ev, { now, alertsEnabledAt: switchOn, windowFrom: exp.date, today: facts.today, todayStart: zonedDayStart(facts.today, exp.tz), rulesOn: on });
     const byId = new Map(rows.map((r) => [r.id, r]));
     const before = new Map(rows.map((r) => [r.id, { tier: r.tier, resolved: !!r.resolvedAt }]));
     const added = applyPlanInMemory(rows, plan, now);

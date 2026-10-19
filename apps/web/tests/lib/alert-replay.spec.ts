@@ -214,6 +214,27 @@ describe('replayDay', () => {
     expect(r.timeline.filter((e) => e.kind === 'REOPENED' || e.kind === 'ESCALATED').filter((e) => e.at.endsWith('+1'))).toEqual([]);
   });
 
+  it("review of the branch (finding 2): a load planned back at 22:30 and still not closed raises Load not closed after midnight, open, and escalates; it is not closed as Day ended", () => {
+    const exp = day();
+    // T05 L1 planned back at 22:30: stop 3 still has no result and there is no Back at depot.
+    exp.loads[0]!.returnMin = parseDayMinute('22:30');
+    const r = replayDay(exp, { fromMin: parseDayMinute('22:00'), toMin: parseDayMinute('03:00+1'), stepMin: 5 });
+    // Threshold 120 min: over it from 00:31, so the 00:35 step raises it (WARN); over 2 x 120 from 02:31: HIGH at 02:35.
+    const notClosed = r.timeline.filter((e) => e.rule === 'LOAD_NOT_CLOSED');
+    expect(notClosed.map((e) => [e.at, e.kind, e.severity])).toEqual([
+      ['00:35 +1', 'RAISED', 'WARN'],
+      ['02:35 +1', 'ESCALATED', 'HIGH'],
+    ]);
+    // The HIGH may be e-mailed (a HIGH-only e-mail carries it), and the row is still open at 03:00.
+    expect(notClosed[1]!.emailHigh).toBe(true);
+    expect(r.rows.find((x) => x.rule === 'LOAD_NOT_CLOSED')).toMatchObject({ resolvedAt: null, resolvedReason: null, tier: 2, severity: 'HIGH', mayToast: true, mayEmail: true });
+    // The rows open at midnight still closed then as Day ended, and nothing else was raised open after it.
+    const atMidnight = r.timeline.filter((e) => e.kind === 'CLOSED' && e.at === '00:00 +1');
+    expect(atMidnight.length).toBeGreaterThanOrEqual(1);
+    expect(atMidnight.every((e) => e.text.endsWith('(day ended)'))).toBe(true);
+    expect(r.timeline.filter((e) => e.kind === 'RAISED' && e.at.endsWith('+1')).map((e) => e.rule)).toEqual(['LOAD_NOT_CLOSED']);
+  });
+
   it('switched on at noon: nothing that began before it raises (no backlog)', () => {
     const r = replayDay(day(), { switchOnMin: 12 * 60 });
     const by = Object.fromEntries(r.rules.map((s) => [s.rule, s]));

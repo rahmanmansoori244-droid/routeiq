@@ -25,7 +25,8 @@ const MIN_GAP_MS = 5_000;
  * into view. Red with a HIGH open alert, amber with any open one. A toast only for a HIGH alert that is
  * new since the page opened (review M11: the first read fills the seen list silently), at most 3 at once.
  * Today's and tomorrow's open alerts only (owner request 19 Oct 2026: yesterday's looked like today's with
- * the time only); the rows of a day that is not today come under a small date header ("Tomorrow, 20 Oct")
+ * the time only), and yesterday's Load not closed raised after midnight (review of the branch, finding 2:
+ * inbox.ts bellOpenWhere); the rows of a day that is not today come under a small date header ("Tomorrow, 20 Oct")
  * and a time that is not today's says its day ("Yesterday 23:40"), from the company's today in the summary
  * (the browser's clock only before the first answer). When every row is today's the bell looks as before.
  */

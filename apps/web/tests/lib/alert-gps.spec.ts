@@ -635,7 +635,7 @@ describe('review of 18 Oct 2026 (the GPS alerts branch)', () => {
       const open = new Map<string, OpenRowInfo>();
       for (const r of rows) if (!r.resolvedAt) open.set(openKey(r.rule, r.subjectKey), { kind: r.kind as AlertKind, tier: r.tier, depotId: r.depotId, deliveryDate: r.deliveryDate });
       const ev = evaluate({ ...facts(st.loads, { gps: st.gps }), open }, st.now, thresholds);
-      const plan = planApply(rows, ev, { now: st.now, alertsEnabledAt: at('05:00'), windowFrom: addDaysIso(D, -1), today: D, rulesOn: ALERT_RULES.filter((r) => thresholds[r] !== null) });
+      const plan = planApply(rows, ev, { now: st.now, alertsEnabledAt: at('05:00'), windowFrom: addDaysIso(D, -1), today: D, todayStart: zonedDayStart(D, TZ), rulesOn: ALERT_RULES.filter((r) => thresholds[r] !== null) });
       reopened += plan.counts.reopened;
       applyPlanInMemory(rows, plan, st.now);
     }

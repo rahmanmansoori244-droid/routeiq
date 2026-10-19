@@ -27,7 +27,7 @@
  */
 import type { TenantConfig } from '@prisma/client';
 import { prisma } from '../db';
-import { DEFAULT_TZ } from '../dispatch/time';
+import { DEFAULT_TZ, zonedDayStart } from '../dispatch/time';
 import { setLockTimeout } from '../dispatch/plan-locks';
 import { ALERT_SWEEP_EVERY_MS, ALERT_SWEEP_SLOW_MS, ALERT_SWEEP_STALE_MS, ALERT_THRESHOLD_COLUMNS, readRuleOnAt, rulesOn, thresholdsOf, type AlertConfig, type ResolvedReason } from './catalog';
 import { readAlertFacts } from './facts';
@@ -163,7 +163,17 @@ export async function sweepTenant(cfg: AlertTenantConfig, now: Date, db: typeof 
         // The rule and the error's message only (never a customer, a note or a text of the facts).
         console.error('alerts: rule failed', { tenantId: cfg.tenantId, failures: ev.failures.slice(0, 5), count: ev.failures.length });
       }
-      const plan = planApply(rows, ev, { now, alertsEnabledAt: enabledAt, ruleOnAt: readRuleOnAt(cfg.alertRuleOnAtJson), windowFrom: facts.dates[0]!, today: facts.today, rulesOn: on });
+      // today / todayStart: the company's; the day before's open rows close as DAY_ENDED, except the day's
+      // follow-up raised after its midnight (owner request 19 Oct 2026; review of the branch, finding 2).
+      const plan = planApply(rows, ev, {
+        now,
+        alertsEnabledAt: enabledAt,
+        ruleOnAt: readRuleOnAt(cfg.alertRuleOnAtJson),
+        windowFrom: facts.dates[0]!,
+        today: facts.today,
+        todayStart: zonedDayStart(facts.today, tz),
+        rulesOn: on,
+      });
       return { ...(await applyPlan(tx, cfg.tenantId, plan, now)), ruleFailures: ev.failures?.length ?? 0 };
     },
     { timeout: 60_000, maxWait: 10_000 },

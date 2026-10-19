@@ -6,7 +6,8 @@
  *   open rows first, HIGH before WARN by rank; `enabled`.
  * - GET /api/alerts/summary (every role): alerts off answers zeros without reading an alert; on: the open
  *   count, the HIGH count and the newest rows (HIGH first) of today and tomorrow (owner request 19 Oct 2026:
- *   yesterday's no longer), with the company's today; the e-mail cap only when the company e-mails.
+ *   yesterday's no longer, but for yesterday's follow-up raised after midnight: review of the branch,
+ *   finding 2), with the company's today; the e-mail cap only when the company e-mails.
  * - POST /api/alerts/ack (PLANNER+): one UPDATE naming the company, only open rows, never above the tier
  *   the screen showed; another company's ids (or none known) 404 with no audit row; one audit row
  *   ALERTS_ACKNOWLEDGED per request that changed something, its user taken from the session.
@@ -76,8 +77,8 @@ import { GET as LIST } from '@/app/api/alerts/route';
 import { GET as SUMMARY } from '@/app/api/alerts/summary/route';
 import { POST as ACK } from '@/app/api/alerts/ack/route';
 import { POST as TEST_EMAIL } from '@/app/api/alerts/test-email/route';
-import { todayIso } from '@/lib/dispatch/time';
-import { bellWindow } from '@/lib/alerts/inbox';
+import { todayIso, zonedDayStart } from '@/lib/dispatch/time';
+import { bellOpenWhere, bellWindow } from '@/lib/alerts/inbox';
 
 const cfg = (extra: Record<string, unknown> = {}) => ({
   alertsEnabled: true,
@@ -218,9 +219,33 @@ describe('GET /api/alerts/summary (the bell)', () => {
     expect(body.data).toMatchObject({ enabled: true, today, open: 3, high: 1, emailCapReached: false });
     expect(body.data.latest.map((r: any) => r.id)).toEqual(['h1', 'w2', 'w1']);
     const day = (d: number) => new Date(Date.parse(`${today}T00:00:00.000Z`) + d * 86_400_000);
-    expect(state.counts[0].where).toEqual({ deliveryDate: { gte: day(0), lte: day(1) }, resolvedAt: null, ackedAt: null });
-    // Every read of the bell has the same window (the counts and both lists).
-    for (const q of [...state.counts, ...state.finds]) expect(q.where.deliveryDate).toEqual({ gte: day(0), lte: day(1) });
+    const open = {
+      resolvedAt: null,
+      ackedAt: null,
+      OR: [
+        { deliveryDate: { gte: day(0), lte: day(1) } },
+        // Review of the branch (finding 2): yesterday's Load not closed raised since the company's midnight.
+        { deliveryDate: day(-1), rule: { in: ['LOAD_NOT_CLOSED'] }, firstSeenAt: { gte: zonedDayStart(today, 'Asia/Muscat') } },
+      ],
+    };
+    expect(state.counts[0].where).toEqual(open);
+    // Every read of the bell has the same rows (the counts and both lists).
+    for (const q of [...state.counts, ...state.finds]) expect({ resolvedAt: q.where.resolvedAt, ackedAt: q.where.ackedAt, OR: q.where.OR }).toEqual(open);
+  });
+
+  it("review of the branch (finding 2): bellOpenWhere - today's and tomorrow's open rows, and only the day's follow-up of yesterday raised since the company's midnight", () => {
+    const start = zonedDayStart('2026-10-21', 'Asia/Muscat');
+    expect(start).toEqual(new Date('2026-10-20T20:00:00.000Z'));
+    expect(bellOpenWhere('2026-10-21', start)).toEqual({
+      resolvedAt: null,
+      ackedAt: null,
+      OR: [
+        { deliveryDate: { gte: new Date('2026-10-21T00:00:00.000Z'), lte: new Date('2026-10-22T00:00:00.000Z') } },
+        { deliveryDate: new Date('2026-10-20T00:00:00.000Z'), rule: { in: ['LOAD_NOT_CLOSED'] }, firstSeenAt: { gte: start } },
+      ],
+    });
+    // Across a year end.
+    expect((bellOpenWhere('2027-01-01', zonedDayStart('2027-01-01', 'Asia/Muscat')).OR as unknown[])[1]).toMatchObject({ deliveryDate: new Date('2026-12-31T00:00:00.000Z') });
   });
 
   it("bellWindow: today and tomorrow in the company's time zone, across midnight", () => {

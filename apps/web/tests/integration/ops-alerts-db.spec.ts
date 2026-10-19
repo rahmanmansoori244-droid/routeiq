@@ -24,11 +24,19 @@
  *     row of 10 Mar still open as DAY_ENDED (who acknowledged it kept), raises nothing open for that day
  *     (what it finds true only now is written closed, never toasted or e-mailed), and the next sweep
  *     changes nothing.
+ *  7. Review of the branch (19 Oct 2026): T05 L3, out at 20:05 and planned back at 22:30, still not closed:
+ *     the sweep at 00:35 raises Load not closed OPEN for 10 Mar (finding 2: the day's follow-up), the next
+ *     sweeps keep it open and escalate it at 02:35; the bell counts it; the first e-mail after the quiet
+ *     hours (06:05) claims it and T05 L1's Load not closed raised at 23:58 and closed at midnight as Day
+ *     ended (finding 1: never e-mailed, so it goes once), and nothing the second time.
  * Invented names and codes.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 import { runAlertSweep, resetAlertSweepClock, sweepTenant, type AlertTenantConfig } from '@/lib/alerts/sweep';
+import { alertSummary } from '@/lib/alerts/inbox';
+import { prismaDigestStore } from '@/lib/alerts/notify';
+import { tenantDb } from '@/lib/tenant';
 import { recordDriverActions } from '@/lib/delivery/event-service';
 import { zonedDayStart } from '@/lib/dispatch/time';
 
@@ -277,5 +285,50 @@ describe('operations alerts on the real database', () => {
     const again = await sweepTenant(cfg, at('24:04'));
     expect(again).toMatchObject({ raised: 0, history: 0, reopened: 0, escalated: 0, updated: 0, resolved: {} });
     expect(await prisma.opsAlert.count({ where: { tenantId: A.tenantId, resolvedAt: null } })).toBe(0);
+  });
+
+  it("7. review of the branch: a load planned back at 22:30 still not closed raises Load not closed open after midnight, on the bell and in the e-mail; a HIGH of the evening closed at midnight goes in the 06:05 e-mail once", async () => {
+    const cfg = await cfgOf(A);
+    const run = await prisma.runPlan.findUniqueOrThrow({ where: { id: A.runId } });
+    const driver = await prisma.driver.findFirstOrThrow({ where: { tenantId: A.tenantId, code: 'DR1' } });
+    const customer = await prisma.customer.findFirstOrThrow({ where: { tenantId: A.tenantId, code: 'C200' } });
+    // T05 L3: out at 20:05, planned back at 22:30, its one stop without a result and no Back at depot.
+    const order = await prisma.order.create({ data: { tenantId: A.tenantId, customerId: customer.id, depotId: run.depotId, deliveryDate: day, totalCases: 10, priority: 3, status: 'DISPATCHED' } });
+    const l3 = await prisma.planLoad.create({
+      data: { tenantId: A.tenantId, runId: A.runId, truckId: A.trucks.T05!, loadNo: 3, status: 'DISPATCHED', departMin: 1200, returnMin: 1350, distanceKm: 20, durationMin: 150, cases: 10, weightKg: 100, utilizationPct: 3, driverId: driver.id, statusChangedAt: at('20:05'), createdAt: at('04:00') },
+    });
+    await prisma.routeAssignment.create({
+      data: { runId: A.runId, truckId: A.trucks.T05!, orderId: order.id, loadId: l3.id, loadNo: 3, sequenceInTruck: 1, orderInStop: 0, plannedArrivalMin: 1260, plannedDistanceFromPrevKm: 5, plannedLoadCases: 10, etaMin: 1260, serviceStartMin: 1260, departureMin: 1280 },
+    });
+
+    // 00:35 on 11 Mar: 125 min after the planned return (threshold 120): raised OPEN for 10 Mar, a warning.
+    const first = await sweepTenant(cfg, at('24:35'));
+    expect(first).toMatchObject({ raised: 1, reopened: 0 });
+    const live = await prisma.opsAlert.findFirstOrThrow({ where: { tenantId: A.tenantId, rule: 'LOAD_NOT_CLOSED', loadNo: 3 } });
+    expect(live).toMatchObject({ deliveryDate: day, truckCode: 'T05', resolvedAt: null, resolvedReason: null, tier: 1, severity: 'WARN', mayToast: true, mayEmail: true, firstSeenAt: at('24:35') });
+    // The next sweep does not close it as Day ended; at 02:35 (245 min) it is HIGH.
+    expect((await sweepTenant(cfg, at('24:37')))!.resolved.DAY_ENDED ?? 0).toBe(0);
+    expect(await sweepTenant(cfg, at('26:35'))).toMatchObject({ escalated: 1 });
+    expect(await prisma.opsAlert.findUniqueOrThrow({ where: { id: live.id } })).toMatchObject({ resolvedAt: null, tier: 2, severity: 'HIGH', lastSeenAt: at('26:35') });
+
+    // The bell at 02:40 counts it (the only open row), with the company's today.
+    const bell = await alertSummary(tenantDb(A.tenantId), A.tenantId, { alertsEnabled: true, timezone: TZ, alertEmails: null, alertEmailEveryMin: 15 }, at('26:40'));
+    expect(bell).toMatchObject({ enabled: true, today: '2026-03-11', open: 1, high: 1 });
+    expect(bell.latest.map((r) => [r.id, r.deliveryDate, r.state])).toEqual([[live.id, D, 'OPEN']]);
+
+    // 06:05, the first e-mail after the quiet hours: L3's row, and T05 L1's Load not closed raised HIGH at
+    // 23:58 and closed at midnight as Day ended, never e-mailed. Anything else of 10 Mar is a Day ended row too.
+    const l1 = await prisma.opsAlert.findFirstOrThrow({ where: { tenantId: A.tenantId, rule: 'LOAD_NOT_CLOSED', loadNo: 1, truckCode: 'T05' } });
+    expect(l1).toMatchObject({ resolvedReason: 'DAY_ENDED', severity: 'HIGH', emailedTier: 0, lastSeenAt: at('23:58'), mayEmail: true });
+    const store = prismaDigestStore(prisma);
+    const opts = { everyMin: 15, minSeverity: 'HIGH', dayStart: zonedDayStart('2026-03-11', TZ), today: '2026-03-11', recipients: 1, quietEndedAt: at('30:00') };
+    const claim = await store.claim(A.tenantId, at('30:05'), opts);
+    expect(claim.ok).toBe(true);
+    const { digestId, rows: claimed } = claim as { digestId: string; rows: { id: string; resolvedReason?: string | null }[] };
+    expect(claimed.map((r) => r.id)).toEqual(expect.arrayContaining([live.id, l1.id]));
+    for (const r of claimed) expect(r.id === live.id || r.resolvedReason === 'DAY_ENDED').toBe(true);
+    // Sent: the next e-mail finds nothing new (nothing goes twice).
+    await store.finish(A.tenantId, digestId, claimed as never, at('30:05'), { ok: true });
+    expect(await store.claim(A.tenantId, at('30:25'), opts)).toEqual({ ok: false, skip: 'NOTHING_NEW' });
   });
 });

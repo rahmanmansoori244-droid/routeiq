@@ -171,6 +171,21 @@ describe('runAlertSweep', () => {
     expect(console.warn).toHaveBeenCalledWith('alerts: sweep', expect.objectContaining({ tenantId: 'tA', resolved: { DAY_ENDED: 1 } }));
   });
 
+  it("review of the branch (finding 2): the day's follow-up raised after the company's midnight (Load not closed at 00:35) stays open; a row raised before it closes as DAY_ENDED", async () => {
+    // 21 Oct 00:40 in Muscat (20:40 UTC on the 20th): the start of the company's today is 21 Oct 00:00 Muscat, not UTC's.
+    const after = at(24 * 60 + 40);
+    const facts = { ...lateFacts().facts, today: '2026-10-21', dates: [D, '2026-10-21', '2026-10-22'], loads: [] };
+    const open = (id: string, loadNo: number, firstSeenAt: Date) => ({
+      id, rule: 'LOAD_NOT_CLOSED', subjectKey: `D1|${D}|TR1|${loadNo}`, kind: 'CONDITION', tier: 1, value: 125, text: `T05 L${loadNo} still not closed.`, truckCode: 'T05', depotId: 'D1', deliveryDate: D, resolvedAt: null, resolvedReason: null, firstSeenAt,
+    });
+    // L1's row was raised at 23:10 (on the bell during its day); L2's at 00:35, after the midnight.
+    state.facts.set('tA', { facts, rows: [open('y1', 1, at(23 * 60 + 10)), open('f1', 2, at(24 * 60 + 35))] });
+    const { db, updated } = stubDb([cfg('tA')]);
+    const r = await runAlertSweep(after, { db });
+    expect(r).toMatchObject({ resolved: 1 });
+    expect(updated.map((u) => [u.where.id, u.data.resolvedReason])).toEqual([['y1', 'DAY_ENDED']]);
+  });
+
   it('at most every 2 min (the cron route forces it); never twice at once; off with ROUTEIQ_DISABLE_ALERTS=1', async () => {
     state.facts.set('tA', lateFacts());
     const { db } = stubDb([cfg('tA')]);
