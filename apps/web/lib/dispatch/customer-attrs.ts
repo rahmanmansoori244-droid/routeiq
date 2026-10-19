@@ -87,6 +87,27 @@ export function unconfirmedPriorityText(eff: Pick<EffectiveAttrs, 'priority' | '
   return `P${eff.priority} - ${eff.prioritySource === 'TYPE' ? 'customer type default' : 'default'}, not confirmed`;
 }
 
+/**
+ * The unloading (service) time the planner gives a customer's stop before the per-case time
+ * (service-time.ts stopService adds that). effectiveAttrs uses it, and so does the analysis dataset
+ * (lib/analysis/job.ts, FactVisit.baseServiceMin), so the facts hold the base the plan was made with.
+ *
+ * A confirmed customer value (entered by a planner, or an imported column) wins; else the customer
+ * type's; else the company default from Settings. An unconfirmed stored value is only the column
+ * default (10 min) - it used to win over the Settings default, which then changed nothing for normal
+ * customers (review F21).
+ */
+export function effectiveServiceTime(
+  c: Pick<CustomerForPlanning, 'avgServiceTimeMin' | 'serviceTimeConfirmed' | 'customerType'>,
+  profiles: Map<string, Pick<TypeProfileLike, 'serviceTimeMin'>>,
+  defaults: { serviceTimeMin: number },
+): Pick<EffectiveAttrs, 'serviceMin' | 'serviceSource'> {
+  if (c.serviceTimeConfirmed) return { serviceMin: c.avgServiceTimeMin, serviceSource: 'CUSTOMER' };
+  const p = c.customerType ? profiles.get(c.customerType) : undefined;
+  if (p?.serviceTimeMin != null) return { serviceMin: p.serviceTimeMin, serviceSource: 'TYPE' };
+  return { serviceMin: defaults.serviceTimeMin, serviceSource: 'DEFAULT' };
+}
+
 export function effectiveAttrs(
   c: CustomerForPlanning,
   profiles: Map<string, TypeProfileLike>,
@@ -94,21 +115,7 @@ export function effectiveAttrs(
 ): EffectiveAttrs {
   const p = c.customerType ? profiles.get(c.customerType) : undefined;
   const { priority, prioritySource } = effectivePriority(c, profiles);
-  // Unloading time: a confirmed customer value (entered by a planner, or an imported column)
-  // wins; else the customer type's; else the company default from Settings. An unconfirmed stored
-  // value is only the column default (10 min) - it used to win over the Settings default, which
-  // then changed nothing for normal customers (review F21).
-  let serviceMin = c.avgServiceTimeMin;
-  let serviceSource: AttrSource = 'CUSTOMER';
-  if (!c.serviceTimeConfirmed) {
-    if (p?.serviceTimeMin != null) {
-      serviceMin = p.serviceTimeMin;
-      serviceSource = 'TYPE';
-    } else {
-      serviceMin = defaults.serviceTimeMin;
-      serviceSource = 'DEFAULT';
-    }
-  }
+  const { serviceMin, serviceSource } = effectiveServiceTime(c, profiles, defaults);
   // Own hours: some stored, or confirmed (all four empty and confirmed = open all day, any time: the
   // customer-type default does not apply to a customer who accepts deliveries at any time).
   const windowConfirmed = c.windowConfirmedAt != null;

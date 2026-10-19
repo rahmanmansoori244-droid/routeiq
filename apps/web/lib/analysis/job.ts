@@ -41,6 +41,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { findInParts } from '../in-parts';
+import { effectiveServiceTime } from '../dispatch/customer-attrs';
 import { addDaysIso, dateOnly, DEFAULT_TZ, localDateIso, zonedDayStart } from '../dispatch/time';
 import { dispatchedAt } from '../dispatch/dispatched-at';
 import { readLoadOrigin, readTruckSnapshot } from '../dispatch/snapshots';
@@ -427,6 +428,22 @@ async function gpsSourceOf(db: Db, c: ConfigRow, input: DayInput, now: Date): Pr
 }
 
 /**
+ * The base unloading minutes the planner gives a customer's stop before the per-case time
+ * (FactVisit.baseServiceMin): the planner's own rule, lib/dispatch/customer-attrs.ts effectiveServiceTime -
+ * the customer's confirmed time, else its customer type's, else the company default. Never the stored time
+ * alone: an unconfirmed customer holds the column default (10 min) while the plan used the company default
+ * (the first facts, 17-18 Oct 2026, stored 10 where the plan used 15). The stop snapshot cannot give it: its
+ * serviceMin is the base plus the per-case time, rounded and capped at 480. Null: the customer is not found.
+ */
+export function baseServiceOf(
+  c: { avgServiceTimeMin: number; serviceTimeConfirmed: boolean; customerType: string | null } | undefined,
+  profiles: Map<string, { serviceTimeMin: number | null }>,
+  defaultServiceTimeMin: number,
+): number | null {
+  return c ? effectiveServiceTime(c, profiles, { serviceTimeMin: defaultServiceTimeMin }).serviceMin : null;
+}
+
+/**
  * Everything the builder needs about a date, per truck: the loads that left on the company's plans in use,
  * their stops (with the plan rows' departure and km), the visits, the stop events, the depots, whether the
  * truck had a tracker (never the IMEI itself) and whether its GPS was suppressed. A handful of queries for
@@ -458,14 +475,18 @@ export async function readDay(db: Db, tenantId: string, date: string): Promise<M
   const extraOf = new Map(extra.map((x) => [x.id, x]));
   const customerIds = [...new Set([...stopsBy.values()].flat().map((s) => s.customerId))];
   const truckIds = [...new Set(loads.map((l) => l.truckId))];
-  const [customers, trucks, depots, dispatched] = await Promise.all([
-    findInParts(customerIds, (part) => db.customer.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, customerType: true, avgServiceTimeMin: true } })),
+  const [customers, profiles, cfg, trucks, depots, dispatched] = await Promise.all([
+    findInParts(customerIds, (part) => db.customer.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, customerType: true, avgServiceTimeMin: true, serviceTimeConfirmed: true } })),
+    db.customerTypeProfile.findMany({ where: { tenantId }, select: { customerType: true, serviceTimeMin: true } }),
+    db.tenantConfig.findFirst({ where: { tenantId }, select: { defaultServiceTimeMin: true } }),
     // Whether the truck has a tracker: the IMEI is read only to say yes or no, never kept.
     db.truck.findMany({ where: { tenantId, id: { in: truckIds } }, select: { id: true, ivmsImei: true } }),
     db.depot.findMany({ where: { tenantId, id: { in: [...new Set(loads.map((l) => l.depotId))] } }, select: { id: true, lat: true, lng: true } }),
     dispatchedAt(db, tenantId, loads.map((l) => ({ id: l.id, carriedFromLoadId: extraOf.get(l.id)?.carriedFromLoadId ?? null }))),
   ]);
   const custOf = new Map(customers.map((c) => [c.id, c]));
+  const profileOf = new Map(profiles.map((p) => [p.customerType, p]));
+  const defaultServiceMin = cfg?.defaultServiceTimeMin ?? 10;
   const firstRow = new Map<string, (typeof plan)[number]>();
   for (const r of plan) {
     const k = `${r.loadId}|${r.sequenceInTruck}`;
@@ -499,7 +520,7 @@ export async function readDay(db: Db, tenantId: string, date: string): Promise<M
             customerId: s.customerId,
             customerCode: s.customerCode,
             customerType: cu?.customerType ?? null,
-            baseServiceMin: cu?.avgServiceTimeMin ?? null,
+            baseServiceMin: baseServiceOf(cu, profileOf, defaultServiceMin),
             etaMin: s.etaMin,
             departureMin: r?.departureMin ?? null,
             plannedServiceMin: s.plannedServiceMin,

@@ -8,7 +8,8 @@
  * data only: the vendor documentation's dummy IMEI, a depot and shops in empty desert near 20.1, 55.1.
  *
  *  1. At 03:10 the day after, company A's truck-day (a tracker, a trail) is built with its GPS site facts and
- *     legs; company B's (no tracker) without GPS. A second run the same night writes nothing.
+ *     legs, and each stop's base unloading as the planner used it; company B's (no tracker) without GPS. A
+ *     second run the same night writes nothing.
  *  2. The next nights a result corrected by the office is refreshed; the trail pulled again after the build
  *     (IvmsTruckDay.lastPullAt) and still whole gives the GPS columns again, and with the trail gone (the
  *     retention) they stay as they are. The 4th night freezes the rows; a frozen row is never written again.
@@ -26,6 +27,7 @@ vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => (session.user ? { user: s
 import { prisma as libPrisma } from '@/lib/db';
 import { GET } from '@/app/api/analysis/export/route';
 import { _resetAnalysisJobState, runAnalysisJob } from '@/lib/analysis/job';
+import { ANALYSIS_VERSION } from '@/lib/analysis/types';
 import { purgeAnalysisFacts } from '@/lib/ivms/retention';
 import { DETECTOR_VERSION } from '@/lib/ivms/types';
 import { addDaysIso } from '@/lib/dispatch/time';
@@ -79,13 +81,14 @@ function trail(): { fixAt: Date; lat: number; lng: number; speedKmh: number; ign
 
 async function company(slug: string, tracked: boolean, truckCode: string): Promise<Company> {
   const t = await prisma.tenant.create({ data: { slug, name: `Analysis ${slug}`, country: 'Oman' } });
-  await prisma.tenantConfig.create({ data: { tenantId: t.id, ivmsMode: tracked ? 'TIMES' : 'OFF', timezone: 'Asia/Muscat' } });
+  // The company default unloading is 15 min: an unconfirmed customer (stored 10, the column default) is planned with it.
+  await prisma.tenantConfig.create({ data: { tenantId: t.id, ivmsMode: tracked ? 'TIMES' : 'OFF', timezone: 'Asia/Muscat', defaultServiceTimeMin: 15 } });
   const user = await prisma.user.create({ data: { tenantId: t.id, email: `admin@${slug}.test`, passwordHash: 'x', name: 'Admin', role: 'TENANT_ADMIN' } });
   const depot = await prisma.depot.create({ data: { tenantId: t.id, code: 'AD1', name: 'Example depot', ...at(0) } });
   const truck = await prisma.truck.create({ data: { tenantId: t.id, depotId: depot.id, code: truckCode, capacityCases: 500, ...(tracked ? { ivmsImei: IMEI } : {}) } });
   const custs = [
     await prisma.customer.create({ data: { tenantId: t.id, code: 'TST0001', name: 'Shop Example One', ...at(3000) } }),
-    await prisma.customer.create({ data: { tenantId: t.id, code: 'TST0002', name: 'Shop Example Two', ...at(6000) } }),
+    await prisma.customer.create({ data: { tenantId: t.id, code: 'TST0002', name: 'Shop Example Two', ...at(6000), avgServiceTimeMin: 10, serviceTimeConfirmed: true } }),
   ];
   const run = await prisma.runPlan.create({ data: { tenantId: t.id, depotId: depot.id, runDate: dayDate, createdById: user.id, status: 'DISPATCHED' } });
   const load = await prisma.planLoad.create({
@@ -143,7 +146,7 @@ describe('1-2. the nightly job on PostgreSQL', () => {
     const r = await run(1);
     expect(r).toMatchObject({ tenants: 2, built: 2, refreshed: 0, failed: 0, unfinished: false });
     const [[dayA], visitsA, legsA] = await facts(A);
-    expect(dayA).toMatchObject({ truckCode: 'T-100', tracked: true, loads: 1, stopsPlanned: 2, delivered: 2, gpsNote: null, lastInFrom: 'TRAIL', frozenAt: null, analysisVersion: 'analysis-v1', detectorVersion: DETECTOR_VERSION });
+    expect(dayA).toMatchObject({ truckCode: 'T-100', tracked: true, loads: 1, stopsPlanned: 2, delivered: 2, gpsNote: null, lastInFrom: 'TRAIL', frozenAt: null, analysisVersion: ANALYSIS_VERSION, detectorVersion: DETECTOR_VERSION });
     expect(dayA!.kmGps).toBeGreaterThan(10);
     expect(dayA!.gpsBuiltAt).toEqual(night(1));
     expect(visitsA.map((v) => [v.sequence, v.customerCode, v.unloadSource])).toEqual([
@@ -153,6 +156,13 @@ describe('1-2. the nightly job on PostgreSQL', () => {
     expect(visitsA[0]!.siteStartAt!.getTime()).toBeLessThanOrEqual(L('07:05').getTime());
     expect(visitsA[0]!.unloadVisitMin).toBe(8);
     expect(visitsA.every((v) => v.lateResultTap === false && v.visitId)).toBe(true);
+    // The base the planner used (fix of 19 Oct 2026): TST0001 never confirmed -> the company default 15, not its
+    // stored 10; TST0002 confirmed at 10 -> 10. The per-case rate takes it off (never negative: the CHECK).
+    expect(visitsA.map((v) => v.baseServiceMin)).toEqual([15, 10]);
+    for (const v of visitsA) {
+      expect(v.usableForRate).toBe(true);
+      expect(v.minPerCase).toBeCloseTo(Math.max(0, v.unloadMin! - v.baseServiceMin!) / 10, 2);
+    }
     expect(legsA.map((l) => [l.fromSeq, l.toSeq])).toEqual([
       [null, 1],
       [1, 2],

@@ -144,7 +144,7 @@ describe('the visit: unloading, the wait, the result', () => {
     expect(a.unloadTapMin).toBe(a.unloadVisitMin); // no GPS time on the visit: the taps are what RouteIQ holds
     expect(a.unloadMin).toBe(a.unloadSiteMin);
     expect(a.usableForRate).toBe(true);
-    expect(a.minPerCase).toBeCloseTo(a.unloadMin! / 40, 2);
+    expect(a.minPerCase).toBeCloseTo((a.unloadMin! - 10) / 40, 2); // the base (10) taken off first
     expect(a.lateResultTap).toBe(false);
     expect(a.truckDistAtResultM).toBeGreaterThan(330); // saved at the second drop point
     const b = f.visits.find((v) => v.sequence === 2)!;

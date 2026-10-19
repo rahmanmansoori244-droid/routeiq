@@ -2036,7 +2036,9 @@ model FactVisit {
   visitId            String?
   truckCode          String
   customerCode       String
-  /// The customer type and base unloading time as planned (null: untyped / not known).
+  /// The customer type, and the base unloading time the planner gives the stop before the per-case time (its
+  /// confirmed time, else its type's, else the company default: lib/analysis/job.ts baseServiceOf; null: untyped /
+  /// not known).
   customerType       String?
   baseServiceMin     Int?
   // The plan (frozen).
@@ -2110,6 +2112,7 @@ model FactVisit {
   /// GPS_SITE or VISIT (CHECK).
   unloadSource       String?
   usableForRate      Boolean   @default(false)
+  /// (unloadMin - baseServiceMin) / cases delivered, 0 when shorter than the base (analysis-v1 rows: unloadMin / cases).
   minPerCase         Float?
   /// lib/analysis/types.ts FACT_VISIT_FLAGS (CHECK).
   flags              String[]  @default([])
