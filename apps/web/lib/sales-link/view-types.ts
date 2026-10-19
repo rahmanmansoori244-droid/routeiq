@@ -40,7 +40,8 @@ export type EtaSource = 'GPS' | 'TRIP' | 'PLAN';
 /**
  * The expected time against the window the salesman gave the customer (the printed Salesman ETA window):
  * inside it, after it, before it (GPS only), "due now - no update yet" (the plan says the truck should be
- * there and nothing says it is: no minutes), or no live updates from this truck at all.
+ * there and nothing says it is: no minutes), or no time to give: no live updates from this truck at all, a trip
+ * not marked as left, or a stop after one the clock decides ("Not before 11:00 - no update from the truck yet").
  */
 export type EtaTiming = 'ON_TIME' | 'LATE' | 'EARLY' | 'DUE_NOW' | 'NO_UPDATES';
 

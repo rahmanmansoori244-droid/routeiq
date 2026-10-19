@@ -14,8 +14,14 @@
  *  2. L is COMPLETED, or the driver tapped Back at depot: NO_RESULT ("Truck stopped there 10:31-10:52 -
  *     result not recorded" when GPS or the phone saw the truck there; never "Delivered");
  *  3. L is DISPATCHED (also an earlier day's trip still out after midnight: now is then past 1440):
- *     - "probably over" (critique 4): GPS saw the truck back at its depot after its last stop, or the planned
- *       return + 60 min has passed with no sign from the truck for an hour: NO_RESULT ("probably finished");
+ *     - Back at depot tapped (the trip is not closed): rule 2;
+ *     - "probably over" (critique 4): GPS saw the truck back at its depot after its last stop; or a later
+ *       trip of the truck has left (Completed, Back at depot tapped, a sign at one of its stops, or Dispatched
+ *       with its planned departure passed); or the planned return + 60 min has passed and the truck gave no
+ *       sign for this trip for an hour (its stops' times and photos; the phone only while no later trip was
+ *       dispatched), or GPS saw it come back to its depot since its last sign: NO_RESULT ("probably
+ *       finished"). A fresh GPS fix alone never keeps a trip going: a truck left Dispatched and driven home in
+ *       the evening is not followed (review of 19 Oct 2026);
  *     - AT_CUSTOMER: arrived (or a delivery photo), no departure, no result, no later stop with activity -
  *       and, while the GPS may judge the stops (a fresh fix and the history caught up: critique 3), the GPS
  *       has the truck at that stop;
@@ -30,9 +36,14 @@
  * THE EXPECTED TIME of a delivery still to come, today (lib/alerts/load-eta.ts: one input with the alerts):
  * - a trip on the road: the live GPS ETA while it may be used, else the projection (projection.ts) of the
  *   plan moved by the driver's taps and photos; never earlier than now: "Due now - no update yet" instead,
- *   with no minutes when the clock pushed it or the phone was heard since (critique 4);
+ *   with no minutes when the clock pushed it or the phone was heard since (critique 4). The stops after such
+ *   a stop, or after a stop whose unloading the clock is stretching, get "not before HH:MM" only: their
+ *   projected times are lower bounds that grow with the clock - never late, never counted as delayed, never
+ *   the truck's "behind plan";
  * - a trip that has not left: the projection from the later of its planned departure (moved by how late the
- *   truck's trip before it will be back: critique 6) and now; more than 30 min past that departure it says
+ *   truck's trip before it will be back: critique 6 - with GPS from the last stop's GPS arrival + its
+ *   unloading + the planned drive back; never before now + the work left when the next stop waits on the
+ *   clock or on a phone heard since) and now; more than 30 min past that departure it says
  *   "should have left - not marked as left yet" and gives no time (critique 14);
  * - a trip with no live source at all (no sign from the phone, no GPS: critique 4): no time, "No live
  *   updates from this truck", the printed window;
@@ -49,10 +60,10 @@ import { carriedLoadShows } from '../dispatch/carry-view';
 import { localMinutes, todayIso, zonedDayStart } from '../dispatch/time';
 import { etaSlot, FIXED_STATUSES, hhmmRange, invoiceText, longDayText, stopWindow, type SalesmanEtaFacts } from '../exports/salesman-eta';
 import { readVisitLines } from '../delivery/visit';
-import { projectLoad, type ProjectedStop, type Projection } from '../alerts/projection';
-import { RETURN_GRACE_MIN } from '../alerts/catalog';
+import { projectLoad, type ProjectedStop, type Projection, type ProjectionStopIn } from '../alerts/projection';
+import { RETURN_GRACE_MIN, thresholdsOf, type AlertConfig } from '../alerts/catalog';
 import { clockText, minutesOnDate } from '../alerts/text';
-import { gpsBackOf, gpsLiveOf, gpsTruckDayFactOf, type AlertGpsSettings } from '../alerts/gps';
+import { firstInAfter, gpsBackOf, gpsLiveOf, gpsTruckDayFactOf, type AlertGpsSettings } from '../alerts/gps';
 import { firstPhotoAt, liveEtaAllowed, loadLiveEtas, projectionInputOf, projectionStopsOf, type EtaFactPhoto, type EtaFactStop, type EtaGps } from '../alerts/load-eta';
 import { fixStale } from '../ivms/live-map';
 import { MOVING_KMH, type GpsTruckDayFact } from '../ivms/types';
@@ -79,6 +90,7 @@ import {
   shortDayText,
   SOURCE_TEXT,
   STATUS_TEXT,
+  STILL_DUE_NOTE,
 } from './text';
 import type {
   DeliveryStatus,
@@ -183,8 +195,8 @@ export interface SalesDayInput {
   gps: SalesGpsIn | null;
   /** Customers' GPS site radius (big customers). */
   siteRadius: ReadonlyMap<string, number>;
-  /** The late Dispatch press threshold of the projection (the ETA_LATE alert's default, 30). */
-  lateDispatchMin?: number;
+  /** The late Dispatch press threshold of the projection, as the alerts read it (rules.ts: the company's ETA_LATE threshold, null while that rule is off); unset: DEFAULT_LATE_DISPATCH_MIN. */
+  lateDispatchMin?: number | null;
 }
 
 export interface SalesDay {
@@ -199,8 +211,10 @@ export interface SalesDay {
 // ---------------------------------------------------------------------------------------------
 
 type DayRel = 'PAST' | 'TODAY' | 'FUTURE';
-/** Where a trip's live times come from (critique 4). */
-type LiveClass = 'GPS' | 'PHONE' | 'NONE' | 'OVER';
+/** Where a trip's live times come from (critique 4); OVER: probably finished; BACK: Back at depot tapped, not closed. */
+type LiveClass = 'GPS' | 'PHONE' | 'NONE' | 'OVER' | 'BACK';
+/** The trip is finished or probably finished (not on the road any more). */
+const isOver = (c: LiveClass | null) => c === 'OVER' || c === 'BACK';
 
 type StopKind = 'RESULT' | 'NO_RESULT' | 'AT_CUSTOMER' | 'VISITED' | 'PASSED' | 'NEXT' | 'ON_THE_WAY' | 'LOADING' | 'PLANNED' | 'TRUCK_DID_NOT_GO';
 
@@ -212,8 +226,10 @@ interface StopLive {
   source: EtaSource | null;
   /** The clock pushed it or the phone was heard since: "due now", no minutes. */
   dueNow: boolean;
-  /** No live time for this trip at all. */
+  /** No live time for this stop: none for the trip at all, a trip not marked as left, or after a stop with no update. */
   noLive: string | null;
+  /** After a stop the clock pushed (or a phone heard since held): its projected arrival, a lower bound only. */
+  notBefore: number | null;
   stopsBefore: number | null;
 }
 
@@ -248,6 +264,17 @@ const r3 = (x: number) => Math.round(x * 1e3) / 1e3;
 const r4 = (x: number) => Math.round(x * 1e4) / 1e4;
 /** A load whose not-left time counts as "should have left" this long after its (moved) departure (critique 14). */
 export const NOT_LEFT_AFTER_MIN = 30;
+/** The late Dispatch press threshold without an alert setting (the ETA_LATE alert's default). */
+export const DEFAULT_LATE_DISPATCH_MIN = 30;
+
+/**
+ * The late Dispatch press threshold of the projection, the same as the alerts' (critique 8: one input): while the
+ * company's alerts are on, its Running late threshold (rules.ts evaluate: thresholdsOf(cfg).ETA_LATE; null when
+ * that rule is off: no late-press rule); while they are off, the default.
+ */
+export function salesLateDispatchMin(cfg: Partial<AlertConfig> | null | undefined): number | null {
+  return cfg?.alertsEnabled ? thresholdsOf(cfg).ETA_LATE : DEFAULT_LATE_DISPATCH_MIN;
+}
 /** A trip with no sign of the truck for this long, past its planned return + RETURN_GRACE_MIN, is "probably over". */
 export const SILENT_OVER_MIN = 60;
 /** A truck's position is shown at most this old. */
@@ -283,7 +310,8 @@ function liveOfLoads(recs: readonly LoadRec[], input: SalesDayInput, rel: DayRel
   const { date, tz, now } = input;
   const nowMin = minutesOnDate(now, date, tz);
   const dayStart = zonedDayStart(date, tz);
-  const lateDispatchMin = input.lateDispatchMin ?? 30;
+  // As the alerts (rules.ts): the company's Running late threshold, null while that rule is off; unset: the default.
+  const lateDispatchMin = input.lateDispatchMin === undefined ? DEFAULT_LATE_DISPATCH_MIN : input.lateDispatchMin;
   const out = new Map<string, LoadLive>();
   const byTruck = new Map<string, LoadRec[]>();
   for (const r of recs) {
@@ -306,7 +334,7 @@ function liveOfLoads(recs: readonly LoadRec[], input: SalesDayInput, rel: DayRel
     const phoneSeenAt = input.phoneSeen.get(truckId) ?? null;
     const fact = gpsFacts.get(truckId) ?? null;
     let lateBy = 0;
-    for (const rec of list) {
+    for (const [n, rec] of list.entries()) {
       const L = rec.load;
       const live: LoadLive = { rec, liveClass: null, shiftMin: 0, notMarkedLeft: false, stop: new Map(), behindMin: null };
       out.set(L.id, live);
@@ -319,11 +347,13 @@ function liveOfLoads(recs: readonly LoadRec[], input: SalesDayInput, rel: DayRel
       }
       if (L.status === 'DISPATCHED') {
         if (rec.back) {
+          // Back at depot tapped, the trip not closed (a stop without a result): finished, never "on the road".
+          live.liveClass = 'BACK';
           for (const [i, s] of rec.stops.entries()) live.stop.set(s.sequence, finishedStop(rec.visits[i]!, date, tz, false));
           lateBy = Math.max(0, minutesOnDate(rec.back, date, tz) - L.returnMin);
           continue;
         }
-        lateBy = dispatchedLive(live, { input, nowMin, dayStart, lateDispatchMin, phoneSeenAt, etaGps, fact });
+        lateBy = dispatchedLive(live, { input, nowMin, dayStart, lateDispatchMin, phoneSeenAt, later: list.slice(n + 1), etaGps, fact });
         continue;
       }
       // Not left: PLANNED, LOCKED, LOADING.
@@ -362,7 +392,7 @@ function liveOfLoads(recs: readonly LoadRec[], input: SalesDayInput, rel: DayRel
 }
 
 function plain(kind: StopKind, detail: string | null): StopLive {
-  return { kind, detail, expectedMin: null, source: null, dueNow: false, noLive: null, stopsBefore: null };
+  return { kind, detail, expectedMin: null, source: null, dueNow: false, noLive: null, notBefore: null, stopsBefore: null };
 }
 
 /** A stop of a trip that is over: its result, else "no result recorded" (with the times the truck was seen there). */
@@ -373,10 +403,44 @@ function finishedStop(v: SalesVisitIn | null, date: string, tz: string, probably
   return plain('NO_RESULT', detail);
 }
 
+/** The live GPS ETA's stop with a delivery photo of the driver's phone as its arrival when none was recorded (M3, as the projection reads it). */
+function withPhotoArrival(s: EtaFactStop): EtaFactStop {
+  const v = s.visit;
+  if (!v || v.arrivedAt || v.departedAt || v.outcome) return s;
+  const photo = firstPhotoAt(v);
+  return photo ? { ...s, visit: { ...v, arrivedAt: photo } } : s;
+}
+
+/**
+ * A later trip of the same truck has left, so the truck is done with this one: it is Completed, has a Back at
+ * depot tap or a sign at one of its stops, or it is Dispatched and its planned departure has passed - unless this
+ * trip had a sign after that Dispatch press (a press made early for both trips).
+ */
+function laterTripLeft(later: LoadRec, lastSign: Date | null, nowMin: number): boolean {
+  if (later.load.status === 'COMPLETED' || later.back) return true;
+  if (later.visits.some((v) => signTimes(v).length > 0 || !!v?.outcome)) return true;
+  if (later.load.status !== 'DISPATCHED' || nowMin < later.load.departMin) return false;
+  return !(lastSign && later.statusChangedAt && lastSign.getTime() > later.statusChangedAt.getTime());
+}
+
+/** The planned unloading the projection uses for a stop (projection.ts). */
+const serviceOf = (s: ProjectionStopIn) => (has(s.plannedServiceMin) ? Math.max(0, s.plannedServiceMin) : has(s.departureMin) && has(s.serviceStartMin) ? Math.max(0, s.departureMin - s.serviceStartMin) : 0);
+
 /** The live state of a DISPATCHED trip's stops; returns how late the truck will be back (lateBy for its next trip). */
 function dispatchedLive(
   live: LoadLive,
-  o: { input: SalesDayInput; nowMin: number; dayStart: Date; lateDispatchMin: number; phoneSeenAt: Date | null; etaGps: EtaGps | null; fact: GpsTruckDayFact | null },
+  o: {
+    input: SalesDayInput;
+    nowMin: number;
+    dayStart: Date;
+    lateDispatchMin: number | null;
+    /** When the truck's phone last sent anything (any trip of the day). */
+    phoneSeenAt: Date | null;
+    /** The truck's later trips that day, in departure order. */
+    later: readonly LoadRec[];
+    etaGps: EtaGps | null;
+    fact: GpsTruckDayFact | null;
+  },
 ): number {
   const { rec } = live;
   const L = rec.load;
@@ -390,30 +454,47 @@ function dispatchedLive(
   })!;
   const proj: Projection = projectLoad(projIn);
   const projOf = new Map(proj.stops.map((p) => [p.sequence, p]));
-  const liveEtas: StopEta[] = loadLiveEtas(o.etaGps, { status: L.status, depotId: rec.depotId, departMin: L.departMin, dayStart: o.dayStart, stops: rec.etaStops }, now);
+  const liveEtas: StopEta[] = loadLiveEtas(o.etaGps, { status: L.status, depotId: rec.depotId, departMin: L.departMin, dayStart: o.dayStart, stops: rec.etaStops.map(withPhotoArrival) }, now);
   const gpsGate = !!o.etaGps && liveEtaAllowed(o.fact, now);
   const etaOfSeq = new Map(liveEtas.map((e) => [e.sequence, e]));
 
-  // Signs of the truck on this trip: the visits' times, the phone, a GPS fix of the last half hour.
+  // Signs of the truck on THIS trip: its stops' times and photos, and the phone (truck-wide) only while no later
+  // trip was dispatched. A fresh GPS fix is no sign: a tracker keeps reporting from a truck driven home.
   const signs = rec.visits.flatMap(signTimes);
   const lastSign = signs.length ? new Date(Math.max(...signs.map((d) => d.getTime()))) : null;
   const allStopsDone = rec.stops.length > 0 && rec.visits.every((v) => !!v && (!!v.outcome || !!v.arrivedAt || !!v.departedAt));
   const gpsBack = o.fact ? gpsBackOf(o.fact, { lastSignAt: lastSign, dispatchAt: rec.statusChangedAt, allStopsDone, depotId: rec.depotId }, now) : null;
-  const recent = [lastSign, o.phoneSeenAt].filter((d): d is Date => !!d).some((d) => now.getTime() - d.getTime() <= SILENT_OVER_MIN * 60_000) || gpsLiveOf(o.fact, now) === 'LIVE';
+  const laterDispatched = o.later.some((r) => r.load.status === 'DISPATCHED' || r.load.status === 'COMPLETED' || !!r.back);
+  const phoneSign = laterDispatched ? null : o.phoneSeenAt;
+  const recent = [lastSign, phoneSign].filter((d): d is Date => !!d).some((d) => now.getTime() - d.getTime() <= SILENT_OVER_MIN * 60_000);
   const pastReturn = o.nowMin > L.returnMin + RETURN_GRACE_MIN;
+  // Past the return: a GPS depot IN since the trip's last sign (some stops untouched) ends it too.
+  const since = lastSign && rec.statusChangedAt ? (lastSign > rec.statusChangedAt ? lastSign : rec.statusChangedAt) : (lastSign ?? rec.statusChangedAt);
+  const backIn = pastReturn && o.fact && since ? firstInAfter(o.fact, since, now, rec.depotId) : null;
+  const laterLeft = o.later.some((r) => laterTripLeft(r, lastSign, o.nowMin));
   const anyActivity = signs.length > 0 || rec.visits.some((v) => !!v?.outcome);
   const gpsFollows = gpsLiveOf(o.fact, now) !== null;
 
   let cls: LiveClass;
-  if (gpsBack || (pastReturn && !recent)) cls = 'OVER';
+  if (gpsBack || laterLeft || (pastReturn && (!recent || backIn))) cls = 'OVER';
   else if (!anyActivity && !o.phoneSeenAt && !gpsFollows) cls = 'NONE';
   else cls = liveEtas.length ? 'GPS' : 'PHONE';
   live.liveClass = cls;
 
   if (cls === 'OVER') {
     for (const [i, s] of rec.stops.entries()) live.stop.set(s.sequence, finishedStop(rec.visits[i]!, date, tz, true));
-    return gpsBack ? Math.max(0, minutesOnDate(gpsBack.at, date, tz) - L.returnMin) : 0;
+    const backMove = gpsBack ?? backIn;
+    return backMove ? Math.max(0, minutesOnDate(backMove.at, date, tz) - L.returnMin) : 0;
   }
+
+  // The first stop whose time the clock decides (critique 4): a pending stop the clock pushed or a phone heard since
+  // held, or a stop being unloaded past its planned end (it ends "now"). The projected times after it only say
+  // "not before" (with GPS the live ETA gives them).
+  const pushed =
+    cls === 'GPS'
+      ? null
+      : (proj.stops.find((p, i) => (p.state === 'PENDING' && (p.clockBound || p.phoneHeld)) || (p.state === 'IN_PROGRESS' && has(p.startMin) && p.depMin === o.nowMin && o.nowMin > p.startMin + serviceOf(stopsIn[i]!))) ?? null);
+  const afterPushed = (seq: number) => !!pushed && seq > pushed.sequence;
 
   const atStopSeq = liveEtas[0]?.atStop ? liveEtas[0].sequence : null;
   const gpsNext = liveEtas.find((e) => !e.atStop)?.sequence ?? null;
@@ -481,12 +562,10 @@ function dispatchedLive(
       const arr = passedFrom + leg;
       passedFrom = arr + service;
       passedPrevPlanDep = has(s.etaMin) ? s.etaMin + service : passedPrevPlanDep;
-      live.stop.set(s.sequence, {
-        ...plain('PASSED', 'Still due - the driver is serving other customers first'),
-        expectedMin: arr,
-        source: 'TRIP',
-        stopsBefore: pendingAll + rec.stops.filter((x) => x.sequence < s.sequence && kinds.get(x.sequence) === 'PASSED').length,
-      });
+      const stopsBefore = pendingAll + rec.stops.filter((x) => x.sequence < s.sequence && kinds.get(x.sequence) === 'PASSED').length;
+      // After the stops the clock decides: a lower bound only.
+      if (pushed) live.stop.set(s.sequence, { ...plain('PASSED', null), source: 'TRIP', notBefore: arr, noLive: notBeforeText(arr, o.nowMin, phoneText), stopsBefore });
+      else live.stop.set(s.sequence, { ...plain('PASSED', null), expectedMin: arr, source: 'TRIP', stopsBefore });
       continue;
     }
     // NEXT / ON_THE_WAY.
@@ -501,17 +580,42 @@ function dispatchedLive(
       expectedMin = p?.arrMin ?? null;
       source = 'TRIP';
       dueNow = !!p && (p.clockBound || p.phoneHeld);
+      if (!dueNow && afterPushed(s.sequence) && has(expectedMin)) {
+        live.stop.set(s.sequence, { ...plain(kind, null), source, notBefore: expectedMin, noLive: notBeforeText(expectedMin, o.nowMin, phoneText), stopsBefore: ahead(s.sequence) });
+        continue;
+      }
     }
     live.stop.set(s.sequence, { ...plain(kind, null), expectedMin, source, dueNow, detail: dueNow ? `Due now - no update from the truck yet${phoneText}` : null, stopsBefore: ahead(s.sequence) });
   }
 
-  // How far behind its plan the trip is now (its next stop ahead, real times only), and how late it will be back.
+  // How far behind its plan the trip is now (its next stop ahead, real times only: never one the clock decides).
   const first = rec.stops.find((s) => ['NEXT', 'ON_THE_WAY'].includes(kinds.get(s.sequence)!) && !live.stop.get(s.sequence)!.dueNow);
   const fl = first ? live.stop.get(first.sequence)! : null;
   if (first && fl && has(fl.expectedMin) && has(first.etaMin)) live.behindMin = fl.expectedMin - first.etaMin;
   if (cls === 'NONE') return 0;
-  const end = cls === 'GPS' && gpsEnds.length ? Math.max(proj.returnMin, ...gpsEnds) : proj.returnMin;
+
+  // How late the truck will be back (critique 6): the projected return, ...
+  let end = proj.returnMin;
+  // ... never before now + the work left when its next stop keeps an expected arrival in the past (a phone heard since);
+  const held = proj.stops.find((p) => p.state === 'PENDING' && (p.clockBound || p.phoneHeld));
+  if (held && has(held.arrMin) && held.arrMin < o.nowMin) end = Math.max(end, o.nowMin + (proj.returnMin - held.arrMin));
+  // ... with GPS, the last stop ahead's GPS arrival + its unloading + the planned drive back (not its arrival alone).
+  if (cls === 'GPS' && liveEtas.length) {
+    const last = liveEtas.reduce((a, b) => (b.sequence > a.sequence ? b : a));
+    const i = rec.stops.findIndex((x) => x.sequence === last.sequence);
+    const s = rec.stops[i]!;
+    const service = serviceOf(stopsIn[i]!);
+    const planDep = has(s.departureMin) ? s.departureMin : has(s.etaMin) ? s.etaMin + service : null;
+    const arr = minutesOnDate(last.etaAt, date, tz);
+    const dep = last.atStop ? Math.max(o.nowMin, arr + service) : arr + service;
+    end = Math.max(end, dep + (planDep !== null ? Math.max(0, L.returnMin - planDep) : 0));
+  }
   return Math.max(0, end - L.returnMin);
+}
+
+/** A stop after one the clock decides: "Not before 11:00 - no update from the truck yet (last update 08:25)". */
+function notBeforeText(min: number, nowMin: number, phoneText: string): string {
+  return min > nowMin ? `Not before ${hhmm(round5(min))} - no update from the truck yet${phoneText}` : `No update from the truck yet${phoneText}`;
 }
 
 /** The planned departure of the stop before index i (its departure, else arrival + unloading), else the trip's. */
@@ -857,11 +961,15 @@ function routeView(route: string, accs: DeliveryAcc[], offs: OffAcc[], c: RouteC
     const eta = pending ? etaView(sl, slot, nowMin) : null;
     if (eta && !sl.detail && !sl.noLive) detailText = eta.text;
     else if (eta && sl.noLive) detailText = eta.text;
+    // Still due (critique 13): its expected time first (as Send to customer and the truck card say it), then why.
+    if (status === 'PASSED') detailText = eta ? `${eta.text} · ${STILL_DUE_NOTE}` : `Still due - ${STILL_DUE_NOTE}`;
     if (eta && sl.stopsBefore && (status === 'NEXT' || status === 'ON_THE_WAY' || status === 'PASSED')) detailText = `${detailText ?? eta.text} · ${sl.stopsBefore} stop${sl.stopsBefore === 1 ? '' : 's'} before`;
     else if (!eta && sl.noLive && sl.stopsBefore) detailText = `${sl.noLive} · ${sl.stopsBefore} stop${sl.stopsBefore === 1 ? '' : 's'} before`;
     // May arrive after the customer's receiving hours (the live time is never clipped).
     const closes = a.stop.promisedWindow?.endMin ?? a.stop.plannedHours?.hardEnd ?? null;
-    const arrivesBy = eta ? (eta.timing === 'DUE_NOW' ? nowMin : has(sl.expectedMin) && eta.timing !== 'NO_UPDATES' ? sl.expectedMin : null) : null;
+    const arrivesBy = !eta ? null : eta.timing === 'DUE_NOW' ? nowMin : has(sl.notBefore) ? sl.notBefore : has(sl.expectedMin) && eta.timing !== 'NO_UPDATES' ? sl.expectedMin : null;
+    // The customer's text never gives a window that is over (or that the truck can no longer make) as the time.
+    const windowOver = !!slot && (nowMin > slot.to || (has(sl.notBefore) && sl.notBefore - slot.to >= LATE_TOLERANCE_MIN));
     const afterHours = has(closes) && has(arrivesBy) && arrivesBy > closes ? `May arrive after the customer's receiving hours (until ${hhmm(closes)})` : null;
 
     const notes: string[] = [];
@@ -905,7 +1013,18 @@ function routeView(route: string, accs: DeliveryAcc[], offs: OffAcc[], c: RouteC
       orderTime: promised ? `this order: ${promised}` : null,
       notes,
       pin: a.stop.lat !== null && a.stop.lng !== null && Number.isFinite(a.stop.lat) && Number.isFinite(a.stop.lng) ? { lat: r4(a.stop.lat), lng: r4(a.stop.lng) } : null,
-      shareText: shareTextOf({ customerName: a.stop.customerName, invoices: a.invoices, status, dayShort: c.dayShort, window, expected: eta?.expected ?? null, at, delivered }),
+      shareText: shareTextOf({
+        customerName: a.stop.customerName,
+        invoices: a.invoices,
+        status,
+        dayShort: c.dayShort,
+        window,
+        expected: eta?.expected ?? null,
+        windowOver,
+        seen: !!thereText(v, date, tz, 'seen'),
+        at,
+        delivered,
+      }),
     });
   }
 
@@ -973,10 +1092,12 @@ function truckView(truckId: string, key: string, deliveries: SalesDelivery[], ac
   const trips = [...lives.values()].filter((l) => l.rec.load.truckId === truckId).sort((a, b) => a.rec.load.departMin - b.rec.load.departMin || a.rec.load.loadNo - b.rec.load.loadNo);
   const mine = accs.filter((a) => a.rec.load.truckId === truckId);
   const truckCode = mine[0]?.rec.load.truckCode ?? '';
-  const onRoad = trips.find((t) => t.rec.load.status === 'DISPATCHED' && t.liveClass !== 'OVER');
+  // The trip on the road: the first Dispatched trip that is not over (Back at depot tapped, or probably finished - a
+  // later trip that left ends it), so a trip pressed early with the one before is not "on the road" before it.
+  const onRoad = trips.find((t) => t.rec.load.status === 'DISPATCHED' && !isOver(t.liveClass)) ?? null;
+  // Else the next trip that has not left (the one being loaded first), else the latest trip (over).
   const current =
     onRoad ??
-    trips.find((t) => t.rec.load.status === 'DISPATCHED') ??
     trips.find((t) => t.rec.load.status === 'LOADING') ??
     trips.find((t) => t.rec.load.status === 'PLANNED' || t.rec.load.status === 'LOCKED') ??
     trips.at(-1) ??
@@ -989,9 +1110,11 @@ function truckView(truckId: string, key: string, deliveries: SalesDelivery[], ac
     if (L.status === 'DISPATCHED') {
       const since = current.rec.statusChangedAt ? ` since ${clockText(current.rec.statusChangedAt, date, tz)}` : '';
       text =
-        current.liveClass === 'OVER'
-          ? `Trip ${L.loadNo} probably finished - not closed yet`
-          : `On the road (trip ${L.loadNo})${since}${current.liveClass === 'NONE' ? ` - ${NO_LIVE_TEXT.toLowerCase()}` : ''}`;
+        current.liveClass === 'BACK'
+          ? `Trip ${L.loadNo} back at the depot`
+          : current.liveClass === 'OVER'
+            ? `Trip ${L.loadNo} probably finished - not closed yet`
+            : `On the road (trip ${L.loadNo})${since}${current.liveClass === 'NONE' ? ` - ${NO_LIVE_TEXT.toLowerCase()}` : ''}`;
     } else if (L.status === 'COMPLETED') text = 'All trips finished';
     else if (rel === 'PAST') text = `Trip ${L.loadNo} did not go out`;
     else if (current.notMarkedLeft) text = `Trip ${L.loadNo} should have left at ${hhmm(L.departMin + current.shiftMin)} - not marked as left yet`;
@@ -1016,7 +1139,8 @@ function truckView(truckId: string, key: string, deliveries: SalesDelivery[], ac
     nextYours = [nextD.customerName, when, before].filter(Boolean).join(' · ');
   }
 
-  // The position: only while the trip on the road still has this route's deliveries to make (critique 10).
+  // The position: only on the delivery day itself, while the trip on the road (never one over) still has this
+  // route's deliveries to make (critique 10).
   let position: SalesTruckPosition | null = null;
   let gpsText: string | null = null;
   const gps = input.gps;
@@ -1033,7 +1157,7 @@ function truckView(truckId: string, key: string, deliveries: SalesDelivery[], ac
       const updatedText = stale ? `Last GPS position ${at} (${ageMin} min ago)` : `Updated ${at}`;
       gpsText = stale ? `GPS: last position ${at}` : `GPS: updated ${at}`;
       const pendingOnRoad = !!onRoad && accs.some((a, i) => a.rec.load.id === onRoad.rec.load.id && PENDING.has(deliveries[i]!.status));
-      if (pendingOnRoad && ageMin <= POSITION_MAX_AGE_MIN && rel !== 'FUTURE' && Number.isFinite(p.lat) && Number.isFinite(p.lng)) {
+      if (pendingOnRoad && ageMin <= POSITION_MAX_AGE_MIN && rel === 'TODAY' && Number.isFinite(p.lat) && Number.isFinite(p.lng)) {
         position = { lat: r3(p.lat), lng: r3(p.lng), fixAt: p.fixAt.toISOString(), updatedText, ageMin, stale, moving: !stale && (p.speedKmh ?? 0) >= MOVING_KMH };
       }
     }

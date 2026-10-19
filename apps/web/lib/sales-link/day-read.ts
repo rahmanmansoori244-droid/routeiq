@@ -11,7 +11,8 @@
  * The page never calls the GPS provider: it reads the stored TruckPosition rows only (the poller writes them).
  *
  * What is read (indexed, a dozen queries per build):
- *  1. the company's name and settings (time zone, GPS tracking mode and radii) and the IVMS kill switch;
+ *  1. the company's name and settings (time zone, GPS tracking mode and radii, the alerts' Running late threshold
+ *     for the projection's late Dispatch press, as rules.ts) and the IVMS kill switch;
  *  2. the plan in use per depot (liveRuns) and its detail (memoPlanDetail); a depot whose plan has no applied
  *     option is "not planned yet";
  *  3. per planned depot, the facts its detail does not carry (lib/exports/salesman-eta.ts loadSalesmanEtaFacts);
@@ -38,7 +39,7 @@ import { readIvmsEnv } from '../ivms/env';
 import { ivmsModeAtLeast, ivmsModeOf } from '../ivms/settings';
 import type { IvmsMode } from '../ivms/types';
 import type { PlanDetail } from '../dispatch/plan-detail';
-import { buildSalesDay, type SalesDay, type SalesDayInput, type SalesExtraOrderIn, type SalesGpsIn, type SalesPlanIn, type SalesPositionIn, type SalesVisitIn } from './day';
+import { buildSalesDay, salesLateDispatchMin, type SalesDay, type SalesDayInput, type SalesExtraOrderIn, type SalesGpsIn, type SalesPlanIn, type SalesPositionIn, type SalesVisitIn } from './day';
 import { matchRoutes, parseRouteQuery } from './route-code';
 import { consumeMisses, salesFail, salesOk, type SalesLinkContext } from './guard';
 import { touchSalesLink } from './service';
@@ -110,7 +111,7 @@ export async function readSalesDayInput(tenantId: string, date: string, now: Dat
   const [cfg, tenant] = await Promise.all([
     prisma.tenantConfig.findFirst({
       where: { tenantId },
-      select: { timezone: true, ivmsMode: true, avgSpeedKmh: true, distanceMultiplier: true, ivmsStopRadiusM: true, ivmsDepotRadiusM: true },
+      select: { timezone: true, ivmsMode: true, avgSpeedKmh: true, distanceMultiplier: true, ivmsStopRadiusM: true, ivmsDepotRadiusM: true, alertsEnabled: true, alertEtaLateMin: true },
     }),
     prisma.tenant.findFirst({ where: { id: tenantId }, select: { name: true } }),
   ]);
@@ -270,6 +271,7 @@ export async function readSalesDayInput(tenantId: string, date: string, now: Dat
       phoneSeen,
       gps,
       siteRadius,
+      lateDispatchMin: salesLateDispatchMin(cfg),
     },
   };
 }

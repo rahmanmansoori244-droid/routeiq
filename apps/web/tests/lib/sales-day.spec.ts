@@ -15,10 +15,13 @@
  *    (critique 7); notes; two depots merged; lines without a route on no page;
  *  - the truck card: the position only while the trip on the road has the route's deliveries to make, 3
  *    decimals (critique 10); pins at 4 decimals; nothing private in the answer;
- *  - parity with the printed Salesman ETA (salesmanEtaModel) on the same plan.
+ *  - parity with the printed Salesman ETA (salesmanEtaModel) on the same plan;
+ *  - the review of 19 Oct 2026: a trip left open ends without the GPS keeping it alive (no position), Back at depot
+ *    and a later trip that left end a trip, the stops after a clock-pushed stop only "not before", the next trip's
+ *    shift, the alerts' late Dispatch threshold, Send to customer's window and "has been to you".
  */
 import { describe, expect, it } from 'vitest';
-import { buildSalesDay, etaView, type SalesDayInput } from '@/lib/sales-link/day';
+import { buildSalesDay, etaView, salesLateDispatchMin, type SalesDayInput, type SalesGpsIn } from '@/lib/sales-link/day';
 import { salesmanEtaModel } from '@/lib/exports/salesman-eta';
 import type { DeliveryStatus, SalesRouteView } from '@/lib/sales-link/view-types';
 import { at, atMin, DAY, dayInput, east, extraOrder, factsOf, gpsIn, hm, ln, load, planDetail, stop, unserved, visit, type Ln } from './sales-day-fixture';
@@ -146,9 +149,11 @@ describe('the live rules of a trip on the road', () => {
     expect(statusOf(v)).toEqual(['TST0001 PASSED', 'TST0002 DELIVERED', 'TST0003 NEXT']);
     const passed = v.deliveries[0]!;
     expect(passed.statusText).toBe('Still due');
-    expect(passed.detailText).toBe('Still due - the driver is serving other customers first · 1 stop before');
-    // After stop 3 (expected 09:45, leaves 10:00), plus its own planned leg (60 min): 11:00.
+    // After stop 3 (expected 09:45, leaves 10:00), plus its own planned leg (60 min): 11:00 - on the card too,
+    // as Send to customer and the truck card say it (review of 19 Oct 2026).
     expect(passed.eta).toMatchObject({ expected: '11:00', source: 'TRIP', timing: 'LATE' });
+    expect(passed.detailText).toBe('Expected about 11:00 - about 135 min after the window 07:45-08:45 · the driver is serving other customers first · 1 stop before');
+    expect(passed.shareText).toContain('is on the way, expected about 11:00 today');
   });
 
   it('no result after the trip: Completed, or Back at depot tapped; with the times the truck was seen (critique 12)', () => {
@@ -274,7 +279,30 @@ describe('the expected time and where it comes from', () => {
   it('the clock pushed the stop (the phone silent): due now, no minutes (critique 4)', () => {
     const v = view(dayInput({ ...base, plans: onePlan(), now: at('10:00') }));
     expect(v.deliveries[1]!.eta).toEqual({ expected: null, source: 'TRIP', timing: 'DUE_NOW', lateMin: null, earlyMin: null, text: 'Due now - no update from the truck yet (last update 08:25)' });
-    expect(v.counts.delayed).toBe(1); // stop 3 only: it cannot be reached before 11:00, after its window
+    // Stop 3 comes after it: a lower bound only ("not before"), never late, never delayed, no "behind plan"
+    // (review of 19 Oct 2026: the minutes grew with the clock all evening).
+    expect(v.deliveries[2]!.eta).toEqual({
+      expected: null,
+      source: null,
+      timing: 'NO_UPDATES',
+      lateMin: null,
+      earlyMin: null,
+      text: 'Not before 11:00 - no update from the truck yet (last update 08:25) - window 09:45-10:45',
+    });
+    expect(v.deliveries[2]!.detailText).toBe('Not before 11:00 - no update from the truck yet (last update 08:25) - window 09:45-10:45 · 1 stop before');
+    expect(v.counts.delayed).toBe(0);
+    expect(v.trucks[0]!.lateText).toBeNull();
+    // Hours later the same: no minutes that grow with the clock.
+    const later = view(dayInput({ ...base, plans: onePlan(), now: at('12:30') }));
+    expect(later.deliveries.map((d) => d.eta?.timing)).toEqual([undefined, 'DUE_NOW', 'NO_UPDATES']);
+    expect(later.deliveries[2]!.eta!.text).toMatch(/^Not before 13:30 - no update from the truck yet/);
+    expect(later.counts.delayed).toBe(0);
+    expect(later.trucks[0]!.lateText).toBeNull();
+    // Neither does a stop the clock is stretching (arrived at 08:00, nothing since): the stops after it.
+    const stuck = view(dayInput({ ...base, plans: onePlan(), visits: [visit({ seq: 1, arrivedAt: at('08:00') })], phoneSeen: new Map([['t5', at('08:00')]]), now: at('11:30') }));
+    expect(stuck.deliveries.map((d) => d.eta?.timing ?? d.status)).toEqual(['AT_CUSTOMER', 'NO_UPDATES', 'NO_UPDATES']);
+    expect(stuck.counts.delayed).toBe(0);
+    expect(stuck.trucks[0]!.lateText).toBeNull();
   });
 
   it('no live source at all (no phone, no GPS, nothing recorded): the window, no time (critique 4)', () => {
@@ -304,6 +332,219 @@ describe('the expected time and where it comes from', () => {
     const later = v.deliveries.find((d) => d.customerCode === 'TST0004')!;
     // Trip 1 is back 75 min late (14:15): trip 2 leaves 15:15 at the earliest, the stop is reached about 16:15.
     expect(later).toMatchObject({ status: 'PLANNED', eta: { source: 'TRIP', expected: '16:15', timing: 'LATE', lateMin: 30 } });
+  });
+
+  it("the next trip's shift: with GPS the last stop's GPS arrival + its unloading + the drive back; without, never before now + the work left", () => {
+    // Trip 1: one stop at 10:00 (15 min), back 11:00 (45 min drive). At 11:00 the truck is still 90 km away.
+    const l1 = load({ id: 'L1', status: 'DISPATCHED', departMin: hm(9), returnMin: hm(11), stops: [stop({ seq: 1, customerId: 'c1', code: 'TST0001', eta: hm(10), lines: [ln('o1', 'o1-l1', 'INV-1', 5, 'R1')] })] });
+    const l2 = load({ id: 'L2', loadNo: 2, status: 'LOCKED', departMin: hm(11, 30), returnMin: hm(14), stops: [stop({ seq: 1, customerId: 'c3', code: 'TST0003', eta: hm(12, 30), lines: [ln('o3', 'o3-l1', 'INV-3', 7, 'R1')] })] });
+    const input = (trailTo: string) =>
+      dayInput({ plans: onePlan([l1, l2]), now: at('11:00'), loadTimes: new Map([['L1', at('09:00')]]), phoneSeen: new Map([['t5', at('10:55')]]), gps: gpsIn({ fixAt: at('10:59'), pos: east(90_000), trailTo: at(trailTo) }) });
+    // GPS: TST0001 at 13:53, done 14:08, back 14:53 (233 min late, not 173): trip 2 leaves 15:23, TST0003 at 16:23.
+    const gps = view(input('10:59'));
+    expect(gps.deliveries.find((d) => d.customerCode === 'TST0001')!.eta).toMatchObject({ source: 'GPS', expected: '13:55' });
+    expect(gps.deliveries.find((d) => d.customerCode === 'TST0003')!.eta).toMatchObject({ expected: '16:25', timing: 'LATE' });
+    // The history behind the fix: the phone heard since the expected arrival holds TST0001 (due now); the rest of the
+    // trip starts no earlier than now - back 12:00, trip 2 leaves 12:30, TST0003 at 13:30 (not "as planned").
+    const phone = view(input('10:00'));
+    expect(phone.deliveries.find((d) => d.customerCode === 'TST0001')!.eta).toMatchObject({ timing: 'DUE_NOW' });
+    expect(phone.deliveries.find((d) => d.customerCode === 'TST0003')!.eta).toMatchObject({ expected: '13:30', timing: 'LATE', lateMin: 15 });
+  });
+
+  it("the late Dispatch press threshold is the alerts' (critique 8): the company's Running late threshold while alerts are on", () => {
+    expect(salesLateDispatchMin(null)).toBe(30);
+    expect(salesLateDispatchMin({ alertsEnabled: false, alertEtaLateMin: 60 })).toBe(30);
+    expect(salesLateDispatchMin({ alertsEnabled: true, alertEtaLateMin: 60 })).toBe(60);
+    expect(salesLateDispatchMin({ alertsEnabled: true, alertEtaLateMin: null })).toBeNull();
+    const l = load({ id: 'L1', status: 'DISPATCHED', departMin: hm(6), returnMin: hm(9), stops: [stop({ seq: 1, customerId: 'c1', code: 'TST0001', eta: hm(6, 40), lines: [ln('o1', 'o1-l1', 'INV-1', 5, 'R1')] })] });
+    const input = (lateDispatchMin?: number | null) => dayInput({ plans: onePlan([l]), now: at('06:50'), loadTimes: new Map([['L1', at('06:45')]]), phoneSeen: new Map([['t5', at('05:50')]]), lateDispatchMin });
+    // Dispatch pressed 45 min late with nothing done: the default 30 starts from the planned departure (due now) ...
+    expect(view(input()).deliveries[0]!.eta).toMatchObject({ timing: 'DUE_NOW' });
+    // ... a company threshold of 60, or that rule off, from the press - as its alerts do.
+    expect(view(input(60)).deliveries[0]!.eta).toMatchObject({ expected: '07:25', timing: 'ON_TIME' });
+    expect(view(input(null)).deliveries[0]!.eta).toMatchObject({ expected: '07:25' });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Trips left open, later trips, and the truck card (review of 19 Oct 2026)
+// ---------------------------------------------------------------------------------------------
+
+describe('trips left open and later trips of the truck (review of 19 Oct 2026)', () => {
+  const base = { loadTimes: new Map([['L1', at('07:00')]]) };
+  const byCode = (v: SalesRouteView, code: string) => v.deliveries.find((d) => d.customerCode === code)!;
+  // Trip 2 of T05: 12:00-16:00, stops at 13:00 and 14:00.
+  const trip2 = (status: string, o: { departMin?: number } = {}) =>
+    load({
+      id: 'L2',
+      loadNo: 2,
+      status,
+      departMin: o.departMin ?? hm(12),
+      returnMin: hm(16),
+      stops: [stop({ seq: 1, customerId: 'c4', code: 'TST0004', eta: hm(13), lines: [ln('o4', 'o4-l1', 'INV-4', 5, 'R1')] }), stop({ seq: 2, customerId: 'c5', code: 'TST0005', eta: hm(14), lines: [ln('o5', 'o5-l1', 'INV-5', 6, 'R1')] })],
+    });
+  const depotIn = (gps: SalesGpsIn, hhmm: string): SalesGpsIn => ({ ...gps, moves: new Map([['t5', [{ kind: 'DEPOT_IN', at: at(hhmm), observed: true, depotId: 'D1' }]]]) });
+
+  it('a fresh GPS fix alone never keeps a trip going: past the return + 60 with no sign for the trip, no position and no times', () => {
+    // Stop 2 skipped with nothing recorded, no Back at depot; the tracker keeps reporting all evening.
+    const input = (now: string, fixAt: string, pos = east(9000)) =>
+      dayInput({
+        ...base,
+        plans: onePlan(),
+        now: at(now),
+        visits: [delivered(1, '08:10', '08:25'), delivered(3, '10:10', '10:25')],
+        phoneSeen: new Map([['t5', at('10:30')]]),
+        gps: gpsIn({ fixAt: at(fixAt), pos, trailTo: at(fixAt) }),
+      });
+    const evening = view(input('19:30', '19:29'));
+    expect(evening.deliveries[1]).toMatchObject({ status: 'NO_RESULT', detailText: 'Trip probably finished - result not recorded', eta: null });
+    expect(evening.trucks[0]).toMatchObject({ position: null, gpsText: null, trip: { text: 'Trip 1 probably finished - not closed yet' } });
+    // Standing at the depot with a fresh fix (GPS tracking MAP: no depot moves): the same, no delay.
+    const atDepot = view(input('17:00', '16:59', east(0)));
+    expect(atDepot.deliveries[1]!.status).toBe('NO_RESULT');
+    expect(atDepot.trucks[0]!.position).toBeNull();
+    expect(atDepot.counts.delayed).toBe(0);
+    // Before the return + 60 min the trip is followed, and the truck shown while it has the route's stops to make.
+    const day = view(input('13:30', '13:29'));
+    expect(day.deliveries[1]!.status).toBe('PASSED');
+    expect(day.trucks[0]!.position).not.toBeNull();
+  });
+
+  it("an earlier day's trip (yesterday's link, after midnight) never shows the truck's position", () => {
+    const next = '2026-10-20';
+    const v = view(
+      dayInput({ ...base, plans: onePlan(), now: at('01:00', next), phoneSeen: new Map([['t5', at('00:50', next)]]), gps: gpsIn({ fixAt: at('00:59', next), pos: east(1500), trailTo: at('00:59', next) }) }),
+    );
+    expect(v.deliveries[0]!.status).toBe('NEXT');
+    expect(v.trucks[0]!.position).toBeNull();
+  });
+
+  it('Back at depot tapped but not closed: finished; the next trip on the road is the one the card follows (position, trip)', () => {
+    const v = view(
+      dayInput({
+        plans: onePlan([trip('DISPATCHED'), trip2('DISPATCHED')]),
+        now: at('13:10'),
+        loadTimes: new Map([['L1', at('07:00')], ['L2', at('12:05')]]),
+        visits: [delivered(1, '08:10', '08:25'), delivered(2, '09:10', '09:25')],
+        backAt: new Map([[`D1|${DAY}|t5|1`, at('11:00')]]),
+        phoneSeen: new Map([['t5', at('12:05')]]),
+        gps: gpsIn({ fixAt: at('13:09'), pos: east(500), trailTo: at('13:05') }),
+      }),
+    );
+    expect(byCode(v, 'TST0003')).toMatchObject({ status: 'NO_RESULT', detailText: 'Trip finished - no result recorded' });
+    expect(byCode(v, 'TST0004')).toMatchObject({ status: 'NEXT', eta: { source: 'GPS' } });
+    expect(v.trucks[0]!.trip).toMatchObject({ loadNo: 2, text: 'On the road (trip 2) since 12:05' });
+    expect(v.trucks[0]!.position).not.toBeNull();
+    // The day's last trip with Back at depot tapped: back, not on the road.
+    const back = view(dayInput({ ...base, plans: onePlan(), now: at('12:00'), visits: [delivered(1, '08:10', '08:25')], backAt: new Map([[`D1|${DAY}|t5|1`, at('11:30')]]) }));
+    expect(back.trucks[0]!.trip!.text).toBe('Trip 1 back at the depot');
+  });
+
+  it('a trip probably finished and the next one being loaded: the card says the next trip', () => {
+    const v = view(dayInput({ ...base, plans: onePlan([trip('DISPATCHED', { returnMin: hm(10, 30) }), trip2('LOADING', { departMin: hm(12, 30) })]), now: at('12:00'), visits: [delivered(1, '08:10', '08:25')], phoneSeen: new Map([['t5', at('08:25')]]) }));
+    expect(byCode(v, 'TST0002').status).toBe('NO_RESULT');
+    expect(v.trucks[0]!.trip).toMatchObject({ loadNo: 2, text: 'Being loaded (trip 2), planned to leave 12:30' });
+  });
+
+  it("an earlier trip left Dispatched while the truck is on its next trip is over: no next stop, no GPS time from the next trip's position", () => {
+    const input = (gps: SalesGpsIn | null) =>
+      dayInput({
+        plans: onePlan([trip('DISPATCHED'), trip2('DISPATCHED')]),
+        now: at('13:30'),
+        loadTimes: new Map([['L1', at('07:00')], ['L2', at('12:05')]]),
+        visits: [delivered(1, '08:10', '08:25'), delivered(1, '13:05', '13:20', { loadNo: 2 })],
+        phoneSeen: new Map([['t5', at('13:20')]]),
+        gps,
+      });
+    for (const v of [view(input(null)), view(input(gpsIn({ fixAt: at('13:29'), pos: east(1500), trailTo: at('13:25') })))]) {
+      expect(byCode(v, 'TST0002')).toMatchObject({ status: 'NO_RESULT', detailText: 'Trip probably finished - result not recorded', eta: null });
+      expect(byCode(v, 'TST0005').status).toBe('NEXT');
+      expect(v.trucks[0]!.trip!.text).toBe('On the road (trip 2) since 12:05');
+      expect(v.counts).toMatchObject({ now: 1, delayed: 0 });
+    }
+    // Trip 2 dispatched, nothing done on it yet, past its planned departure: trip 1 is over too.
+    const pressed = view(dayInput({ plans: onePlan([trip('DISPATCHED'), trip2('DISPATCHED')]), now: at('12:20'), loadTimes: new Map([['L1', at('07:00')], ['L2', at('12:05')]]), visits: [delivered(1, '08:10', '08:25')], phoneSeen: new Map([['t5', at('12:05')]]) }));
+    expect(byCode(pressed, 'TST0002').status).toBe('NO_RESULT');
+    // Both trips pressed early in the morning: trip 1 is followed until trip 2's planned departure.
+    const early = view(dayInput({ plans: onePlan([trip('DISPATCHED'), trip2('DISPATCHED')]), now: at('09:30'), loadTimes: new Map([['L1', at('07:00')], ['L2', at('07:01')]]), visits: [delivered(1, '08:10', '08:25')], phoneSeen: new Map([['t5', at('08:25')]]) }));
+    expect(byCode(early, 'TST0002').status).toBe('NEXT');
+    expect(early.trucks[0]!.trip!.text).toBe('On the road (trip 1) since 07:00');
+  });
+
+  it('GPS saw the truck back at its depot: probably finished, and the next trip moves by how late it came back', () => {
+    const l2 = load({ id: 'L2', loadNo: 2, status: 'LOCKED', departMin: hm(14), returnMin: hm(16), stops: [stop({ seq: 1, customerId: 'c4', code: 'TST0004', eta: hm(15), lines: [ln('o4', 'o4-l1', 'INV-4', 5, 'R1')] })] });
+    const gps = gpsIn({ fixAt: at('13:44'), pos: east(0), trailTo: at('13:44') });
+    // Every stop has a sign: the depot IN after the last one (13:40) ends the trip.
+    const v = view(
+      dayInput({
+        ...base,
+        plans: onePlan([trip('DISPATCHED'), l2]),
+        now: at('13:45'),
+        visits: [delivered(1, '08:10', '08:25'), delivered(2, '09:10', '09:25'), visit({ seq: 3, arrivedAt: at('10:05'), departedAt: at('10:20') })],
+        phoneSeen: new Map([['t5', at('10:20')]]),
+        gps: depotIn(gps, '13:40'),
+      }),
+    );
+    expect(byCode(v, 'TST0003')).toMatchObject({ status: 'NO_RESULT', detailText: 'Truck stopped there 10:05-10:20 - result not recorded' });
+    // Back 40 min late (13:40): trip 2 leaves 14:40, its stop about 15:40.
+    expect(byCode(v, 'TST0004').eta).toMatchObject({ expected: '15:40', source: 'TRIP', timing: 'ON_TIME' });
+    expect(v.trucks[0]!.position).toBeNull();
+    // Past the return + 60: a depot IN since the trip's last sign ends it with a stop untouched and the phone heard.
+    const open = view(dayInput({ ...base, plans: onePlan([trip('DISPATCHED'), l2]), now: at('14:10'), visits: [delivered(1, '08:10', '08:25')], phoneSeen: new Map([['t5', at('13:50')]]), gps: depotIn(gps, '13:30') }));
+    expect(byCode(open, 'TST0002')).toMatchObject({ status: 'NO_RESULT', detailText: 'Trip probably finished - result not recorded' });
+    // Without that depot IN the phone heard 20 min ago keeps it followed.
+    const heard = view(dayInput({ ...base, plans: onePlan([trip('DISPATCHED'), l2]), now: at('14:10'), visits: [delivered(1, '08:10', '08:25')], phoneSeen: new Map([['t5', at('13:50')]]) }));
+    expect(byCode(heard, 'TST0002').status).toBe('NEXT');
+  });
+
+  it('at the customer by a delivery photo while the GPS judges the stops (critique 3); a stop the GPS has the truck past is still due', () => {
+    const photo = { source: 'PHONE_MANUAL', takenAt: at('09:05'), receivedAt: at('09:06'), oldPhoto: false };
+    const atStop2 = view(
+      dayInput({ ...base, plans: onePlan(), now: at('09:10'), visits: [delivered(1, '08:10', '08:25'), visit({ seq: 2, photos: [photo] })], phoneSeen: new Map([['t5', at('09:06')]]), gps: gpsIn({ fixAt: at('09:09'), pos: east(2000), trailTo: at('09:08') }) }),
+    );
+    expect(statusOf(atStop2)).toEqual(['TST0001 DELIVERED', 'TST0002 AT_CUSTOMER', 'TST0003 NEXT']);
+    expect(atStop2.deliveries[1]!.detailText).toBe('Truck there since 09:05 (delivery photo)');
+    expect(atStop2.deliveries[2]!.eta!.source).toBe('GPS');
+    // At stop 3's pin, the history caught up, stop 2 never reached: still due, not next.
+    const past = view(dayInput({ ...base, plans: onePlan(), now: at('09:10'), visits: [delivered(1, '08:10', '08:25')], phoneSeen: new Map([['t5', at('08:25')]]), gps: gpsIn({ fixAt: at('09:09'), pos: east(3000), trailTo: at('09:08') }) }));
+    expect(statusOf(past)).toEqual(['TST0001 DELIVERED', 'TST0002 PASSED', 'TST0003 NEXT']);
+  });
+
+  it('the position at most POSITION_MAX_AGE_MIN (60 min) old', () => {
+    const input = (fixAt: string) =>
+      dayInput({ ...base, plans: onePlan(), now: at('08:40'), visits: [delivered(1, '08:10', '08:25')], phoneSeen: new Map([['t5', at('08:25')]]), gps: gpsIn({ fixAt: at(fixAt), pos: east(1500), trailTo: at(fixAt) }) });
+    expect(view(input('07:40')).trucks[0]!.position).toMatchObject({ stale: true, ageMin: 60 });
+    expect(view(input('07:39')).trucks[0]!.position).toBeNull();
+  });
+});
+
+describe('Send to customer (review of 19 Oct 2026)', () => {
+  const base = { loadTimes: new Map([['L1', at('07:00')]]) };
+  const READY = 'Please have someone ready to receive and sign.';
+
+  it('never gives a window that is over (or that the truck can no longer make) as the time; the window while it is still ahead', () => {
+    // No live source at all.
+    expect(view(dayInput({ ...base, plans: onePlan(), now: at('08:00') })).deliveries[0]!.shareText).toBe(`Example Mart TST0001: your delivery (invoice INV-1) is on the way, expected between 07:45-08:45 today. ${READY}`);
+    const none = view(dayInput({ ...base, plans: onePlan(), now: at('13:00') })).deliveries[0]!;
+    expect(none.eta!.text).toBe('No live updates from this truck - window 07:45-08:45');
+    expect(none.shareText).toBe(`Example Mart TST0001: your delivery (invoice INV-1) is on the way today, later than planned - we will confirm the time. ${READY}`);
+    // Due now after the window, and a stop the truck can only reach after its window.
+    const pushed = view(dayInput({ ...base, plans: onePlan(), now: at('10:00'), visits: [delivered(1, '08:10', '08:25')], phoneSeen: new Map([['t5', at('08:25')]]) }));
+    for (const d of pushed.deliveries.slice(1)) expect(d.shareText).toContain('is on the way today, later than planned - we will confirm the time.');
+    // A trip not marked as left after the window; before it, the time as planned; the day before, the window.
+    expect(view(dayInput({ plans: onePlan([trip('LOCKED')]), now: at('13:00') })).deliveries[0]!.shareText).toBe(
+      `Example Mart TST0001: your delivery (invoice INV-1) is planned for Mon 19 Oct, later than planned - we will confirm the time. ${READY}`,
+    );
+    expect(view(dayInput({ plans: onePlan([trip('LOCKED')]), now: at('06:00') })).deliveries[0]!.shareText).toBe(`Example Mart TST0001: your delivery (invoice INV-1) is planned for Mon 19 Oct, expected about 08:00. ${READY}`);
+    expect(view(dayInput({ plans: onePlan([trip('LOCKED')]), now: at('21:00', '2026-10-18') })).deliveries[0]!.shareText).toBe(
+      `Example Mart TST0001: your delivery (invoice INV-1) is planned for Mon 19 Oct, expected between 07:45-08:45. ${READY}`,
+    );
+  });
+
+  it('"the truck has been to you" only when the truck was seen there', () => {
+    const v = view(dayInput({ ...base, plans: onePlan([trip('COMPLETED')]), now: at('14:00'), visits: [delivered(1, '08:10', '08:25'), visit({ seq: 2, arrivedAt: at('09:05'), departedAt: at('09:20') })] }));
+    expect(v.deliveries[1]!.shareText).toBe('Example Mart TST0002: your delivery (invoice INV-2): the truck has been to you on Mon 19 Oct. Please tell us if anything is missing.');
+    expect(v.deliveries[2]!.shareText).toBe('Example Mart TST0003: your delivery (invoice INV-3) of Mon 19 Oct: we are checking its status and will contact you.');
   });
 });
 
@@ -362,7 +603,7 @@ describe('the orders of the route that are not on a truck', () => {
       'CANCELLED TST0002 7 Cancelled - Customer cancelled',
       'CANCELLED TST0008 1 Cancelled - Wrong or duplicate order',
       "NOT_PLANNED TST0004 3 The customer's receiving hours could not be met (the office will advise)",
-      'PART_NOT_PLANNED TST0006 15 Rest of a split delivery - not on a truck today (the office will advise)',
+      'PART_NOT_PLANNED TST0006 15 Rest of a split delivery - not on a truck on this day (the office will advise)',
       'ADDED_AFTER_PLAN TST0007 6 Received after planning - the next re-plan adds it',
       'NOT_PLANNED_YET TST0010 11 Not planned yet - the plan is made the evening before',
       'MOVED TST0003 9 Moved to Wed 21 Oct',

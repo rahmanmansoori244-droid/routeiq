@@ -116,7 +116,7 @@ export function salesWhy(reasonCode: string | null | undefined): string {
 
 export const OFFICE_ADVISES = ' (the office will advise)';
 export const NOT_PLANNED_WHY = (reasonCode: string | null | undefined) => `${salesWhy(reasonCode)}${OFFICE_ADVISES}`;
-export const PART_NOT_PLANNED_WHY = `Rest of a split delivery - not on a truck today${OFFICE_ADVISES}`;
+export const PART_NOT_PLANNED_WHY = `Rest of a split delivery - not on a truck on this day${OFFICE_ADVISES}`;
 export const ADDED_AFTER_PLAN_WHY = 'Received after planning - the next re-plan adds it';
 export const NOT_PLANNED_YET_WHY = 'Not planned yet - the plan is made the evening before';
 export const movedWhy = (toIso: string) => `Moved to ${shortDayText(toIso)}`;
@@ -144,8 +144,14 @@ export const windowText = (from: number, to: number) => `${hhmm(from)}-${hhmm(to
 /** A truck's GPS line. */
 export const GPS_NONE_TEXT = "No GPS on this truck - times from the driver's updates";
 export const NO_LIVE_TEXT = 'No live updates from this truck';
+/** Why a stop is still due (critique 13: never "skipped"). */
+export const STILL_DUE_NOTE = 'the driver is serving other customers first';
 
-/** The customer's WhatsApp text (no link): the status and the window or the time, with the invoices. */
+/**
+ * The customer's WhatsApp text (no link): the status and the expected time, else the printed window while it is
+ * still ahead (never a window that is over: "later than planned - we will confirm the time"), with the invoices.
+ * "The truck has been to you" only when the truck was seen there.
+ */
 export function shareTextOf(d: {
   customerName: string;
   invoices: readonly string[];
@@ -153,12 +159,18 @@ export function shareTextOf(d: {
   dayShort: string;
   window: string | null;
   expected: string | null;
+  /** The printed window is over, or the truck can no longer make it. */
+  windowOver: boolean;
+  /** The truck was seen at the customer (an arrival, a departure or a delivery photo). */
+  seen: boolean;
   at: string | null;
   delivered: { cases: number; of: number } | null;
 }): string {
   const inv = d.invoices.length ? ` (invoice ${d.invoices.join(', ')})` : '';
   const head = `${d.customerName}: your delivery${inv}`;
-  const when = d.expected ? `expected about ${d.expected}` : d.window ? `expected between ${d.window}` : null;
+  const ready = 'Please have someone ready to receive and sign.';
+  const later = 'later than planned - we will confirm the time';
+  const when = d.expected ? `expected about ${d.expected}` : d.window && !d.windowOver ? `expected between ${d.window}` : null;
   switch (d.status) {
     case 'DELIVERED':
       return `${head} was delivered${d.at ? ` at ${d.at}` : ''} on ${d.dayShort}.`;
@@ -168,18 +180,21 @@ export function shareTextOf(d: {
       return `${head} could not be delivered on ${d.dayShort}. We will contact you.`;
     case 'NO_RESULT':
     case 'VISITED':
-      return `${head}: the truck has been to you on ${d.dayShort}. Please tell us if anything is missing.`;
+      if (d.status === 'VISITED' || d.seen) return `${head}: the truck has been to you on ${d.dayShort}. Please tell us if anything is missing.`;
+      return `${head} of ${d.dayShort}: we are checking its status and will contact you.`;
     case 'AT_CUSTOMER':
-      return `${head}: the truck is with you now. Please have someone ready to receive and sign.`;
+      return `${head}: the truck is with you now. ${ready}`;
     case 'NEXT':
     case 'ON_THE_WAY':
     case 'PASSED':
-      return `${head} is on the way${when ? `, ${when}` : ''} today. Please have someone ready to receive and sign.`;
+      if (!when && d.windowOver) return `${head} is on the way today, ${later}. ${ready}`;
+      return `${head} is on the way${when ? `, ${when}` : ''} today. ${ready}`;
     case 'TRUCK_DID_NOT_GO':
       return `${head} was not delivered on ${d.dayShort}. We will contact you with a new time.`;
     case 'LOADING':
     case 'PLANNED':
     default:
-      return `${head} is planned for ${d.dayShort}${d.window ? `, expected between ${d.window}` : ''}. Please have someone ready to receive and sign.`;
+      if (!when && d.windowOver) return `${head} is planned for ${d.dayShort}, ${later}. ${ready}`;
+      return `${head} is planned for ${d.dayShort}${when ? `, ${when}` : ''}. ${ready}`;
   }
 }
