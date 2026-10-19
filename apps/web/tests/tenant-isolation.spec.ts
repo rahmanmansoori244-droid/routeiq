@@ -11,6 +11,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import { tenantDb } from '@/lib/tenant';
 
@@ -263,6 +264,25 @@ describe('tenantDb isolation (Phase 1 scope)', () => {
     // A write through one company cannot touch the other's rows.
     await tenantDb(tenantAId).driverLink.updateMany({ data: { revokedAt: new Date() } });
     expect((await tenantDb(tenantBId).driverLink.findFirst())?.revokedAt).toBeNull();
+  });
+
+  it('SalesLink (the salesman link, owner request 19 Oct 2026) is scoped both ways', async () => {
+    // One link per company and date: the same date in both companies (unique per company only).
+    const day = new Date('2099-10-19T00:00:00Z');
+    const hex = (tag: string) => createHash('sha256').update(`${tag}-${SUFFIX}`).digest('hex');
+    const a = await tenantDb(tenantAId).salesLink.create({ data: { id: `slA${SUFFIX}`, deliveryDate: day, salt: 's', keyId: '0a1b2c3d', tokenHash: hex('A'), expiresAt: new Date('2099-10-20T02:00:00Z') } as Any });
+    const b = await tenantDb(tenantBId).salesLink.create({ data: { id: `slB${SUFFIX}`, deliveryDate: day, salt: 's', keyId: '0a1b2c3d', tokenHash: hex('B'), expiresAt: new Date('2099-10-20T02:00:00Z') } as Any });
+    for (const [tid, own, other] of [
+      [tenantAId, a, b],
+      [tenantBId, b, a],
+    ] as const) {
+      const db = tenantDb(tid);
+      expect(await db.salesLink.count()).toBe(1);
+      expect((await db.salesLink.findFirst())?.id).toBe(own.id);
+      expect(await db.salesLink.findUnique({ where: { id: other.id } })).toBeNull();
+    }
+    await tenantDb(tenantAId).salesLink.updateMany({ data: { revokedAt: new Date() } });
+    expect((await tenantDb(tenantBId).salesLink.findFirst())?.revokedAt).toBeNull();
   });
 
   it('HireOption and HireSuggestion (the hire suggestion, owner request 6 Oct 2026) are scoped both ways', async () => {

@@ -66,6 +66,10 @@ export const AUDIT_ACTIONS = {
   DRIVER_LINK_ISSUED: { label: 'Driver link (QR) made' },
   DRIVER_LINK_REISSUED: { label: 'Driver link reissued (the old one stopped working)' },
   DRIVER_LINK_REVOKED: { label: 'Driver link stopped' },
+  // The salesman link (owner request 19 Oct 2026): one read-only link per day for the salesmen's group.
+  SALES_LINK_ISSUED: { label: 'Salesman link made' },
+  SALES_LINK_REISSUED: { label: 'Salesman link replaced (the old one stopped working)' },
+  SALES_LINK_REVOKED: { label: 'Salesman link turned off' },
   CASUAL_DRIVER_ADDED: { label: 'Daily driver added' },
   // Drivers page for the dispatcher (owner request 6 Oct 2026): leave periods and a truck's usual driver.
   DRIVER_LEAVE_ADDED: { label: 'Driver leave added' },
@@ -138,6 +142,7 @@ export const AUDIT_ENTITIES = {
   RouteAssignment: { label: 'Stop (legacy run)' },
   ManualBaseline: { label: 'Baseline (legacy run)' },
   DriverLink: { label: 'Driver link' },
+  SalesLink: { label: 'Salesman link' },
   StopVisit: { label: 'Delivery stop' },
   HireOption: { label: 'Truck to hire (hire option)' },
   HireSuggestion: { label: 'Hire suggestion' },
@@ -155,6 +160,7 @@ export function auditActionTone(action: string): 'default' | 'success' | 'warnin
   if (action === 'CREATE' || action === 'OPTIMIZE_SUCCEEDED' || action === 'LOAD_DISPATCHED' || action === 'LOAD_COMPLETED' || action === 'DISPATCH') return 'success';
   if (action === 'OVERRIDE' || action === 'ROUTE_MANUALLY_CHANGED' || action === 'LOAD_PLANNED' || action === 'PLAN_RESET' || action === 'CROSS_TENANT_VIEW' || action.startsWith('PLATFORM_ADMIN')) return 'warning';
   if (action === 'DRIVER_LINK_REVOKED' || action === 'DRIVER_LINK_REISSUED' || action === 'DELIVERY_CARRY_CONFLICT' || action === 'ORDER_CANCELLED') return 'warning';
+  if (action === 'SALES_LINK_REVOKED' || action === 'SALES_LINK_REISSUED') return 'warning';
   if (action === 'LOGIN' || action === 'SIGNUP' || action === 'LOAD_LOCKED' || action === 'LOAD_LOADING') return 'secondary';
   return 'outline';
 }

@@ -139,6 +139,7 @@ beforeEach(() => {
   seed();
 });
 afterEach(() => {
+  vi.useRealTimers();
   if (prevDisable === undefined) delete process.env.ROUTEIQ_DISABLE_IVMS;
   else process.env.ROUTEIQ_DISABLE_IVMS = prevDisable;
 });
@@ -238,6 +239,10 @@ describe('what the answer holds', () => {
   // at a stop; the phone's own photo is a sign, an old gallery photo, an office upload or another
   // company's row is not.
   it("the Leaving tap shown is rule R2's: the phone's own photo is a first sign; an old, office or other company photo is not", async () => {
+    // The taps and photos are at 07:05-07:25 of today: run at 12:00 company time, so that just after midnight
+    // they are not in the future (the spec failed between 00:00 and about 07:30 Oman time, 20 Oct 2026).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(local(720));
     tables.stopEvent.push(
       ...[425, 435, 445].map((min, k) => ({ id: `EL${k}`, tenantId: TEN, depotId: 'D1', deliveryDate: dateOnlyOf(TODAY), truckId: 't1', loadNo: 1, sequence: null, kind: 'DEPOT_DEPART', source: 'PHONE_MANUAL', at: local(min), receivedAt: local(min), payloadJson: null })),
     );

@@ -8,7 +8,8 @@
  *   wrong clock can neither keep a photo forever nor lose it the next day.
  * - purgeOldLocations: after locationRetentionDays (default 90, never more than the photo retention)
  *   the positions, accuracies, speeds, IP addresses and browser ids of driver events, visits and
- *   photos are erased, and the browser ids on the driver links (devicesJson; the count stays). Every
+ *   photos are erased, and the browser ids on the driver links and the salesman links (devicesJson; the count
+ *   stays). Every
  *   distance from the pin is kept: the KPIs, the actuals Excel and the pin check need only distances.
  *   The planned pin is company data and stays.
  * - clearIdleCasualDrivers (once a day): a daily driver with no load dated within the last 30 days (or
@@ -30,6 +31,7 @@ import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, todayIso } from '../dispatch/t
 import { DEFAULT_LOCATION_RETENTION_DAYS, DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
 import { ALERT_RETENTION_DAYS } from '../alerts/catalog';
 import { purgeOldAlertRows } from '../alerts/store';
+import { eraseSalesLinkDevices } from '../sales-link/service';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -154,7 +156,8 @@ export async function purgeOldLocations(now: Date = new Date(), db: Db = prisma)
       ).count;
       if (ids.length < JANITOR_BATCH) break;
     }
-    mine.links = await eraseLinkDevices(db, t.tenantId, cutoffIso);
+    // The driver links' browser ids, and the salesman links' (owner request 19 Oct 2026): the counts stay.
+    mine.links = (await eraseLinkDevices(db, t.tenantId, cutoffIso)) + (await eraseSalesLinkDevices(db, t.tenantId, cutoffIso));
     const count = mine.events + mine.visits + mine.photos + mine.links;
     if (count > 0) {
       await audit({ tenantId: t.tenantId, userId: null, action: 'DELIVERY_LOCATIONS_PURGED', entity: 'Tenant', entityId: t.tenantId, afterJson: { count, ...mine, olderThanDays: t.locationRetentionDays } as never });

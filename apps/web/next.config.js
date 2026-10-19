@@ -42,6 +42,18 @@ const nextConfig = {
           { key: 'Permissions-Policy', value: 'geolocation=(self), camera=(self)' },
         ],
       })),
+      // The salesman link's page and its API (owner request 19 Oct 2026): the token is in the page's path, so
+      // no index and no cache; Referer only as the origin (strict-origin: the map tiles get the origin, never the
+      // token's path). Read-only: no location or camera.
+      ...['/s/:path*', '/api/s/:path*'].map((source) => ({
+        source,
+        headers: [
+          { key: 'Referrer-Policy', value: 'strict-origin' },
+          { key: 'X-Robots-Tag', value: 'noindex, nofollow, noarchive' },
+          { key: 'Cache-Control', value: 'no-store' },
+          { key: 'Permissions-Policy', value: 'geolocation=(), camera=(), microphone=()' },
+        ],
+      })),
     ];
   },
 };
