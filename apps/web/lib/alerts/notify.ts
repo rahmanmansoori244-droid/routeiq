@@ -26,8 +26,11 @@
  *   than 12 h before an e-mail could go (the quiet hours, the daily cap) is not e-mailed any more; it
  *   still shows in RouteIQ (review L6 of 16 Oct 2026: documented, not changed);
  * - still open, or over by itself since the last e-mail ("(over at 10:50)"), not what ended during the
- *   quiet hours; a row closed because its load left the plan, its date passed, its rule was switched off,
- *   it is no longer followed or its result was corrected is not news;
+ *   quiet hours; a row closed because its load left the plan, its date passed, its day ended, its rule was
+ *   switched off, it is no longer followed or its result was corrected is not news;
+ * - of the company's today or later (owner request 19 Oct 2026): after midnight the day before is history.
+ *   The sweep closes its open rows as DAY_ENDED before this step runs (store.ts), so an e-mail never sends
+ *   them again or as "over"; the date guard also holds when that company's sweep failed this tick;
  * - HIGH first by rank, never by the alphabet (L5), at most ALERT_DIGEST_MAX_ROWS.
  * The claimed rows get emailedTier = tier and the digest's id; then the transaction commits and the
  * e-mail goes out. A failure puts each row's emailedTier back, counts the attempt and keeps a short reason;
@@ -127,7 +130,7 @@ export type ClaimResult =
 /** The database side of the digest (prismaDigestStore; a fake in the unit tests). */
 export interface DigestStore {
   readConfig(tenantId: string): Promise<(DigestConfig & { name: string; slug: string }) | null>;
-  claim(tenantId: string, now: Date, opts: { everyMin: number; minSeverity: string; dayStart: Date; recipients: number; quietEndedAt?: Date | null }): Promise<ClaimResult>;
+  claim(tenantId: string, now: Date, opts: { everyMin: number; minSeverity: string; dayStart: Date; today: string; recipients: number; quietEndedAt?: Date | null }): Promise<ClaimResult>;
   depotLabels(tenantId: string, depotIds: string[]): Promise<Map<string, string>>;
   finish(tenantId: string, digestId: string, rows: DigestRow[], now: Date, result: SendResult): Promise<void>;
 }
@@ -242,11 +245,13 @@ export async function sendAlertDigest(
     const gate = digestGate(cfg, now, env);
     if (!gate.ok) return { sent: false, skip: gate.skip, alerts: 0, high: 0 };
     if (!cfg) return { sent: false, skip: 'ALERTS_OFF', alerts: 0, high: 0 };
-    const dayStart = zonedDayStart(todayIso(cfg.timezone, now), cfg.timezone);
+    const today = todayIso(cfg.timezone, now);
+    const dayStart = zonedDayStart(today, cfg.timezone);
     const claim = await store.claim(tenantId, now, {
       everyMin: cfg.alertEmailEveryMin,
       minSeverity: cfg.alertEmailMinSeverity,
       dayStart,
+      today,
       recipients: gate.recipients.length,
       quietEndedAt: lastQuietEnd(now, cfg.timezone, cfg.alertQuietFromMin, cfg.alertQuietToMin),
     });
@@ -298,8 +303,11 @@ interface ClaimSqlRow {
  * The claim query (exported for the unit test of its SQL). A row over by itself (ENDED) is news only when
  * it ended after `endedSince` (the last e-mail; for the first e-mail, the last "every N min"): the first
  * e-mail after recipients are added does not list what ended during the days alerts showed in RouteIQ only.
+ * Only rows of the company's `today` (YYYY-MM-DD) or later: a row of a day that is over - closed as
+ * DAY_ENDED, or still open because the sweep has not run since midnight - is never e-mailed (owner request
+ * 19 Oct 2026).
  */
-export function claimSql(tenantId: string, now: Date, minSeverity: string, endedSince: Date): Prisma.Sql {
+export function claimSql(tenantId: string, now: Date, minSeverity: string, endedSince: Date, today: string): Prisma.Sql {
   const lookback = new Date(now.getTime() - ALERT_EMAIL_LOOKBACK_H * 3_600_000);
   const anySeverity = minSeverity === 'WARN';
   return Prisma.sql`
@@ -312,6 +320,7 @@ export function claimSql(tenantId: string, now: Date, minSeverity: string, ended
       AND "emailAttempts" < ${ALERT_EMAIL_MAX_ATTEMPTS}
       AND "lastSeenAt" > ${lookback}
       AND ("resolvedAt" IS NULL OR ("resolvedReason" = 'ENDED' AND "resolvedAt" > ${endedSince}))
+      AND "deliveryDate" >= ${today}::date
       AND (${anySeverity} OR "severity" = 'HIGH')
     ORDER BY ${Prisma.raw(SEVERITY_ORDER_SQL)}, "firstSeenAt", "id"
     LIMIT ${ALERT_DIGEST_MAX_ROWS}
@@ -379,7 +388,7 @@ export function prismaDigestStore(db: AppPrismaClient): DigestStore {
         const sinceLast = last?.createdAt ?? new Date(now.getTime() - opts.everyMin * 60_000);
         // The first e-mail after the quiet hours leaves out what ended during them (L5).
         const endedSince = opts.quietEndedAt && opts.quietEndedAt > sinceLast ? opts.quietEndedAt : sinceLast;
-        const found = await tx.$queryRaw<ClaimSqlRow[]>(claimSql(tenantId, now, opts.minSeverity, endedSince));
+        const found = await tx.$queryRaw<ClaimSqlRow[]>(claimSql(tenantId, now, opts.minSeverity, endedSince, opts.today));
         const rows: DigestRow[] = found
           .filter((r) => emailSeverityPasses(r.severity as AlertSeverity, opts.minSeverity))
           .map((r) => ({ ...r, severity: r.severity as AlertSeverity, tier: Number(r.tier), emailedTier: Number(r.emailedTier) }));

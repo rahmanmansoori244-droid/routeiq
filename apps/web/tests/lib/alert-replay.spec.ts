@@ -194,6 +194,26 @@ describe('replayDay', () => {
     expect(by.PRIORITY_NOT_DELIVERED).toMatchObject({ threshold: null, raised: 0 });
   });
 
+  it("owner request 19 Oct 2026: replayed past midnight, the day's rows still open close at the first step after it (Day ended), as the live sweep does; nothing reopens or is raised open after", () => {
+    const r = replayDay(day(), { fromMin: parseDayMinute('23:00'), toMin: parseDayMinute('00:30+1'), stepMin: 5 });
+    const raised = r.timeline.filter((e) => e.kind === 'RAISED');
+    expect(raised.length).toBeGreaterThanOrEqual(2);
+    expect(raised.every((e) => !e.at.endsWith('+1'))).toBe(true);
+    // 23:55 is still the day: everything raised is open until the 00:00 step closes it.
+    const closed = r.timeline.filter((e) => e.kind === 'CLOSED');
+    expect(closed.length).toBe(raised.length);
+    expect(new Set(closed.map((e) => e.at))).toEqual(new Set(['00:00 +1']));
+    expect(closed.every((e) => e.text.endsWith('(day ended)'))).toBe(true);
+    // Every row is closed: the history row (the unloading over before any step saw it) as ENDED, the rest at the day's end.
+    expect(r.rows.map((x) => [x.rule, x.resolvedReason])).toEqual([
+      ['UNLOAD_OVER', 'ENDED'],
+      ['LOAD_NOT_CLOSED', 'DAY_ENDED'],
+      ['PRIORITY_NOT_DELIVERED', 'DAY_ENDED'],
+      ['PAGE_NOT_OPENED', 'DAY_ENDED'],
+    ]);
+    expect(r.timeline.filter((e) => e.kind === 'REOPENED' || e.kind === 'ESCALATED').filter((e) => e.at.endsWith('+1'))).toEqual([]);
+  });
+
   it('switched on at noon: nothing that began before it raises (no backlog)', () => {
     const r = replayDay(day(), { switchOnMin: 12 * 60 });
     const by = Object.fromEntries(r.rules.map((s) => [s.rule, s]));

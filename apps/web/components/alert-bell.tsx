@@ -11,7 +11,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSepar
 import { api } from '@/app/t/[slug]/dispatch/client-api';
 import { ALERT_POLL_MS } from '@/lib/alerts/catalog';
 import type { AlertSummary, OpsAlertRow } from '@/lib/alerts/types';
-import { alertTime, alertWhere, bellTone, newAlertToasts, ruleLabel, SEVERITY_BADGE, sweepCheckText } from '@/lib/alerts/view';
+import { alertDayGroups, alertWhen, alertWhere, bellTone, newAlertToasts, ruleLabel, SEVERITY_BADGE, sweepCheckText } from '@/lib/alerts/view';
+import { todayIso } from '@/lib/dispatch/time';
 import { acknowledgeAlerts } from './alerts-api';
 
 /** A focus right after a poll does not read again (focus and visibilitychange often fire together). */
@@ -23,6 +24,10 @@ const MIN_GAP_MS = 5_000;
  * L10). Reads GET /api/alerts/summary every ALERT_POLL_MS while the tab is visible, and when it comes back
  * into view. Red with a HIGH open alert, amber with any open one. A toast only for a HIGH alert that is
  * new since the page opened (review M11: the first read fills the seen list silently), at most 3 at once.
+ * Today's and tomorrow's open alerts only (owner request 19 Oct 2026: yesterday's looked like today's with
+ * the time only); the rows of a day that is not today come under a small date header ("Tomorrow, 20 Oct")
+ * and a time that is not today's says its day ("Yesterday 23:40"), from the company's today in the summary
+ * (the browser's clock only before the first answer). When every row is today's the bell looks as before.
  */
 export function AlertBell({ slug, enabled, canAck, timezone }: { slug: string; enabled: boolean; canAck: boolean; timezone: string }) {
   // The toast's link uses the router of the latest render; reading it from a ref keeps `read` (and the
@@ -84,6 +89,7 @@ export function AlertBell({ slug, enabled, canAck, timezone }: { slug: string; e
   const tone = summary ? bellTone(summary) : 'none';
   const rows = summary?.latest ?? [];
   const check = sweepCheckText(summary, timezone);
+  const today = summary?.today ?? todayIso(timezone);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -126,20 +132,31 @@ export function AlertBell({ slug, enabled, canAck, timezone }: { slug: string; e
         <DropdownMenuSeparator />
         <div className="max-h-[60vh] overflow-y-auto">
           {rows.length ? (
-            rows.map((r) => (
-              <div key={r.id} className="border-b px-2 py-1.5 text-sm last:border-b-0" data-testid="alert-bell-row">
-                <div className="flex items-center gap-1.5">
-                  <Badge variant={SEVERITY_BADGE[r.severity]}>{r.severity}</Badge>
-                  <span className="font-medium">{alertWhere(r)}</span>
-                  <span className="ms-auto text-xs text-muted-foreground">{alertTime(r.lastSeenAt, timezone)}</span>
-                </div>
-                <p className="mt-0.5 text-xs text-muted-foreground">{ruleLabel(r.rule)}</p>
-                <p className="mt-0.5 break-words text-xs">{r.text}</p>
-                {canAck ? (
-                  <Button size="sm" variant="outline" className="mt-1 h-6 px-2 text-xs" disabled={busy} onClick={() => void ack([r])} data-testid="alert-bell-ack">
-                    Acknowledge
-                  </Button>
+            alertDayGroups(rows, today).map((g) => (
+              <div key={g.date} data-testid="alert-bell-group">
+                {g.header ? (
+                  <p className="bg-muted/50 px-2 py-0.5 text-xs font-medium text-muted-foreground" data-testid="alert-bell-day">
+                    {g.header}
+                  </p>
                 ) : null}
+                {g.rows.map((r) => (
+                  <div key={r.id} className="border-b px-2 py-1.5 text-sm last:border-b-0" data-testid="alert-bell-row">
+                    <div className="flex items-center gap-1.5">
+                      <Badge variant={SEVERITY_BADGE[r.severity]}>{r.severity}</Badge>
+                      <span className="font-medium">{alertWhere(r)}</span>
+                      <span className="ms-auto whitespace-nowrap text-xs text-muted-foreground" data-testid="alert-bell-when">
+                        {alertWhen(r.lastSeenAt, r.deliveryDate, timezone, today)}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-xs text-muted-foreground">{ruleLabel(r.rule)}</p>
+                    <p className="mt-0.5 break-words text-xs">{r.text}</p>
+                    {canAck ? (
+                      <Button size="sm" variant="outline" className="mt-1 h-6 px-2 text-xs" disabled={busy} onClick={() => void ack([r])} data-testid="alert-bell-ack">
+                        Acknowledge
+                      </Button>
+                    ) : null}
+                  </div>
+                ))}
               </div>
             ))
           ) : (

@@ -163,7 +163,7 @@ export async function sweepTenant(cfg: AlertTenantConfig, now: Date, db: typeof 
         // The rule and the error's message only (never a customer, a note or a text of the facts).
         console.error('alerts: rule failed', { tenantId: cfg.tenantId, failures: ev.failures.slice(0, 5), count: ev.failures.length });
       }
-      const plan = planApply(rows, ev, { now, alertsEnabledAt: enabledAt, ruleOnAt: readRuleOnAt(cfg.alertRuleOnAtJson), windowFrom: facts.dates[0]!, rulesOn: on });
+      const plan = planApply(rows, ev, { now, alertsEnabledAt: enabledAt, ruleOnAt: readRuleOnAt(cfg.alertRuleOnAtJson), windowFrom: facts.dates[0]!, today: facts.today, rulesOn: on });
       return { ...(await applyPlan(tx, cfg.tenantId, plan, now)), ruleFailures: ev.failures?.length ?? 0 };
     },
     { timeout: 60_000, maxWait: 10_000 },

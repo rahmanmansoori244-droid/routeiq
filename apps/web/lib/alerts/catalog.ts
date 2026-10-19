@@ -23,6 +23,9 @@
  * - CONDITION rows close when the condition ends, when their load or stop is no longer in the plan that
  *   was read in full (NOT_IN_PLAN), when their date leaves the sweep's window (EXPIRED) or when their rule
  *   is switched off (RULE_OFF). EVENT rows record a fact: they stay open until acknowledged or corrected.
+ *   Every row still open when its delivery day is over closes at the first sweep after midnight (DAY_ENDED,
+ *   owner request 19 Oct 2026), so the bell shows today's alerts only; the screens show the date of any
+ *   alert that is not today's ("Yesterday 17:20", "18 Oct 17:20": view.ts alertWhen).
  * - One missing tap must not pile up alerts: the rules that follow the driver's phone (needsDriverPage)
  *   run only for truck-days whose driver page was opened; a dispatched truck-day without it gets one WARN
  *   (PAGE_NOT_OPENED) instead. ETA_LATE and the projected AFTER_CLOSING are not raised while DRIVER_SILENT
@@ -54,8 +57,17 @@ export type AlertTier = 1 | 2 | 3;
  * Why a row closed (OpsAlert.resolvedReason; text, no CHECK). NOT_FOLLOWED: the rule stopped following
  * the subject while it was still true (past the planned return + 60 min, a truck at the depot 4 h after Back at depot, a load
  * not dispatched 4 h after its time): not "over", so never listed as over in an e-mail.
+ *
+ * DAY_ENDED (owner request 19 Oct 2026: alerts of yesterday looked like today's on the bell, "ok add the
+ * date fix"): a row still open (acknowledged or not) when its delivery day is over, closed by the first
+ * sweep after midnight that follows its date, whatever its rule says (store.ts planApply). Before, such a
+ * row stayed open, and on the bell, for the whole next day and closed only one day later as EXPIRED
+ * (production closed 17 Oct's rows at 19 Oct 00:02). The bell then shows only today's open alerts; the day's
+ * rows stay on the Alerts page as history. Not "over" either: never e-mailed. EXPIRED is now only for a row
+ * older than the sweep's window that no sweep closed on the night after its date (alerts were off, the sweep
+ * did not run).
  */
-export const RESOLVED_REASONS = ['ENDED', 'CORRECTED', 'NOT_IN_PLAN', 'EXPIRED', 'RULE_OFF', 'NOT_FOLLOWED'] as const;
+export const RESOLVED_REASONS = ['ENDED', 'CORRECTED', 'NOT_IN_PLAN', 'EXPIRED', 'RULE_OFF', 'NOT_FOLLOWED', 'DAY_ENDED'] as const;
 export type ResolvedReason = (typeof RESOLVED_REASONS)[number];
 export const RESOLVED_REASON_TEXT: Record<ResolvedReason, string> = {
   ENDED: 'Over',
@@ -64,6 +76,7 @@ export const RESOLVED_REASON_TEXT: Record<ResolvedReason, string> = {
   EXPIRED: 'Date passed',
   RULE_OFF: 'Rule switched off',
   NOT_FOLLOWED: 'No longer followed',
+  DAY_ENDED: 'Day ended',
 };
 
 /** The rule codes stored in OpsAlert.rule (checked here, not by the database: a new rule needs no migration). */
@@ -491,7 +504,13 @@ export const UNLOAD_ARRIVAL_FAR_M = 1000;
 export const ALERT_EVIDENCE_MAX_ACCURACY_M = 100;
 /** PROOF_FAR is tier 2 (HIGH) beyond this multiple of its threshold. */
 export const PROOF_FAR_HIGH_FACTOR = 4;
-/** The sweep reads yesterday, today and tomorrow in the company's time zone; open condition rows of older dates close as EXPIRED. */
+/**
+ * The sweep reads yesterday, today and tomorrow in the company's time zone. Yesterday is still read so its
+ * rows that ended or were corrected just before midnight close with their own words, and so a late history
+ * row is still found; every row of yesterday still open closes as DAY_ENDED at the first sweep after midnight
+ * (owner request 19 Oct 2026), and open rows of older dates (no sweep ran that night) as EXPIRED. The bell
+ * reads today and tomorrow only (inbox.ts bellWindow).
+ */
 export const ALERT_DAYS_BACK = 1;
 export const ALERT_DAYS_AHEAD = 1;
 /** Rows are deleted this long after their delivery date (they hold customer names and notes). */

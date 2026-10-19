@@ -234,8 +234,9 @@ describe('sendAlertDigest', () => {
     const f = vi.fn(async () => new Response('{}', { status: 200 }));
     const out = await sendAlertDigest('tA', NOW, { store, env: ENV, fetchImpl: f as never });
     expect(out).toEqual({ sent: true, alerts: 2, high: 1, digestId: 'dg1' });
-    // The quiet hours ended at 06:00 today: the claim leaves out what ended before then (review L5).
-    expect(calls.claim[0]).toEqual(['tA', NOW, { everyMin: 15, minSeverity: 'HIGH', dayStart: new Date('2026-10-15T20:00:00.000Z'), recipients: 2, quietEndedAt: at('06:00') }]);
+    // The quiet hours ended at 06:00 today: the claim leaves out what ended before then (review L5). Only
+    // rows of the company's today or later (owner request 19 Oct 2026).
+    expect(calls.claim[0]).toEqual(['tA', NOW, { everyMin: 15, minSeverity: 'HIGH', dayStart: new Date('2026-10-15T20:00:00.000Z'), today: '2026-10-16', recipients: 2, quietEndedAt: at('06:00') }]);
     const init = (f.mock.calls[0] as unknown as [string, RequestInit])[1];
     const body = JSON.parse(init.body as string);
     expect(body.to).toEqual(['owner@company.example', 'dispatch@company.example']);
@@ -248,6 +249,16 @@ describe('sendAlertDigest', () => {
     expect(calls.finish[0]![4]).toEqual({ ok: true });
     expect(logged()).not.toMatch(/@company\.example|running about|Example Water Co/);
     expect(logged()).toContain('"recipients":2');
+  });
+
+  it('owner request 19 Oct 2026: just after midnight the claim already reads the new day (the day before is history)', async () => {
+    const { store, calls } = fakeStore({ readConfig: async () => ({ ...cfg({ alertQuietFromMin: null, alertQuietToMin: null }), name: 'Example Water Co', slug: 'example' }) });
+    await sendAlertDigest('tA', at('00:02', '2026-10-17'), { store, env: ENV, fetchImpl: (async () => new Response('{}', { status: 200 })) as never });
+    expect(calls.claim[0]![2]).toMatchObject({ today: '2026-10-17', dayStart: new Date('2026-10-16T20:00:00.000Z') });
+    // One minute before midnight it is still the day before.
+    const late = fakeStore({ readConfig: async () => ({ ...cfg({ alertQuietFromMin: null, alertQuietToMin: null }), name: 'Example Water Co', slug: 'example' }) });
+    await sendAlertDigest('tA', at('23:59'), { store: late.store, env: ENV, fetchImpl: (async () => new Response('{}', { status: 200 })) as never });
+    expect(late.calls.claim[0]![2]).toMatchObject({ today: '2026-10-16' });
   });
 
   it('a failed e-mail is handed to finish (the rows go back) and answered as not sent', async () => {
@@ -286,7 +297,7 @@ describe('sendAlertDigest', () => {
 
 describe('the claim SQL (review L5)', () => {
   const since = new Date(NOW.getTime() - 15 * 60_000);
-  const sql = claimSql('tA', NOW, 'HIGH', since);
+  const sql = claimSql('tA', NOW, 'HIGH', since, '2026-10-16');
   it('HIGH first by rank (a CASE, not the alphabet), then the oldest; skips rows another sweep holds', () => {
     expect(sql.sql).toMatch(/ORDER BY CASE "severity" WHEN 'HIGH' THEN 0 ELSE 1 END, "firstSeenAt", "id"/);
     expect(sql.sql).toMatch(/FOR UPDATE SKIP LOCKED/);
@@ -304,7 +315,14 @@ describe('the claim SQL (review L5)', () => {
     expect(sql.values).toContain(ALERT_DIGEST_MAX_ROWS);
     // HIGH only by default; WARN too when the company e-mails warnings.
     expect(sql.values).toContain(false);
-    expect(claimSql('tA', NOW, 'WARN', since).values).toContain(true);
+    expect(claimSql('tA', NOW, 'WARN', since, '2026-10-16').values).toContain(true);
+  });
+  it("owner request 19 Oct 2026: only rows of the company's today or later; a day that is over is never e-mailed again", () => {
+    // A row closed at the end of its day (DAY_ENDED) is neither open nor "over by itself"; a row of
+    // yesterday still open because the sweep has not run since midnight is left out by its date.
+    expect(sql.sql).toMatch(/AND "deliveryDate" >= \?::date/);
+    expect(sql.sql).not.toMatch(/DAY_ENDED/);
+    expect(sql.values).toContain('2026-10-16');
   });
 });
 
@@ -342,7 +360,7 @@ function fakeDb(state: { locked?: boolean; lastAt?: Date | null; today?: number;
   return { db: db as never, seen };
 }
 
-const claimOpts = { everyMin: 15, minSeverity: 'HIGH', dayStart: new Date('2026-10-15T20:00:00.000Z'), recipients: 2 };
+const claimOpts = { everyMin: 15, minSeverity: 'HIGH', dayStart: new Date('2026-10-15T20:00:00.000Z'), today: '2026-10-16', recipients: 2 };
 const sqlRow = (id: string, severity = 'HIGH', emailedTier = 0) => ({ ...row({ id, severity: severity as never, emailedTier }), tier: 2 });
 
 describe('prismaDigestStore: the claim in one transaction under the company e-mail lock (M4, M5)', () => {

@@ -21,6 +21,7 @@ import {
   RETURN_GRACE_MIN,
   SEVERITY_ORDER_SQL,
   SEVERITY_RANK,
+  RESOLVED_REASONS,
   RESOLVED_REASON_TEXT,
   alertEmailAllowed,
   beforeSwitchOn,
@@ -371,5 +372,12 @@ describe('alert e-mail only for the companies the server lists (review H1 of 16 
 
   it('a row the rule stopped following is "No longer followed", never "Over"', () => {
     expect(RESOLVED_REASON_TEXT.NOT_FOLLOWED).toBe('No longer followed');
+  });
+
+  it('owner request 19 Oct 2026: a row closed at the end of its day is "Day ended", a reason of its own (never "Over", so never e-mailed as over)', () => {
+    expect(RESOLVED_REASONS).toContain('DAY_ENDED');
+    expect(RESOLVED_REASON_TEXT.DAY_ENDED).toBe('Day ended');
+    // Every reason has its words (the Alerts page and the closing text read them).
+    for (const r of RESOLVED_REASONS) expect(RESOLVED_REASON_TEXT[r]).toMatch(/^[A-Z][a-z ]+$/);
   });
 });

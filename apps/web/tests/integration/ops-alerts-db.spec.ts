@@ -19,6 +19,11 @@
  *     driver's "Leaving for next load" at 10:40 is stored (StopEvent DEPOT_DEPART, audited; a retry of
  *     the same key stores nothing, a second tap at 10:41 is stored too: the latest tap counts, second
  *     review of 16 Oct 2026) and the next sweep closes the row with the final minutes.
+ *  6. The day's end (owner request 19 Oct 2026: yesterday's alerts looked like today's on the bell): a sweep
+ *     at 23:58 closes nothing as DAY_ENDED; the first sweep after midnight (00:02 on 11 Mar) closes every
+ *     row of 10 Mar still open as DAY_ENDED (who acknowledged it kept), raises nothing open for that day
+ *     (what it finds true only now is written closed, never toasted or e-mailed), and the next sweep
+ *     changes nothing.
  * Invented names and codes.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -231,5 +236,46 @@ describe('operations alerts on the real database', () => {
     expect(s2!.resolved.ENDED ?? 0).toBeGreaterThanOrEqual(1);
     const closed = await prisma.opsAlert.findUniqueOrThrow({ where: { id: live.id } });
     expect(closed).toMatchObject({ resolvedReason: 'ENDED', text: 'T05 L2: 51 min at the depot between L1 and L2 (back 09:50, left 10:41, by Leaving tapped), limit 40 min.' });
+  });
+
+  it("6. the day's end (owner request 19 Oct 2026): 23:58 closes nothing as Day ended; the first sweep after midnight closes every open row of the day, keeping who acknowledged it; then nothing changes", async () => {
+    const cfg = await cfgOf(A);
+    // T09 went out at 09:45 without a driver page: its alert is open all day. A dispatcher saw it at 20:00.
+    const seen = await prisma.opsAlert.findFirstOrThrow({ where: { tenantId: A.tenantId, rule: 'PAGE_NOT_OPENED', truckCode: 'T09', resolvedAt: null } });
+    await prisma.opsAlert.update({ where: { id: seen.id }, data: { ackedAt: at('20:00'), ackedById: A.userId } });
+
+    // Two minutes before midnight it is still the day: nothing closes for the day's end.
+    const late = await sweepTenant(cfg, at('23:58'));
+    expect(late!.resolved.DAY_ENDED ?? 0).toBe(0);
+    const openAtNight = await prisma.opsAlert.findMany({ where: { tenantId: A.tenantId, resolvedAt: null } });
+    expect(openAtNight.map((r) => r.id)).toContain(seen.id);
+
+    // 00:02 on 11 Mar: the first sweep after midnight.
+    const midnight = at('24:02');
+    const first = await sweepTenant(cfg, midnight);
+    expect(first).toMatchObject({ raised: 0, reopened: 0, escalated: 0, updated: 0 });
+    expect(first!.resolved.DAY_ENDED).toBeGreaterThanOrEqual(1);
+    const rows = await prisma.opsAlert.findMany({ where: { tenantId: A.tenantId } });
+    expect(rows.filter((r) => !r.resolvedAt)).toEqual([]);
+    // Every row open at 23:58 is closed now: at the day's end, as it was (tier and words), unless its rule
+    // answered for it with its own final words in this sweep.
+    for (const r of openAtNight) {
+      const now = rows.find((x) => x.id === r.id)!;
+      expect(now.resolvedAt).toEqual(midnight);
+      if (now.resolvedReason === 'DAY_ENDED') expect(now).toMatchObject({ tier: r.tier, text: `${r.text} (day ended)` });
+      else expect(['ENDED', 'CORRECTED', 'NOT_FOLLOWED']).toContain(now.resolvedReason);
+    }
+    // The acknowledgement is kept.
+    expect(rows.find((r) => r.id === seen.id)).toMatchObject({ resolvedReason: 'DAY_ENDED', ackedAt: at('20:00'), ackedById: A.userId });
+    // Anything of 10 Mar first found true only now is written closed: never toasted, never e-mailed.
+    for (const r of rows.filter((x) => x.firstSeenAt.getTime() === midnight.getTime())) {
+      expect(r).toMatchObject({ resolvedAt: midnight, mayToast: false, mayEmail: false });
+      expect(['DAY_ENDED', 'ENDED']).toContain(r.resolvedReason);
+    }
+
+    // The next sweep: the day is history.
+    const again = await sweepTenant(cfg, at('24:04'));
+    expect(again).toMatchObject({ raised: 0, history: 0, reopened: 0, escalated: 0, updated: 0, resolved: {} });
+    expect(await prisma.opsAlert.count({ where: { tenantId: A.tenantId, resolvedAt: null } })).toBe(0);
   });
 });

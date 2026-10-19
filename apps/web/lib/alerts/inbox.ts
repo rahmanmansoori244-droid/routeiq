@@ -5,8 +5,11 @@
  * the company and returns the rows it changed (the audit row lists them).
  *
  * States (lib/alerts/types.ts): OPEN needs someone to look (it counts on the bell), ACKED was seen,
- * RESOLVED is history. The bell counts the OPEN rows of the sweep's dates (yesterday, today, tomorrow):
- * an event of an older day that nobody acknowledged stays OPEN on the Alerts page, not on the bell.
+ * RESOLVED is history. The bell counts the OPEN rows of today and tomorrow only (owner request 19 Oct 2026:
+ * "the bell shows only today's open alerts"): the first sweep after midnight closes what is still open of
+ * the day before (DAY_ENDED, store.ts), and between midnight and that sweep - or while the sweep is not
+ * running - a row of yesterday is not counted either. Every day stays on the Alerts page. The summary
+ * carries the company's today, so the bell labels another day's alert with its day (view.ts alertWhen).
  */
 import { Prisma, type OpsAlert } from '@prisma/client';
 import { prisma } from '../db';
@@ -16,7 +19,6 @@ import { isRealIsoDate } from '../schemas';
 import {
   ALERT_ACK_MAX_IDS,
   ALERT_DAYS_AHEAD,
-  ALERT_DAYS_BACK,
   ALERT_LATEST_COUNT,
   ALERT_MAX_TIER,
   SEVERITY_RANK,
@@ -97,9 +99,13 @@ export async function listAlerts(db: TenantDb, q: AlertListQuery): Promise<{ row
   return { rows, truncated: found.length > ALERT_LIST_MAX };
 }
 
-/** The sweep's dates (yesterday, today, tomorrow): the bell's window. */
+/**
+ * The bell's window: today and tomorrow (a load of tomorrow out already). Yesterday is no longer in it
+ * (owner request 19 Oct 2026: before, the bell counted yesterday's open rows the whole of the next day,
+ * shown with their time only, so they looked like today's).
+ */
 export function bellWindow(today: string): { from: Date; to: Date } {
-  return { from: dateOnly(addDaysIso(today, -ALERT_DAYS_BACK)), to: dateOnly(addDaysIso(today, ALERT_DAYS_AHEAD)) };
+  return { from: dateOnly(today), to: dateOnly(addDaysIso(today, ALERT_DAYS_AHEAD)) };
 }
 
 export const DISABLED_SUMMARY: AlertSummary = { enabled: false, open: 0, high: 0, latest: [], emailCapReached: false, checkedAt: null, checkStale: false, checkFailed: false };
@@ -113,7 +119,8 @@ export async function alertSummary(
   check: SweepCheck = { checkedAt: null, checkStale: false, checkFailed: false },
 ): Promise<AlertSummary> {
   if (!cfg.alertsEnabled) return DISABLED_SUMMARY;
-  const w = bellWindow(todayIso(cfg.timezone, now));
+  const today = todayIso(cfg.timezone, now);
+  const w = bellWindow(today);
   const open: Prisma.OpsAlertWhereInput = { deliveryDate: { gte: w.from, lte: w.to }, resolvedAt: null, ackedAt: null };
   const [count, high, highRows, warnRows] = await Promise.all([
     db.opsAlert.count({ where: open }),
@@ -125,6 +132,7 @@ export async function alertSummary(
   const mails = !!cfg.alertEmails && cfg.alertEmailEveryMin > 0;
   return {
     enabled: true,
+    today,
     open: count,
     high,
     latest,

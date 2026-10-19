@@ -10,6 +10,10 @@
  *   polls only for yesterday, today and tomorrow; Acknowledge all sends the open rows.
  * - No warehouse "Loaded" button next to Dispatch (removed before release, owner decision of 16 Oct 2026).
  * - The pure helpers: where, state words, the toast choice, the ack body, the settings checks.
+ * - Dates (owner request 19 Oct 2026: yesterday's alerts looked like today's with the time only): the bell
+ *   and the Alerts page show the day of an alert that is not today's ("Yesterday 17:20", "18 Oct 17:20"),
+ *   today's keep the time only; across midnight, time zones and a summer-time change; the bell's date
+ *   headers; "Day ended" with who had acknowledged it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Host, elements, textOf, typeName } from './hook-host';
@@ -57,9 +61,10 @@ vi.mock('next/dynamic', () => ({ default: () => function DynamicStub() { return 
 
 import { AlertBell } from '@/components/alert-bell';
 import { AlertsCard, alertDayIsLive } from '@/app/t/[slug]/dispatch/alerts-card';
+import { AlertsClient } from '@/app/t/[slug]/alerts/alerts-client';
 import { PlanView } from '@/app/t/[slug]/dispatch/plan-view';
 import { alertSettingsProblem, ruleMeaning } from '@/app/t/[slug]/settings/alert-settings-card';
-import { ackBody, alertStateText, alertWhere, bellTone, groupByTruck, newAlertToasts, sweepCheckText } from '@/lib/alerts/view';
+import { ackBody, alertDayGroups, alertDayHeader, alertDayWord, alertStateText, alertWhen, alertWhere, bellTone, groupByTruck, newAlertToasts, sweepCheckText } from '@/lib/alerts/view';
 import { visibleNavItems } from '@/lib/nav';
 import { ALERT_POLL_MS, ALERT_RULE_SPECS, ALERT_TOAST_MAX } from '@/lib/alerts/catalog';
 import { fixture } from './plan-detail-fixture';
@@ -370,6 +375,129 @@ describe('the turnaround on the load row (owner decision 16 Oct 2026: rule R2 fr
     expect(textOf(lineOf(waiting, 'T01-2'))).toBe('After L1: back 11:20, not left yet, 25 min so far');
     const none = await mount({});
     expect(lineOf(none, 'T01-2')).toBeNull();
+  });
+});
+
+describe("dates on the bell and the Alerts page (owner request 19 Oct 2026: yesterday's alerts looked like today's)", () => {
+  const MCT = 'Asia/Muscat';
+
+  it("today's alert keeps the time only; another day's says its day: Yesterday, Tomorrow, or the date", () => {
+    // 16 Oct 09:30 in Muscat.
+    const at = '2026-10-16T05:30:00.000Z';
+    expect(alertWhen(at, '2026-10-16', MCT, '2026-10-16')).toBe('09:30');
+    expect(alertWhen(at, '2026-10-16', MCT, '2026-10-17')).toBe('Yesterday 09:30');
+    expect(alertWhen(at, '2026-10-16', MCT, '2026-10-18')).toBe('16 Oct 09:30');
+    expect(alertWhen(at, '2026-10-16', MCT, '2026-10-15')).toBe('Tomorrow 09:30');
+    expect([alertWhen(null, '2026-10-16', MCT, '2026-10-16'), alertWhen('not a time', '2026-10-16', MCT, '2026-10-16')]).toEqual(['', '']);
+    expect([alertDayWord('2026-10-16', '2026-10-16'), alertDayWord('2026-10-15', '2026-10-16'), alertDayWord('2026-10-17', '2026-10-16'), alertDayWord('2026-09-30', '2026-10-16')]).toEqual([null, 'Yesterday', 'Tomorrow', '30 Sep']);
+    // Across a month and a year end.
+    expect(alertDayWord('2026-12-31', '2027-01-01')).toBe('Yesterday');
+    expect(alertWhen('2026-12-30T10:00:00.000Z', '2026-12-30', MCT, '2027-01-01')).toBe('30 Dec 14:00');
+  });
+
+  it('across midnight: 23:59 is still the day, 00:01 is the next; a time not of today says its own day', () => {
+    // 16 Oct 23:59 and 17 Oct 00:01 in Muscat.
+    const late = '2026-10-16T19:59:00.000Z';
+    const early = '2026-10-16T20:01:00.000Z';
+    expect(alertWhen(late, '2026-10-16', MCT, '2026-10-16')).toBe('23:59');
+    expect(alertWhen(late, '2026-10-16', MCT, '2026-10-17')).toBe('Yesterday 23:59');
+    expect(alertWhen(early, '2026-10-17', MCT, '2026-10-17')).toBe('00:01');
+    // Yesterday's alert whose time is after midnight (the day's last load), and tomorrow's seen this evening.
+    expect(alertWhen(early, '2026-10-16', MCT, '2026-10-17')).toBe('Today 00:01');
+    expect(alertWhen(late, '2026-10-17', MCT, '2026-10-16')).toBe('Today 23:59');
+    // An alert of today whose time was yesterday evening says so.
+    expect(alertWhen(late, '2026-10-17', MCT, '2026-10-17')).toBe('Yesterday 23:59');
+  });
+
+  it("the company's time zone decides, not UTC, the server or the browser; a summer-time change does not move the clock", () => {
+    const instant = '2026-10-16T20:30:00.000Z';
+    // Muscat (UTC+4): 17 Oct 00:30. New York (UTC-4): 16 Oct 16:30. Kolkata (UTC+5:30): 17 Oct 02:00.
+    expect(alertWhen(instant, '2026-10-17', MCT, '2026-10-17')).toBe('00:30');
+    expect(alertWhen(instant, '2026-10-16', 'America/New_York', '2026-10-17')).toBe('Yesterday 16:30');
+    expect(alertWhen(instant, '2026-10-17', 'Asia/Kolkata', '2026-10-17')).toBe('02:00');
+    // London goes back from summer time at 02:00 on 25 Oct 2026: 12:00 UTC that day is 12:00 on the clock.
+    expect(alertWhen('2026-10-25T12:00:00.000Z', '2026-10-25', 'Europe/London', '2026-10-26')).toBe('Yesterday 12:00');
+    expect(alertWhen('2026-10-25T00:30:00.000Z', '2026-10-25', 'Europe/London', '2026-10-25')).toBe('01:30');
+  });
+
+  it('the state words say the day of a time that is not today; a row closed at the end of its day says so, with who acknowledged it', () => {
+    const acked = row({ state: 'ACKED', ackedAt: '2026-10-16T06:42:00.000Z', ackedByName: 'Sam Example' });
+    expect(alertStateText(acked, MCT, '2026-10-16')).toBe('Acknowledged by Sam Example 10:42');
+    expect(alertStateText(acked, MCT, '2026-10-17')).toBe('Acknowledged by Sam Example yesterday 10:42');
+    const over = row({ state: 'RESOLVED', resolvedAt: '2026-10-16T06:50:00.000Z', resolvedReason: 'ENDED' });
+    expect(alertStateText(over, MCT, '2026-10-16')).toBe('Over 10:50');
+    expect(alertStateText(over, MCT, '2026-10-18')).toBe('Over 16 Oct 10:50');
+    expect(alertStateText(row({ state: 'RESOLVED', resolvedAt: '2026-10-16T20:02:00.000Z', resolvedReason: 'ENDED' }), MCT, '2026-10-17')).toBe('Over today 00:02');
+    const dayEnded = row({ state: 'RESOLVED', resolvedAt: '2026-10-16T20:02:00.000Z', resolvedReason: 'DAY_ENDED' });
+    expect(alertStateText(dayEnded, MCT, '2026-10-17')).toBe('Day ended');
+    expect(alertStateText({ ...dayEnded, ackedAt: '2026-10-16T06:42:00.000Z', ackedByName: 'Sam Example' }, MCT, '2026-10-17')).toBe('Day ended (acknowledged by Sam Example yesterday 10:42)');
+    // Without today (the day screen's card, the truck's day: one day on screen) the time only, as before.
+    expect(alertStateText(acked, MCT)).toBe('Acknowledged by Sam Example 10:42');
+    expect(alertStateText({ ...dayEnded, ackedAt: '2026-10-16T06:42:00.000Z', ackedByName: null }, MCT)).toBe('Day ended (acknowledged 10:42)');
+  });
+
+  it('alertDayGroups: today first, then the days ahead, then the days before (latest first); no header when every row is today\'s', () => {
+    const rows = [row({ id: 'y', deliveryDate: '2026-10-16' }), row({ id: 't1', deliveryDate: '2026-10-17' }), row({ id: 'n', deliveryDate: '2026-10-18' }), row({ id: 'o', deliveryDate: '2026-10-14' }), row({ id: 't2', deliveryDate: '2026-10-17' })];
+    expect(alertDayGroups(rows, '2026-10-17').map((g) => [g.header, g.rows.map((r) => r.id)])).toEqual([
+      ['Today', ['t1', 't2']],
+      ['Tomorrow, 18 Oct', ['n']],
+      ['Yesterday, 16 Oct', ['y']],
+      ['14 Oct', ['o']],
+    ]);
+    expect(alertDayGroups([row({ id: 'a', deliveryDate: '2026-10-17' }), row({ id: 'b', deliveryDate: '2026-10-17' })], '2026-10-17')).toEqual([{ date: '2026-10-17', header: null, rows: [expect.objectContaining({ id: 'a' }), expect.objectContaining({ id: 'b' })] }]);
+    expect(alertDayGroups([], '2026-10-17')).toEqual([]);
+    expect([alertDayHeader('2026-10-17', '2026-10-17'), alertDayHeader('2026-10-16', '2026-10-17'), alertDayHeader('2026-10-10', '2026-10-17')]).toEqual(['Today', 'Yesterday, 16 Oct', '10 Oct']);
+  });
+
+  async function mountBell() {
+    const host: Host<any> = new Host(AlertBell as any, { slug: 'example', enabled: true, canAck: true, timezone: MCT });
+    host.render();
+    await host.settle();
+    return host;
+  }
+
+  it("the bell: today's rows with the time only and no header, as before", async () => {
+    net.summaries = [summary([high({ id: 'h1', deliveryDate: '2026-10-17', lastSeenAt: '2026-10-17T05:30:00.000Z' }), row({ id: 'w1', deliveryDate: '2026-10-17', lastSeenAt: '2026-10-17T06:10:00.000Z' })], { today: '2026-10-17' })];
+    const host = await mountBell();
+    expect(byTestId(host.tree, 'alert-bell-when').map(textOf)).toEqual(['09:30', '10:10']);
+    expect(byTestId(host.tree, 'alert-bell-day')).toHaveLength(0);
+  });
+
+  it("the bell: a row of another day comes under its date header, a time not of today says its day (the company's today from the summary)", async () => {
+    net.summaries = [
+      summary(
+        [
+          high({ id: 'h1', deliveryDate: '2026-10-17', lastSeenAt: '2026-10-17T05:30:00.000Z' }),
+          // Tomorrow's load already out this evening, and (between midnight and the sweep) one of yesterday.
+          row({ id: 'n1', deliveryDate: '2026-10-18', lastSeenAt: '2026-10-17T18:40:00.000Z' }),
+          row({ id: 'y1', deliveryDate: '2026-10-16', lastSeenAt: '2026-10-16T13:20:00.000Z' }),
+        ],
+        { today: '2026-10-17' },
+      ),
+    ];
+    const host = await mountBell();
+    expect(byTestId(host.tree, 'alert-bell-day').map(textOf)).toEqual(['Today', 'Tomorrow, 18 Oct', 'Yesterday, 16 Oct']);
+    expect(byTestId(host.tree, 'alert-bell-when').map(textOf)).toEqual(['09:30', 'Today 22:40', 'Yesterday 17:20']);
+    expect(byTestId(host.tree, 'alert-bell-row')).toHaveLength(3);
+  });
+
+  it('the Alerts page: Since and State say the day of another day\'s alert; today\'s keep the time only', async () => {
+    net.list = {
+      enabled: true,
+      today: '2026-10-17',
+      truncated: false,
+      rows: [
+        row({ id: 't1', deliveryDate: '2026-10-17', occurredAt: '2026-10-17T05:10:00.000Z' }),
+        row({ id: 'y1', deliveryDate: '2026-10-16', occurredAt: '2026-10-16T13:20:00.000Z', state: 'RESOLVED', resolvedAt: '2026-10-16T20:02:00.000Z', resolvedReason: 'DAY_ENDED', ackedAt: '2026-10-16T14:00:00.000Z', ackedByName: 'Sam Example' }),
+        row({ id: 'o1', deliveryDate: '2026-10-15', occurredAt: '2026-10-15T07:00:00.000Z', state: 'RESOLVED', resolvedAt: '2026-10-15T07:40:00.000Z', resolvedReason: 'ENDED' }),
+      ],
+    };
+    const host: Host<any> = new Host(AlertsClient as any, { enabled: true, canAck: true, isAdmin: false, slug: 'example', timezone: MCT, today: '2026-10-17', depots: [], initial: { from: '2026-10-15', to: '2026-10-17', depotId: '', state: 'all' } });
+    host.render();
+    await host.settle();
+    expect(net.sent[0]!.url).toBe('/api/alerts?from=2026-10-15&to=2026-10-17&state=all');
+    expect(byTestId(host.tree, 'alerts-when').map(textOf)).toEqual(['09:10', 'Yesterday 17:20', '15 Oct 11:00']);
+    expect(byTestId(host.tree, 'alerts-state').map(textOf)).toEqual(['Open', 'Day ended (acknowledged by Sam Example yesterday 18:00)', 'Over 15 Oct 11:40']);
   });
 });
 

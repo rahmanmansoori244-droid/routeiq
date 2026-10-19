@@ -408,7 +408,9 @@ export function replayDay(exp: AlertDayExport, opts: ReplayOptions = {}): Replay
     const now = at(m);
     const facts = factsAsOf(exp, now, rows, opts.radiusM, { gps });
     const ev = evaluate(facts, now, thresholds);
-    const plan = planApply(rows, ev, { now, alertsEnabledAt: switchOn, windowFrom: exp.date, rulesOn: on });
+    // The company's today at this step: a replay that runs past midnight closes the day's rows still open
+    // as DAY_ENDED at the first step after it, as the live sweep does (owner request 19 Oct 2026).
+    const plan = planApply(rows, ev, { now, alertsEnabledAt: switchOn, windowFrom: exp.date, today: facts.today, rulesOn: on });
     const byId = new Map(rows.map((r) => [r.id, r]));
     const before = new Map(rows.map((r) => [r.id, { tier: r.tier, resolved: !!r.resolvedAt }]));
     const added = applyPlanInMemory(rows, plan, now);
