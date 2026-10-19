@@ -7,8 +7,11 @@
  * - the window is clipped on both sides: a stop served before its window opened is never negative;
  * - crawling alone never makes a standstill; a single-point spike is no trip away and no km;
  * - the truck more than 500 m away at the driver's result tap is a late result tap; standing 120-500 m from
- *   the pin is a pin offset; no position is ever in a row;
- * - a refresh rebuilds what does not come from the trail and copies the trail's columns and the settings.
+ *   the pin, and never within 120 m of it, is a pin offset (a big site's second drop point is not); no
+ *   position is ever in a row;
+ * - the truck-day counts the delivery date's trips only (the evening before is the day before's);
+ * - a refresh rebuilds what does not come from the trail and copies the trail's columns and the settings, or
+ *   recomputes the GPS columns from a trail pulled again; a stop never searched is never GPS_NOT_SEEN.
  */
 import { describe, expect, it } from 'vitest';
 import { buildTruckDayFacts, clippedMinutes, type EventIn, type LoadIn, type TruckDayIn, type VisitIn } from '@/lib/analysis/build';
@@ -17,7 +20,7 @@ import { ANALYSIS_VERSION } from '@/lib/analysis/types';
 import { distanceM } from '@/lib/dispatch/snapshots';
 import { prevIndexOf } from '@/lib/ivms/stops';
 import { DETECTOR_VERSION, type TrailPoint } from '@/lib/ivms/types';
-import { A, atOn, B, dayOne as dayOneOn, DEPOT, ev, load as loadOf, off, SETTINGS, stop, Trail, truckDayOf, visit } from './analysis-fakes';
+import { A, atOn, B, dayOne as dayOneOn, dayPinOff, DEPOT, ev, load as loadOf, off, SETTINGS, stop, Trail, truckDayOf, visit } from './analysis-fakes';
 
 const D = '2026-10-18';
 /** Local HH:MM in Muscat (UTC+4) on D. */
@@ -29,7 +32,7 @@ const dayOne = () => dayOneOn(D);
 const minutes = (a: Date | null, b: Date | null) => (a && b ? (b.getTime() - a.getTime()) / 60_000 : NaN);
 
 describe('the customer site, the sub-stays and the drop points (lib/analysis/gps.ts)', () => {
-  it('a second drop point 350 m from the pin is on the site; the standing spot is where the result was saved (a pin offset)', () => {
+  it('a second drop point 350 m from the pin is on the site; the standing spot is where the result was saved; no pin offset (30 min at the pin first)', () => {
     const { tr, input, drop2 } = dayOne();
     const f = buildTruckDayFacts(input, SETTINGS, { kind: 'TRAIL', points: tr.pts, zoneMoves: [], deviceIn: [] }, { now: NOW });
     const a = f.visits.find((v) => v.sequence === 1)!;
@@ -38,12 +41,15 @@ describe('the customer site, the sub-stays and the drop points (lib/analysis/gps
     expect(minutes(drop2, a.siteEndAt)).toBeGreaterThan(17);
     expect(a.substays).toBe(2);
     expect(a.dropPoints).toBe(2);
-    expect(a.flags).toEqual(expect.arrayContaining(['MULTI_DROP', 'PIN_OFFSET']));
+    expect(a.flags).toContain('MULTI_DROP');
     expect(a.standDistM).toBeGreaterThan(330);
     expect(a.standDistM).toBeLessThan(370);
     expect(a.standBearingDeg).toBeGreaterThan(80); // east of the pin
     expect(a.standBearingDeg).toBeLessThan(100);
-    expect(a.pinOffset).toBe(true);
+    // The study's big-site pattern (review of 19 Oct 2026): the truck stood 30 min within 25 m of the pin before
+    // the second drop point, so the pin is right - never a pin offset, never in "Pins to review".
+    expect(a.pinOffset).toBe(false);
+    expect(a.flags).not.toContain('PIN_OFFSET');
     expect(a.maxDistM).toBeGreaterThan(330);
     // The live detector (100 m) saw one stay only: the 350 m drop point is outside its circle.
     expect(a.detectorStays).toBe(1);
@@ -54,6 +60,32 @@ describe('the customer site, the sub-stays and the drop points (lib/analysis/gps
       expect.objectContaining({ distM: expect.any(Number) }),
     ]);
     for (const s of a.substaysJson as Record<string, unknown>[]) expect(Object.keys(s).sort()).toEqual(['bearingDeg', 'distM', 'minutes', 'startOffsetSec']);
+  });
+
+  it('a pin offset: the truck unloaded 250 m from the pin, longer than it stood near it (a gate halt at the pin does not count), at the build and after a refresh', () => {
+    const { tr, input } = dayPinOff(D);
+    const f = buildTruckDayFacts(input, SETTINGS, { kind: 'TRAIL', points: tr.pts, zoneMoves: [], deviceIn: [] }, { now: NOW });
+    const c = f.visits[0]!;
+    expect(c.standDistM).toBeGreaterThan(230);
+    expect(c.standDistM).toBeLessThan(270);
+    expect(c.standBearingDeg).toBeGreaterThan(170); // south of the pin
+    expect(c.standBearingDeg).toBeLessThan(190);
+    expect(c.pinOffset).toBe(true);
+    expect(c.flags).toContain('PIN_OFFSET');
+    expect(c.flags).not.toContain('MULTI_DROP');
+    // As a study customer whose pin the study's check says to fix: a 3-min halt 30 m from the pin at the gate, then 25 min of
+    // unloading 250 m away. A sub-stay within 120 m does not make the pin right: still a pin offset.
+    const gate = dayPinOff(D, { gateHaltMin: 3 });
+    const g = buildTruckDayFacts(gate.input, SETTINGS, { kind: 'TRAIL', points: gate.tr.pts, zoneMoves: [], deviceIn: [] }, { now: NOW }).visits[0]!;
+    expect((g.substaysJson as { distM: number }[]).map((s) => s.distM < 120)).toEqual([true, false]);
+    expect(g).toMatchObject({ pinOffset: true, dropPoints: 2 });
+    expect(g.flags).toContain('PIN_OFFSET');
+    // A refresh decides it from the stored sub-stays exactly as the build did (both cases).
+    const later = new Date(NOW.getTime() + 86_400_000);
+    expect(buildTruckDayFacts(input, SETTINGS, { kind: 'STORED', rows: f }, { now: later }).visits[0]).toMatchObject({ pinOffset: true, flags: c.flags });
+    const one = dayOne();
+    const built = buildTruckDayFacts(one.input, SETTINGS, { kind: 'TRAIL', points: one.tr.pts, zoneMoves: [], deviceIn: [] }, { now: NOW });
+    expect(buildTruckDayFacts(one.input, SETTINGS, { kind: 'STORED', rows: built }, { now: later }).visits.find((v) => v.sequence === 1)).toMatchObject({ pinOffset: false });
   });
 
   it('no position anywhere in the rows: no latitude or longitude key, no coordinate value', () => {
@@ -81,6 +113,23 @@ describe('the customer site, the sub-stays and the drop points (lib/analysis/gps
     const none = buildTruckDayFacts(input, SETTINGS, { kind: 'NONE' }, { now: NOW });
     expect(none.visits[0]!.flags).toContain('NO_GPS');
     expect(none.truckDay.gpsNote).toBe('NO_TRAIL');
+    // Searched at the build and not seen: still GPS_NOT_SEEN after a refresh.
+    expect(buildTruckDayFacts(input, SETTINGS, { kind: 'STORED', rows: seen }, { now: NOW }).visits[0]!.flags).toContain('GPS_NOT_SEEN');
+  });
+
+  it('a stop with no arrival and no result at the build is never searched: not GPS_NOT_SEEN, even after a result saved late (review of 19 Oct 2026)', () => {
+    const { tr, input } = dayOne();
+    // At 03:00 the next day stop 2 has nothing yet: the office saves its result the next morning.
+    const atBuild = { ...input, visits: input.visits.map((v) => (v.sequence === 2 ? visit(1, 2, {}) : v)), events: input.events.filter((e) => e.sequence !== 2) };
+    const built = buildTruckDayFacts(atBuild, SETTINGS, { kind: 'TRAIL', points: tr.pts, zoneMoves: [], deviceIn: [] }, { now: NOW });
+    const b0 = built.visits.find((v) => v.sequence === 2)!;
+    expect(b0).toMatchObject({ actualOrder: null, siteStartAt: null, closestM: null });
+    expect(b0.flags).not.toContain('GPS_NOT_SEEN');
+    const late = atOn('2026-10-19', '09:30');
+    const resulted = { ...atBuild, visits: atBuild.visits.map((v) => (v.sequence === 2 ? visit(1, 2, { outcome: 'DELIVERED', outcomeAt: late, outcomeSource: 'DISPATCHER', casesDelivered: 40 }) : v)) };
+    const b1 = buildTruckDayFacts(resulted, SETTINGS, { kind: 'STORED', rows: built }, { now: new Date(NOW.getTime() + 86_400_000) }).visits.find((v) => v.sequence === 2)!;
+    expect(b1).toMatchObject({ actualOrder: 2, outcome: 'DELIVERED', siteStartAt: null });
+    expect(b1.flags).not.toContain('GPS_NOT_SEEN');
   });
 });
 
@@ -208,6 +257,62 @@ describe('the legs, the depot turns and the truck-day', () => {
     expect(t).toMatchObject({ frozenRuns: 0, spikes: 0, ignitionSeen: false });
     // The settings in force are on every row, with the builder's and the detector's versions.
     for (const row of [t, ...f.visits, ...f.legs]) expect(row).toMatchObject({ serviceMinPerCase: 0.25, reloadMinutes: 30, stopRadiusM: 100, dwellMin: 3, detectorVersion: DETECTOR_VERSION, analysisVersion: ANALYSIS_VERSION, builtAt: NOW, refreshedAt: NOW, frozenAt: null });
+  });
+
+  it('the evening before is the day before\'s: a trip back at 21:14 is left out of the time out, overtime, km and trips (review of 19 Oct 2026)', () => {
+    // The trail is read from 21:00 the evening before: the truck is 2 km out, back at the depot at 21:14, then
+    // leaves at 06:40 for one stop and is back about 07:21.
+    const evening = new Trail(atOn('2026-10-17', '21:00'), off(DEPOT, 2000, 0)).park(10).drive(DEPOT).park(566);
+    expect(evening.at).toEqual(L('06:40'));
+    const tr = evening.drive(off(A, 0, 25)).park(30).drive(DEPOT).park(30);
+    const arrive = L('06:47');
+    const v = [visit(1, 1, { arrivedAt: arrive, arrivalSource: 'PHONE_MANUAL', departedAt: L('07:14'), departureSource: 'PHONE_MANUAL', departedAtOutcome: true, outcome: 'DELIVERED', outcomeAt: L('07:14'), outcomeSource: 'PHONE_MANUAL', casesDelivered: 40 })];
+    const input = day([load(1, [stop(1, A, { etaMin: 410, departureMin: 430 })], { departMin: 400 })], v, [ev(1, 1, 'ARRIVED', arrive), ev(1, 1, 'OUTCOME', L('07:14'))]);
+    const t = buildTruckDayFacts(input, SETTINGS, { kind: 'TRAIL', points: tr.pts, zoneMoves: [], deviceIn: [] }, { now: NOW }).truckDay;
+    // Before the fix: out from 17:00 UTC the day before, 595.5 min out, 55.5 min overtime, 2 trips, the evening's km.
+    expect(t.gpsTrips).toBe(1);
+    expect(minutes(L('06:40'), t.firstOutAt)).toBeGreaterThanOrEqual(0);
+    expect(minutes(L('06:40'), t.firstOutAt)).toBeLessThan(2);
+    expect(t.outMin).toBeGreaterThan(35);
+    expect(t.outMin).toBeLessThan(45);
+    expect(t.overtimeMin).toBe(0);
+    expect(t.kmGps).toBeGreaterThan(5);
+    expect(t.kmGps).toBeLessThan(6.1); // 6 km out and back less the depot circle; never the evening's 2 km
+    // The quality columns describe the date's own trail, from its midnight.
+    expect(t.trailFrom!.getTime()).toBeGreaterThanOrEqual(L('00:00').getTime());
+    expect(t.trailPoints).toBe(tr.pts.filter((p) => p.fixAt.getTime() >= L('00:00').getTime()).length);
+
+    // Out all night with this day's load (parked 2 km from the depot): the day counts from the first move after midnight.
+    const night = new Trail(atOn('2026-10-17', '21:00'), off(DEPOT, 2000, 0)).park(580).drive(off(A, 0, 25)).park(30).drive(DEPOT).park(30);
+    const n = buildTruckDayFacts(input, SETTINGS, { kind: 'TRAIL', points: night.pts, zoneMoves: [], deviceIn: [] }, { now: NOW }).truckDay;
+    expect(n.gpsTrips).toBe(1);
+    expect(minutes(L('06:40'), n.firstOutAt)).toBeGreaterThanOrEqual(0);
+    expect(minutes(L('06:40'), n.firstOutAt)).toBeLessThan(1);
+    expect(n.overtimeMin).toBe(0);
+    // A trail with no point on the date itself is no trail.
+    const before = buildTruckDayFacts(input, SETTINGS, { kind: 'TRAIL', points: tr.pts.filter((p) => p.fixAt.getTime() < L('00:00').getTime()), zoneMoves: [], deviceIn: [] }, { now: NOW });
+    expect(before.truckDay).toMatchObject({ gpsNote: 'NO_TRAIL', gpsBuiltAt: null, firstOutAt: null });
+  });
+
+  it('a refresh with the trail pulled again recomputes the GPS columns with the settings and build time of the stored rows; PARTIAL_TRAIL stays', () => {
+    const { tr, input } = dayOne();
+    // At the build the trail ended at 07:30 (no final pull yet): B's site was not seen whole, the day not closed.
+    const cut = tr.pts.filter((p) => p.fixAt.getTime() < L('07:30').getTime());
+    const built = buildTruckDayFacts(input, SETTINGS, { kind: 'TRAIL', points: cut, zoneMoves: [], deviceIn: [] }, { now: NOW });
+    expect(built.truckDay.lastInAt).toBeNull();
+    const later = new Date(NOW.getTime() + 86_400_000);
+    const changed = { ...SETTINGS, serviceMinPerCase: 0.5, params: { ...SETTINGS.params, dwellMin: 6 } };
+    const again = buildTruckDayFacts(input, changed, { kind: 'TRAIL', points: tr.pts, zoneMoves: [], deviceIn: [] }, { now: later, previous: built });
+    expect(again.truckDay.lastInAt).not.toBeNull();
+    expect(again.truckDay.lastInFrom).toBe('TRAIL');
+    expect(again.truckDay.kmGps!).toBeGreaterThan(built.truckDay.kmGps!);
+    for (const row of [again.truckDay, ...again.visits, ...again.legs]) expect(row).toMatchObject({ serviceMinPerCase: 0.25, dwellMin: 3, builtAt: NOW, gpsBuiltAt: later, refreshedAt: later });
+    // Copied as stored without a new pull (STORED); a trail found partly deleted keeps its note on every refresh.
+    expect(buildTruckDayFacts(input, SETTINGS, { kind: 'STORED', rows: again }, { now: later }).truckDay).toMatchObject({ kmGps: again.truckDay.kmGps, gpsBuiltAt: later });
+    const partial = buildTruckDayFacts(input, SETTINGS, { kind: 'NONE', note: 'PARTIAL_TRAIL' }, { now: NOW });
+    expect(partial.truckDay).toMatchObject({ gpsNote: 'PARTIAL_TRAIL', gpsBuiltAt: null, kmGps: null });
+    expect(partial.visits.every((v) => v.flags.includes('NO_GPS'))).toBe(true);
+    expect(buildTruckDayFacts(input, SETTINGS, { kind: 'STORED', rows: partial }, { now: later }).truckDay.gpsNote).toBe('PARTIAL_TRAIL');
   });
 
   it('a trail that ended before the truck came back is closed by the tracker\'s own depot IN', () => {

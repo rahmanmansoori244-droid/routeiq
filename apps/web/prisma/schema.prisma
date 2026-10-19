@@ -1948,7 +1948,9 @@ model FactTruckDay {
   plannedReturnMin   Int?
   plannedOutMin      Int?
   plannedKm          Float?
-  /// GPS (null without a usable trail): the first depot OUT and the last depot IN of the day.
+  /// GPS (null without a usable trail): the first depot OUT and the last depot IN of the delivery date's trips (a
+  /// trip that left the evening before is the day before's; a truck out overnight with this day's load counts
+  /// from its first move after midnight).
   firstOutAt         DateTime? @db.Timestamptz(3)
   lastInAt           DateTime? @db.Timestamptz(3)
   /// TRAIL (the trail's own depot IN) or DEVICE_EVENT (the tracker's depot IN when the trail ended before
@@ -1967,7 +1969,8 @@ model FactTruckDay {
   gpsTrips           Int?
   /// The trail's quality: points, first and last fix time, the longest gap, minutes in gaps over 5 min,
   /// frozen-position runs (the same position repeated for 60 s or more at 5 km/h or more), single-point
-  /// spikes (a pairwise check, never a plain speed filter) and whether any point carried the ignition.
+  /// spikes (a pairwise check, never a plain speed filter) and whether any point carried the ignition, over the
+  /// date's own trail (from its midnight; the 3 h before are read only for the detector).
   trailPoints        Int       @default(0)
   trailFrom          DateTime? @db.Timestamptz(3)
   trailTo            DateTime? @db.Timestamptz(3)
@@ -1977,7 +1980,8 @@ model FactTruckDay {
   frozenMin          Float?
   spikes             Int?
   ignitionSeen       Boolean?
-  /// Why the GPS columns are empty: NO_TRACKER, NO_TRAIL, SUPPRESSED (CHECK).
+  /// Why the GPS columns are empty: NO_TRACKER, NO_TRAIL, SUPPRESSED, PARTIAL_TRAIL (built late: the start of the
+  /// trail already deleted by the GPS retention, so none of it is used) (CHECK).
   gpsNote            String?
   // The settings in force when built (kept on refresh).
   overtimeAfterMin   Int
@@ -1992,7 +1996,8 @@ model FactTruckDay {
   detectorVersion    String
   analysisVersion    String
   builtAt            DateTime  @db.Timestamptz(3)
-  /// When the GPS columns were computed (null: no usable trail then; they are never computed again).
+  /// When the GPS columns were computed (null: no usable trail then). Computed again only at a refresh, when the
+  /// trail was pulled again after it (a late final pull) and is still whole; otherwise copied as they are.
   gpsBuiltAt         DateTime? @db.Timestamptz(3)
   refreshedAt        DateTime  @db.Timestamptz(3)
   /// Set at the last refresh (4 days after the delivery date): the row is never written again.
@@ -2074,7 +2079,8 @@ model FactVisit {
   /// Where it stood to unload (the sub-stay holding the result tap, else the longest): from the pin only.
   standDistM         Float?
   standBearingDeg    Float?
-  /// The truck stood 120-500 m from the pin (null: not known): the pin may be wrong (office review).
+  /// The truck stood 120-500 m from the pin to unload, longer than within 120 m of it (null: not known): the pin
+  /// may be wrong (office review). A big site's second drop point after a drop at the pin is not one.
   pinOffset          Boolean?
   /// The live detector's stays (lib/ivms/stops.ts staysAt) inside the site.
   detectorStays      Int?

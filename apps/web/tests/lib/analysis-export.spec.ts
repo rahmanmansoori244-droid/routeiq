@@ -3,8 +3,9 @@
  * an in-memory stand-in (analysis-fakes.ts): the roles (no session 401, VIEWER 403, PLANNER and up 200: the pins
  * to review are office data), the range rules (real dates, at most 92 days), another company's depot 404, only
  * the caller's company in the file even when the stand-in does not scope (every read names the company), the
- * sheets, the pins to review (2 or more visits standing 120-500 m off, the median standing point) and the late
- * result taps; no position anywhere but the office's standing point. Invented data only.
+ * sheets, the pins to review (2 or more visits standing 120-500 m off and never within 120 m, the median
+ * standing point; a big site's second drop point is never one: review of 19 Oct 2026) and the late result
+ * taps; no position anywhere but the office's standing point. Invented data only.
  */
 import ExcelJS from 'exceljs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,7 +13,7 @@ import { buildTruckDayFacts, type TruckDayFacts } from '@/lib/analysis/build';
 import { pinsToReview } from '@/lib/analysis/export';
 import { analysisDefaultRange, analysisExportUrl, analysisRangeProblem } from '@/lib/analysis/view';
 import { distanceM } from '@/lib/dispatch/snapshots';
-import { A, dayOne, factDb, SETTINGS } from './analysis-fakes';
+import { A, C, dayOne, dayPinOff, factDb, SETTINGS } from './analysis-fakes';
 
 const { session, scopedTo } = vi.hoisted(() => ({
   session: { value: null as null | { user: { id: string; name: string; role: string; tenantId: string; email: string } } },
@@ -37,7 +38,10 @@ const D2 = '2026-10-18';
 const req = (q: string) => new Request(`http://localhost/api/analysis/export?${q}`);
 const as = (role: string, tenantId = 'tA') => (session.value = { user: { id: 'u1', name: 'Office Example', role, tenantId, email: 'office@example.test' } });
 
-/** Two delivery dates of company A (the truck stood 350 m off customer 1's pin both times) and one of company B. */
+/**
+ * Two delivery dates of company A - truck T-100 at customer 1's big site (30 min at the pin, then a second drop
+ * point 350 m away) and truck T-200 standing 250 m off customer 3's pin both times - and one of company B.
+ */
 function seed() {
   const db = factDb({ configs: [] });
   const put = (tenantId: string, f: TruckDayFacts) => {
@@ -49,6 +53,8 @@ function seed() {
   for (const date of [D1, D2]) {
     const one = dayOne(date);
     put('tA', buildTruckDayFacts(one.input, SETTINGS, { kind: 'TRAIL', points: one.tr.pts, zoneMoves: [], deviceIn: [] }, { now: NOW }));
+    const pinOff = dayPinOff(date);
+    put('tA', buildTruckDayFacts(pinOff.input, SETTINGS, { kind: 'TRAIL', points: pinOff.tr.pts, zoneMoves: [], deviceIn: [] }, { now: NOW }));
   }
   const b = dayOne(D2);
   put('tB', buildTruckDayFacts({ ...b.input, truckCode: 'T-900' }, SETTINGS, { kind: 'TRAIL', points: b.tr.pts, zoneMoves: [], deviceIn: [] }, { now: NOW }));
@@ -60,6 +66,7 @@ function seed() {
     customer: rows([
       { id: 'cust-1', tenantId: 'tA', code: 'TST0001', branchCode: null, name: 'Shop Example One', ...A },
       { id: 'cust-2', tenantId: 'tA', code: 'TST0002', branchCode: 'B2', name: 'Shop Example Two', lat: null, lng: null },
+      { id: 'cust-3', tenantId: 'tA', code: 'TST0003', branchCode: null, name: 'Shop Example Three', ...C },
       { id: 'cust-1', tenantId: 'tB', code: 'OTHER01', branchCode: null, name: 'Other company shop', ...A },
     ]),
     depot: rows([
@@ -141,20 +148,25 @@ describe('the workbook', () => {
     expect(Object.keys(s)).toEqual(['ReadMe', 'Truck days', 'Visits', 'Sub-stays', 'Legs', 'Depot turns', 'Pins to review', 'Late result taps']);
     const header = (name: string) => s[name]![0]!.map(String);
     const col = (name: string, h: string) => s[name]!.slice(1).map((r) => r[header(name).indexOf(h)]);
-    // Company A only: two truck-days of T-100; company B's T-900 of the same date never in the file.
-    expect(col('Truck days', 'Truck')).toEqual(['T-100', 'T-100']);
-    expect(col('Visits', 'Truck').every((t) => t === 'T-100')).toBe(true);
-    expect(col('Visits', 'Customer')).toEqual(['Shop Example One', 'Shop Example Two', 'Shop Example One', 'Shop Example Two']);
+    // Company A only: two truck-days of T-100 and T-200 each; company B's T-900 of the same date never in the file.
+    expect(col('Truck days', 'Truck')).toEqual(['T-100', 'T-200', 'T-100', 'T-200']);
+    expect(col('Visits', 'Truck').every((t) => t === 'T-100' || t === 'T-200')).toBe(true);
+    expect(col('Visits', 'Customer')).toEqual(['Shop Example One', 'Shop Example Two', 'Shop Example Three', 'Shop Example One', 'Shop Example Two', 'Shop Example Three']);
     expect(JSON.stringify(s)).not.toContain('Other company shop');
     expect(JSON.stringify(s)).not.toContain('T-900');
-    // The second drop point: a pin offset on both days -> one customer to review, with the median standing point.
-    expect(col('Pins to review', 'Customer code')).toEqual(['TST0001']);
+    // Customer 3: the truck stood 250 m off the pin on both days -> the one customer to review, with the median
+    // standing point. Customer 1's second drop point (350 m, after 30 min at the pin) is no pin to review: its pin
+    // is right, and moving it there would make the live detector miss the main drop point (review of 19 Oct 2026).
+    expect(col('Pins to review', 'Customer code')).toEqual(['TST0003']);
     expect(col('Pins to review', 'Visits standing 120-500 m off')).toEqual([2]);
     const point = String(col('Pins to review', 'Median standing point (office use only)')[0]);
     const [lat, lng] = point.split(',').map(Number);
-    expect(distanceM(A, { lat: lat!, lng: lng! })).toBeGreaterThan(330);
-    expect(distanceM(A, { lat: lat!, lng: lng! })).toBeLessThan(370);
-    expect(col('Pins to review', 'Pin now to standing point m')[0]).toBeGreaterThan(330);
+    expect(distanceM(C, { lat: lat!, lng: lng! })).toBeGreaterThan(230);
+    expect(distanceM(C, { lat: lat!, lng: lng! })).toBeLessThan(270);
+    expect(col('Pins to review', 'Pin now to standing point m')[0]).toBeGreaterThan(230);
+    const flagsOf = (code: string) => s['Visits']!.slice(1).filter((r) => r[header('Visits').indexOf('Customer code')] === code).map((r) => String(r[header('Visits').indexOf('Flags')]));
+    expect(flagsOf('TST0001').every((f) => f.includes('MULTI_DROP') && !f.includes('PIN_OFFSET'))).toBe(true);
+    expect(flagsOf('TST0003').every((f) => f.includes('PIN_OFFSET'))).toBe(true);
     // B's result was saved 10 min after leaving, back at the depot: a late result tap on each day.
     expect(col('Late result taps', 'Customer code')).toEqual(['TST0002', 'TST0002']);
     expect((col('Late result taps', 'Truck m from pin at the tap') as number[]).every((m) => m > 4000)).toBe(true);
@@ -166,21 +178,33 @@ describe('the workbook', () => {
     // No position anywhere but the office's standing point: no coordinate text in the other sheets.
     for (const name of Object.keys(s).filter((n) => n !== 'Pins to review')) {
       const text = JSON.stringify(s[name]);
-      for (const c of [A.lat, A.lng]) expect(text, name).not.toContain(c.toFixed(4));
+      for (const c of [A.lat, A.lng, C.lat, C.lng]) expect(text, name).not.toContain(c.toFixed(4));
     }
   });
 
-  it('pinsToReview: 2 or more offset visits; the standing point from the pin each was planned with; one visit is not enough', () => {
+  it("pinsToReview: 2 or more offset visits; never a big site's second drop point; the standing point from the pin each was planned with; one visit is not enough", () => {
     const db = store.db!;
     const visits = db.tables.factVisit.filter((v: { tenantId: string }) => v.tenantId === 'tA');
-    const customers = new Map([['cust-1', { code: 'TST0001', branchCode: null, name: 'Shop Example One', lat: A.lat, lng: A.lng }]]);
-    expect(pinsToReview({ visits, customers, plannedPins: new Map() }).map((r) => [r.customerCode, r.offsetVisits, r.siteVisits])).toEqual([['TST0001', 2, 2]]);
-    expect(pinsToReview({ visits: visits.slice(0, 2), customers, plannedPins: new Map() })).toEqual([]);
-    // A visit planned with another pin: its standing point is moved from that pin, not from today's.
-    const moved = visits.map((v: Record<string, unknown>, i: number) => ({ ...v, visitId: `sv-${i}` }));
-    const planned = new Map(moved.map((v: { visitId: string }) => [v.visitId, { lat: A.lat + 0.001, lng: A.lng }]));
+    const customers = new Map([
+      ['cust-1', { code: 'TST0001', branchCode: null, name: 'Shop Example One', lat: A.lat, lng: A.lng }],
+      ['cust-3', { code: 'TST0003', branchCode: null, name: 'Shop Example Three', lat: C.lat, lng: C.lng }],
+    ]);
+    expect(pinsToReview({ visits, customers, plannedPins: new Map() }).map((r) => [r.customerCode, r.offsetVisits, r.siteVisits])).toEqual([['TST0003', 2, 2]]);
+    // Customer 1 stood 350 m off at its second drop point on both days, but 30 min within 25 m of the pin first.
+    const one = visits.filter((v: { customerId: string }) => v.customerId === 'cust-1');
+    expect(one.map((v: { standDistM: number; pinOffset: boolean }) => [v.standDistM > 330, v.pinOffset])).toEqual([
+      [true, false],
+      [true, false],
+    ]);
+    const three = visits.filter((v: { customerId: string }) => v.customerId === 'cust-3');
+    expect(pinsToReview({ visits: three.slice(0, 1), customers, plannedPins: new Map() })).toEqual([]);
+    // A visit planned with another pin (111 m north of today's): its standing point is moved from that pin, so
+    // it lies 250 - 111 = about 139 m from today's pin (250 m when moved from today's).
+    const moved = three.map((v: Record<string, unknown>, i: number) => ({ ...v, visitId: `sv-${i}` }));
+    const planned = new Map(moved.map((v: { visitId: string }) => [v.visitId, { lat: C.lat + 0.001, lng: C.lng }]));
     const row = pinsToReview({ visits: moved, customers, plannedPins: planned as never })[0]!;
-    expect(row.pinNowToStandingM).toBeGreaterThan(330);
+    expect(row.pinNowToStandingM).toBeGreaterThan(120);
+    expect(row.pinNowToStandingM).toBeLessThan(160);
     expect(row.standingPoint).not.toBeNull();
   });
 });

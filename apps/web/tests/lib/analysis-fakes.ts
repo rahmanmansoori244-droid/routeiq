@@ -1,8 +1,9 @@
 /**
  * Invented truck-days for the analysis dataset's specs (analysis-build, analysis-job, analysis-export): a
- * depot and shops in empty desert near 20.1, 55.1, truck T-100, customers TST0001..., a trail written step
- * by step (parked at 0 km/h or driving straight, a fix every 30 s), and a small in-memory stand-in for the
- * four fact tables (where: equality, null, not null, in, lt/lte/gte; a transaction runs in place).
+ * depot and shops in empty desert near 20.1, 55.1, trucks T-100 and T-200, customers TST0001..., a trail
+ * written step by step (parked at 0 km/h or driving straight, a fix every 30 s), and a small in-memory
+ * stand-in for the four fact tables (where: equality, null, not null, in, lt/lte/gte; a transaction runs in
+ * place) whose trail read can fail a given number of times (a deadlock, a connection reset).
  */
 import type { AnalysisSettings, EventIn, LoadIn, StopIn, TruckDayIn, VisitIn } from '@/lib/analysis/build';
 import { distanceM } from '@/lib/dispatch/snapshots';
@@ -173,6 +174,34 @@ export function dayOne(date: string) {
   return { tr, input, arriveA, drop2, arriveB, leaveB, resultA, resultB };
 }
 
+/** Customer 3's pin, 3 km west of the depot (a pin the truck never stands at: dayPinOff). */
+export const C = off(DEPOT, 0, -3000);
+
+/**
+ * Truck-day of truck T-200 on `date`: depot -> customer TST0003, where the truck unloads 25 min 250 m south of
+ * the pin (a pin offset, the office's data fix) and the driver saves the result there -> depot. With
+ * `gateHaltMin`, it first halts that long 30 m from the pin (a study customer's pin to fix: a 2-min halt at the
+ * gate, then the unloading 200 m away).
+ */
+export function dayPinOff(date: string, opts: { gateHaltMin?: number } = {}) {
+  const L = (hhmm: string, sec = 0) => atOn(date, hhmm, sec);
+  const tr = new Trail(L('06:40'), DEPOT).park(20);
+  if (opts.gateHaltMin) tr.drive(off(C, 0, 30)).park(opts.gateHaltMin).drive(off(C, -250, 0), 12);
+  else tr.drive(off(C, -250, 0));
+  const arrive = tr.at;
+  tr.park(25).drive(DEPOT).park(20);
+  const result = new Date(arrive.getTime() + 20 * 60_000);
+  const visits = [
+    visit(1, 1, { arrivedAt: new Date(arrive.getTime() + 60_000), arrivalSource: 'PHONE_MANUAL', departedAt: result, departureSource: 'PHONE_MANUAL', departedAtOutcome: true, outcome: 'DELIVERED', outcomeAt: result, outcomeSource: 'PHONE_MANUAL', casesDelivered: 30 }),
+  ];
+  const events = [ev(1, 1, 'ARRIVED', visits[0]!.arrivedAt!), ev(1, 1, 'OUTCOME', result)];
+  const input = truckDayOf(date, [load(1, [stop(1, C, { customerId: 'cust-3', customerCode: 'TST0003', casesPlanned: 30, etaMin: 430, departureMin: 450 })], { dispatchedAt: L('06:50') })], visits, events, {
+    truckId: 'truck-2',
+    truckCode: 'T-200',
+  });
+  return { tr, input, arrive, result };
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
 
@@ -206,7 +235,8 @@ export function matches(row: Row, where: Row = {}): boolean {
 }
 
 /** An in-memory stand-in for the fact tables, the trail and the settings (what lib/analysis/job.ts touches). */
-export function factDb(opts: { configs: Row[]; trail?: Row[]; moves?: Row[]; failTrailOf?: string }): FactDb {
+export function factDb(opts: { configs: Row[]; trail?: Row[]; moves?: Row[]; failTrailOf?: string; failTimes?: number }): FactDb {
+  let failsLeft = opts.failTimes ?? Infinity;
   const tables: Record<string, Row[]> = { factTruckDay: [], factVisit: [], factLeg: [], factDepotTurn: [] };
   let id = 0;
   const model = (name: string) => ({
@@ -249,7 +279,7 @@ export function factDb(opts: { configs: Row[]; trail?: Row[]; moves?: Row[]; fai
     tenantConfig: { findMany: async (a: Row = {}) => opts.configs.filter((c) => matches(c, a.where)) },
     truckTrailPoint: {
       findMany: async (a: Row) => {
-        if (opts.failTrailOf && a.where.truckId === opts.failTrailOf) throw Object.assign(new Error('connection lost'), { code: 'P1001' });
+        if (opts.failTrailOf && a.where.truckId === opts.failTrailOf && failsLeft-- > 0) throw Object.assign(new Error('connection lost'), { code: 'P1001' });
         return (opts.trail ?? []).filter((p) => matches(p, a.where)).sort((x, y) => x.fixAt.getTime() - y.fixAt.getTime());
       },
     },

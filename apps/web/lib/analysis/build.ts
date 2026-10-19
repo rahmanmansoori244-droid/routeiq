@@ -24,11 +24,31 @@
  * - nothing measured is ever "bridged": two stays at one customer with a trip away in between keep the trip
  *   away out of the unloading (the check's guard), with its count and minutes beside it;
  * - the truck's distance from the pin at the driver's result tap (more than 500 m: a late result tap) and a
- *   standing spot 120-500 m from the pin (a pin offset) are kept for the office's lists.
+ *   standing spot 120-500 m from the pin (a pin offset) are kept for the office's lists. A pin offset needs
+ *   the truck to have stood longer 120 m or more from the pin than within 120 m of it on that visit (review of
+ *   19 Oct 2026: at a big site the first drop point is at the pin and the result is saved at a second one
+ *   350 m away, the study's pattern; that pin is right, and moving it would make the live detector miss the
+ *   main drop point. A 2-min halt at the gate near a wrong pin does not make it right: another study
+ *   customer's, a pin to fix).
+ *
+ * The truck-day (review of 19 Oct 2026, owner request 19 Oct 2026): the trail is read from 21:00 the evening
+ * before, only so the detector knows where the truck stood at midnight. A trip that left before the delivery
+ * date's midnight is the day before's (a late return after 21:00 counted 10 h out and 55 min of overtime): it
+ * is left out of the day's trips and totals, unless the detector gave it a load of this day (the truck stood
+ * outside the depot overnight), and then it counts from the truck's first move after midnight. The trail's
+ * quality columns describe the date's own trail (from its midnight); a trail with no point on the date is no
+ * trail (NO_TRAIL).
  *
  * Refresh (`gps.kind === 'STORED'`): the columns that do not come from the trail are built again from the
  * plan, the visits and the events, the trail's columns are copied from the rows already stored (the trail
- * is gone by then), and so are the settings the rows were first built with.
+ * is gone by then), and so are the settings the rows were first built with. A refresh may instead pass the
+ * trail again with `opts.previous` (the job does when the trail was pulled again after the GPS columns were
+ * built and is still whole: a late final pull): the GPS columns are then computed again, with the settings
+ * and `builtAt` of the stored rows.
+ *
+ * GPS_NOT_SEEN says the visit's window was searched on the trail and the truck was not seen on site. A stop
+ * with no arrival and no result when the facts were built has no window and is never searched: it is not
+ * flagged, at the build or at a refresh after a result saved late (review of 19 Oct 2026).
  */
 import type { FactDepotTurn, FactLeg, FactTruckDay, FactVisit, Prisma } from '@prisma/client';
 import { distanceM } from '../dispatch/snapshots';
@@ -169,12 +189,18 @@ export interface TruckDayIn {
 export type GpsSource =
   | { kind: 'TRAIL'; points: readonly TrailPoint[]; zoneMoves: readonly ZoneMove[]; deviceIn: readonly Date[] }
   | { kind: 'STORED'; rows: TruckDayFacts }
-  | { kind: 'NONE' };
+  /** No usable trail; `note` says why when the job knows better than the builder (PARTIAL_TRAIL). */
+  | { kind: 'NONE'; note?: GpsNote };
 
 export interface BuildOptions {
   now: Date;
   /** Set on the last refresh: the rows are frozen (never written again). */
   freeze?: boolean;
+  /**
+   * The rows already stored, when a refresh computes the GPS columns again from the trail (`gps.kind`
+   * TRAIL): their settings and `builtAt` are kept. A STORED source implies its own rows.
+   */
+  previous?: TruckDayFacts;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -194,6 +220,8 @@ interface VisitGps {
   detectorStays: number | null;
   resultTapAt: Date | null;
   truckDistAtResultM: number | null;
+  /** The visit's window was searched on the trail (only then can GPS_NOT_SEEN be said). */
+  searched: boolean;
 }
 
 interface LegGps {
@@ -233,6 +261,21 @@ export function clippedMinutes(a: Date | null, b: Date | null, windowStartAt: Da
   const before = !!windowStartAt && ms(b) <= ms(windowStartAt);
   const start = before || !windowStartAt ? a : maxDate(a, windowStartAt)!;
   return minutes(start, b);
+}
+
+/**
+ * Minutes the truck stood on site within 120 m of the pin and 120 m or more from it (the sub-stays, rounded as
+ * substaysJson keeps them, so a refresh decides a pin offset exactly as the build did).
+ */
+export function standingSplit(subs: readonly { distM: number; minutes: number }[]): { nearMin: number; farMin: number } {
+  let nearMin = 0;
+  let farMin = 0;
+  for (const s of subs) {
+    const m = Math.round(s.minutes * 10) / 10;
+    if (Math.round(s.distM) < SITE_RULES.pinOffsetMinM) nearMin += m;
+    else farMin += m;
+  }
+  return { nearMin, farMin };
 }
 
 /** The driver's result tap of a stop: the latest phone OUTCOME event that saved a result (not an undo). */
@@ -291,6 +334,8 @@ function visitGpsOfRow(v: FactVisitRow): VisitGps {
     detectorStays: v.detectorStays,
     resultTapAt: v.resultTapAt,
     truckDistAtResultM: v.truckDistAtResultM,
+    // Built with a trail, a stop with an arrival or a result then had its window searched (its actual order).
+    searched: v.actualOrder !== null,
   };
 }
 
@@ -320,22 +365,39 @@ function tripsOf(input: TruckDayIn, settings: AnalysisSettings, points: readonly
     }),
   }));
   const det = detectTruckDay({ points, depots: input.depots, zoneMoves, loads, params: settings.params });
-  // Only trips that left on the delivery date (the trail is read 3 h either side of it).
-  const dayEnd = ms(dayStart) + 24 * 60 * MIN;
-  const all = det.trips.filter((t) => ms(t.outAt) < dayEnd).sort((a, b) => ms(a.outAt) - ms(b.outAt));
+  // Only the trips of the delivery date. The trail is read from 3 h before its midnight so the detector knows
+  // where the truck stood then; a trip that left before the midnight is the day before's (its late return:
+  // review of 19 Oct 2026, a trip from 21:00 counted 595 min out and 55 min of overtime for a 65-min day), and
+  // is left out - unless the detector gave it a load of this day (the truck stood outside the depot
+  // overnight): then it counts from the truck's first move after the midnight, never from the evening before.
+  const day0 = ms(dayStart);
+  const dayEnd = day0 + 24 * 60 * MIN;
+  const ownsLoad = (t: DetectedTrip) => t.loadNo !== null && input.loads.some((l) => l.loadNo === t.loadNo && (t.loadDepotId === null || t.loadDepotId === l.depotId));
+  const outOf = new Map<DetectedTrip, Date>();
+  for (const t of det.trips) {
+    if (ms(t.outAt) >= dayEnd) continue;
+    if (ms(t.outAt) >= day0) {
+      outOf.set(t, t.outAt);
+      continue;
+    }
+    if (!ownsLoad(t) || (t.inAt && ms(t.inAt) <= day0)) continue;
+    const moved = firstMoveOf(points.filter((pt) => ms(pt.fixAt) >= day0 && (!t.inAt || ms(pt.fixAt) <= ms(t.inAt))), settings.params.movingKmh);
+    outOf.set(t, moved ?? dayStart);
+  }
+  const all = [...outOf.keys()].sort((a, b) => ms(outOf.get(a)!) - ms(outOf.get(b)!));
   const trips = new Map<DetectedTrip, Trip>();
   all.forEach((t, i) => {
     let inAt = t.inAt;
     let inFromDevice = false;
     if (!inAt) {
-      const nextOut = all[i + 1] ? ms(all[i + 1]!.outAt) : dayEnd + 6 * 60 * MIN;
-      const dev = deviceIn.filter((d) => ms(d) > ms(t.outAt) && ms(d) < nextOut).sort((a, b) => ms(a) - ms(b))[0];
+      const nextOut = all[i + 1] ? ms(outOf.get(all[i + 1]!)!) : dayEnd + 6 * 60 * MIN;
+      const dev = deviceIn.filter((d) => ms(d) > ms(outOf.get(t)!) && ms(d) < nextOut).sort((a, b) => ms(a) - ms(b))[0];
       if (dev) {
         inAt = dev;
         inFromDevice = true;
       }
     }
-    trips.set(t, { outAt: t.outAt, inAt, inFromDevice });
+    trips.set(t, { outAt: outOf.get(t)!, inAt, inFromDevice });
   });
   const byLoad = new Map<string, Trip[]>();
   const owned = new Set<DetectedTrip>();
@@ -373,16 +435,20 @@ function tripsOf(input: TruckDayIn, settings: AnalysisSettings, points: readonly
 
 export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSettings, gps: GpsSource, opts: BuildOptions): TruckDayFacts {
   const now = opts.now;
-  const stored = gps.kind === 'STORED' ? gps.rows : null;
-  // A refresh of a truck-day built without a usable trail rebuilds it like one without GPS.
-  const storedGps = stored && stored.truckDay.gpsBuiltAt ? stored : null;
+  const stored = gps.kind === 'STORED' ? gps.rows : (opts.previous ?? null);
   const settings = stored ? storedSettings(stored.truckDay, baseSettings) : baseSettings;
   const p = settings.params;
   const tz = settings.tz;
   const dayStart = zonedDayStart(input.date, tz);
   const deliveryDate = dateOnly(input.date);
+  // The trail, sorted; none when no point falls on the delivery date itself (only the evening before).
+  const sortedTrail = gps.kind === 'TRAIL' && gps.points.length ? [...gps.points].sort((a, b) => ms(a.fixAt) - ms(b.fixAt)) : null;
+  const trail = sortedTrail && ms(sortedTrail[sortedTrail.length - 1]!.fixAt) >= ms(dayStart) ? sortedTrail : null;
+  // Without a usable trail now, the stored GPS columns are copied; a refresh of a truck-day built without a
+  // usable trail rebuilds it like one without GPS.
+  const storedGps = !trail && stored && stored.truckDay.gpsBuiltAt ? stored : null;
   const builtAt = stored?.truckDay.builtAt ?? now;
-  const gpsBuiltAt: Date | null = stored ? (stored.truckDay.gpsBuiltAt ?? null) : gps.kind === 'TRAIL' && gps.points.length ? now : null;
+  const gpsBuiltAt: Date | null = trail ? now : storedGps ? storedGps.truckDay.gpsBuiltAt : null;
   const frozenAt = opts.freeze ? now : null;
   const common = {
     deliveryDate,
@@ -414,7 +480,6 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
   const depotPins = input.depots.map((d) => ({ lat: d.lat, lng: d.lng }));
 
   // --- GPS primitives
-  const trail = gps.kind === 'TRAIL' && gps.points.length ? [...gps.points].sort((a, b) => ms(a.fixAt) - ms(b.fixAt)) : null;
   const visitGps = new Map<string, VisitGps>();
   const legGps = new Map<string, LegGps>();
   const tripByLoad = new Map<string, { outAt: Date | null; inAt: Date | null }>();
@@ -427,7 +492,8 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
     // middle of an unloading is no trip away); the trips stay the live detector's, on the trail as stored.
     const clean = spikes.size ? trail.filter((_, i) => !spikes.has(i)) : trail;
     const prevIdx = prevIndexOf(clean);
-    const firstMove = firstMoveOf(clean, p.movingKmh);
+    // The truck's first move on the delivery date (never the evening before, read only for the detector).
+    const firstMove = firstMoveOf(clean.filter((pt) => ms(pt.fixAt) >= ms(dayStart)), p.movingKmh);
     const trips = tripsOf(input, settings, trail, gps.zoneMoves, gps.deviceIn, dayStart);
     for (const l of loads) {
       const own = trips.byLoad.get(`${l.depotId}|${l.loadNo}`) ?? [];
@@ -442,13 +508,14 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
         const resultTapAt = resultTapOf(eventsOf(l, o.stop.sequence));
         const base: VisitGps = {
           siteStartAt: null, siteEndAt: null, away: [], substays: [], substayCount: null, dropPoints: null, maxDistM: null, closestM: null,
-          standDistM: null, standBearingDeg: null, detectorStays: null, resultTapAt, truckDistAtResultM: null,
+          standDistM: null, standBearingDeg: null, detectorStays: null, resultTapAt, truckDistAtResultM: null, searched: false,
         };
         if (!pin) {
           visitGps.set(key, base);
           return;
         }
         base.truckDistAtResultM = resultTapAt ? r0(distanceAt(clean, resultTapAt, pin)) : null;
+        // No arrival and no result yet: no window to search (never GPS_NOT_SEEN, even after a late result).
         if (!o.anchor) {
           visitGps.set(key, base);
           return;
@@ -461,7 +528,7 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
         const window = clean.filter((pt) => (!w0 || ms(pt.fixAt) > ms(w0)) && (!w1 || ms(pt.fixAt) < ms(w1)));
         const others = [...allStopPins.filter((x) => x.key !== key).map((x) => x.pin), ...depotPins].filter((o2) => distanceM(o2, pin) >= SITE_RULES.siteRadiusM);
         const site = siteOf({ window, pin, sequence: o.stop.sequence, others, resultTapAt, params: p, all: clean, prevIdx });
-        const g: VisitGps = { ...base, closestM: r0(closestOf(window, pin)) };
+        const g: VisitGps = { ...base, closestM: r0(closestOf(window, pin)), searched: true };
         if (site) {
           Object.assign(g, {
             siteStartAt: site.siteStartAt,
@@ -506,16 +573,20 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
         prev = f;
       }
     }
-    // The truck-day: the first depot OUT to the last depot IN (the tracker's own when the trail ended first).
+    // The truck-day: the first depot OUT to the last depot IN (the tracker's own when the trail ended first),
+    // over the trips of the delivery date only (tripsOf: the evening before is the day before's).
     const dayTrips = trips.all;
     const firstOut = dayTrips[0]?.outAt ?? null;
     const lastTrip = [...dayTrips].reverse().find((t) => t.inAt);
     const lastIn = lastTrip?.inAt ?? null;
     const lastInFrom: LastInFrom | null = lastTrip ? (lastTrip.inFromDevice ? 'DEVICE_EVENT' : 'TRAIL') : null;
-    const spanFrom = firstOut ?? trail[0]!.fixAt;
+    // The date's own trail (from its midnight): the quality columns, and the span when no trip was seen.
+    const own = trail.filter((pt) => ms(pt.fixAt) >= ms(dayStart));
+    const ownFrom = trail.length - own.length;
+    const spanFrom = firstOut ?? own[0]!.fixAt;
     const spanTo = lastIn ?? trail[trail.length - 1]!.fixAt;
     const facts = dayTrailFacts(trail, spanFrom, spanTo, sites, depotPins, p, spikes);
-    const frozen = frozenRunsOf(trail);
+    const frozen = frozenRunsOf(own);
     const outMin = firstOut && lastIn && ms(lastIn) > ms(firstOut) ? minutes(firstOut, lastIn) : null;
     dayGps = {
       firstOutAt: firstOut,
@@ -529,15 +600,15 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
       idleStops: facts.idleStops,
       idleMin: r1(facts.idleMin),
       gpsTrips: dayTrips.length,
-      trailPoints: trail.length,
-      trailFrom: trail[0]!.fixAt,
-      trailTo: trail[trail.length - 1]!.fixAt,
+      trailPoints: own.length,
+      trailFrom: own[0]!.fixAt,
+      trailTo: own[own.length - 1]!.fixAt,
       maxGapMin: r1(facts.maxGapMin),
       gapMinOver5: r1(facts.gapMinOver5),
       frozenRuns: frozen.runs,
       frozenMin: r1(frozen.minutes),
-      spikes: spikes.size,
-      ignitionSeen: trail.some((pt) => pt.ignition !== null),
+      spikes: [...spikes].filter((i) => i >= ownFrom).length,
+      ignitionSeen: own.some((pt) => pt.ignition !== null),
     };
   } else if (storedGps) {
     for (const v of storedGps.visits) visitGps.set(stopKey(v.depotId, v.loadNo, v.sequence), visitGpsOfRow(v));
@@ -549,7 +620,9 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
       maxGapMin: t.maxGapMin, gapMinOver5: t.gapMinOver5, frozenRuns: t.frozenRuns, frozenMin: t.frozenMin, spikes: t.spikes, ignitionSeen: t.ignitionSeen,
     };
   } else {
-    gpsNote = stored?.truckDay.gpsNote === 'SUPPRESSED' || input.suppressed ? 'SUPPRESSED' : !input.tracked ? 'NO_TRACKER' : 'NO_TRAIL';
+    // Why there is no GPS; a trail found partly deleted at the build stays PARTIAL_TRAIL on every refresh.
+    const partial = (gps.kind === 'NONE' && gps.note === 'PARTIAL_TRAIL') || stored?.truckDay.gpsNote === 'PARTIAL_TRAIL';
+    gpsNote = stored?.truckDay.gpsNote === 'SUPPRESSED' || input.suppressed ? 'SUPPRESSED' : !input.tracked ? 'NO_TRACKER' : partial ? 'PARTIAL_TRAIL' : 'NO_TRAIL';
   }
   const hasGps = !!trail || !!storedGps;
 
@@ -602,7 +675,18 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
       // Flags.
       const flags = new Set<FactVisitFlag>();
       if (distAtResult !== null && distAtResult > SITE_RULES.lateResultM) flags.add('LATE_RESULT_TAP');
-      const pinOffset = g?.standDistM !== null && g?.standDistM !== undefined ? g.standDistM >= SITE_RULES.pinOffsetMinM && g.standDistM <= SITE_RULES.pinOffsetMaxM : null;
+      // A pin offset: the truck stood 120-500 m from the pin to unload, and stood there longer than within 120 m
+      // of the pin (its main standing was away from the pin). Review of 19 Oct 2026: a big site's first drop at
+      // the pin and a second drop point further on is no wrong pin (one study customer: 38 min within 54 m, then
+      // 35 min at 171-378 m); listed in "Pins to review", the office would move a right pin there and the live
+      // detector would miss the main drop point. A short halt at the gate near the pin before unloading 200 m
+      // away still is one (another study customer, a pin to fix in the study's check: 2 min at 29 m, then
+      // 117 min at 201-281 m), so "never within 120 m" is not the rule.
+      const split = g ? standingSplit(g.substays) : null;
+      const pinOffset =
+        g?.standDistM !== null && g?.standDistM !== undefined
+          ? g.standDistM >= SITE_RULES.pinOffsetMinM && g.standDistM <= SITE_RULES.pinOffsetMaxM && split!.nearMin < split!.farMin
+          : null;
       if (pinOffset) flags.add('PIN_OFFSET');
       if ((g?.dropPoints ?? 0) > 1) flags.add('MULTI_DROP');
       if (g?.away.length) flags.add('LEFT_AND_RETURNED');
@@ -613,7 +697,8 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
       if (resultChanged) flags.add('RESULT_CHANGED');
       if (evs.some((e) => e.kind === 'PHOTO' && e.distanceM !== null && e.distanceM > SITE_RULES.leaveRadiusM)) flags.add('PHOTO_FAR');
       if (!hasGps) flags.add('NO_GPS');
-      else if (pin && rank.has(s.sequence) && !g?.siteStartAt) flags.add('GPS_NOT_SEEN');
+      // Not seen: its window was searched on the trail (an arrival or a result when the GPS columns were built).
+      else if (pin && rank.has(s.sequence) && g?.searched && !g.siteStartAt) flags.add('GPS_NOT_SEEN');
       const cases = v?.outcome && DONE.has(v.outcome) ? v.casesDelivered : null;
       const usable = !!(v?.outcome && DONE.has(v.outcome) && cases && cases > 0 && unloadMin !== null && unloadMin > 0 && !resultChanged && !flags.has('SHARED_SITE') && !flags.has('PHOTO_FAR'));
       const site0 = g?.siteStartAt ?? null;

@@ -342,7 +342,7 @@ ALTER TABLE "TenantConfig" ADD CONSTRAINT "TenantConfig_analysisRetentionDays_ra
 
 -- Where the last depot IN came from, and why the GPS columns are empty (lib/analysis/types.ts).
 ALTER TABLE "FactTruckDay" ADD CONSTRAINT "FactTruckDay_lastInFrom_check" CHECK ("lastInFrom" IS NULL OR "lastInFrom" IN ('TRAIL', 'DEVICE_EVENT'));
-ALTER TABLE "FactTruckDay" ADD CONSTRAINT "FactTruckDay_gpsNote_check" CHECK ("gpsNote" IS NULL OR "gpsNote" IN ('NO_TRACKER', 'NO_TRAIL', 'SUPPRESSED'));
+ALTER TABLE "FactTruckDay" ADD CONSTRAINT "FactTruckDay_gpsNote_check" CHECK ("gpsNote" IS NULL OR "gpsNote" IN ('NO_TRACKER', 'NO_TRAIL', 'SUPPRESSED', 'PARTIAL_TRAIL'));
 ALTER TABLE "FactTruckDay" ADD CONSTRAINT "FactTruckDay_minutes_nonneg" CHECK (
   ("outMin" IS NULL OR "outMin" >= 0) AND ("overtimeMin" IS NULL OR "overtimeMin" >= 0) AND ("kmGps" IS NULL OR "kmGps" >= 0)
   AND ("movingMin" IS NULL OR "movingMin" >= 0) AND ("atSitesMin" IS NULL OR "atSitesMin" >= 0) AND ("idleMin" IS NULL OR "idleMin" >= 0)

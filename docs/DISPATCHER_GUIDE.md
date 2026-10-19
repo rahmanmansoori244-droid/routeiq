@@ -395,9 +395,9 @@ Owner request of 19 Oct 2026: "build on more data for our analysis later and imp
 - **Sub-stays:** each standstill of 2 minutes or more on a customer site, as a distance and a direction from the customer's pin (a big customer with two drop points shows two). No truck position is kept anywhere.
 - **Legs:** each drive in the order driven, against the plan's drive minutes and km; **Depot turns:** each return to the depot between two trips, by GPS and by the driver's *Back at depot* and *Leaving for next load* taps, with the cases loaded.
 - **Truck days:** time out, km, time at customers, moving, standing elsewhere, overtime against the setting.
-- **Pins to review** (office use only, do not share): customers where the truck stood 120-500 m from the pin on 2 or more visits, with the median standing point. Check with the driver before you ask the company admin to move a pin: a waiting spot is not the delivery point.
+- **Pins to review** (office use only, do not share): customers where the truck unloaded 120-500 m from the pin, standing there longer than near the pin, on 2 or more visits, with the median standing point. A big customer where the truck also unloads at the pin and then at a second drop point further on is not listed: its pin is right. Check with the driver before you ask the company admin to move a pin: a waiting spot is not the delivery point.
 - **Late result taps:** stops whose result the driver saved more than 500 m away (after leaving): their departure time is late, ask the driver to save the result before he leaves.
-- Facts are refreshed every night until 4 days after the delivery date (a result saved late, your correction), then kept as they are. A day of a truck without a GPS tracker has no GPS columns (*NO_GPS*).
+- Facts are refreshed every night until 4 days after the delivery date (a result saved late, your correction), then kept as they are. A day of a truck without a GPS tracker has no GPS columns (*NO_GPS*), nor has a day built late (RouteIQ was down that night) after its GPS trail was already partly deleted (*PARTIAL_TRAIL* on the truck day).
 
 ## Late orders (e.g. a P1 customer calls at 22:15)
 - Click **Late order** on the plan (or upload a small file in step 1), enter the customer, products, priority and reason (why it is added after the cutoff, or to a day already planned).

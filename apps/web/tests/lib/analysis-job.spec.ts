@@ -5,14 +5,18 @@
  * - the schedule: the effective day turns at 03:00 company time; the day before is built, the 2nd to 4th days
  *   before are refreshed once a night, the 4th is frozen; a frozen row is never written again;
  * - idempotent: a second run the same night changes nothing; a run of another process (unique key) is skipped;
- * - bounded and safe: the time budget leaves the rest for the next run; one failing truck-day never stops the
- *   others; the 10-minute throttle, the kill switch;
+ * - bounded and safe: the time budget leaves the rest for the next run, and a date is read again until all of
+ *   it was done; one failing truck-day never stops the others and is tried again at the next run the same
+ *   night (at most 3 times); the 10-minute throttle, the kill switch;
+ * - the trail: never used when its start was already deleted (PARTIAL_TRAIL); recomputed at a refresh when it
+ *   was pulled again after the build and is still whole;
  * - tenant-scoped: each company's rows carry its own id and another company's frozen rows are never touched;
  * - the retention deletes the facts older than analysisRetentionDays, frozen or not, per company.
  * The integration spec analysis-facts-db.spec.ts runs the same job on PostgreSQL with the real reader.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { _resetAnalysisJobState, analysisChanged, cycleStartOf, effectiveDay, freezesTonight, runAnalysisJob, truckDayAction, type DayReader } from '@/lib/analysis/job';
+import type { TruckDayIn } from '@/lib/analysis/build';
+import { _resetAnalysisJobState, analysisChanged, ANALYSIS_MAX_TRIES, cycleStartOf, effectiveDay, freezesTonight, runAnalysisJob, trailWhole, truckDayAction, type DayReader } from '@/lib/analysis/job';
 import { purgeAnalysisFacts } from '@/lib/ivms/retention';
 import { addDaysIso } from '@/lib/dispatch/time';
 import { atOn, dayOne, factDb } from './analysis-fakes';
@@ -27,7 +31,7 @@ const DAY = '2026-10-18';
 const night = (n: number, hhmm = '03:10') => atOn(addDaysIso(DAY, n), hhmm);
 
 /** A reader that gives the invented truck-day on DAY (and nothing on other dates), for the companies listed. */
-function reader(perTenant: Record<string, ReturnType<typeof dayOne>['input'][]>): DayReader & { calls: string[] } {
+function reader(perTenant: Record<string, (TruckDayIn & { lastPullAt?: Date | null })[]>): DayReader & { calls: string[] } {
   const calls: string[] = [];
   const read = (async (_db: unknown, tenantId: string, date: string) => {
     calls.push(`${tenantId}|${date}`);
@@ -163,6 +167,107 @@ describe('the nightly job', () => {
     // Company B's truck-day of that date was frozen: left exactly as it was, no visit written beside it.
     expect(db.tables.factTruckDay.filter((x) => x.tenantId === 'tB')).toEqual([expect.objectContaining({ id: 'b-frozen', frozenAt: night(0) })]);
     expect(db.tables.factVisit.filter((x) => x.tenantId === 'tB')).toHaveLength(0);
+  });
+
+  it('a catch-up whose trail start the GPS retention already deleted keeps no GPS column (PARTIAL_TRAIL), never the afternoon alone (review of 19 Oct 2026)', async () => {
+    // The trail still whole: at 03:10 with the 2-day trail the day before and the day before that (pulls from 05:00).
+    expect(trailWhole(DAY, null, { timezone: TZ }, night(1))).toBe(true);
+    expect(trailWhole(DAY, null, { timezone: TZ }, night(2))).toBe(true);
+    // A deploy at 14:00: the 2-day retention has deleted DAY's trail before 14:00 of that date.
+    expect(trailWhole(DAY, null, { timezone: TZ }, night(2, '14:00'))).toBe(false);
+    // One day kept: at 03:10 the day before is still whole (its pulls begin at 05:00), at 05:10 no longer.
+    expect(trailWhole(DAY, null, { timezone: TZ, ivmsTrailDays: 1 }, night(1))).toBe(true);
+    expect(trailWhole(DAY, null, { timezone: TZ, ivmsTrailDays: 1 }, night(1, '05:10'))).toBe(false);
+    // A tracker mapped at 15:00 that day: its trail begins then, whole after the 14:00 cutoff.
+    expect(trailWhole(DAY, atOn(DAY, '15:00'), { timezone: TZ }, night(2, '14:00'))).toBe(true);
+
+    const one = dayOne(DAY);
+    const db = factDb({ configs: [CONFIG], trail: one.tr.pts.map((p) => ({ ...p, tenantId: 'tA', truckId: 'truck-1' })) });
+    const trailRead = vi.spyOn(db.truckTrailPoint, 'findMany');
+    const r = await runAnalysisJob(night(2, '14:00'), { db: db as never, read: reader({ tA: [one.input] }), force: true });
+    expect(r).toMatchObject({ built: 1, failed: 0 });
+    expect(trailRead).not.toHaveBeenCalled();
+    expect(db.tables.factTruckDay[0]).toMatchObject({ gpsNote: 'PARTIAL_TRAIL', gpsBuiltAt: null, firstOutAt: null, kmGps: null, outMin: null });
+    expect(db.tables.factVisit.every((v) => v.flags.includes('NO_GPS') && v.siteStartAt === null && v.unloadSource === 'VISIT')).toBe(true);
+    // Its refreshes keep the note and never read the trail.
+    await runAnalysisJob(night(3), { db: db as never, read: reader({ tA: [{ ...one.input, lastPullAt: night(2, '15:00') }] }), force: true });
+    expect(db.tables.factTruckDay[0]).toMatchObject({ gpsNote: 'PARTIAL_TRAIL', refreshedAt: night(3) });
+    expect(trailRead).not.toHaveBeenCalled();
+  });
+
+  it('a refresh recomputes the GPS columns when the trail was pulled again after the build and is still whole (a late final pull)', async () => {
+    const one = dayOne(DAY);
+    // At 03:10 the trail had come to 07:30 only (the load left open, its final pull not yet made).
+    const full = one.tr.pts.map((p) => ({ ...p, tenantId: 'tA', truckId: 'truck-1' }));
+    const trail = full.filter((p) => p.fixAt.getTime() < atOn(DAY, '07:30').getTime());
+    const db = factDb({ configs: [CONFIG], trail });
+    await runAnalysisJob(night(1), { db: db as never, read: reader({ tA: [{ ...one.input, lastPullAt: night(1, '02:00') }] }), force: true });
+    const built = { ...db.tables.factTruckDay[0]! };
+    expect(built).toMatchObject({ lastInAt: null, gpsBuiltAt: night(1) });
+    // The office completes the load at 09:00; the poller's final pull over the whole day follows.
+    trail.push(...full.slice(trail.length));
+    const pulled = reader({ tA: [{ ...one.input, lastPullAt: night(1, '09:10') }] });
+    expect(await runAnalysisJob(night(2), { db: db as never, read: pulled, force: true })).toMatchObject({ refreshed: 1, failed: 0 });
+    const t = db.tables.factTruckDay[0]!;
+    expect(t).toMatchObject({ lastInFrom: 'TRAIL', builtAt: night(1), gpsBuiltAt: night(2), refreshedAt: night(2) });
+    expect(t.lastInAt).toBeInstanceOf(Date);
+    expect(t.kmGps).toBeGreaterThan(built.kmGps);
+    // Not pulled again since: the next night copies the columns as they are.
+    await runAnalysisJob(night(3), { db: db as never, read: pulled, force: true });
+    expect(db.tables.factTruckDay[0]).toMatchObject({ gpsBuiltAt: night(2), refreshedAt: night(3), kmGps: t.kmGps });
+  });
+
+  it('the in-process janitor tries a failed truck-day again at its next run the same night, at most 3 times (review of 19 Oct 2026)', async () => {
+    const one = dayOne(DAY);
+    const two = { ...dayOne(DAY).input, truckId: 'truck-2', truckCode: 'T-200' };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // A deadlock at 03:10 on truck-1 only, once.
+    const db = factDb({ configs: [CONFIG], trail: one.tr.pts.map((p) => ({ ...p, tenantId: 'tA', truckId: 'truck-1' })), failTrailOf: 'truck-1', failTimes: 1 });
+    const read = reader({ tA: [one.input, two] });
+    expect(await runAnalysisJob(night(1), { db: db as never, read })).toMatchObject({ built: 1, failed: 1 });
+    // Before the fix the company was marked done: truck-1 waited for the next night (as the 2nd day back).
+    expect(await runAnalysisJob(night(1, '03:21'), { db: db as never, read })).toMatchObject({ tenants: 1, built: 1, failed: 0 });
+    expect(db.tables.factTruckDay.map((x) => x.truckCode).sort()).toEqual(['T-100', 'T-200']);
+    expect(db.tables.factTruckDay.find((x) => x.truckCode === 'T-100')).toMatchObject({ gpsBuiltAt: night(1, '03:21'), gpsNote: null });
+    // Done now: the next run reads nothing.
+    const n = read.calls.length;
+    expect(await runAnalysisJob(night(1, '03:32'), { db: db as never, read })).toMatchObject({ tenants: 0 });
+    expect(read.calls.length).toBe(n);
+
+    // A failure every time: tried ANALYSIS_MAX_TRIES times, then left for the next night (the company done).
+    _resetAnalysisJobState();
+    const bad = factDb({ configs: [CONFIG], trail: [], failTrailOf: 'truck-1' });
+    const tries: number[] = [];
+    for (let k = 0; k < ANALYSIS_MAX_TRIES + 2; k++) {
+      const r = await runAnalysisJob(new Date(night(1).getTime() + k * 11 * 60_000), { db: bad as never, read });
+      tries.push(r!.failed);
+    }
+    expect(tries).toEqual([1, 1, 1, 0, 0]);
+    expect(bad.tables.factTruckDay.map((x) => x.truckCode)).toEqual(['T-200']);
+    warn.mockRestore();
+  });
+
+  it('after a time-budget cut, a truck with no row yet on a date whose other rows are done is built at the next run (review of 19 Oct 2026)', async () => {
+    const one = dayOne(DAY);
+    const db = factDb({ configs: [CONFIG] });
+    const a = { ...one.input, tracked: false };
+    const b = { ...a, truckId: 'truck-2', truckCode: 'T-200' };
+    await runAnalysisJob(night(1), { db: db as never, read: reader({ tA: [a, b] }), force: true });
+    // The next night truck-3's load is on the plan as well (marked as left late): it needs a BUILD.
+    const c = { ...a, truckId: 'truck-3', truckCode: 'T-300' };
+    const read = reader({ tA: [a, b, c] });
+    // The budget runs out after two truck-days: A and B refreshed, C not reached.
+    let tick = 0;
+    const r1 = await runAnalysisJob(night(2), { db: db as never, read, budgetMs: 2, clock: () => tick++ });
+    expect(r1).toMatchObject({ refreshed: 2, built: 0, unfinished: true });
+    // Ten minutes later: A and B are done tonight, but the date is read again and C is built.
+    const r2 = await runAnalysisJob(night(2, '03:21'), { db: db as never, read });
+    expect(r2).toMatchObject({ built: 1, refreshed: 0, unfinished: false });
+    expect(db.tables.factTruckDay.map((x) => x.truckCode).sort()).toEqual(['T-100', 'T-200', 'T-300']);
+    // Every date done: the next forced run reads only the day before, never DAY again tonight.
+    const before = read.calls.length;
+    await runAnalysisJob(night(2, '03:40'), { db: db as never, read, force: true });
+    expect(read.calls.slice(before)).toEqual([`tA|${addDaysIso(DAY, 1)}`]);
   });
 
   it('the throttle (10 min) and the kill switch', async () => {

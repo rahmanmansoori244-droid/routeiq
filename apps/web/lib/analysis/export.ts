@@ -7,9 +7,10 @@
  * through the caller's company (tenantDb). exceljs streamed like the Delivery actuals (lib/delivery/actuals-workbook.ts).
  *
  * Sheets: ReadMe; Truck days; Visits; Sub-stays (and the trips away from a site); Legs; Depot turns; Pins to
- * review (customers where the truck stood 120-500 m from the pin on 2 or more visits, with the median standing
- * point: the GPS study found 7 such pins, an office data fix); Late result taps (the truck more than 500 m from
- * the pin when the driver saved the result). Never the raw trail, a driver, a phone or an IP address.
+ * review (customers with a pin offset on 2 or more visits - the truck unloaded 120-500 m from the pin, longer
+ * than it stood near it - with the median standing point: the GPS study found 7 such pins, an office data fix;
+ * a big site's second drop point is never listed: review of 19 Oct 2026); Late result taps (the truck more than
+ * 500 m from the pin when the driver saved the result). Never the raw trail, a driver, a phone or an IP address.
  */
 import { PassThrough } from 'node:stream';
 import ExcelJS from 'exceljs';
@@ -97,10 +98,12 @@ export const PIN_REVIEW_MIN_VISITS = 2;
 const latLngText = (p: { lat: number; lng: number }) => `${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}`;
 
 /**
- * The customers whose pin may be wrong: the truck stood 120-500 m from it on PIN_REVIEW_MIN_VISITS or more
- * visits. The standing point is the median of each visit's standing spot (the pin it was planned with, moved
- * by the stored distance and bearing). Only for the office to check and move the pin; never a waiting spot
- * picked by RouteIQ alone (the study: "do not move a pin to a waiting spot").
+ * The customers whose pin may be wrong: a pin offset (FactVisit.pinOffset: the truck unloaded 120-500 m from
+ * it, standing there longer than within 120 m of it) on PIN_REVIEW_MIN_VISITS or more visits. A big site's
+ * second drop point is never one (review of 19 Oct 2026). The standing point is the median of each visit's
+ * standing spot (the pin it was planned with, moved by the stored distance and bearing). Only for the office
+ * to check and move the pin; never a waiting spot picked by RouteIQ alone (the study: "do not move a pin to a
+ * waiting spot").
  */
 export function pinsToReview(data: Pick<AnalysisData, 'visits' | 'customers' | 'plannedPins'>): PinReviewRow[] {
   const by = new Map<string, FactVisit[]>();
@@ -158,15 +161,15 @@ const source = (s: string | null) => (s ? (SOURCE_TEXT[s] ?? s) : null);
 export const README_LINES: string[] = [
   'RouteIQ analysis data (owner request 19 Oct 2026). Facts kept per delivery date for later analysis and plan calibration; built every night at about 03:00 for the day before, refreshed until 4 days after the date, then frozen.',
   'Times are company time. Minutes and km as measured; an empty cell means not known. Each row keeps the settings in force when it was built (the last columns).',
-  'Truck days: time out (first depot OUT to last depot IN by GPS; "Back from" says when the trail ended before the truck came back and the tracker\'s own depot IN was used), km, moving, at customer sites, idle elsewhere (standstills of 3 min or more away from every customer and the depot: count and minutes only), overtime against the setting.',
+  'Truck days: time out (first depot OUT to last depot IN by GPS, over the trips of the delivery date only: a trip that left the evening before is the day before\'s, a truck out overnight with the day\'s load counts from its first move after midnight; "Back from" says when the trail ended before the truck came back and the tracker\'s own depot IN was used), km, moving, at customer sites, idle elsewhere (standstills of 3 min or more away from every customer and the depot: count and minutes only), overtime against the setting. GPS note PARTIAL_TRAIL: the day was built late (RouteIQ down that night) after the start of its trail was already deleted, so no GPS column is kept.',
   'Visits: one row per planned stop of a load that left. Site start and end: the truck on the customer site by GPS (within 300 m of the pin, or standing within 500 m: a second drop point). Trips away from the site and back are never counted as unloading (Minutes away).',
   'Unloading: on site by GPS (after the window opened, the time away left out), as RouteIQ holds the stop (arrival to departure), and by taps (the driver\'s and the office\'s own times, GPS left out). All three are clipped at the window on both sides: a stop served before its window opened counts from its arrival.',
   'Usable for rate: Delivered or Partly, cases delivered, an unloading time, the result not changed, no other stop within 300 m, no photo more than 500 m away. Min per case = unloading / cases delivered.',
-  'Flags: LATE_RESULT_TAP (truck more than 500 m from the pin at the driver\'s result tap), PIN_OFFSET (truck stood 120-500 m from the pin to unload), MULTI_DROP (drop points more than 50 m apart), LEFT_AND_RETURNED, PREMATURE_DEP (the GPS departure RouteIQ holds is more than 5 min before the truck left the site), SPLIT_STAYS (the live GPS detector saw more than one stay inside the site), SHARED_SITE, NEAR_DEPOT, RESULT_CHANGED, PHOTO_FAR, NO_GPS, GPS_NOT_SEEN.',
+  'Flags: LATE_RESULT_TAP (truck more than 500 m from the pin at the driver\'s result tap), PIN_OFFSET (truck stood 120-500 m from the pin to unload, longer than within 120 m of it: a big site\'s second drop point is not one), MULTI_DROP (drop points more than 50 m apart), LEFT_AND_RETURNED, PREMATURE_DEP (the GPS departure RouteIQ holds is more than 5 min before the truck left the site), SPLIT_STAYS (the live GPS detector saw more than one stay inside the site), SHARED_SITE, NEAR_DEPOT, RESULT_CHANGED, PHOTO_FAR, NO_GPS, GPS_NOT_SEEN (the stop\'s window was searched on the trail and the truck was not seen on site; a stop with no arrival and no result when the facts were built is never searched).',
   'Sub-stays: each standstill of 2 min or more on a site (STANDING), and each trip away from it (AWAY), from the site start, as distance and bearing from the pin (0 = north). No position of the truck is kept anywhere.',
   'Legs: each drive in the order driven (from the depot, between stops, back to the depot): drive minutes and km by GPS, against the plan where the two stops are consecutive in it; the straight line between the pins for the distance multiplier.',
   'Depot turns: each return to the depot between two loads: back to leaving by GPS and by the driver\'s taps (Back at depot, Leaving for next load), and the cases loaded for the next load.',
-  'Pins to review (office use only, do not share): customers where the truck stood 120-500 m from the pin on 2 or more visits, with the median standing point. Check it before moving a pin: a waiting spot is not the delivery point.',
+  'Pins to review (office use only, do not share): customers with PIN_OFFSET on 2 or more visits (the truck unloaded 120-500 m from the pin, longer than it stood near it), with the median standing point. Check it before moving a pin: a waiting spot is not the delivery point.',
   'Late result taps: the driver saved the result more than 500 m from the pin (after leaving): the departure time of those stops is late.',
 ];
 

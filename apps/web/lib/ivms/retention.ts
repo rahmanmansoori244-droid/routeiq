@@ -40,6 +40,16 @@ export interface IvmsRetentionResult {
   truckDays: number;
 }
 
+/**
+ * The trail retention's cutoff: a fix older than this is deleted (ivmsTrailDays, clamped to 1-7). One
+ * expression for the sweep below and for the analysis job (lib/analysis/job.ts trailWhole), which must never
+ * build a truck-day's GPS facts from a trail whose start this sweep has already deleted (review of 19 Oct 2026).
+ */
+export function trailCutoffOf(now: Date, ivmsTrailDays: number): Date {
+  const trailDays = Math.min(7, Math.max(1, ivmsTrailDays));
+  return new Date(now.getTime() - trailDays * DAY_MS);
+}
+
 /** Is there any GPS data at all? One statement: false for every company that never used the link. */
 async function anyIvmsData(db: Db): Promise<boolean> {
   const rows = await db.$queryRaw<{ any: boolean }[]>`
@@ -57,10 +67,9 @@ export async function purgeIvmsData(now: Date = new Date(), db: Db = prisma): Pr
   });
   for (const c of configs) {
     const t = c.tenantId;
-    const trailDays = Math.min(7, Math.max(1, c.ivmsTrailDays));
     // As the driver positions: never kept longer than the photos, at least 30 days (delivery-janitor.ts).
     const keepDays = Math.max(30, Math.min(c.locationRetentionDays ?? DEFAULT_LOCATION_RETENTION_DAYS, c.photoRetentionDays ?? DEFAULT_PHOTO_RETENTION_DAYS));
-    const trailCutoff = new Date(now.getTime() - trailDays * DAY_MS);
+    const trailCutoff = trailCutoffOf(now, c.ivmsTrailDays);
     const keepCutoff = new Date(now.getTime() - keepDays * DAY_MS);
     out.trailPoints += (await db.truckTrailPoint.deleteMany({ where: { tenantId: t, fixAt: { lt: trailCutoff } } })).count;
     out.positions += (

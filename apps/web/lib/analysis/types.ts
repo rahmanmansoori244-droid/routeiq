@@ -47,7 +47,8 @@ export const ANALYSIS_CATCHUP_DAYS = 7;
  *   check found one trip of 6.3 km to another customer's site and one 94-min park 1.2 km away in the middle
  *   of two visits); it is kept as a count and minutes;
  * - a standing spot 120-500 m from the pin is a pin offset (study: 7 customers' pins 120-300 m off caused
- *   missed GPS stops; an office data fix, never a code fix);
+ *   missed GPS stops; an office data fix, never a code fix) when the truck stood there longer than within
+ *   120 m of the pin: a big site's first drop at the pin and a second drop point further on is not one;
  * - the truck more than 500 m from the pin at the driver's result tap is a late result tap;
  * - frozen positions: the same coordinates for 60 s or more at 5 km/h or more (counted, never deleted);
  * - spikes: a single point that implies more than 150 km/h both to and from it while its neighbours agree
@@ -76,7 +77,7 @@ export const SITE_RULES = {
 /**
  * FactVisit.flags (database CHECK "FactVisit_flags_check"):
  * - LATE_RESULT_TAP: the truck was more than 500 m from the pin at the driver's result tap;
- * - PIN_OFFSET: the truck stood 120-500 m from the pin to unload;
+ * - PIN_OFFSET: the truck stood 120-500 m from the pin to unload, longer than within 120 m of it;
  * - MULTI_DROP: sub-stays more than 50 m apart (drop points);
  * - LEFT_AND_RETURNED: the truck went away from the site and came back (time away not counted);
  * - PREMATURE_DEP: the GPS departure RouteIQ holds is more than 5 min before the truck left the site;
@@ -85,7 +86,8 @@ export const SITE_RULES = {
  * - NEAR_DEPOT: the pin is within the depot radius + 50 m;
  * - RESULT_CHANGED: the first result saved is not the final one;
  * - PHOTO_FAR: a delivery photo more than 500 m from the pin;
- * - NO_GPS: no usable trail for the truck-day; GPS_NOT_SEEN: a trail, but the truck was not seen on site.
+ * - NO_GPS: no usable trail for the truck-day; GPS_NOT_SEEN: a trail, the visit's window searched (an arrival
+ *   or a result when the GPS columns were built), but the truck was not seen on site.
  */
 export const FACT_VISIT_FLAGS = [
   'LATE_RESULT_TAP',
@@ -111,8 +113,13 @@ export type UnloadSource = (typeof UNLOAD_SOURCES)[number];
 export const LAST_IN_FROM = ['TRAIL', 'DEVICE_EVENT'] as const;
 export type LastInFrom = (typeof LAST_IN_FROM)[number];
 
-/** FactTruckDay.gpsNote (CHECK): why its GPS columns are empty. */
-export const GPS_NOTES = ['NO_TRACKER', 'NO_TRAIL', 'SUPPRESSED'] as const;
+/**
+ * FactTruckDay.gpsNote (CHECK): why its GPS columns are empty. PARTIAL_TRAIL (review of 19 Oct 2026): the
+ * day was built late (a missed night, the first deploy) when the GPS retention (ivmsTrailDays) had already
+ * deleted the start of its trail; built from the rest, the morning's stops would be "not seen" and the time
+ * out and km would cover the afternoon only, so no GPS column is kept.
+ */
+export const GPS_NOTES = ['NO_TRACKER', 'NO_TRAIL', 'SUPPRESSED', 'PARTIAL_TRAIL'] as const;
 export type GpsNote = (typeof GPS_NOTES)[number];
 
 /** FactVisit.awayJson and substaysJson: a JSON array of at most this many bytes (CHECK), kept under it by the builder. */

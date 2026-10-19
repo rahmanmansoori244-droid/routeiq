@@ -9,10 +9,11 @@
  *
  *  1. At 03:10 the day after, company A's truck-day (a tracker, a trail) is built with its GPS site facts and
  *     legs; company B's (no tracker) without GPS. A second run the same night writes nothing.
- *  2. The next nights, with the trail gone (the retention), a result corrected by the office is refreshed;
- *     the GPS columns stay as built. The 4th night freezes the rows; a frozen row is never written again.
- *  3. The CHECKs: no negative unloading, flags and sources from their lists, JSON arrays only, the retention
- *     30-3650 days.
+ *  2. The next nights a result corrected by the office is refreshed; the trail pulled again after the build
+ *     (IvmsTruckDay.lastPullAt) and still whole gives the GPS columns again, and with the trail gone (the
+ *     retention) they stay as they are. The 4th night freezes the rows; a frozen row is never written again.
+ *  3. The CHECKs: no negative unloading, flags and sources from their lists (PARTIAL_TRAIL among the GPS
+ *     notes), JSON arrays only, the retention 30-3650 days.
  *  4. The retention deletes facts older than analysisRetentionDays, of that company only.
  *  5. The export: PLANNER gets company A's facts only; VIEWER 403.
  */
@@ -166,16 +167,21 @@ describe('1-2. the nightly job on PostgreSQL', () => {
     expect(await facts(A)).toEqual(before);
   });
 
-  it('the next nights refresh what does not come from the trail (the trail gone); the 4th night freezes; frozen is never written again', async () => {
-    const [, built] = await facts(A);
-    await prisma.truckTrailPoint.deleteMany({ where: { tenantId: A.tenantId } });
+  it('the next nights refresh what does not come from the trail (pulled again while whole: computed again; the trail gone: copied); the 4th night freezes; frozen is never written again', async () => {
+    const [[day1], built] = await facts(A);
+    // The poller pulled the truck-day's trail again after the 03:10 build (its final pull, the morning after):
+    // the first refresh computes the GPS columns again from it, with the settings of the build (review of 19 Oct 2026).
+    await prisma.ivmsTruckDay.create({ data: { tenantId: A.tenantId, truckId: A.truckId, deliveryDate: dayDate, pulledTo: night(1), lastPullAt: new Date(night(1).getTime() + 6 * 3600_000), pulls: 2 } });
     await prisma.stopVisit.updateMany({ where: { tenantId: A.tenantId, sequence: 2 }, data: { outcome: 'PARTLY_DELIVERED', casesDelivered: 5, outcomeSource: 'DISPATCHER' } });
     expect(await run(2)).toMatchObject({ built: 0, refreshed: 2, frozen: 0 });
     const [[day2], v2] = await facts(A);
-    expect(v2[1]).toMatchObject({ outcome: 'PARTLY_DELIVERED', casesDelivered: 5, refreshedAt: night(2), builtAt: night(1) });
+    expect(v2[1]).toMatchObject({ outcome: 'PARTLY_DELIVERED', casesDelivered: 5, refreshedAt: night(2), builtAt: night(1), gpsBuiltAt: night(2) });
     for (const k of ['siteStartAt', 'siteEndAt', 'unloadSiteMin', 'substays', 'truckDistAtResultM'] as const) expect(v2[1]![k], k).toEqual(built[1]![k]);
-    expect(day2!.kmGps).toBeGreaterThan(10);
+    expect(day2).toMatchObject({ gpsBuiltAt: night(2), kmGps: day1!.kmGps, firstOutAt: day1!.firstOutAt });
+    // The trail gone (the retention): the next nights copy the GPS columns as they are.
+    await prisma.truckTrailPoint.deleteMany({ where: { tenantId: A.tenantId } });
     expect(await run(3)).toMatchObject({ refreshed: 2, frozen: 0 });
+    expect((await facts(A))[0][0]).toMatchObject({ gpsBuiltAt: night(2), kmGps: day1!.kmGps });
     expect(await run(4)).toMatchObject({ refreshed: 2, frozen: 2 });
     const frozen = await facts(A);
     expect(frozen.flat().every((r) => r.frozenAt?.getTime() === night(4).getTime())).toBe(true);
@@ -213,6 +219,8 @@ describe('3. the CHECKs of 20261019090000_analysis_facts', () => {
     };
     await expect(prisma.factTruckDay.create({ data: { ...base, lastInFrom: 'PHONE' } })).rejects.toThrow(/FactTruckDay_lastInFrom_check/);
     await expect(prisma.factTruckDay.create({ data: { ...base, gpsNote: 'MAYBE' } })).rejects.toThrow(/FactTruckDay_gpsNote_check/);
+    // A day built late from a partly deleted trail (review of 19 Oct 2026): a note of its own.
+    await prisma.factTruckDay.delete({ where: { id: (await prisma.factTruckDay.create({ data: { ...base, gpsNote: 'PARTIAL_TRAIL' } })).id } });
     await expect(prisma.factTruckDay.create({ data: { ...base, outMin: -5 } })).rejects.toThrow(/FactTruckDay_minutes_nonneg/);
     await expect(prisma.factLeg.create({ data: { tenantId: A.tenantId, depotId: A.depotId, deliveryDate: base.deliveryDate, truckId: 'x', truckCode: 'T-100', loadNo: 1, legNo: 0, distanceMultiplier: 1.3, avgSpeedKmh: 40, roadTimeFactor: 1.25, serviceMinPerCase: 0, reloadMinutes: 30, stopRadiusM: 100, dwellMin: 3, detectorVersion: 'ivms-v1', analysisVersion: 'analysis-v1', builtAt: new Date(), refreshedAt: new Date() } })).rejects.toThrow(/FactLeg_legNo_range/);
     for (const days of [29, 3651]) {
