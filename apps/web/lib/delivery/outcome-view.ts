@@ -85,9 +85,14 @@ export interface OverlayStop {
   departedAtOutcome: boolean;
   /** "result time", "not observed". */
   departureNote: string | null;
-  /** Actual unloading minutes, and how they were measured. */
+  /** Actual unloading minutes (on site: the minutes away taken off), and how they were measured. */
   actualMin: number | null;
   actualLabel: string | null;
+  /**
+   * Minutes the GPS showed the truck away from the customer between the arrival and the departure (owner
+   * request 19 Oct 2026, StopVisit.awayMinutes: a leave-and-return), shown as "away N min"; null: none.
+   */
+  awayMin: number | null;
   /** Planned unloading (departure - service start). */
   plannedMin: number | null;
   /** The minutes come from observed automatic timing (they feed measured times). */
@@ -298,6 +303,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
           departureNote: null,
           actualMin: null,
           actualLabel: null,
+          awayMin: null,
           plannedMin: s.plannedServiceMin,
           autoTimed: false,
           timingSuspect: false,
@@ -362,6 +368,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
         departureNote: departureNote(v.departedAtOutcome, departureGap, v.departureSource),
         actualMin: actual.min,
         actualLabel: actual.label,
+        awayMin: v.awayMinutes ?? null,
         plannedMin: v.plannedServiceMin ?? s.plannedServiceMin,
         autoTimed: actual.auto,
         timingSuspect: v.timingSuspect,

@@ -117,7 +117,7 @@ describe('a dispatched load with a trail', () => {
     const a1 = events()[0]!;
     expect(a1.idempotencyKey).toBe(gpsEventKey({ kind: 'ARRIVED', loadNo: 1, sequence: 1, segmentStartAt: T('07:04:30') }, 'D1', DATE, 't5'));
     expect(a1.idempotencyKey).toMatch(/^ayun:A:D1:2026-10-20:t5:1:1:\d+$/);
-    expect(a1.payloadJson).toMatchObject({ observed: true, detector: 'ivms-v1', segmentStartAt: T('07:04:30').toISOString() });
+    expect(a1.payloadJson).toMatchObject({ observed: true, detector: 'ivms-v2', segmentStartAt: T('07:04:30').toISOString() });
     // No driver link, no user, no browser: GPS is nobody's tap.
     expect([a1.driverLinkId ?? null, a1.userId ?? null, a1.clientIp ?? null, a1.deviceId ?? null, a1.accuracyM]).toEqual([null, null, null, null, null]);
     // Never a result, a Back at depot, a completion or an audit row.
@@ -311,7 +311,8 @@ describe('the reviews of 16 Oct 2026 (second review H-1, M-1, L-1; first review 
   });
 
   it('left to park and came back within 10 minutes: both stays are written, the departure after the result is the second one (L-1)', async () => {
-    const trail = new Trail('06:30').park(30).drive(3000).park(5).drive(3500).park(2).drive(3000).park(5).drive(6000).park(8).drive(0).park(20);
+    // Parked 1 km away (beyond the 500 m of a site: owner request 19 Oct 2026, a move within 500 m is merged).
+    const trail = new Trail('06:30').park(30).drive(3000).park(5).drive(4000).park(2).drive(3000).park(5).drive(6000).park(8).drive(0).park(20);
     tables.truckTrailPoint = trail.pts.map((p, i) => ({ id: `tp${i}`, tenantId: TEN, truckId: 't5', ...p }));
     const r = await processGpsTimes(TEN, 't5', DATE, NOW);
     const a = events().filter((e) => e.source === 'AYUN' && e.sequence === 1);

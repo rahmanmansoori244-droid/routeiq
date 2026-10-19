@@ -39,10 +39,16 @@
  *      or the weighbridge: finding 4).
  *    A row raised from GPS is never closed only because the live fix aged out (it waits for the history:
  *    finding 2), and only the load's own depot's moves count (finding 5).
+ * 7. Big customers (owner request 19 Oct 2026, the GPS study of 18-19 Oct): "at the stop" by the live
+ *    position reaches the customer's site radius when it has one (atStopRadiusOf: Customer.siteRadiusM,
+ *    never narrower than the company's), and the minutes the GPS stays showed the truck away from the
+ *    customer between its arrival and departure (StopVisit.awayMinutes, a leave-and-return) are never
+ *    unloading: R1 measures the time on site and says "(away N min not counted, GPS)".
  */
 import { distanceM } from '../dispatch/snapshots';
 import { AT_STOP_MARGIN_M, fixUsable, liveEta, type EtaStop, type StopEta } from '../ivms/eta';
 import { ivmsModeOf } from '../ivms/settings';
+import { validSiteRadius } from '../ivms/site-radius';
 import { ANCHOR_EARLY_MIN, tripsOf } from '../ivms/stops';
 import { DETECTOR_FIXED, MOVING_KMH, type FixFlag, type GpsDepotMove, type GpsTruckDayFact } from '../ivms/types';
 
@@ -82,6 +88,16 @@ export interface AlertGpsSettings {
   distanceMultiplier: number;
   /** The pins of the loads' depots, by depot id (empty in the replay: no live position is saved). */
   depots: ReadonlyMap<string, { lat: number; lng: number }>;
+}
+
+/**
+ * "At the stop" by the live position for one stop (owner request 19 Oct 2026, a big customer's site): the
+ * company's radius (atStopRadiusM: the stop radius + AT_STOP_MARGIN_M), or the customer's site radius
+ * (Customer.siteRadiusM, 100-500 m) when that is larger - a truck at a second drop point 370 m from the pin
+ * is still at the stop. Never narrower than the company's. No site radius: exactly as before.
+ */
+export function atStopRadiusOf(s: Pick<AlertGpsSettings, 'atStopRadiusM'>, siteRadiusM?: number | null): number {
+  return Math.max(s.atStopRadiusM, validSiteRadius(siteRadiusM) ?? 0);
 }
 
 /** The settings facts.ts reads the depots for (AlertGpsSettings without the depot pins). */
@@ -277,7 +293,7 @@ export function liveEtasOf(
   const latest = touched.length ? Math.max(...touched) : -Infinity;
   const atPin = [...load.stops]
     .sort((a, b) => a.sequence - b.sequence)
-    .find((x) => x.sequence > latest && untouched(x) && !!x.pin && distanceM(pos, x.pin) <= s.atStopRadiusM);
+    .find((x) => x.sequence > latest && untouched(x) && !!x.pin && distanceM(pos, x.pin) <= (x.atStopRadiusM ?? s.atStopRadiusM));
   const stops = atPin ? load.stops.map((x) => (untouched(x) && x.sequence < atPin.sequence ? { ...x, done: true } : x)) : load.stops;
   return liveEta({
     now,

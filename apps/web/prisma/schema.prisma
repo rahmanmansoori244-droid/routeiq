@@ -856,6 +856,13 @@ model Customer {
   /// accessNotes (a change reaches sheets already printed when they are printed again; no re-plan). NULL =
   /// none. Audited by the customer UPDATE row. Never sent to the optimizer, never in a plan snapshot.
   loadingInstruction String?
+  /// Owner request 19 Oct 2026 ("at big customers the truck moves between drop points and the model thinks
+  /// it left"): the customer's GPS site radius in metres, 100-500 (CHECK "Customer_siteRadiusM_range"). The
+  /// GPS stop detector (lib/ivms/stops.ts) still needs the truck within the company's stop radius to arrive,
+  /// but ends its stay only beyond this radius, and the GPS alerts' "the truck is at the stop" uses it (never
+  /// narrower than the company's). NULL (the default) = the company's stop radius: today's behaviour. Edited
+  /// in the Details dialog (lib/ivms/site-radius.ts), audited by the customer UPDATE row. Read live.
+  siteRadiusM       Int?
   active            Boolean     @default(true)
   orders            Order[]
 
@@ -1535,6 +1542,12 @@ model StopVisit {
   driverResultOutcome DeliveryOutcome?
   driverNoPhotoReason String? // 'CAMERA_FAILED': that result was saved with "Camera not working"
   driverPhotoKeys     Int                  @default(0) // photo keys named by the driver's Delivered / Partly results
+  /// Owner request 19 Oct 2026 (GPS study, the leave-and-return guard): minutes the truck was away from the
+  /// customer between the shown arrival and departure, by its GPS stays (beyond 500 m of the pin, or at
+  /// another customer, and back: lib/delivery/visit.ts awayMinutesOf). Never unloading: every unloading
+  /// time and UNLOAD_OVER use departure - arrival - awayMinutes. NULL = none (every visit without GPS).
+  /// Rebuilt with the visit; CHECK "StopVisit_awayMinutes_range" (NULL, or more than 0 and at most 1440).
+  awayMinutes         Float?
   locationPurgedAt    DateTime?            @db.Timestamptz(3) // lat/lng/accuracy erased; distances kept
   createdAt           DateTime             @default(now()) @db.Timestamptz(3)
   updatedAt           DateTime             @updatedAt @db.Timestamptz(3)

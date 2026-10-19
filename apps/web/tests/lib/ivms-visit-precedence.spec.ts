@@ -121,9 +121,14 @@ describe('the driver and the office always win (design 6.4, owner decision D-3 r
     expect(filled.departedAt).toEqual(L('10:24'));
   });
 
-  it('a GPS stay that began more than 15 min after the chosen arrival is not its departure', () => {
-    const v = deriveVisit([office('ARRIVED', '10:00'), gpsIn('10:30'), gpsOut('10:45'), result('10:40', 'DELIVERED')], CTX);
+  it('without a result, a GPS stay that began more than 15 min after the chosen arrival is not its departure', () => {
+    const v = deriveVisit([office('ARRIVED', '10:00'), gpsIn('10:30'), gpsOut('10:45')], CTX);
     expect(v.departureSource).not.toBe('AYUN');
+  });
+
+  it('with a result, the GPS stay that holds it gives the departure, wherever it began (owner request 19 Oct 2026)', () => {
+    const v = deriveVisit([office('ARRIVED', '10:00'), gpsIn('10:30'), gpsOut('10:45'), result('10:40', 'DELIVERED')], CTX);
+    expect(v).toMatchObject({ departureSource: 'AYUN', departedAt: L('10:45') });
   });
 
   it('the 15-minute rule after the result applies to a GPS departure too', () => {
@@ -319,8 +324,11 @@ describe('the operations alerts read the visit without its GPS times (merge revi
       if (JSON.stringify(timesOf(stored)) !== JSON.stringify(timesOf(own))) gpsChanged++;
       expect(timesOf(withoutGpsTimes(stored)), events.map((e) => `${e.kind}/${e.source}@${e.at.toISOString().slice(11, 16)}`).join(' ')).toEqual(timesOf(own));
     }
-    // The pool really exercises what GPS fills: arrivals, departures and the result standing in for one.
-    expect(gpsChanged).toBeGreaterThan(500);
+    // The pool really exercises what GPS fills: arrivals, departures and the result standing in for one. (It
+    // was over 500 before the rebuild took the departure from the stay that holds the result, owner request
+    // 19 Oct 2026: a result at 11:20 in the 11:10-11:40 stay now keeps the result time, as that stay's
+    // departure is more than 15 min after it, where the first stay's 10:28 was shown before.)
+    expect(gpsChanged).toBeGreaterThan(400);
   });
 
   it('a GPS arrival and the driver result: for the alerts no arrival and no departure, as on the driver page; the result stays', () => {

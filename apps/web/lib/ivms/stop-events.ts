@@ -30,6 +30,18 @@
  * shared with the driver and the office (event-service.ts MAX_EVENTS_PER_VISIT): the driver always keeps
  * room.
  *
+ * Big sites (owner request 19 Oct 2026, "at big customers the truck moves between drop points and the
+ * model thinks it left"; the GPS study of 18-19 Oct 2026): the detector merges the stays of one site and
+ * says whether each departure is final (stops.ts: the truck has been away HOLD_DEPARTED_MIN, is beyond
+ * SITE_MAX_M of the pin, or reached the depot). A departure that is not final yet is HELD back here (kept
+ * as HELD, written by a later run): an observed GPS time is never moved once written (correctGpsEvent
+ * moves only an unobserved one, and only earlier), so a departure written at a move between drop points
+ * would stay wrong once the stays merge. A real departure is still written within about 10 minutes. Each
+ * event's payload carries its stay's summary (`stay`: lib/ivms/types.ts StaySummary, distances and minutes
+ * only), and each stop's customer's site radius (Customer.siteRadiusM) reaches the detector. The short
+ * stays the detector rejected (SHORT_DWELL) are kept in the facts with the other rejected candidates,
+ * after them (the first cut when the facts are too long).
+ *
  * Re-derived when the trip changes hands (second review H-1): an AYUN event whose stay lies in a trip the
  * detector now gives to ANOTHER load (a later Dispatch press, a trip that appeared later) is deleted and
  * its visit rebuilt; the new load's stays are then written as usual. Nothing is deleted on a mere absence
@@ -59,8 +71,12 @@ import { DETECTOR_FIXED, type StopAmbiguity, type StopCandidate } from './types'
 
 type Tx = Prisma.TransactionClient;
 
-/** The detector's marker on every event it writes (payloadJson.detector). */
-export const DETECTOR_VERSION = 'ivms-v1';
+/**
+ * The detector's marker on every event it writes (payloadJson.detector). ivms-v2 (owner request 19 Oct
+ * 2026): frozen runs as gaps, the customer's site radius, merged stays, held departures and the stay
+ * summary in the payload; ivms-v1 events (16-19 Oct 2026) have no summary.
+ */
+export const DETECTOR_VERSION = 'ivms-v2';
 /** At most this many AYUN arrivals and departures per stop. */
 export const MAX_AYUN_EVENTS_PER_VISIT = 4;
 /** No GPS event once the stop holds this many arrivals, departures and results (of the shared 40). */
@@ -85,7 +101,10 @@ export interface GpsTimesResult {
   corrected: number;
   /** GPS events deleted because their trip is now another load's (second review H-1). */
   removed: number;
-  /** Candidates not written, by why: DUPLICATE (key or same stay), CAP, ROOM, NOT_ON_ROAD, NO_STOP, OFFICE. */
+  /**
+   * Candidates not written, by why: DUPLICATE (key or same stay), CAP, ROOM, NOT_ON_ROAD, NO_STOP, OFFICE,
+   * HELD (a departure that is not final yet: owner request 19 Oct 2026, written by a later run).
+   */
   kept: Record<string, number>;
   /** The truck was busy (lock timeout): the rest waits for the next run. */
   busy: boolean;
@@ -93,9 +112,13 @@ export interface GpsTimesResult {
   facts: GpsFact[];
 }
 
-/** A fact for the office (IvmsTruckDay.gpsFactsJson): what GPS saw but did not write by itself. */
+/**
+ * A fact for the office (IvmsTruckDay.gpsFactsJson): what GPS saw but did not write by itself. SHORT_DWELL
+ * (owner request 19 Oct 2026): a stay at a pending stop's pin shorter than the dwell, kept for later
+ * analysis and not shown on the screens (lib/ivms/live-map.ts gpsFactText leaves it out).
+ */
 export type GpsFact =
-  | { kind: 'SEVERAL_PINS' | 'NEAR_DEPOT' | 'OUT_OF_SEQUENCE_SHORT'; loadNo: number; sequences: number[]; from: string; to: string | null }
+  | { kind: 'SEVERAL_PINS' | 'NEAR_DEPOT' | 'OUT_OF_SEQUENCE_SHORT' | 'SHORT_DWELL'; loadNo: number; sequences: number[]; from: string; to: string | null }
   | { kind: 'NO_DEPOT_BOUNDARY' };
 
 /** At most this many facts, this many stop numbers per fact, and this many bytes of JSON (the column's CHECK is 8 KB). */
@@ -106,10 +129,12 @@ export const MAX_FACTS_BYTES = 7000;
 /**
  * The facts to store from a detector run: at most 40, at most 12 stop numbers each, and never more than
  * 7,000 bytes of JSON, so the column's 8 KB CHECK can never refuse the truck-day (which would leave it
- * unprocessed and retried every 5 minutes: first review LOW).
+ * unprocessed and retried every 5 minutes: first review LOW). The short stays (SHORT_DWELL) come last, so
+ * they are the first cut and never push out a fact the office reads.
  */
 export function gpsFactsOf(out: Pick<DetectorOutput, 'ambiguities' | 'notes'>): GpsFact[] {
-  const facts: GpsFact[] = out.ambiguities.map((a: StopAmbiguity) => ({ kind: a.reason, loadNo: a.loadNo, sequences: a.sequences.slice(0, MAX_FACT_SEQUENCES), from: a.from.toISOString(), to: a.to ? a.to.toISOString() : null }));
+  const ordered = [...out.ambiguities.filter((a) => a.reason !== 'SHORT_DWELL'), ...out.ambiguities.filter((a) => a.reason === 'SHORT_DWELL')];
+  const facts: GpsFact[] = ordered.map((a: StopAmbiguity) => ({ kind: a.reason, loadNo: a.loadNo, sequences: a.sequences.slice(0, MAX_FACT_SEQUENCES), from: a.from.toISOString(), to: a.to ? a.to.toISOString() : null }));
   if (out.notes.includes('NO_DEPOT_BOUNDARY')) facts.unshift({ kind: 'NO_DEPOT_BOUNDARY' });
   const kept = facts.slice(0, MAX_GPS_FACTS);
   while (kept.length && Buffer.byteLength(JSON.stringify(kept), 'utf8') > MAX_FACTS_BYTES) kept.pop();
@@ -301,6 +326,10 @@ async function detectorInput(tenantId: string, truckId: string, date: string, da
       select: { depotId: true, loadNo: true, at: true },
     }),
   ]);
+  // The customers' site radius (owner request 19 Oct 2026, Customer.siteRadiusM): read live, as the pins are.
+  const customerIds = [...new Set([...stops.values()].flat().map((s) => s.customerId))];
+  const sites = customerIds.length ? await prisma.customer.findMany({ where: { tenantId, id: { in: customerIds } }, select: { id: true, siteRadiusM: true } }) : [];
+  const siteOf = new Map(sites.map((c) => [c.id, c.siteRadiusM ?? null]));
   const backAtOf = (depotId: string, loadNo: number): Date | null => {
     const mine = backs.filter((b) => b.depotId === depotId && b.loadNo === loadNo).map((b) => b.at.getTime());
     return mine.length ? new Date(Math.max(...mine)) : null;
@@ -323,7 +352,7 @@ async function detectorInput(tenantId: string, truckId: string, date: string, da
     stops: (stops.get(l.id) ?? []).map((s) => {
       const v = visits.find((x) => x.depotId === l.depotId && x.loadNo === l.loadNo && x.sequence === s.sequence);
       const pin = v && v.plannedLat !== null && v.plannedLng !== null ? { lat: v.plannedLat, lng: v.plannedLng } : s.pin;
-      return { sequence: s.sequence, pin, resultAt: v?.outcome ? v.outcomeAt : null, officeArrival: v?.arrivalSource === 'DISPATCHER' };
+      return { sequence: s.sequence, pin, resultAt: v?.outcome ? v.outcomeAt : null, officeArrival: v?.arrivalSource === 'DISPATCHER', siteRadiusM: siteOf.get(s.customerId) ?? null };
     }),
   }));
   const zoneMoves: ZoneMove[] = zone.filter((z): z is typeof z & { kind: 'DEPOT_IN' | 'DEPOT_OUT' } => z.kind === 'DEPOT_IN' || z.kind === 'DEPOT_OUT').map((z) => ({ id: z.id, kind: z.kind, at: z.eventAt, depotId: z.depotId }));
@@ -470,8 +499,21 @@ async function writeStopCandidates(
     // The stays the detector sees now at this stop: an event of one of them is never another stay's (L-1).
     const seen = new Set(list.map((c) => `${c.kind}|${c.segmentStartAt.getTime()}`));
     for (const c of [...list].sort((a, b) => a.at.getTime() - b.at.getTime() || (a.kind === 'ARRIVED' ? -1 : 1))) {
+      // Owner request 19 Oct 2026: a departure that is not final yet (the truck may be moving between drop
+      // points of the site and come back) is held back; a later run writes it once it is final.
+      if (c.kind === 'DEPARTED' && c.final === false) {
+        bump(kept, 'HELD');
+        continue;
+      }
       const key = gpsEventKey(c, dayLoad.depotId, date, truckId);
-      const payloadOf = (): Record<string, unknown> => ({ observed: c.observed, ...(c.kind === 'DEPARTED' && !c.observed ? { gap: true } : {}), detector: DETECTOR_VERSION, segmentStartAt: c.segmentStartAt.toISOString() });
+      const payloadOf = (): Record<string, unknown> => ({
+        observed: c.observed,
+        ...(c.kind === 'DEPARTED' && !c.observed ? { gap: true } : {}),
+        detector: DETECTOR_VERSION,
+        segmentStartAt: c.segmentStartAt.toISOString(),
+        // The stay's summary (distances and minutes only, never a position): kept after the trail is deleted.
+        ...(c.stay ? { stay: c.stay } : {}),
+      });
       const same = existing.find(
         (e) =>
           e.source === 'AYUN' &&

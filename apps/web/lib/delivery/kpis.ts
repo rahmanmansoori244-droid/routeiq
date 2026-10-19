@@ -17,7 +17,7 @@
  *   (an office correction keeps them), their share of the delivered results, and the truck-days
  *   (driver links) with 3 or more (camera-exceptions.ts).
  */
-import { eligibleForMeasured, type MeasuredVisit } from './measured';
+import { eligibleForMeasured, measuredOnSite, type MeasuredVisit } from './measured';
 import { countOf } from './office-text';
 import { CAMERA_ALERT_PER_DAY, noPhotoKind, truckDayKey } from './camera-exceptions';
 
@@ -185,7 +185,8 @@ export function deliveryKpis(stops: readonly (KpiVisit | null)[]): DeliveryKpis 
     }
     if (v.outcomeLate) out.late++;
     if (eligibleForMeasured(v) && v.plannedServiceMin !== null) {
-      deltaSum += v.autoServiceMinutes! - v.plannedServiceMin;
+      // On site: the minutes the GPS showed the truck away are not unloading (owner request 19 Oct 2026).
+      deltaSum += measuredOnSite(v)! - v.plannedServiceMin;
       out.unloadSample++;
     }
   }

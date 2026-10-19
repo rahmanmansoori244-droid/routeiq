@@ -225,6 +225,8 @@ function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: {
     windowEndMin: v.windowEndMin,
     photos,
     ...(ctx.gps ? { departureSource: s.departureSource, departureObserved: !s.departureGap } : {}),
+    // The minutes away the GPS stays showed (owner request 19 Oct 2026): with the GPS alerts only, as the live facts.
+    ...(ctx.gps && s.awayMinutes ? { awayMinutes: s.awayMinutes } : {}),
   };
 }
 

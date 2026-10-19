@@ -416,6 +416,8 @@ export function kpiVisitOf(v: StopVisit, tz: string, photoWaitOver = false): Kpi
     driverPhotoKeys: v.driverPhotoKeys,
     photoCount: v.photoCount,
     photoWaitOver,
+    // Owner request 19 Oct 2026: the minutes the GPS showed the truck away are not unloading (measured.ts measuredOnSite).
+    ...(v.awayMinutes ? { awayMinutes: v.awayMinutes, autoMinutes: v.autoMinutes } : {}),
   };
 }
 

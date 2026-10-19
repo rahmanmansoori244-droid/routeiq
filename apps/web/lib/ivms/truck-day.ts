@@ -43,7 +43,7 @@
 import { alertStateText, ruleLabel } from '../alerts/view';
 import { SEVERITY_LABEL } from '../alerts/catalog';
 import type { OpsAlertRow } from '../alerts/types';
-import { countOf, GPS_WORD, OUTCOME_LABEL, reasonText, sourceWord } from '../delivery/office-text';
+import { awayText, countOf, GPS_WORD, OUTCOME_LABEL, reasonText, sourceWord } from '../delivery/office-text';
 import { countedLeaveTap, firstSignOf } from '../delivery/turnaround';
 import { cyclesOf, GPS_DEPARTURE_MATCH_MIN, withoutGpsTimes, type VisitEvent, type VisitTimes } from '../delivery/visit';
 import { distanceM } from '../dispatch/snapshots';
@@ -228,7 +228,10 @@ export interface TruckDayStop {
   departedAtResult: boolean;
   /** Arrival minus the planned arrival, whole minutes (positive = late). */
   lateMin: number | null;
+  /** Departure minus arrival less the minutes away, whole minutes (owner request 19 Oct 2026: the time on site). */
   onSiteMin: number | null;
+  /** Minutes the GPS showed the truck away from the customer between the arrival and the departure (StopVisit.awayMinutes); null: none. */
+  awayMin: number | null;
   plannedServiceMin: number | null;
   /** Arrived before the receiving window opened: about this many minutes of waiting. */
   waitedMin: number | null;
@@ -464,18 +467,22 @@ export interface OtherGpsStay {
 }
 
 /**
- * The GPS (AYUN) stays at a stop that are not the stay of the arrival shown (lib/delivery/visit.ts: a
- * stay there at the arrival time, or begun at most GPS_DEPARTURE_MATCH_MIN after it, is the stop's own).
- * A customer who refused at 10:02 and received at 13:40: the 10:02 stay is an "earlier GPS visit".
+ * The GPS (AYUN) stays at a stop that are not the stop's own (lib/delivery/visit.ts): a stay there at the
+ * arrival time, or begun at most GPS_DEPARTURE_MATCH_MIN after it, is its own; so is (owner request 19 Oct
+ * 2026) every stay between the arrival and the departure shown - at a big customer the truck comes back
+ * to the pin and the departure is taken from the stay that holds the result. A customer who refused at
+ * 10:02 and received at 13:40: the 10:02 stay is an "earlier GPS visit".
  */
-export function otherGpsStays(gps: readonly VisitEvent[], shown: { arrivedAt: Date | null }): OtherGpsStay[] {
+export function otherGpsStays(gps: readonly VisitEvent[], shown: { arrivedAt: Date | null; departedAt?: Date | null }): OtherGpsStay[] {
   const cycles = cyclesOf(gps.filter((e) => e.source === 'AYUN' && (e.kind === 'ARRIVED' || e.kind === 'DEPARTED')));
   const match = GPS_DEPARTURE_MATCH_MIN * MIN;
   const a = shown.arrivedAt ? shown.arrivedAt.getTime() : null;
+  // The stop's own stays begin by 15 min after the arrival, or before the departure shown when that is later.
+  const ownUntil = a === null ? null : Math.max(a + match, shown.departedAt ? shown.departedAt.getTime() - 1 : -Infinity);
   const out: OtherGpsStay[] = [];
   for (const c of cycles) {
     const dep = c.departure ? c.departure.at.getTime() : null;
-    if (a !== null && c.start <= a + match && (dep === null || dep > a)) continue;
+    if (a !== null && ownUntil !== null && c.start <= ownUntil && (dep === null || dep > a)) continue;
     out.push({ from: new Date(c.start), to: dep === null ? null : new Date(dep), when: a === null ? 'UNUSED' : c.start < a ? 'EARLIER' : 'LATER' });
   }
   return out;
@@ -575,7 +582,7 @@ export function buildTruckDay(i: TruckDayInput): TruckDayModel {
         const gps: VisitEvent[] = events
           .filter((e) => e.source === 'AYUN' && e.depotId === l.depotId && e.loadNo === l.loadNo && e.sequence === s.sequence && (e.kind === 'ARRIVED' || e.kind === 'DEPARTED'))
           .map((e) => ({ kind: e.kind as VisitEvent['kind'], source: 'AYUN', at: e.at, receivedAt: e.receivedAt, payload: e.payload }));
-        for (const g of otherGpsStays(gps, { arrivedAt: v?.arrivedAt ?? null })) {
+        for (const g of otherGpsStays(gps, { arrivedAt: v?.arrivedAt ?? null, departedAt: v?.departedAt ?? null })) {
           const word = g.when === 'EARLIER' ? 'Earlier' : g.when === 'LATER' ? 'Later' : 'Other';
           const dur = g.to ? ` (${minutesBetween(g.from, g.to)} min)` : '';
           gpsVisitItems.push({
@@ -797,7 +804,9 @@ function stopOf(l: TruckDayLoadInput, s: TruckDayStopInput, v: TruckDayVisitInpu
   const plannedAt = s.etaMin === null ? null : atMin(s.etaMin);
   const arrived = v?.arrivedAt ?? null;
   const departed = v?.departedAt ?? null;
-  const onSiteMin = arrived && departed && departed > arrived ? minutesBetween(arrived, departed) : null;
+  // On site (owner request 19 Oct 2026): the minutes the GPS showed the truck away are not counted.
+  const away = v?.awayMinutes && v.awayMinutes > 0 ? v.awayMinutes : null;
+  const onSiteMin = arrived && departed && departed > arrived ? Math.max(0, Math.round(minutesBetween(arrived, departed) - (away ?? 0))) : null;
   let waitedMin: number | null = null;
   if (arrived && s.windowStartMin !== null && s.windowStartMin > 0) {
     const arrMin = (arrived.getTime() - dayStart.getTime()) / MIN;
@@ -833,6 +842,7 @@ function stopOf(l: TruckDayLoadInput, s: TruckDayStopInput, v: TruckDayVisitInpu
     departedAtResult: !!v?.departedAtOutcome,
     lateMin: arrived && plannedAt ? minutesBetween(plannedAt, arrived) : null,
     onSiteMin,
+    awayMin: away === null ? null : Math.round(away),
     plannedServiceMin: s.plannedServiceMin,
     waitedMin,
     // A window that is the whole day ("any time") is no window.
@@ -859,7 +869,10 @@ function stopItem(stop: TruckDayStop, s: TruckDayStopInput, v: TruckDayVisitInpu
     lines.push(`Arrived ${at(stop.arrivedAt)} (${stop.arrivalBy})${late}${stop.arrivalObserved ? '' : '; not observed: the real arrival was earlier'}`);
   }
   if (stop.departedAt) lines.push(stop.departedAtResult ? `Left: no departure seen, the result at ${at(stop.departedAt)} ended the stop` : `Left ${at(stop.departedAt)} (${stop.departureBy})`);
-  if (stop.onSiteMin !== null) lines.push(`On site ${stop.onSiteMin} min${stop.plannedServiceMin !== null ? ` (planned unloading ${stop.plannedServiceMin} min)` : ''}`);
+  if (stop.onSiteMin !== null) {
+    const away = stop.awayMin ? `; ${awayText(stop.awayMin)} not counted (GPS: the truck left the customer and came back)` : '';
+    lines.push(`On site ${stop.onSiteMin} min${stop.plannedServiceMin !== null ? ` (planned unloading ${stop.plannedServiceMin} min${away})` : away ? ` (${away.slice(2)})` : ''}`);
+  } else if (stop.awayMin) lines.push(`${awayText(stop.awayMin)} (GPS: the truck left the customer and came back)`);
   if (stop.waitedMin !== null) lines.push(`Waited about ${stop.waitedMin} min for the receiving window to open (${fmtHhmm(s.windowStartMin)})`);
   if (stop.resultText) {
     const cases = stop.casesDelivered !== null && stop.result !== 'NOT_DELIVERED' ? ` - ${stop.casesDelivered} of ${stop.casesPlanned} cases` : '';

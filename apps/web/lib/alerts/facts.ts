@@ -107,7 +107,7 @@ export async function readAlertFacts(
   const customerIds = [...new Set([...planned.values()].flat().map((s) => s.customerId))];
   const [orders, customers] = await Promise.all([
     findInParts(orderIds, (part) => db.order.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, priority: true } })),
-    findInParts(customerIds, (part) => db.customer.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, locationVerified: true, lat: true, lng: true } })),
+    findInParts(customerIds, (part) => db.customer.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, locationVerified: true, lat: true, lng: true, siteRadiusM: true } })),
   ]);
   const priorityOf = new Map(orders.map((o) => [o.id, o.priority]));
   const verified = new Set(customers.filter((c) => c.locationVerified).map((c) => c.id));
@@ -194,8 +194,10 @@ export async function readAlertFacts(
           const row = visitOf.get(visitKey({ depotId: l.depotId, date: l.date, truckId: l.truckId, loadNo: l.loadNo, sequence: s.sequence }));
           const gpsTimes = keepGps(l.date, l.truckId);
           const v = row ? alertVisitRow(row, photosOf.get(row.id) ?? [], gpsTimes) : null;
-          // GPS alerts: the planned pin (the visit's, else the plan's, as the stop detector) for "at the stop" and the live ETA.
-          const gpsStop = gpsRead ? { pin: row && row.plannedLat !== null && row.plannedLng !== null ? { lat: row.plannedLat, lng: row.plannedLng } : s.pin } : {};
+          // GPS alerts: the planned pin (the visit's, else the plan's, as the stop detector) for "at the stop" and the live ETA,
+          // and the customer's site radius (owner request 19 Oct 2026: "at the stop" reaches that far, gps.ts atStopRadiusOf).
+          const site = pinOf.get(s.customerId)?.siteRadiusM ?? null;
+          const gpsStop = gpsRead ? { pin: row && row.plannedLat !== null && row.plannedLng !== null ? { lat: row.plannedLat, lng: row.plannedLng } : s.pin, ...(site ? { siteRadiusM: site } : {}) } : {};
           return {
             sequence: s.sequence,
             customerId: s.customerId,
@@ -388,6 +390,8 @@ export function alertVisitRow(row: StopVisit, photos: readonly FactPhoto[], keep
 function factVisit(v: StopVisit, photos: FactPhoto[], departureObserved?: boolean): FactVisit {
   return {
     ...(departureObserved !== undefined ? { departureSource: v.departureSource, departureObserved } : {}),
+    // The minutes away (owner request 19 Oct 2026): GPS facts, only with the GPS alerts (alertVisitRow clears them below ALERTS).
+    ...(v.awayMinutes ? { awayMinutes: v.awayMinutes } : {}),
     arrivedAt: v.arrivedAt,
     arrivalSource: v.arrivalSource,
     arrivalObserved: v.arrivalObserved,

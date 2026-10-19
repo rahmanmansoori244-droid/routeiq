@@ -28,9 +28,13 @@
  *   only when it changed as the server would store it (line breaks and spaces typed differently are no
  *   change), and sent only then; emptied = none (null). A stored value that breaks the rule (written to
  *   the database by hand) does not stop a save of the other fields while it is left as it is.
+ * - Owner request 19 Oct 2026: "GPS site radius (m)", optional, whole metres 100-500 (readSiteRadius,
+ *   lib/ivms/site-radius.ts, the server's own bounds), sent only when it changed; emptied = null (the
+ *   company's stop radius). For big customers whose trucks unload at several points of one site.
  */
 import { readCustomerPhone } from '@/lib/dispatch/customer-phone';
 import { foldLoadingInstruction, readLoadingInstruction } from '@/lib/dispatch/loading-instruction';
+import { readSiteRadius } from '@/lib/ivms/site-radius';
 import { MAX_SERVICE_MIN } from '@/lib/dispatch/service-time';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 
@@ -57,6 +61,8 @@ export interface DetailsCustomer {
   smallTruckOnly?: boolean;
   /** The warehouse's loading instruction (owner request 16 Oct 2026). Absent or null = none. */
   loadingInstruction?: string | null;
+  /** The GPS site radius in metres (owner request 19 Oct 2026). Absent or null = the company's stop radius. */
+  siteRadiusM?: number | null;
 }
 
 /** The form as typed. '' = not set / the default applies. */
@@ -80,6 +86,8 @@ export interface DetailsForm {
   smallTruckOnly?: boolean;
   /** "Loading instruction (warehouse)" as typed; '' = none. Absent = ''. */
   loadingInstruction?: string;
+  /** "GPS site radius (m)" as typed; '' = the company's stop radius. Absent = ''. */
+  siteRadius?: string;
 }
 
 /** The PATCH /api/customers/:id body: only the fields that changed (a changed window with both ends). */
@@ -100,9 +108,11 @@ export interface DetailsPatch {
   smallTruckOnly?: boolean;
   /** The warehouse's loading instruction (owner request 16 Oct 2026); null = none any more. */
   loadingInstruction?: string | null;
+  /** The GPS site radius (owner request 19 Oct 2026); null = the company's stop radius again. */
+  siteRadiusM?: number | null;
 }
 
-export const EMPTY_DETAILS: DetailsForm = { type: '', priority: '', service: '', hardStart: '', hardEnd: '', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false, phone: '', smallTruckOnly: false, loadingInstruction: '' };
+export const EMPTY_DETAILS: DetailsForm = { type: '', priority: '', service: '', hardStart: '', hardEnd: '', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false, phone: '', smallTruckOnly: false, loadingInstruction: '', siteRadius: '' };
 
 const isOwn = (source: string | undefined) => source === undefined || source === 'CUSTOMER';
 
@@ -129,6 +139,7 @@ export function detailsFormOf(c: DetailsCustomer): DetailsForm {
     phone: c.phone ?? '',
     smallTruckOnly: !!c.smallTruckOnly,
     loadingInstruction: c.loadingInstruction ?? '',
+    siteRadius: c.siteRadiusM ? String(c.siteRadiusM) : '',
   };
 }
 
@@ -197,6 +208,9 @@ export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsRes
   const instructionNow = foldLoadingInstruction(now.loadingInstruction ?? '');
   const instruction = instructionNow !== foldLoadingInstruction(initial.loadingInstruction ?? '') ? readLoadingInstruction(instructionNow) : null;
   if (instruction && !instruction.ok) return instruction;
+  // The GPS site radius: checked with the server's bounds; sent only when it changed.
+  const site = readSiteRadius(now.siteRadius);
+  if (!site.ok) return site;
 
   const patch: DetailsPatch = {};
   if (now.type !== initial.type) patch.customerType = now.type || null;
@@ -209,6 +223,8 @@ export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsRes
   if (!phoneWas.ok || phoneWas.phone !== phone.phone) patch.phone = phone.phone;
   if (!!now.smallTruckOnly !== !!initial.smallTruckOnly) patch.smallTruckOnly = !!now.smallTruckOnly;
   if (instruction?.ok) patch.loadingInstruction = instruction.text;
+  const siteWas = readSiteRadius(initial.siteRadius);
+  if (!siteWas.ok || siteWas.radiusM !== site.radiusM) patch.siteRadiusM = site.radiusM;
   // Receiving hours (owner decision 1 Oct 2026, "own confirmed window"): hours the dispatcher enters
   // are confirmed by the server; "Open all day" is confirmed with no hours; ticking "confirmed with
   // the customer" confirms the hours as shown (sent whole, so what is confirmed is what was seen).

@@ -14,6 +14,7 @@ import { measuredServiceValue } from '@/lib/delivery/measured';
 import { CUSTOMER_PHONE_RULE } from '@/lib/dispatch/customer-phone';
 import { SMALL_TRUCK_FIELD_LABEL } from '@/lib/dispatch/small-truck';
 import { foldLoadingInstruction, LOADING_INSTRUCTION_FIELD_LABEL, LOADING_INSTRUCTION_MAX } from '@/lib/dispatch/loading-instruction';
+import { SITE_RADIUS_FIELD_LABEL, SITE_RADIUS_HINT, SITE_RADIUS_MAX_M, SITE_RADIUS_MIN_M } from '@/lib/ivms/site-radius';
 import { detailsFormOf, detailsPatch, EMPTY_DETAILS, type DetailsCustomer, type DetailsForm } from './customer-details';
 
 export interface EditableCustomer extends DetailsCustomer {
@@ -264,6 +265,20 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
               Printed in a SPECIAL LOADING box at the top of the warehouse load sheet, the driver sheet and the Excel load sheet of every load with this customer, and shown on the plan screen.
               Keep it short. English prints on every sheet (the driver sheet cannot print Arabic letters). Empty = none. No re-plan needed: print the sheets again after a change.
             </p>
+          </div>
+          {/* Owner request 19 Oct 2026: a big customer's GPS site radius (lib/ivms/site-radius.ts). */}
+          <div className="col-span-2 space-y-1">
+            <Label htmlFor="cd-site-radius">{SITE_RADIUS_FIELD_LABEL}</Label>
+            <Input
+              id="cd-site-radius"
+              inputMode="numeric"
+              autoComplete="off"
+              placeholder={`empty = Settings stop radius (${SITE_RADIUS_MIN_M}-${SITE_RADIUS_MAX_M})`}
+              value={form.siteRadius ?? ''}
+              onChange={(e) => set('siteRadius')(e.target.value)}
+              data-testid="site-radius"
+            />
+            <p className="text-xs text-muted-foreground">{SITE_RADIUS_HINT}</p>
           </div>
         </div>
         <DialogFooter>

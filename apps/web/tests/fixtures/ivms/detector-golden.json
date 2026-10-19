@@ -1,0 +1,2022 @@
+{
+ "cases": 160,
+ "candidates": 1591,
+ "ambiguities": 13,
+ "full": [
+  {
+   "trips": [
+    {
+     "outAt": "2026-10-20T03:06:00.000Z",
+     "inAt": null,
+     "loadNo": 1,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    }
+   ],
+   "trailMoves": [
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T03:06:00.000Z",
+     "depotId": "dep1",
+     "observed": true
+    }
+   ],
+   "zoneOutcomes": [],
+   "candidates": [
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T03:12:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:12:00.000Z",
+     "lat": 20.124272367948258,
+     "lng": 55.07112109427516,
+     "distanceM": 69.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T03:51:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:12:00.000Z",
+     "lat": 20.121856072041194,
+     "lng": 55.07286946411681,
+     "distanceM": 291.3
+    }
+   ],
+   "ambiguities": [],
+   "notes": []
+  },
+  {
+   "trips": [
+    {
+     "outAt": "2026-10-20T01:52:30.000Z",
+     "inAt": "2026-10-20T02:54:00.000Z",
+     "loadNo": 1,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    }
+   ],
+   "trailMoves": [
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T01:52:30.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T02:54:00.000Z",
+     "depotId": "dep1",
+     "observed": true
+    }
+   ],
+   "zoneOutcomes": [
+    {
+     "id": "z1-1",
+     "outcome": "UNCONFIRMED"
+    }
+   ],
+   "candidates": [
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T01:57:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T01:57:30.000Z",
+     "lat": 20.123920335784067,
+     "lng": 55.072199825798506,
+     "distanceM": 57.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T02:12:50.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T01:57:30.000Z",
+     "lat": 20.123282837243462,
+     "lng": 55.07223247640604,
+     "distanceM": 119.3
+    }
+   ],
+   "ambiguities": [],
+   "notes": []
+  },
+  {
+   "trips": [
+    {
+     "outAt": "2026-10-20T02:46:30.000Z",
+     "inAt": "2026-10-20T06:47:30.000Z",
+     "loadNo": 1,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    },
+    {
+     "outAt": "2026-10-20T07:12:30.000Z",
+     "inAt": "2026-10-20T09:24:30.000Z",
+     "loadNo": 2,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    },
+    {
+     "outAt": "2026-10-20T09:57:00.000Z",
+     "inAt": "2026-10-20T13:47:30.000Z",
+     "loadNo": 3,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    }
+   ],
+   "trailMoves": [
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T02:46:30.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T06:47:30.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T07:12:30.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T09:24:30.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T09:57:00.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T13:47:30.000Z",
+     "depotId": "dep1",
+     "observed": true
+    }
+   ],
+   "zoneOutcomes": [
+    {
+     "id": "z2-3",
+     "outcome": "UNCONFIRMED"
+    }
+   ],
+   "candidates": [
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T02:51:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:51:30.000Z",
+     "lat": 20.124272367948258,
+     "lng": 55.07179069460665,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T03:06:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:51:30.000Z",
+     "lat": 20.12116570178203,
+     "lng": 55.07317768397686,
+     "distanceM": 374.6
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T03:17:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:17:30.000Z",
+     "lat": 20.050781530722244,
+     "lng": 55.10393151051769,
+     "distanceM": 69.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T03:57:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:17:30.000Z",
+     "lat": 20.053968557915965,
+     "lng": 55.1057631093313,
+     "distanceM": 374.6
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 4,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T04:35:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T04:35:30.000Z",
+     "lat": 20.086696011498386,
+     "lng": 55.01993493179302,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 4,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T05:08:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T04:35:30.000Z",
+     "lat": 20.08593719422477,
+     "lng": 55.02342988422621,
+     "distanceM": 374.6
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 5,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T05:30:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:30:30.000Z",
+     "lat": 20.051790416912144,
+     "lng": 55.180702743719806,
+     "distanceM": 1.4
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 5,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T05:44:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:30:30.000Z",
+     "lat": 20.0546030184616,
+     "lng": 55.17874582533528,
+     "distanceM": 374.6
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 6,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T06:13:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T06:13:30.000Z",
+     "lat": 20.199766439094503,
+     "lng": 55.07144632872188,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 6,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T06:33:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T06:13:30.000Z",
+     "lat": 20.19651322821397,
+     "lng": 55.0723774145151,
+     "distanceM": 374.6
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T07:14:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:14:30.000Z",
+     "lat": 20.08040037026049,
+     "lng": 55.08916487660604,
+     "distanceM": 41.8
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T07:41:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:14:30.000Z",
+     "lat": 20.08267412861856,
+     "lng": 55.09277622297637,
+     "distanceM": 491.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T07:47:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:47:30.000Z",
+     "lat": 20.11232482932088,
+     "lng": 55.135268806030965,
+     "distanceM": 69.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T08:06:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:47:30.000Z",
+     "lat": 20.11271295171127,
+     "lng": 55.13125345573535,
+     "distanceM": 491.1
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 3,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T08:17:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T08:17:00.000Z",
+     "lat": 20.118855551563062,
+     "lng": 55.0513678844965,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 3,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T08:52:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T08:17:00.000Z",
+     "lat": 20.118855551563062,
+     "lng": 55.056071029681895,
+     "distanceM": 491.1
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T10:09:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T10:09:00.000Z",
+     "lat": 20.043047071505573,
+     "lng": 55.12838148833574,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T10:13:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T10:09:00.000Z",
+     "lat": 20.045516369456358,
+     "lng": 55.12830451561568,
+     "distanceM": 274.7
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T10:39:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T10:39:30.000Z",
+     "lat": 20.172853036291773,
+     "lng": 55.123665588858316,
+     "distanceM": 69.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T10:42:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T10:39:30.000Z",
+     "lat": 20.170973647195094,
+     "lng": 55.12262791140749,
+     "distanceM": 274.6
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 5,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T12:55:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T12:55:30.000Z",
+     "lat": 20.118370463528567,
+     "lng": 55.0862444960476,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 5,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T13:03:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T12:55:30.000Z",
+     "lat": 20.118370463528567,
+     "lng": 55.08887506877841,
+     "distanceM": 274.7
+    }
+   ],
+   "ambiguities": [],
+   "notes": []
+  },
+  {
+   "trips": [
+    {
+     "outAt": "2026-10-20T02:08:40.000Z",
+     "inAt": "2026-10-20T04:40:40.000Z",
+     "loadNo": 1,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    },
+    {
+     "outAt": "2026-10-20T05:04:40.000Z",
+     "inAt": "2026-10-20T09:07:40.000Z",
+     "loadNo": 2,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    }
+   ],
+   "trailMoves": [
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T02:08:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T04:40:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T05:04:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T09:07:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    }
+   ],
+   "zoneOutcomes": [
+    {
+     "id": "z3-2",
+     "outcome": "UNCONFIRMED"
+    }
+   ],
+   "candidates": [
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T02:12:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:12:20.000Z",
+     "lat": 20.124272367948258,
+     "lng": 55.07179069460665,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T02:45:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:12:20.000Z",
+     "lat": 20.1216029362795,
+     "lng": 55.0729824780655,
+     "distanceM": 321.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T02:54:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:54:40.000Z",
+     "lat": 20.050781530722244,
+     "lng": 55.104601110849174,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T03:09:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:54:40.000Z",
+     "lat": 20.05352001334796,
+     "lng": 55.10559956880419,
+     "distanceM": 321.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 3,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T03:20:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:20:40.000Z",
+     "lat": 20.149366905247987,
+     "lng": 55.140545597229746,
+     "distanceM": 62.8
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 3,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T03:46:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:20:40.000Z",
+     "lat": 20.148492422043393,
+     "lng": 55.13804779563963,
+     "distanceM": 321.8
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 4,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T04:01:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T04:01:00.000Z",
+     "lat": 20.086696011498386,
+     "lng": 55.01993493179302,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 4,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T04:32:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T04:01:00.000Z",
+     "lat": 20.08720034479208,
+     "lng": 55.02297007268734,
+     "distanceM": 321.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T05:19:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:19:40.000Z",
+     "lat": 20.199668742236174,
+     "lng": 55.07147429006844,
+     "distanceM": 11.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T05:36:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:19:40.000Z",
+     "lat": 20.197961965328695,
+     "lng": 55.0727787724241,
+     "distanceM": 244.1
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T06:03:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T06:03:20.000Z",
+     "lat": 20.05179959029803,
+     "lng": 55.180706712303596,
+     "distanceM": 1.6
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T06:11:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T06:03:20.000Z",
+     "lat": 20.052472498736886,
+     "lng": 55.17849388431911,
+     "distanceM": 244.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 3,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T06:24:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T06:24:20.000Z",
+     "lat": 20.079866878683003,
+     "lng": 55.08962777306674,
+     "distanceM": 71.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 3,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T06:34:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T06:24:20.000Z",
+     "lat": 20.08006647502695,
+     "lng": 55.09131857855948,
+     "distanceM": 244.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 3,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T07:10:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:10:00.000Z",
+     "lat": 20.08006647502695,
+     "lng": 55.089511720522154,
+     "distanceM": 55.5
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 3,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T07:25:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:10:00.000Z",
+     "lat": 20.081362935569672,
+     "lng": 55.09086753436226,
+     "distanceM": 244.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 4,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T07:33:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:33:40.000Z",
+     "lat": 20.11232482932088,
+     "lng": 55.13593840636244,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 4,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T07:49:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:33:40.000Z",
+     "lat": 20.11232482932088,
+     "lng": 55.138276693234275,
+     "distanceM": 244.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 4,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T08:16:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T08:16:40.000Z",
+     "lat": 20.11232482932088,
+     "lng": 55.13646983519695,
+     "distanceM": 55.5
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 4,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T08:31:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T08:16:40.000Z",
+     "lat": 20.11250478958307,
+     "lng": 55.13360798520467,
+     "distanceM": 244.2
+    }
+   ],
+   "ambiguities": [],
+   "notes": []
+  },
+  {
+   "trips": [
+    {
+     "outAt": "2026-10-20T02:25:40.000Z",
+     "inAt": "2026-10-20T05:19:40.000Z",
+     "loadNo": 1,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    },
+    {
+     "outAt": "2026-10-20T05:55:40.000Z",
+     "inAt": "2026-10-20T08:41:00.000Z",
+     "loadNo": 2,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    },
+    {
+     "outAt": "2026-10-20T09:00:20.000Z",
+     "inAt": "2026-10-20T09:10:00.000Z",
+     "loadNo": null,
+     "loadDepotId": null,
+     "depotId": "dep1",
+     "openStart": false
+    },
+    {
+     "outAt": "2026-10-20T09:21:00.000Z",
+     "inAt": "2026-10-20T12:37:20.000Z",
+     "loadNo": 3,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    }
+   ],
+   "trailMoves": [
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T02:25:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T05:19:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T05:55:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T08:41:00.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T09:00:20.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T09:10:00.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T09:21:00.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T12:37:20.000Z",
+     "depotId": "dep1",
+     "observed": true
+    }
+   ],
+   "zoneOutcomes": [
+    {
+     "id": "z4-1",
+     "outcome": "UNCONFIRMED"
+    },
+    {
+     "id": "z4-2",
+     "outcome": "UNCONFIRMED"
+    }
+   ],
+   "candidates": [
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T02:29:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:29:20.000Z",
+     "lat": 20.124272367948258,
+     "lng": 55.07179069460665,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T02:59:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:29:20.000Z",
+     "lat": 20.121648960963444,
+     "lng": 55.072961930074825,
+     "distanceM": 316.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T03:08:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:08:40.000Z",
+     "lat": 20.050816972373447,
+     "lng": 55.10458528771567,
+     "distanceM": 4.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T03:38:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:08:40.000Z",
+     "lat": 20.053472798130272,
+     "lng": 55.10558235401186,
+     "distanceM": 316.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 3,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T03:50:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:50:20.000Z",
+     "lat": 20.14990118577075,
+     "lng": 55.140740397311056,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 3,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T04:04:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:50:20.000Z",
+     "lat": 20.148516711073174,
+     "lng": 55.13809421980638,
+     "distanceM": 316.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 4,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T04:19:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T04:19:40.000Z",
+     "lat": 20.086696011498386,
+     "lng": 55.01926533146154,
+     "distanceM": 69.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 4,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T04:41:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T04:19:40.000Z",
+     "lat": 20.086055232467334,
+     "lng": 55.022886224958825,
+     "distanceM": 316.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 5,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T04:59:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T04:59:20.000Z",
+     "lat": 20.051787639238235,
+     "lng": 55.18071553710042,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 5,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T05:09:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T04:59:20.000Z",
+     "lat": 20.05331432939365,
+     "lng": 55.17815960302183,
+     "distanceM": 316.4
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T06:16:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T06:16:40.000Z",
+     "lat": 20.199766439094503,
+     "lng": 55.07144632872188,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T06:48:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T06:16:40.000Z",
+     "lat": 20.19793713741208,
+     "lng": 55.07171428960393,
+     "distanceM": 205.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T07:09:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:09:20.000Z",
+     "lat": 20.080861829736914,
+     "lng": 55.0888637860551,
+     "distanceM": 89.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T07:32:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:09:20.000Z",
+     "lat": 20.081156680483332,
+     "lng": 55.09056729120948,
+     "distanceM": 205.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T09:29:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T09:29:20.000Z",
+     "lat": 20.043859933748152,
+     "lng": 55.127976412760766,
+     "distanceM": 99.8
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T09:32:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T09:29:20.000Z",
+     "lat": 20.045341772631556,
+     "lng": 55.12830995813124,
+     "distanceM": 255.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 3,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T10:29:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T10:29:40.000Z",
+     "lat": 20.054958677685953,
+     "lng": 55.01723739902906,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 3,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T11:09:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T10:29:40.000Z",
+     "lat": 20.055241724834843,
+     "lng": 55.01966331963117,
+     "distanceM": 255.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 4,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T11:38:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T11:38:00.000Z",
+     "lat": 20.07782069708947,
+     "lng": 55.20659186991029,
+     "distanceM": 88.8
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 4,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T11:55:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T11:38:00.000Z",
+     "lat": 20.07862485202853,
+     "lng": 55.20515246826367,
+     "distanceM": 255.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 5,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T12:14:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T12:14:40.000Z",
+     "lat": 20.118370463528567,
+     "lng": 55.08539420991238,
+     "distanceM": 88.8
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 5,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T12:18:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T12:14:40.000Z",
+     "lat": 20.11610142199053,
+     "lng": 55.08661584847173,
+     "distanceM": 255.3
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 6,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T12:26:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T12:26:20.000Z",
+     "lat": 20.064363995688108,
+     "lng": 55.095083220423135,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 6,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T12:32:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T12:26:20.000Z",
+     "lat": 20.06664064898801,
+     "lng": 55.095397335393784,
+     "distanceM": 255.3
+    }
+   ],
+   "ambiguities": [],
+   "notes": []
+  },
+  {
+   "trips": [
+    {
+     "outAt": "2026-10-20T02:48:30.000Z",
+     "inAt": "2026-10-20T06:28:30.000Z",
+     "loadNo": 1,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    },
+    {
+     "outAt": "2026-10-20T06:56:00.000Z",
+     "inAt": "2026-10-20T10:49:00.000Z",
+     "loadNo": 2,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    }
+   ],
+   "trailMoves": [
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T02:48:30.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T06:28:30.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T06:56:00.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T10:49:00.000Z",
+     "depotId": "dep1",
+     "observed": true
+    }
+   ],
+   "zoneOutcomes": [
+    {
+     "id": "z5-2",
+     "outcome": "UNCONFIRMED"
+    }
+   ],
+   "candidates": [
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T02:52:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:52:30.000Z",
+     "lat": 20.124272367948258,
+     "lng": 55.07179069460665,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T03:02:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:52:30.000Z",
+     "lat": 20.120544368548785,
+     "lng": 55.0734550818509,
+     "distanceM": 449.5
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T03:11:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:11:30.000Z",
+     "lat": 20.050781530722244,
+     "lng": 55.104601110849174,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T03:37:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:11:30.000Z",
+     "lat": 20.054605963354707,
+     "lng": 55.10599550902773,
+     "distanceM": 449.5
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 5,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T05:19:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:19:30.000Z",
+     "lat": 20.051787639238235,
+     "lng": 55.18071553710042,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 5,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T05:24:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:19:30.000Z",
+     "lat": 20.055109511398022,
+     "lng": 55.17826262937589,
+     "distanceM": 449.5
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 6,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T05:46:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:46:00.000Z",
+     "lat": 20.199766439094503,
+     "lng": 55.07144632872188,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 6,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T06:16:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:46:00.000Z",
+     "lat": 20.195862586037865,
+     "lng": 55.07256363167375,
+     "distanceM": 449.5
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T07:03:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:03:00.000Z",
+     "lat": 20.11232482932088,
+     "lng": 55.13593840636244,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T07:39:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:03:00.000Z",
+     "lat": 20.11099890376582,
+     "lng": 55.13400827180885,
+     "distanceM": 249.7
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 3,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T08:43:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T08:43:00.000Z",
+     "lat": 20.118257691834035,
+     "lng": 55.051947608108904,
+     "distanceM": 89.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 3,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T08:52:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T08:43:00.000Z",
+     "lat": 20.11723063167798,
+     "lng": 55.053018635655285,
+     "distanceM": 249.7
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 4,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T09:15:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T09:15:30.000Z",
+     "lat": 20.043047071505573,
+     "lng": 55.12838148833574,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 4,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T09:47:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T09:15:30.000Z",
+     "lat": 20.04529188782447,
+     "lng": 55.128311513135685,
+     "distanceM": 249.7
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 5,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T10:15:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T10:15:30.000Z",
+     "lat": 20.172853036291773,
+     "lng": 55.12433518918979,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 5,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T10:33:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T10:15:30.000Z",
+     "lat": 20.170710211486853,
+     "lng": 55.123619418788415,
+     "distanceM": 249.7
+    }
+   ],
+   "ambiguities": [],
+   "notes": []
+  },
+  {
+   "trips": [
+    {
+     "outAt": "2026-10-20T02:23:40.000Z",
+     "inAt": "2026-10-20T06:22:50.000Z",
+     "loadNo": 1,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    },
+    {
+     "outAt": "2026-10-20T06:40:40.000Z",
+     "inAt": "2026-10-20T07:32:40.000Z",
+     "loadNo": 2,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    },
+    {
+     "outAt": "2026-10-20T07:43:40.000Z",
+     "inAt": "2026-10-20T11:51:20.000Z",
+     "loadNo": 3,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    }
+   ],
+   "trailMoves": [
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T02:23:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T06:22:50.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T06:40:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T07:32:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T07:43:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T11:51:20.000Z",
+     "depotId": "dep1",
+     "observed": true
+    }
+   ],
+   "zoneOutcomes": [
+    {
+     "id": "z6-3",
+     "outcome": "UNCONFIRMED"
+    }
+   ],
+   "candidates": [
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T02:28:50.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:28:50.000Z",
+     "lat": 20.124190050634347,
+     "lng": 55.07188636365106,
+     "distanceM": 13.5
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T02:55:10.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:28:50.000Z",
+     "lat": 20.123328861927405,
+     "lng": 55.07221192841538,
+     "distanceM": 113.8
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T03:08:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:08:00.000Z",
+     "lat": 20.050781530722244,
+     "lng": 55.10393151051769,
+     "distanceM": 69.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T03:37:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:08:00.000Z",
+     "lat": 20.05174944268478,
+     "lng": 55.104954014091895,
+     "distanceM": 113.8
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 3,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T03:54:10.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:54:10.000Z",
+     "lat": 20.14950855090104,
+     "lng": 55.14059724160673,
+     "distanceM": 46.1
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 3,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T04:13:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:54:10.000Z",
+     "lat": 20.149403260660222,
+     "lng": 55.13978870189271,
+     "distanceM": 113.7
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 6,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T05:32:10.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:32:10.000Z",
+     "lat": 20.199754488034706,
+     "lng": 55.07145515351871,
+     "distanceM": 1.6
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 6,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T06:06:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:32:10.000Z",
+     "lat": 20.198778426901157,
+     "lng": 55.07172910292575,
+     "distanceM": 113.8
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T06:43:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T06:43:20.000Z",
+     "lat": 20.08006647502695,
+     "lng": 55.08898029168764,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T07:08:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T06:43:20.000Z",
+     "lat": 20.08077363532298,
+     "lng": 55.09000969678289,
+     "distanceM": 133.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T07:15:50.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:15:50.000Z",
+     "lat": 20.111888688348305,
+     "lng": 55.13530352097375,
+     "distanceM": 82.1
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 2,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T07:28:10.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:15:50.000Z",
+     "lat": 20.111913968716802,
+     "lng": 55.13474036337433,
+     "distanceM": 133.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T07:54:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:54:00.000Z",
+     "lat": 20.0433175176491,
+     "lng": 55.1282467162657,
+     "distanceM": 33.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T08:04:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:54:00.000Z",
+     "lat": 20.043733148790384,
+     "lng": 55.12768450451314,
+     "distanceM": 105.5
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T08:22:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T08:22:30.000Z",
+     "lat": 20.118515572834987,
+     "lng": 55.05171326785016,
+     "distanceM": 52.2
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T08:30:50.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T08:22:30.000Z",
+     "lat": 20.118855551563062,
+     "lng": 55.05237759928207,
+     "distanceM": 105.4
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T08:53:30.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T08:53:30.000Z",
+     "lat": 20.118855551563062,
+     "lng": 55.05205874198136,
+     "distanceM": 72.1
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T09:01:50.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T08:53:30.000Z",
+     "lat": 20.11944244083649,
+     "lng": 55.052160953445004,
+     "distanceM": 105.4
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 3,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T09:17:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T09:17:00.000Z",
+     "lat": 20.17284936471842,
+     "lng": 55.124330227758485,
+     "distanceM": 0.7
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 3,
+     "sequence": 3,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T09:46:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T09:17:00.000Z",
+     "lat": 20.1721316546183,
+     "lng": 55.12367987044507,
+     "distanceM": 105.4
+    }
+   ],
+   "ambiguities": [],
+   "notes": []
+  },
+  {
+   "trips": [
+    {
+     "outAt": "2026-10-20T02:49:40.000Z",
+     "inAt": "2026-10-20T07:30:00.000Z",
+     "loadNo": 1,
+     "loadDepotId": "dep1",
+     "depotId": "dep1",
+     "openStart": false
+    }
+   ],
+   "trailMoves": [
+    {
+     "kind": "DEPOT_OUT",
+     "at": "2026-10-20T02:49:40.000Z",
+     "depotId": "dep1",
+     "observed": true
+    },
+    {
+     "kind": "DEPOT_IN",
+     "at": "2026-10-20T07:30:00.000Z",
+     "depotId": "dep1",
+     "observed": true
+    }
+   ],
+   "zoneOutcomes": [
+    {
+     "id": "z7-1",
+     "outcome": "UNCONFIRMED"
+    }
+   ],
+   "candidates": [
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T02:54:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:54:20.000Z",
+     "lat": 20.124272367948258,
+     "lng": 55.07179069460665,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 1,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T03:29:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T02:54:20.000Z",
+     "lat": 20.122201257170772,
+     "lng": 55.07271535418678,
+     "distanceM": 249.7
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T03:41:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:41:20.000Z",
+     "lat": 20.050781530722244,
+     "lng": 55.104601110849174,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 2,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T04:14:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T03:41:20.000Z",
+     "lat": 20.052906215518057,
+     "lng": 55.10537577650393,
+     "distanceM": 249.7
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 3,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T04:30:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T04:30:00.000Z",
+     "lat": 20.14990118577075,
+     "lng": 55.140740397311056,
+     "distanceM": 0
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 3,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T05:01:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T04:30:00.000Z",
+     "lat": 20.14876730957092,
+     "lng": 55.138676157492355,
+     "distanceM": 249.7
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 4,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T05:22:00.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:22:00.000Z",
+     "lat": 20.086696011498386,
+     "lng": 55.0189783598909,
+     "distanceM": 99.9
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 4,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T06:01:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T05:22:00.000Z",
+     "lat": 20.086206727697473,
+     "lng": 55.022268915053175,
+     "distanceM": 249.7
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 6,
+     "kind": "ARRIVED",
+     "at": "2026-10-20T07:04:40.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:04:40.000Z",
+     "lat": 20.19942640189547,
+     "lng": 55.071697416010025,
+     "distanceM": 46
+    },
+    {
+     "depotId": "dep1",
+     "loadNo": 1,
+     "sequence": 6,
+     "kind": "DEPARTED",
+     "at": "2026-10-20T07:15:20.000Z",
+     "observed": true,
+     "segmentStartAt": "2026-10-20T07:04:40.000Z",
+     "lat": 20.197597631840814,
+     "lng": 55.07206705258403,
+     "distanceM": 249.7
+    }
+   ],
+   "ambiguities": [],
+   "notes": []
+  }
+ ],
+ "hashes": [
+  "dlncigngkccjpndg",
+  "gellgadbpmdikkni",
+  "gplblifafhafcbbn",
+  "aoolblmpjodflflf",
+  "joflcddeabamifig",
+  "jegmkmfbilajjloj",
+  "ebgmfdlpljfaochj",
+  "aohcmmbpekbggglb",
+  "edbliknjidiffgpp",
+  "ecpeapgbnlbfpabj",
+  "nnophlalnhiiglbb",
+  "ghicoiablbgaclab",
+  "inkociecebpcmepf",
+  "bkfejelkpjdngcfd",
+  "kbgkheleifmmhnpi",
+  "phoffficlfgcacbp",
+  "cnbplopdjlcebepp",
+  "fakfjleggndpfabj",
+  "kieejbhpldacmpkm",
+  "mpimgpcelohbjpke",
+  "hbljjagpjbklffkm",
+  "ccnojaabnabfcaca",
+  "anlmbcndlibebphi",
+  "ljgjajjmobfeafeo",
+  "hgobmngdfgibbcdf",
+  "pdlkmkfmpgegdjel",
+  "hbohlnpmhnebmpba",
+  "okjiaojgmlhbplmg",
+  "cciglgblfknkchpl",
+  "lkkaencppogkiojf",
+  "hdebdchjpncmpcpb",
+  "loiflcjhigiopmpp",
+  "fjdbhfngegonoima",
+  "bnjkacdlgcfojgie",
+  "nkpiapafkghapjgd",
+  "cojlbapmhikclbcc",
+  "mliflnjegjldeoff",
+  "dophcbcjdcegmhkh",
+  "jacinmmccnogegnp",
+  "bgglpgnbndobccpf",
+  "pcgjpmmapjjcnkjj",
+  "anlpmanlnihaedjh",
+  "ipbgbacpafmoefcm",
+  "dkmnonccdplgefbe",
+  "ceepmgoppoegfpob",
+  "mljehejecbhaobbn",
+  "kfkmcgdoccfhoaef",
+  "nkjkoggkdfdklfjh",
+  "hekchicekaoojpbo",
+  "maakkdadgcjopkdp",
+  "cofpedfikhdbjinl",
+  "ajpabnkknpcmmekn",
+  "kpoopmapmjecoddm",
+  "pjlohhndgnalcnnb",
+  "ffndgodhpcjijdam",
+  "epadfcccdmddoldn",
+  "jnegffgjikafbkni",
+  "jekdejfobodiikfi",
+  "llebibjddplgamgo",
+  "gmidkaihmcgjhhek",
+  "abjefaidpembgind",
+  "nfbcjimdjdpgbdmk",
+  "eihkpfjlnmbmepfh",
+  "pkenkielekpebmjj",
+  "odhikailolbmlpon",
+  "bcimbeiiembmaihm",
+  "pglkfjgfpmghnbnb",
+  "gjmfibniploaihaj",
+  "ojapgihfhagefnhl",
+  "fmmmncgemdmbhamb",
+  "kjokdbedbgmfpffn",
+  "jbfehjlcechmhccm",
+  "ppdkcjkbhkkgiopd",
+  "iefighpfbmcdoecl",
+  "nabbjndcfpolichd",
+  "cfbnkcnghecpegbe",
+  "knflppiadmioolfe",
+  "nbajdpkaejfjedhl",
+  "nohpfekabmligaah",
+  "mpfcjmchbajjjihb",
+  "dkpjihheenldeibm",
+  "poooelbpgdccgceo",
+  "chdjnkglondkaabi",
+  "afpcennaffhpkgcd",
+  "fkjleaainpadofbp",
+  "npaacnjnppbadkfn",
+  "lmjjabnideejcdej",
+  "oljckpnhmolaibci",
+  "ehinlnpinadadoko",
+  "bnjbbbbfhmhkbhja",
+  "khpibolmdabadinl",
+  "fdnpicboeoamfnlh",
+  "aihmmannncdkaebi",
+  "hfblnnplloienmbd",
+  "iofkohicjhlibbdn",
+  "bgefbnkpeioeakde",
+  "kjfpbnhmffnbhhpo",
+  "cjkedofcaacilgfg",
+  "gdinmldpmphplnmf",
+  "ginbnlafcngannml",
+  "oapmiehhebfbfkfc",
+  "pdgmjlegjjofeibd",
+  "nbmcnnbdenfbgoag",
+  "bldhldgnjephagba",
+  "oepnfgljelflagkn",
+  "ihhoihnpgiodglmm",
+  "igbhjfcjbeddnhkd",
+  "objoefnchaaeggdi",
+  "fhjngmfflfmkjlbf",
+  "efkiegjmkpjjnkph",
+  "fnoafcammmhbmmpe",
+  "fhfmfklgammjbeoi",
+  "jkmdhnnjnhchmgpm",
+  "pcfkdimodilcbafi",
+  "pimhmpjlbmikmbbf",
+  "bflggdimpcdndaih",
+  "lekdmlhihikoaaki",
+  "idldejoelpkgkofc",
+  "jgloacgfamhdkpke",
+  "knbndbfmaoiihlpb",
+  "iaidjhfjjfikcfjp",
+  "okebpigobpmlgbkb",
+  "kmheglchcjnjchgl",
+  "lemcngioepbcheop",
+  "jieeemjljlhadlpd",
+  "cnpgkcidlcdcnjed",
+  "ngmpcehimohomndm",
+  "obaimmpipbhlmbgl",
+  "ibfakefpgkhlabbp",
+  "akndhegnbdceamak",
+  "jacfbgdmpccmkfbo",
+  "lpnghfccpdjdpcaa",
+  "phnakfkcdilccmdg",
+  "bfejmncokaoffknk",
+  "mcikapjfgjfgbbfp",
+  "dhalmnailfeafiki",
+  "hfhllclejnmggmpf",
+  "hmafpckgagikpjph",
+  "kmbkeomlokgfoldm",
+  "bopdkdjiifmoccik",
+  "jpppiddmkbkhkohf",
+  "liemcnjhpfikcnla",
+  "jobgchidhoiencah",
+  "econcgiefgplbmdb",
+  "hagimllekjckhdgg",
+  "cckkekhgnlgibfcc",
+  "jpalgijbhjbjnafb",
+  "obmipogabeogmkic",
+  "imeanlckjfenjfpe",
+  "kjhoolmodmbppdpe",
+  "nfcihhmecjkcbmcd",
+  "oojoeldciioigjno",
+  "pmaepbalgmbipied",
+  "beffjbjbcijaolgd",
+  "hblgcgcedkoclbid",
+  "obponfdananlcdbn",
+  "cnomggncmccgfmdj",
+  "ojbpimbhlpccigoj",
+  "iihbbhchhpmknpfp",
+  "dmiaodbhpnkpncdb"
+ ]
+}

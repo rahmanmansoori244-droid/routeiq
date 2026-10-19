@@ -271,6 +271,16 @@ Redeploy after setting them; the startup log names a variable that is missing or
 
 **A truck's day** (owner request 18 Oct 2026): the truck code on the plan screen opens that truck's day (`/t/<slug>/dispatch/truck/<truckId>?date=YYYY-MM-DD`, data `GET /api/ivms/trucks/<truckId>/day`), for the dispatcher (Planner) and up: its loads, each stop with the times and who recorded them, the results, the alerts, and with GPS on the trail (TIMES; the only screen that draws it, never exported, kept `ivmsTrailDays` as before) and the live position (MAP and up, today or yesterday, only while the truck has a load of that date out, as the live map: never a truck off duty, even when the poller has not yet cleared its last position). It reads only, makes no call to Ayun, and never shows an IMEI or an Ayun name; **Open Ayun** is a plain link to Ayun's own site in a new tab (no key or password is ever passed). With the mode OFF it shows the plan and the results only.
 
+**Big customers** (owner request 19 Oct 2026: "at big customers the truck moves between drop points and the model thinks it left"; the GPS study of 18-19 Oct 2026). In TIMES and ALERTS (nothing changes below TIMES): stays of one stop at its pin less than 10 minutes apart with the truck within 500 m in between are one visit (never across another open customer's stay); a GPS departure is written only once it is final (the truck away 10 minutes, beyond 500 m, or back at the depot: the processing result counts the others as `kept.HELD`); a tracker repeating one position for 60 s or more while moving is a gap (the next GPS time is not observed); and a later stay after a real trip away carries the minutes away, which the visit stores (`StopVisit.awayMinutes`) and every unloading time and the UNLOAD_OVER alert take off. Each GPS event's payload has the stay's summary (`stay`: exit rule, exit speed and distance, minutes standing, furthest distance, points, frozen runs, merged stays, minutes away, radius; detector `ivms-v2`); short stays at a pending customer are kept as `SHORT_DWELL` facts on `IvmsTruckDay.gpsFactsJson` (never shown). Migration `20261019120000_gps_site_radius_away` (additive: `Customer.siteRadiusM`, `StopVisit.awayMinutes`, two CHECKs; rollback lines in the file). **A customer's site radius** (`Customer.siteRadiusM`, 100-500 m, the customer's **Details**; empty = the stop radius): only for a site where the trucks unload at several points; a pin far from where trucks stand is fixed by moving the pin (the study found seven such pins, 120-300 m off), not by a radius. To see what GPS saw at a stop, read the summaries (read only):
+
+```sql
+SELECT "truckId", "loadNo", sequence, kind, "at", "payloadJson"->'stay'->>'merged' AS merged,
+       "payloadJson"->'stay'->>'awayMin' AS away_min, "payloadJson"->'stay'->>'exitRule' AS exit_rule, "payloadJson"->'stay'->>'maxDistM' AS max_m
+FROM "StopEvent"
+WHERE "tenantId" = '<tenantId>' AND source = 'AYUN' AND "deliveryDate" = '2026-10-20'
+ORDER BY "truckId", "at";
+```
+
 **Turn it off**: mode OFF on the Settings card (immediate), or `ROUTEIQ_DISABLE_IVMS=1` and redeploy.
 
 **Useful query** (one company's GPS stop events of a day, read only):

@@ -53,6 +53,8 @@ export interface ActualsRow {
   earlyLateMin: number | null;
   plannedUnloadMin: number | null;
   actualUnloadMin: number | null;
+  /** Minutes the GPS showed the truck away from the customer between arrival and departure (owner request 19 Oct 2026); not in the actual unloading. */
+  awayMin: number | null;
   waitingMin: number | null;
   timedBy: string | null;
   unverified: string;
@@ -106,6 +108,7 @@ export const ACTUALS_COLUMNS: { key: keyof ActualsRow; header: string; width: nu
   // The plan screen's figure: automatic (from the service start when the truck waited), else the
   // office's or the manual arrival to departure; "Timed by" says which.
   { key: 'actualUnloadMin', header: 'Actual unloading min', width: 12 },
+  { key: 'awayMin', header: 'Away from the customer (min, GPS)', width: 12 },
   { key: 'waitingMin', header: 'Waiting before the window (min)', width: 10 },
   { key: 'timedBy', header: 'Timed by', width: 16 },
   { key: 'unverified', header: 'Unverified timing', width: 9 },
@@ -325,6 +328,7 @@ export function actualsRowOf(
         departedAt: toDate(v.departedAt),
         departedAtOutcome: v.departedAtOutcome,
         outcomeSource: v.outcomeSource,
+        awayMinutes: v.awayMinutes ?? null,
       })
     : { min: null, auto: false };
   const timedBy =
@@ -352,6 +356,7 @@ export function actualsRowOf(
     earlyLateMin: earlyLate,
     plannedUnloadMin: stop.plannedServiceMin,
     actualUnloadMin: actual.min,
+    awayMin: v?.awayMinutes ? Math.round(v.awayMinutes) : null,
     waitingMin: waiting,
     timedBy,
     unverified: yesNo(!!v?.timingSuspect),

@@ -84,7 +84,10 @@
  *   position shows away has left (the row waits for the GPS departure, which closes it with the minutes);
  *   an unobserved GPS arrival or departure is "not measured". No fix for a while is no end: an open row
  *   waits (review of 18 Oct 2026, finding 2). A GPS arrival ended only by the driver's result (tapped in a
- *   batch, perhaps) is measured once the GPS history covers that result (finding 3).
+ *   batch, perhaps) is measured once the GPS history covers that result (finding 3). The minutes the GPS
+ *   showed the truck away from the customer in between (owner request 19 Oct 2026: a leave-and-return,
+ *   StopVisit.awayMinutes) are never unloading: the live and the final minutes are on site (from the window
+ *   start, only what can have been after it), and "at the stop" reaches the customer's site radius.
  * - R2: without Back at depot, the trail's (observed) depot IN after the trip before counts as it; without
  *   Leaving for next load, the trail's (observed) depot OUT counts before the fallbacks (the Dispatch press,
  *   the first stop reached: a GPS arrival there only when observed) once it is known to be the truck leaving
@@ -110,7 +113,7 @@
  * - R7, R8, R9, R11: unchanged (GPS never writes a result and is never pin evidence; R9's "a later stop had
  *   activity before the result" sees the GPS stop times too).
  */
-import { actualMinutes, OUTCOME_LABEL, reasonLabel, sourceWord } from '../delivery/office-text';
+import { actualMinutes, awayInside, awayText, OUTCOME_LABEL, reasonLabel, sourceWord } from '../delivery/office-text';
 import { arrivalIsObserved } from '../delivery/kpis';
 import { zonedDayStart } from '../dispatch/time';
 import {
@@ -134,7 +137,7 @@ import {
 import { firstSignOf, leftHowText, plannedDriveOf, previousTrip, turnaroundOf, type TurnaroundIn } from '../delivery/turnaround';
 import type { StopEta } from '../ivms/eta';
 import type { GpsDepotMove, GpsTruckDayFact } from '../ivms/types';
-import { GPS_LEAVE_EARLY_MIN, gpsBackOf, gpsLiveOf, historyCoversFix, liveAt, liveEtasOf, motionWords, openStayEnd, outSince, outState, type AlertGpsSettings, type GpsLive, type OutState } from './gps';
+import { atStopRadiusOf, GPS_LEAVE_EARLY_MIN, gpsBackOf, gpsLiveOf, historyCoversFix, liveAt, liveEtasOf, motionWords, openStayEnd, outSince, outState, type AlertGpsSettings, type GpsLive, type OutState } from './gps';
 import { projectLoad, type ProjectedStop, type Projection, type ProjectionIn } from './projection';
 import {
   clockText,
@@ -202,6 +205,12 @@ export interface FactVisit {
   departureSource?: string | null;
   /** false: a GPS departure found after a gap in the trail, its time only an upper bound (never measured). Absent: observed. */
   departureObserved?: boolean;
+  /**
+   * GPS tracking ALERTS (owner request 19 Oct 2026): minutes the GPS showed the truck away from the customer
+   * between the arrival and the departure (StopVisit.awayMinutes, a leave-and-return): never unloading, so
+   * R1 measures the time on site. Absent or null: none (as before).
+   */
+  awayMinutes?: number | null;
 }
 
 /** One planned stop of a load that left (DISPATCHED or COMPLETED), with its visit. */
@@ -225,6 +234,8 @@ export interface FactStop {
   pinMoved?: boolean;
   /** The planned pin (the visit's, else the plan's), for the GPS "at the stop" check and the live ETA (ALERTS only; never in a text). */
   pin?: { lat: number; lng: number } | null;
+  /** The customer's site radius (Customer.siteRadiusM; ALERTS only, owner request 19 Oct 2026): "at the stop" reaches that far (gps.ts atStopRadiusOf). */
+  siteRadiusM?: number | null;
   visit: FactVisit | null;
 }
 
@@ -597,7 +608,12 @@ function unloadOver(out: Out, c: LoadCtx): void {
     const fromWindow = start !== v.arrivedAt;
     const later = c.laterActivity[i] ?? false;
     const noEnd = !v.departedAt && !v.outcomeAt;
-    const occurredAt = new Date(start.getTime() + (planned + T) * 60_000);
+    // GPS tracking ALERTS (owner request 19 Oct 2026): the minutes the truck was away from the customer (a
+    // leave-and-return the GPS stays showed) are not unloading; counted from the window start, only what can
+    // have been after it (office-text.ts awayInside).
+    const away = awayInside(v.awayMinutes, minutesBetween(v.arrivedAt, start));
+    const awayWords = away > 0 ? ` (${awayText(away)} not counted, GPS)` : '';
+    const occurredAt = new Date(start.getTime() + (planned + T + away) * 60_000);
     if (noEnd) {
       // A load the office completed is not being unloaded any more (15 Oct 2026 replay: a stop of a load
       // completed at 12:18 stayed "unloading" for 12 h).
@@ -618,7 +634,7 @@ function unloadOver(out: Out, c: LoadCtx): void {
       let stillThere = '';
       if (c.gps) {
         const fix = c.gps.fixAt ? clockText(c.gps.fixAt, l.date, tz) : '?';
-        const where = liveAt(c.gps, s.pin, out.facts.gps!.atStopRadiusM, out.now);
+        const where = liveAt(c.gps, s.pin, atStopRadiusOf(out.facts.gps!, s.siteRadiusM), out.now);
         if (where === 'AWAY') return out.holdOrEnd(rule, key, `${label}: the GPS position at ${fix} shows the truck away from the stop: it has left (the departure time comes with the GPS history) (GPS).`);
         if (where === null && c.gpsLive === 'WAIT') return out.holdOrEnd(rule, key, `${label}: waiting for the next GPS position (last ${fix}) (GPS).`);
         // No fix for longer than GPS_WAIT_MIN (a truck parked with its engine off sends few; positions slow
@@ -630,7 +646,7 @@ function unloadOver(out: Out, c: LoadCtx): void {
         }
         if (where === 'AT') stillThere = ` GPS: the truck is still there at ${fix}.`;
       }
-      const elapsed = Math.max(0, minutesBetween(start, out.now));
+      const elapsed = Math.max(0, minutesBetween(start, out.now) - away);
       const over = elapsed - planned;
       const tier = tierAt(over, T);
       if (!tier) return out.end(rule, key, `${label}: unloading within the planned time + ${T} min.`);
@@ -648,9 +664,9 @@ function unloadOver(out: Out, c: LoadCtx): void {
         tier,
         value: over,
         threshold: T,
-        text: `${label}: no result or departure ${gpsArrival ? 'recorded' : 'tapped'} ${since} - ${fmtDuration(elapsed)} at the stop, planned ${fmtDuration(planned)} (${fmtDuration(over)} over).${stillThere}${knock}`,
+        text: `${label}: no result or departure ${gpsArrival ? 'recorded' : 'tapped'} ${since} - ${fmtDuration(elapsed)} at the stop${awayWords}, planned ${fmtDuration(planned)} (${fmtDuration(over)} over).${stillThere}${knock}`,
         occurredAt,
-        facts: { elapsedMin: Math.round(elapsed), plannedMin: planned, observed: v.arrivalObserved, ...(gpsArrival || stillThere ? { gps: true } : {}) },
+        facts: { elapsedMin: Math.round(elapsed), plannedMin: planned, observed: v.arrivalObserved, ...(gpsArrival || stillThere || away > 0 ? { gps: true } : {}), ...(away > 0 ? { awayMin: Math.round(away) } : {}) },
       });
     }
     const actual = actualMinutes(v);
@@ -697,11 +713,14 @@ function unloadOver(out: Out, c: LoadCtx): void {
     const over = took - planned;
     const byGps = !actual.auto && (gpsArrival || (gpsDeparture && !until));
     const gpsWords = !byGps ? '' : gpsArrival && gpsDeparture && !until ? ' (GPS arrival and departure)' : gpsArrival ? ' (GPS arrival)' : ' (GPS departure)';
-    const final = `${label}: unloading took ${fmtDuration(took)}${until}${gpsWords}, planned ${fmtDuration(planned)}${over > 0 ? ` (${fmtDuration(over)} over)` : ''}.`;
+    // The time on site (actualMinutes took the minutes away off already): say so.
+    const awayFinal = took === actual.min ? awayInside(v.awayMinutes, actual.auto && v.autoMinutes !== null && v.autoServiceMinutes !== null ? v.autoMinutes - v.autoServiceMinutes : 0) : 0;
+    const awayDone = awayFinal > 0 ? ` (${awayText(awayFinal)} not counted, GPS)` : '';
+    const final = `${label}: unloading took ${fmtDuration(took)}${until}${gpsWords}${awayDone}, planned ${fmtDuration(planned)}${over > 0 ? ` (${fmtDuration(over)} over)` : ''}.`;
     const tier = tierAt(over, T);
     // A stop that ended over the limit before any sweep saw it live: kept as history (no toast, no e-mail).
     if (!out.isOpen(rule, key) && tier) {
-      return out.raise({ ...stopBase(c, s), rule, kind: 'CONDITION', subjectKey: key, tier, value: over, threshold: T, text: final, occurredAt, history: true, facts: { tookMin: Math.round(took), plannedMin: planned, ...(byGps ? { gps: true } : {}) } });
+      return out.raise({ ...stopBase(c, s), rule, kind: 'CONDITION', subjectKey: key, tier, value: over, threshold: T, text: final, occurredAt, history: true, facts: { tookMin: Math.round(took), plannedMin: planned, ...(byGps || awayFinal > 0 ? { gps: true } : {}), ...(awayFinal > 0 ? { awayMin: Math.round(awayFinal) } : {}) } });
     }
     return out.end(rule, key, final);
   });
@@ -1606,7 +1625,7 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
       // GPS: a stop with an arrival and nothing that ends it, where the GPS knows better than the clock
       // (the truck away from it, or a GPS stay the trail lost sight of): its projected end (gps.ts openStayEnd).
       if (gps && v?.arrivedAt && !v.departedAt && !v.outcome) {
-        endAt = openStayEnd({ arrivedAt: v.arrivedAt, gpsArrival: isGps(v.arrivalSource), plannedServiceMin: plannedServiceOf(s) }, liveAt(gps, s.pin, facts.gps!.atStopRadiusM, now), gps, now);
+        endAt = openStayEnd({ arrivedAt: v.arrivedAt, gpsArrival: isGps(v.arrivalSource), plannedServiceMin: plannedServiceOf(s) }, liveAt(gps, s.pin, atStopRadiusOf(facts.gps!, s.siteRadiusM), now), gps, now);
       }
       // M3: a delivery photo of the driver's phone is the truck being there, when no arrival was recorded.
       const arrAt = v?.arrivedAt ?? firstPhotoAt(v);
@@ -1673,6 +1692,8 @@ export function evaluate(facts: AlertFacts, now: Date, thresholds: Thresholds): 
                   plannedServiceMin: plannedServiceOf(s),
                   done: !!s.visit?.outcome || !!s.visit?.departedAt,
                   arrivedAt: s.visit && !s.visit.outcome && !s.visit.departedAt ? s.visit.arrivedAt : null,
+                  // A big customer's site radius (owner request 19 Oct 2026): at the stop that far from its pin.
+                  ...(s.siteRadiusM ? { atStopRadiusM: atStopRadiusOf(facts.gps!, s.siteRadiusM) } : {}),
                 })),
               },
               now,

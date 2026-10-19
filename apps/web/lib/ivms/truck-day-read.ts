@@ -110,6 +110,8 @@ export async function readTruckDay(tenantId: string, truckId: string, date: stri
         casesDelivered: true,
         photoCount: true,
         outcomeLate: true,
+        // Owner request 19 Oct 2026: the minutes the GPS showed the truck away (a leave-and-return), "away N min".
+        awayMinutes: true,
       },
     }),
     // The driver's and the office's load-level taps; the GPS arrivals and departures in TIMES only.

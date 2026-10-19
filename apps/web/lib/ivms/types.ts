@@ -205,6 +205,40 @@ export interface GpsTrip {
 }
 
 /**
+ * What the detector saw of one stay, kept in the payload of each GPS event it writes (owner request 19 Oct
+ * 2026, GPS study of 18-19 Oct: "keep the facts, not the raw positions"): enough to tell later a dock move
+ * from a departure, a frozen tracker from a real exit, and a return from a stay, after the trail points are
+ * deleted (ivmsTrailDays). Distances and minutes only, never a position. The values are what the trail
+ * showed when the event was written: an arrival written while the truck was still there has no exit yet.
+ */
+export interface StaySummary {
+  /** How the stay ended: FAST (one point beyond the radius at EXIT_FAST_KMH or more), TWO_FAR (two points beyond the radius + exitExtraM); null: still there. */
+  exitRule: 'FAST' | 'TWO_FAR' | null;
+  /** The exit point's speed (km/h) and distance from the pin (m); null: still there. */
+  exitKmh: number | null;
+  exitDistM: number | null;
+  /** Minutes standing (a slow point inside the radius until the next point), merged stays included. */
+  standMin: number;
+  /** The furthest point from the pin (m) from the arrival to the exit, the gaps of merged stays included. */
+  maxDistM: number;
+  /** Trail points from the arrival to the exit. */
+  points: number;
+  /** Frozen-position runs (lib/ivms/stops.ts cleanTrail) from the arrival to the exit. */
+  frozenRuns: number;
+  /** Stays at the same pin merged into this one (a move between drop points of one site); 0: none. */
+  merged: number;
+  /**
+   * Minutes the truck was away between the stop's previous stay and this one (a leave-and-return): the part
+   * of that time it was beyond SITE_MAX_M of the pin or standing at another customer's pin; 0: it stayed on
+   * the site in between; null: the stop's first stay. Read by the visit rebuild (lib/delivery/visit.ts
+   * awayMinutesOf, as the absence just before this stay): the time away is never counted as unloading.
+   */
+  awayMin: number | null;
+  /** The radius the stay was ended with (m): the customer's site radius when it has one, else the company's stop radius. */
+  radiusM: number;
+}
+
+/**
  * An arrival or departure the detector proposes for one stop. The idempotency key of the event it
  * becomes is built from the dwell's first inside fix time (segmentStartAt), never from a cycle index, so a
  * rerun over a re-segmented trail never writes the same dwell twice (M2).
@@ -214,18 +248,31 @@ export interface StopCandidate {
   sequence: number;
   kind: 'ARRIVED' | 'DEPARTED';
   at: Date;
-  /** false: the point before was more than observedMaxGapSec earlier, so `at` is only an upper bound. */
+  /** false: the point before was more than observedMaxGapSec earlier (or a frozen-position run), so `at` is only an upper bound. */
   observed: boolean;
   segmentStartAt: Date;
   /** The truck's own fix (display only, erased with the driver positions) and its distance from the pin. */
   lat: number;
   lng: number;
   distanceM: number;
+  /**
+   * DEPARTED only (owner request 19 Oct 2026): false while the departure may still be undone - the truck
+   * is still within SITE_MAX_M of the pin and has not been away HOLD_DEPARTED_MIN yet, so it may be moving
+   * between drop points and come back (a merge). The writer holds such a departure back (lib/ivms/
+   * stop-events.ts): an observed GPS time is never moved once written. Absent: final.
+   */
+  final?: boolean;
+  /** The stay's summary (absent in candidates built by hand: none is stored). */
+  stay?: StaySummary;
 }
 
-/** A dwell the detector saw but must not write by itself (H4): shown to the office as a fact. */
+/**
+ * A dwell the detector saw but must not write by itself (H4): shown to the office as a fact. SHORT_DWELL
+ * (owner request 19 Oct 2026, kept as a fact for later analysis): the truck stood at a pending stop's pin
+ * (a slow point inside the radius) for less than the dwell.
+ */
 export interface StopAmbiguity {
-  reason: 'SEVERAL_PINS' | 'NEAR_DEPOT' | 'OUT_OF_SEQUENCE_SHORT';
+  reason: 'SEVERAL_PINS' | 'NEAR_DEPOT' | 'OUT_OF_SEQUENCE_SHORT' | 'SHORT_DWELL';
   loadNo: number;
   sequences: number[];
   from: Date;

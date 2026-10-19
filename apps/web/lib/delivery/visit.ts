@@ -23,9 +23,21 @@
  *   stay holding the result: an observed arrival of it first, then the earliest).
  * - Departure: the office's Left, else the phone's; when nothing else ends the stop, or only the result
  *   time stands in for it (and the phone's automatic timing does not end there: "Auto to result" is
- *   never replaced), the GPS departure of the stay of the shown arrival (one that began at most 15 min
- *   after it). The 15-minute rule after the result applies to a GPS departure too. A GPS arrival with a
- *   phone result and no departure ends at the result time, as any arrival.
+ *   never replaced), the GPS departure of the GPS stay that HOLDS the result (owner request 19 Oct 2026,
+ *   GPS study of 18-19 Oct: begun at or before the result and not left before it; else the last stay
+ *   begun before the result), of all the stays not left before the shown arrival - at a big customer the
+ *   truck comes back to the pin, and the visit used to show the first stay's departure, up to 351 min too
+ *   early. Without a result, the stay of the shown arrival (one that began at most 15 min after it), or
+ *   none while the truck has come back to the pin and is there now (its last stay not left yet). The
+ *   15-minute rule after the result applies to a GPS departure too. A GPS arrival with a phone result and
+ *   no departure ends at the result time, as any arrival.
+ * - Time away (owner request 19 Oct 2026, the leave-and-return guard): a GPS stay that began after the
+ *   truck had gone beyond 500 m of the pin, or stopped at another customer, since the stop's previous
+ *   stay carries the minutes away in its payload (lib/ivms/stops.ts StaySummary.awayMin). The minutes of
+ *   such absences between the shown arrival and the shown departure (or now, while the stop is in
+ *   progress) are the visit's awayMinutes (null: none), which every unloading time and the UNLOAD_OVER
+ *   alert take off: on site = departure - arrival - awayMinutes (lib/delivery/office-text.ts onSite).
+ *   A stay that never came back has no time away to take off.
  * - Automatic timing (autoArrivedAt, autoBasis, autoMinutes, autoServiceMinutes) is the phone's only, as
  *   with the link off: GPS never feeds the measured unloading times used for planning or the "auto"
  *   label (review M3), and never removes the phone's (second review H-2). A GPS-timed stop shows its
@@ -143,6 +155,12 @@ export interface VisitState {
   driverNoPhotoReason: string | null;
   /** Photo keys named by the driver's Delivered and Partly results (proofPhotoKeys counts the same). */
   driverPhotoKeys: number;
+  /**
+   * Minutes the truck was away from the customer between the shown arrival and departure (owner request
+   * 19 Oct 2026: a leave-and-return the GPS stays show; never unloading). Only a visit with GPS (AYUN)
+   * events has the field (absent otherwise: the rebuild without GPS is unchanged); null: none.
+   */
+  awayMinutes?: number | null;
 }
 
 const AUTO: ReadonlySet<EventSource> = new Set(['PHONE_AUTO', 'AYUN']);
@@ -323,17 +341,31 @@ function withGps(v: VisitState, gpsEvents: readonly VisitEvent[], ctx: VisitCont
       out.arrivalObserved = isObserved(a);
     }
   } else {
-    // The GPS stay of the arrival shown: there at that time, or begun at most 15 min after it.
     const at = arrivalAt;
-    const near = cycles.filter((c) => c.start <= at + match && (!c.departure || t(c.departure.at) > at));
-    stay = chooseCycle(near, outcomeAt) ?? near[0] ?? null;
+    // The stays not left before the arrival shown, and those of them that began at most 15 min after it.
+    const live = cycles.filter((c) => !c.departure || t(c.departure.at) > at);
+    const near = live.filter((c) => c.start <= at + match);
+    if (outcomeAt !== null) {
+      // Owner request 19 Oct 2026: the GPS stay that holds the result, wherever it began (the truck came
+      // back to the pin at a big customer), else the last one begun before the result, else (as before)
+      // the first that began at most 15 min after the arrival.
+      const holding = live.filter((c) => c.start <= outcomeAt && (!c.departure || t(c.departure.at) >= outcomeAt));
+      const before = live.filter((c) => c.start <= outcomeAt);
+      stay = holding[holding.length - 1] ?? before[before.length - 1] ?? near[0] ?? null;
+    } else {
+      // No result yet: the GPS stay of the arrival shown, there at that time or begun at most 15 min after it;
+      // but a truck that came back to the pin and is there now (the last stay, not left yet) is at the stop
+      // again: no departure (owner request 19 Oct 2026; the minutes it was away are not unloading).
+      const last = live[live.length - 1];
+      stay = last && !last.departure ? last : chooseCycle(near, null);
+    }
   }
   // The result time is only a stand-in for a departure nobody saw, unless the phone's automatic timing ends
   // there ("Auto to result"): that one is never replaced (second review H-2).
   const standIn = v.departedAtOutcome && v.autoBasis !== 'RESULT';
   if ((out.departedAt === null || standIn) && arrivalAt !== null) {
     const dep = stay?.departure ?? null;
-    if (dep && stay!.start <= arrivalAt + match && t(dep.at) > arrivalAt && !(outcomeAt !== null && t(dep.at) > outcomeAt + maxAfter)) {
+    if (dep && t(dep.at) > arrivalAt && !(outcomeAt !== null && t(dep.at) > outcomeAt + maxAfter)) {
       out.departedAt = dep.at;
       out.departureSource = 'AYUN';
       out.departureGap = dep.payload?.gap === true;
@@ -346,8 +378,35 @@ function withGps(v: VisitState, gpsEvents: readonly VisitEvent[], ctx: VisitCont
       out.departureGap = false;
     }
   }
+  // Owner request 19 Oct 2026: the time the truck was away (a leave-and-return) inside the visit shown.
+  out.awayMinutes = out.arrivedAt ? awayMinutesOf(gpsEvents, t(out.arrivedAt), out.departedAt ? t(out.departedAt) : null) : null;
   out.state = out.outcome ? 'DONE' : out.arrivedAt && out.departedAt === null ? 'ARRIVED' : 'PENDING';
   return out;
+}
+
+/**
+ * The minutes the truck was away from the customer between `from` and `to` (null: still there), by its GPS
+ * stays (owner request 19 Oct 2026): a stay that began after a leave-and-return carries the minutes away
+ * since the stop's previous stay ended (payload.stay.awayMin, lib/ivms/stops.ts), i.e. the absence
+ * [its start - awayMin, its start]; the parts inside [from, to] are summed. Null: none (0 minutes).
+ */
+export function awayMinutesOf(gps: readonly VisitEvent[], from: number, to: number | null): number | null {
+  let total = 0;
+  const seen = new Set<number>();
+  for (const e of gps) {
+    if (e.source !== 'AYUN' || e.kind !== 'ARRIVED') continue;
+    const away = num((e.payload?.stay as { awayMin?: unknown } | null | undefined)?.awayMin);
+    if (away === null || away <= 0) continue;
+    const seg = typeof e.payload?.segmentStartAt === 'string' ? Date.parse(e.payload.segmentStartAt) : NaN;
+    const start = Number.isFinite(seg) ? seg : t(e.at);
+    if (seen.has(start)) continue;
+    seen.add(start);
+    const a = Math.max(from, start - away * 60_000);
+    const b = Math.min(to ?? Infinity, start);
+    if (b > a) total += (b - a) / 60_000;
+  }
+  const r = Math.round(total * 10) / 10;
+  return r > 0 ? r : null;
 }
 
 /** The times withGps may fill, as a stored visit (StopVisit) or a rebuilt one (VisitState) carries them. */
@@ -363,6 +422,8 @@ export interface VisitTimes {
   outcome: string | null;
   outcomeAt: Date | null;
   outcomeSource: string | null;
+  /** The minutes away the GPS stays showed inside the visit (owner request 19 Oct 2026); absent or null: none. */
+  awayMinutes?: number | null;
 }
 
 /**
@@ -376,14 +437,18 @@ export interface VisitTimes {
  *   a departure the office or the phone gave stays, a GPS one or the result ending the GPS arrival goes;
  * - a GPS departure after the driver's or the office's arrival: the stop had none, or the result stood in
  *   for it (a result from the phone; one the office recorded never ends a stop).
+ * - the minutes away (awayMinutes, owner request 19 Oct 2026): from the GPS stays only, so none.
  * Everything else (the result, the automatic timing, the flags, the rest of the row) is the driver's and
- * the office's already. The same object back when GPS gave neither time.
+ * the office's already. The same object back when GPS gave neither time nor minutes away.
  */
 export function withoutGpsTimes<V extends VisitTimes>(v: V): V {
   const gpsArrival = v.arrivalSource === 'AYUN';
-  if (!gpsArrival && v.departureSource !== 'AYUN') return v;
+  const away = v.awayMinutes !== undefined && v.awayMinutes !== null;
+  if (!gpsArrival && v.departureSource !== 'AYUN' && !away) return v;
   const out: V = { ...v };
   const o: VisitTimes = out;
+  if (away) o.awayMinutes = null;
+  if (!gpsArrival && v.departureSource !== 'AYUN') return out;
   if (gpsArrival) {
     o.arrivedAt = null;
     o.arrivalSource = null;

@@ -20,6 +20,7 @@ import { readLoadingInstruction } from './dispatch/loading-instruction';
 import { WINDOW_RULES } from './dispatch/window-rule';
 import { IVMS_MODES } from './ivms/types';
 import { IVMS_SETTING_BOUNDS, type IvmsNumberSetting } from './ivms/settings';
+import { SITE_RADIUS_MAX_M, SITE_RADIUS_MIN_M } from './ivms/site-radius';
 
 /** A number inside a planner bound (lib/planner-bounds.ts: never outside what the optimizer accepts). */
 function bounded(b: Bound) {
@@ -376,6 +377,10 @@ export const customerSchema = z.object({
   // Owner request 16 Oct 2026: what the warehouse must do when loading this customer's orders, printed in
   // the SPECIAL LOADING box of the load sheets (lib/dispatch/loading-instruction.ts). '' or null clears it.
   loadingInstruction: clearable(loadingInstructionSchema),
+  // Owner request 19 Oct 2026: the customer's GPS site radius (lib/ivms/site-radius.ts), whole metres 100-500
+  // (the database CHECK "Customer_siteRadiusM_range" has the same bounds); null = the company's stop radius.
+  // A JSON number only: "400 m" or "" is refused, never read as something else.
+  siteRadiusM: z.number().int().min(SITE_RADIUS_MIN_M).max(SITE_RADIUS_MAX_M).nullable().optional(),
   active: z.boolean().optional(),
 });
 export type CustomerInput = z.infer<typeof customerSchema>;

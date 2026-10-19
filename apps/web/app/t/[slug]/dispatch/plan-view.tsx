@@ -55,7 +55,7 @@ import { LoadHelpersCell, type HelperOption } from './load-helpers-picker';
 import { helperClashes, helpersText } from '@/lib/dispatch/load-helpers';
 import type { ApiResult } from './client-api';
 import type { LoadTurnaround, OutcomeOverlay, OverlayPhoto, OverlayStop } from '@/lib/delivery/outcome-view';
-import { officeTimesPrefill } from '@/lib/delivery/office-text';
+import { awayText, officeTimesPrefill } from '@/lib/delivery/office-text';
 import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
 import { PhotoViewer } from './photo-viewer';
 import { CameraExceptions } from './camera-exceptions';
@@ -2025,6 +2025,12 @@ function StopResultCells({ o, tz, canRecord, onRecord, onPhotos }: { o: OverlayS
       <td data-testid="stop-left">
         {fmtClock(o.departedAt, tz)}
         {o.departureNote ? <span className="block text-muted-foreground">{o.departureNote}</span> : null}
+        {/* Owner request 19 Oct 2026: the truck left the customer and came back (GPS); not counted as unloading. */}
+        {awayText(o.awayMin) ? (
+          <span className="block text-amber-700" data-testid="stop-away" title="The GPS showed the truck away from the customer (beyond 500 m, or at another customer) and back: not counted as unloading">
+            {awayText(o.awayMin)}
+          </span>
+        ) : null}
       </td>
       <td data-testid="stop-unload" title={o.actualLabel ?? undefined}>
         {o.plannedMin !== null || o.actualMin !== null ? `plan ${o.plannedMin ?? '—'} / actual ${o.actualMin ?? '—'} min` : '—'}
