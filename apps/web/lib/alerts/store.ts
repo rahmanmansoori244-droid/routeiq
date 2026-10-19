@@ -94,9 +94,14 @@ export interface StoredAlert {
    * that ended its day lives on (ALERT_AFTER_DAY_RULES). Absent: raised before it.
    */
   firstSeenAt?: Date | null;
+  /** The customer the row names (absent: not read; the update then never compares it). */
+  customerId?: string | null;
 }
 
-/** The columns the store writes on a raise, an escalation, an update or a reopen. */
+/**
+ * The columns the store writes on a raise, an escalation, an update or a reopen. Never a cause & action column
+ * (review*, owner request 20 Oct 2026): what the office recorded stays through every one of them.
+ */
 export interface AlertFields {
   kind?: AlertKind;
   severity?: AlertSeverity;
@@ -105,6 +110,12 @@ export interface AlertFields {
   threshold?: number;
   text?: string;
   truckCode?: string;
+  /**
+   * The stop's customer now (critique of the cause & action design, item 6): a stop's row is keyed by its
+   * sequence, so after a re-plan another customer can take it; the text already named the new one, and the
+   * customer column (the export's Customer) now follows it. Data only: raising, closing and e-mail unchanged.
+   */
+  customerId?: string | null;
   factsJson?: Record<string, unknown> | null;
   mayToast?: boolean;
   mayEmail?: boolean;
@@ -210,6 +221,7 @@ function fieldsOf(c: Candidate, now: Date): AlertFields {
     threshold: Math.round(c.threshold),
     text: c.text,
     truckCode: c.truckCode,
+    customerId: c.customerId,
     factsJson: c.facts ?? null,
     mayToast: d.mayToast,
     mayEmail: d.mayEmail,
@@ -326,7 +338,8 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
       continue;
     }
     const moved = Math.abs(Math.round(c.value) - row.value) >= ALERT_VALUE_STEP;
-    if (moved || wordsOf(c.text) !== wordsOf(row.text) || c.kind !== row.kind || c.truckCode !== row.truckCode) {
+    const otherCustomer = row.customerId !== undefined && (c.customerId ?? null) !== (row.customerId ?? null);
+    if (moved || wordsOf(c.text) !== wordsOf(row.text) || c.kind !== row.kind || c.truckCode !== row.truckCode || otherCustomer) {
       // The tier stays (it never goes down while open), and so does the severity.
       const { tier: _t, severity: _s, mayToast: _mt, mayEmail: _me, ...rest } = fieldsOf(c, now);
       void _t;
@@ -505,8 +518,10 @@ export function storedOf(r: {
   resolvedAt: Date | null;
   resolvedReason?: string | null;
   firstSeenAt?: Date | null;
+  customerId?: string | null;
 }): StoredAlert {
   return {
+    ...(r.customerId !== undefined ? { customerId: r.customerId } : {}),
     id: r.id,
     rule: r.rule,
     subjectKey: r.subjectKey,
@@ -524,19 +539,67 @@ export function storedOf(r: {
 }
 
 /** The columns facts.ts reads of the rows already there. */
-export const STORED_SELECT = { id: true, rule: true, subjectKey: true, kind: true, tier: true, value: true, text: true, truckCode: true, depotId: true, deliveryDate: true, resolvedAt: true, resolvedReason: true, firstSeenAt: true } as const;
+export const STORED_SELECT = { id: true, rule: true, subjectKey: true, kind: true, tier: true, value: true, text: true, truckCode: true, depotId: true, deliveryDate: true, resolvedAt: true, resolvedReason: true, firstSeenAt: true, customerId: true } as const;
 
 // ---------------------------------------------------------------------------------------------
 // Retention
 // ---------------------------------------------------------------------------------------------
 
+/** What the retention did for one company. */
+export interface AlertPurgeCounts {
+  /** Rows deleted. */
+  alerts: number;
+  /** Of them, rows with a cause & action. */
+  reviewed: number;
+  /** Rows still open past `cutoffIso` closed as EXPIRED before their details were removed. */
+  closed: number;
+  /** Rows whose details were removed now. */
+  detailsRemoved: number;
+  /** E-mail records deleted. */
+  digests: number;
+}
+
 /**
- * Rows of a delivery date before `cutoffIso` (the company's today - ALERT_RETENTION_DAYS) and e-mail
- * digests older than `digestCutoff` are deleted (they hold customer names and shortened driver notes).
+ * The alerts' retention. E-mail records older than `digestCutoff` are deleted. Alert rows of a delivery date
+ * before `cutoffIso` (the company's today - ALERT_RETENTION_DAYS: they hold customer names and shortened driver
+ * notes) lose them:
+ * - without `keepUntilIso` (as before the cause & action): they are deleted;
+ * - with `keepUntilIso` (an earlier date: the analysis data's retention, owner request 20 Oct 2026; critique of
+ *   the design, items 2-4): every row is kept until then, so the share of alerts with a cause & action and the
+ *   false alarms per rule can still be counted for a range older than 90 days. Its details are removed: the
+ *   text becomes '', the facts only "by GPS" ({"gps":true} or NULL), the e-mail error and the cause & action's
+ *   free texts (note, Other texts) NULL; the codes, numbers, times and names stay; detailsRemovedAt makes it
+ *   read-only. A row still open (alerts were switched off, so no sweep closed it) is closed as EXPIRED first,
+ *   so no later sweep writes its words back. Rows before `keepUntilIso` are deleted.
  * `db`: a transaction or the app's client (lib/db.ts, with the IVMS link's global omit; the retention janitor).
  */
-export async function purgeOldAlertRows(db: Tx | AppPrismaClient, tenantId: string, cutoffIso: string, digestCutoff: Date): Promise<{ alerts: number; digests: number }> {
-  const alerts = (await db.opsAlert.deleteMany({ where: { tenantId, deliveryDate: { lt: dateOnly(cutoffIso) } } })).count;
+export async function purgeOldAlertRows(
+  db: Tx | AppPrismaClient,
+  tenantId: string,
+  cutoffIso: string,
+  digestCutoff: Date,
+  opts: { keepUntilIso?: string | null; now?: Date } = {},
+): Promise<AlertPurgeCounts> {
+  const keep = opts.keepUntilIso && opts.keepUntilIso < cutoffIso ? opts.keepUntilIso : null;
+  const deleteBefore = dateOnly(keep ?? cutoffIso);
+  const reviewed = await db.opsAlert.count({ where: { tenantId, deliveryDate: { lt: deleteBefore }, reviewedAt: { not: null } } });
+  const alerts = (await db.opsAlert.deleteMany({ where: { tenantId, deliveryDate: { lt: deleteBefore } } })).count;
+  let closed = 0;
+  let detailsRemoved = 0;
+  if (keep) {
+    const now = opts.now ?? new Date();
+    closed = (await db.opsAlert.updateMany({ where: { tenantId, deliveryDate: { lt: dateOnly(cutoffIso) }, resolvedAt: null }, data: { resolvedAt: now, resolvedReason: 'EXPIRED' } })).count;
+    detailsRemoved = await db.$executeRaw`
+      UPDATE "OpsAlert"
+      SET "text" = '',
+          "factsJson" = CASE WHEN "factsJson"->>'gps' = 'true' THEN '{"gps":true}'::jsonb ELSE NULL END,
+          "emailError" = NULL,
+          "reviewNote" = NULL,
+          "reviewCauseOther" = NULL,
+          "reviewActionOther" = NULL,
+          "detailsRemovedAt" = ${now}
+      WHERE "tenantId" = ${tenantId} AND "deliveryDate" < ${cutoffIso}::date AND "detailsRemovedAt" IS NULL`;
+  }
   const digests = (await db.opsAlertDigest.deleteMany({ where: { tenantId, createdAt: { lt: digestCutoff } } })).count;
-  return { alerts, digests };
+  return { alerts, reviewed, closed, detailsRemoved, digests };
 }

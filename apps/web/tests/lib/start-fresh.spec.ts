@@ -395,6 +395,24 @@ describe('the run removes only what the preview showed (PREVIEW_STALE)', () => {
     expect(r.removed.orders).toBe(5);
   });
 
+  it('alerts with a cause & action (owner request 20 Oct 2026: the office\'s own input) are a line of their own, in the audit row too; one recorded after the check is stale', async () => {
+    // None recorded: no line, as before.
+    expect((await preview(null)).removed).not.toHaveProperty('alertReviews');
+    tables.opsAlert!.find((a) => a.id === 'aal2')!.reviewedAt = new Date('2026-10-02T08:00:00Z');
+    const shown = startFreshShown(await preview(null));
+    expect(shown.removed.alertReviews).toBe(1);
+    tables.opsAlert!.find((a) => a.id === 'aal6')!.reviewedAt = new Date('2026-10-04T05:00:00Z');
+    const fresh = await preview(null);
+    expect(startFreshStale(shown, fresh)).toEqual(['Alerts with a cause & action recorded by the office (removed with the alerts of these days): 1 shown, now 2']);
+    await expect(run(null, { shown })).rejects.toMatchObject({ details: { code: 'PREVIEW_STALE' } });
+    const r = await run(null, { shown: startFreshShown(fresh) });
+    expect(r.removed.alertReviews).toBe(2);
+    // Not added to the total: the alerts themselves are no line of the panel.
+    expect(startFreshTotal(r.removed)).toBe(startFreshTotal({ ...r.removed, alertReviews: undefined }));
+    const audit = tables.auditLog!.find((a) => a.tenantId === 'tA' && a.action === 'TEST_DATA_CLEARED')!;
+    expect(audit.afterJson).toMatchObject({ removed: { alertReviews: 2 }, alertsRemoved: 2 });
+  });
+
   it('a new live load since the check is stale too; fewer rows than shown is not', async () => {
     const shown = startFreshShown(await preview(null));
     tables.planLoad!.find((l) => l.id === 'ald6')!.status = 'DISPATCHED';

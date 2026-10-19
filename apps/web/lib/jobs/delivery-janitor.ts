@@ -15,11 +15,13 @@
  *   later) is hidden from the Driver list (active false; the quick add finds and reactivates them by
  *   phone); after locationRetentionDays without a load their phone number is erased (the name stays:
  *   plans and audit rows show it).
- * - purgeOldAlerts (once a day, operations alerts of 16 Oct 2026): alert rows of a delivery date older
- *   than 90 days and alert e-mail records older than 90 days are deleted.
+ * - purgeOldAlerts (once a day, operations alerts of 16 Oct 2026): alert e-mail records older than 90 days
+ *   are deleted; alert rows of a delivery date older than 90 days lose their text, facts and free texts (a
+ *   row still open is closed first), and are deleted once older than the analysis data's retention (owner
+ *   request 20 Oct 2026: their cause & action is decision data, lib/alerts/store.ts purgeOldAlertRows).
  *
  * Each sweep works per company in batches of 200, at most 5 batches, and writes one audit row per
- * company per sweep that changed something (the alert rows: none, they are derived). The deletions
+ * company per sweep that changed something (the alerts: OPS_ALERTS_PURGED, counts only). The deletions
  * reach the live database only: Railway's backups keep the old data until they expire (docs/admin.md,
  * SECURITY.md).
  */
@@ -30,6 +32,7 @@ import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, todayIso } from '../dispatch/t
 import { DEFAULT_LOCATION_RETENTION_DAYS, DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
 import { ALERT_RETENTION_DAYS } from '../alerts/catalog';
 import { purgeOldAlertRows } from '../alerts/store';
+import { ANALYSIS_RETENTION_BOUNDS, DEFAULT_ANALYSIS_RETENTION_DAYS } from '../analysis/types';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -43,16 +46,19 @@ interface TenantRetention {
   tenantId: string;
   photoRetentionDays: number;
   locationRetentionDays: number;
+  /** The analysis data's retention (Settings, Keep analysis data): how long an alert row's codes stay. */
+  analysisRetentionDays: number;
   timezone: string;
 }
 
 async function tenants(db: Db): Promise<TenantRetention[]> {
-  const rows = await db.tenantConfig.findMany({ select: { tenantId: true, photoRetentionDays: true, locationRetentionDays: true, timezone: true } });
+  const rows = await db.tenantConfig.findMany({ select: { tenantId: true, photoRetentionDays: true, locationRetentionDays: true, analysisRetentionDays: true, timezone: true } });
   return rows.map((r) => ({
     tenantId: r.tenantId,
     photoRetentionDays: Math.max(30, r.photoRetentionDays ?? DEFAULT_PHOTO_RETENTION_DAYS),
     // Never kept longer than the photos (spec section 3).
     locationRetentionDays: Math.max(30, Math.min(r.locationRetentionDays ?? DEFAULT_LOCATION_RETENTION_DAYS, r.photoRetentionDays ?? DEFAULT_PHOTO_RETENTION_DAYS)),
+    analysisRetentionDays: Math.min(ANALYSIS_RETENTION_BOUNDS.max, Math.max(ANALYSIS_RETENTION_BOUNDS.min, r.analysisRetentionDays ?? DEFAULT_ANALYSIS_RETENTION_DAYS)),
     timezone: r.timezone || DEFAULT_TZ,
   }));
 }
@@ -214,16 +220,39 @@ export async function clearIdleCasualDrivers(now: Date = new Date(), db: Db = pr
 }
 
 /**
- * Operations alerts (owner request 16 Oct 2026): rows of a delivery date older than ALERT_RETENTION_DAYS
- * (90; they hold customer names and shortened driver notes) and alert e-mail records older than that.
- * Per company, by its own today. No audit row: the rows are derived from data that stays.
+ * Operations alerts (owner request 16 Oct 2026): alert e-mail records older than ALERT_RETENTION_DAYS (90) are
+ * deleted. Alert rows of a delivery date older than 90 days (they hold customer names and shortened driver
+ * notes) lose their text, facts and the cause & action's free texts, a row still open closing first as EXPIRED;
+ * the rows themselves stay until the company's analysis data retention (Keep analysis data, 730 days by
+ * default, never less than 90), so the causes and actions recorded (owner request 20 Oct 2026) and the share of
+ * alerts with one can still be counted (lib/alerts/store.ts purgeOldAlertRows). Per company, by its own today.
+ * One audit row OPS_ALERTS_PURGED (counts only) when rows changed: the rows now hold the office's own input.
+ * To go back to deleting every row at 90 days, pass no keepUntilIso.
  */
-export async function purgeOldAlerts(now: Date = new Date(), db: Db = prisma): Promise<{ alerts: number; digests: number }> {
-  const out = { alerts: 0, digests: 0 };
+export async function purgeOldAlerts(
+  now: Date = new Date(),
+  db: Db = prisma,
+): Promise<{ alerts: number; reviewed: number; closed: number; detailsRemoved: number; digests: number }> {
+  const out = { alerts: 0, reviewed: 0, closed: 0, detailsRemoved: 0, digests: 0 };
   for (const t of await tenants(db)) {
-    const cutoffIso = addDaysIso(todayIso(t.timezone, now), -ALERT_RETENTION_DAYS);
-    const r = await purgeOldAlertRows(db, t.tenantId, cutoffIso, new Date(now.getTime() - ALERT_RETENTION_DAYS * DAY_MS));
+    const today = todayIso(t.timezone, now);
+    const cutoffIso = addDaysIso(today, -ALERT_RETENTION_DAYS);
+    const keepDays = Math.max(ALERT_RETENTION_DAYS, t.analysisRetentionDays);
+    const r = await purgeOldAlertRows(db, t.tenantId, cutoffIso, new Date(now.getTime() - ALERT_RETENTION_DAYS * DAY_MS), { keepUntilIso: addDaysIso(today, -keepDays), now });
+    if (r.alerts || r.closed || r.detailsRemoved) {
+      await audit({
+        tenantId: t.tenantId,
+        userId: null,
+        action: 'OPS_ALERTS_PURGED',
+        entity: 'Tenant',
+        entityId: t.tenantId,
+        afterJson: { deleted: r.alerts, deletedWithCauseAndAction: r.reviewed, closedAsExpired: r.closed, detailsRemoved: r.detailsRemoved, detailsAfterDays: ALERT_RETENTION_DAYS, rowsAfterDays: keepDays } as never,
+      });
+    }
     out.alerts += r.alerts;
+    out.reviewed += r.reviewed;
+    out.closed += r.closed;
+    out.detailsRemoved += r.detailsRemoved;
     out.digests += r.digests;
   }
   return out;
@@ -242,7 +271,7 @@ export async function runDeliveryJanitor(now: Date = new Date(), opts: { force?:
   const locations = await purgeOldLocations(now);
   const dayKey = now.toISOString().slice(0, 10);
   let casual: { deactivated: number; phonesCleared: number } | null = null;
-  let alerts: { alerts: number; digests: number } | null = null;
+  let alerts: Awaited<ReturnType<typeof purgeOldAlerts>> | null = null;
   if (opts.force || g.__routeiqCasualSweepDay !== dayKey) {
     g.__routeiqCasualSweepDay = dayKey;
     casual = await clearIdleCasualDrivers(now);

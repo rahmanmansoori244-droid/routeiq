@@ -10,10 +10,10 @@
 import ExcelJS from 'exceljs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildTruckDayFacts, type TruckDayFacts } from '@/lib/analysis/build';
-import { pinsToReview } from '@/lib/analysis/export';
+import { ALERT_SHEET, pinsToReview } from '@/lib/analysis/export';
 import { analysisDefaultRange, analysisExportUrl, analysisRangeProblem } from '@/lib/analysis/view';
 import { distanceM } from '@/lib/dispatch/snapshots';
-import { A, C, dayOne, dayPinOff, factDb, SETTINGS } from './analysis-fakes';
+import { A, atOn, C, dayOne, dayPinOff, factDb, matches, SETTINGS } from './analysis-fakes';
 
 const { session, scopedTo } = vi.hoisted(() => ({
   session: { value: null as null | { user: { id: string; name: string; role: string; tenantId: string; email: string } } },
@@ -58,6 +58,33 @@ function seed() {
   }
   const b = dayOne(D2);
   put('tB', buildTruckDayFacts({ ...b.input, truckCode: 'T-900' }, SETTINGS, { kind: 'TRAIL', points: b.tr.pts, zoneMoves: [], deviceIn: [] }, { now: NOW }));
+  // Operations alerts with their cause & action (owner request 20 Oct 2026), in the sheet's order (the stand-in
+  // does not sort): one saved twice with another alert of the incident, one without, one of company B.
+  const none = { reviewCause: null, reviewCauseOther: null, reviewAction: null, reviewActionOther: null, reviewNote: null, reviewFollowUp: false, reviewFirstAt: null, reviewFirstBy: null, reviewedAt: null, reviewedBy: null, reviewSaves: 0, reviewGroupId: null, reviewTier: null, reviewOccurrences: null, reviewCustomerId: null, detailsRemovedAt: null };
+  const alertRow = (extra: Record<string, unknown>) => ({
+    tenantId: 'tA', depotId: 'dep-1', truckCode: 'T-100', loadNo: 1, sequence: null, customerId: null, severity: 'WARN', tier: 1, value: 35, threshold: 30,
+    factsJson: null, resolvedAt: null, resolvedReason: null, occurrences: 1, ackedAt: null, ackedBy: null, ...none, ...extra,
+  });
+  const alerts: Record<string, unknown>[] = [];
+  db.opsAlert = { findMany: async (a: Record<string, any> = {}) => alerts.filter((r) => matches(r, a.where)).map((r) => ({ ...r })) };
+  alerts.push(
+    alertRow({
+      id: 'al-1', deliveryDate: new Date(`${D1}T00:00:00.000Z`), rule: 'UNLOAD_OVER', sequence: 1, customerId: 'cust-1', severity: 'HIGH', tier: 2, value: 70,
+      text: 'T-100 L1 stop 1 Shop Example One (TST0001): unloading 70 min.', factsJson: { gps: true },
+      occurredAt: atOn(D1, '09:00'), firstSeenAt: atOn(D1, '09:02'), lastSeenAt: atOn(D1, '09:30'), resolvedAt: atOn(D1, '10:00'), resolvedReason: 'ENDED', occurrences: 2,
+      ackedAt: atOn(D1, '09:10'), ackedBy: { name: 'Office Example' },
+      reviewCause: 'WAITING_AT_CUSTOMER', reviewAction: 'CALLED_CUSTOMER', reviewNote: 'Receiver busy', reviewFirstAt: atOn(D1, '09:12'), reviewFirstBy: { name: 'Office Example' },
+      reviewedAt: atOn(D1, '09:40'), reviewedBy: { name: 'Lead Example' }, reviewSaves: 2, reviewGroupId: 'al-1', reviewTier: 2, reviewOccurrences: 1, reviewCustomerId: 'cust-1',
+    }),
+    alertRow({
+      id: 'al-3', deliveryDate: new Date(`${D1}T00:00:00.000Z`), rule: 'DRIVER_SILENT', text: 'T-100 L1: nothing from the driver for 130 min.',
+      occurredAt: atOn(D1, '09:05'), firstSeenAt: atOn(D1, '11:20'), lastSeenAt: atOn(D1, '11:20'),
+      reviewCause: 'OTHER', reviewCauseOther: 'Phone left at the depot', reviewAction: 'NONE_YET', reviewFollowUp: true, reviewFirstAt: atOn(D1, '09:40'), reviewFirstBy: { name: 'Lead Example' },
+      reviewedAt: atOn(D1, '09:40'), reviewedBy: { name: 'Lead Example' }, reviewSaves: 1, reviewGroupId: 'al-1', reviewTier: 1, reviewOccurrences: 1,
+    }),
+    alertRow({ id: 'al-2', deliveryDate: new Date(`${D2}T00:00:00.000Z`), rule: 'ETA_LATE', text: 'T-100 L1 is running about 35 min late.', occurredAt: atOn(D2, '08:00'), firstSeenAt: atOn(D2, '08:02'), lastSeenAt: atOn(D2, '08:30') }),
+    alertRow({ id: 'bl-1', tenantId: 'tB', deliveryDate: new Date(`${D2}T00:00:00.000Z`), rule: 'ETA_LATE', truckCode: 'T-900', text: 'Other company shop alert', occurredAt: atOn(D2, '08:00'), firstSeenAt: atOn(D2, '08:00'), lastSeenAt: atOn(D2, '08:00') }),
+  );
   const rows = (list: Record<string, any>[]) => ({
     findMany: async (a: Record<string, any> = {}) => list.filter((r) => Object.entries(a.where ?? {}).every(([k, v]) => (typeof v === 'object' && v && 'in' in v ? (v as { in: unknown[] }).in.includes(r[k]) : r[k] === v))),
     findFirst: async (a: Record<string, any> = {}) => list.find((r) => Object.entries(a.where ?? {}).every(([k, v]) => r[k] === v)) ?? null,
@@ -145,7 +172,7 @@ describe('the workbook', () => {
   it('the sheets, the caller\'s company only, the pins to review and the late result taps', async () => {
     as('PLANNER');
     const s = await sheets(await GET(req(`from=${D1}&to=${D2}`)));
-    expect(Object.keys(s)).toEqual(['ReadMe', 'Truck days', 'Visits', 'Sub-stays', 'Legs', 'Depot turns', 'Pins to review', 'Late result taps']);
+    expect(Object.keys(s)).toEqual(['ReadMe', 'Truck days', 'Visits', 'Sub-stays', 'Legs', 'Depot turns', 'Pins to review', 'Late result taps', 'Alert causes & actions']);
     const header = (name: string) => s[name]![0]!.map(String);
     const col = (name: string, h: string) => s[name]!.slice(1).map((r) => r[header(name).indexOf(h)]);
     // Company A only: two truck-days of T-100 and T-200 each; company B's T-900 of the same date never in the file.
@@ -206,5 +233,105 @@ describe('the workbook', () => {
     expect(row.pinNowToStandingM).toBeGreaterThan(120);
     expect(row.pinNowToStandingM).toBeLessThan(160);
     expect(row.standingPoint).not.toBeNull();
+  });
+});
+
+describe('the alert causes & actions (owner request 20 Oct 2026)', () => {
+  const sheetOf = (s: Record<string, (string | number | boolean | null)[][]>) => {
+    const rows = s[ALERT_SHEET]!;
+    const header = rows[0]!.map(String);
+    return rows.slice(1).map((r) => Object.fromEntries(header.map((h, i) => [h, r[i] ?? null])));
+  };
+
+  it('the last sheet of the Analysis data: every alert of the range of the company, with and without a cause & action', async () => {
+    as('PLANNER');
+    const s = await sheets(await GET(req(`from=${D1}&to=${D2}`)));
+    const rows = sheetOf(s);
+    expect(rows.map((r) => [r['Date'], r['Truck'], r['Rule no'], r['Rule']])).toEqual([
+      [D1, 'T-100', 'R1', 'Unloading longer than planned'],
+      [D1, 'T-100', 'R5', 'Driver silent'],
+      [D2, 'T-100', 'R3', 'Running late'],
+    ]);
+    expect(JSON.stringify(s[ALERT_SHEET])).not.toMatch(/Other company shop|T-900/);
+    const [one, silent, none] = rows as Record<string, unknown>[];
+    expect(one).toMatchObject({
+      Depot: 'DEP-A',
+      Trip: 1,
+      Stop: 1,
+      'Customer code': 'TST0001',
+      Customer: 'Shop Example One',
+      'Cause & action list': 'Unloading',
+      'By GPS': 'Yes',
+      Severity: 'High',
+      Tier: 2,
+      Value: 70,
+      Threshold: 30,
+      Unit: 'min',
+      Started: '09:00',
+      'First seen': '09:02',
+      'Came back (times)': 1,
+      State: 'Over',
+      'Closed as': 'Over',
+      'Acknowledged by': 'Office Example',
+      'Cause code': 'WAITING_AT_CUSTOMER',
+      Cause: 'Waiting at the customer (queue, receiver busy, paperwork)',
+      'Action code': 'CALLED_CUSTOMER',
+      Action: 'Called the customer',
+      Note: 'Receiver busy',
+      'Follow-up': 'No',
+      'First saved by': 'Office Example',
+      'First saved': '09:12',
+      'Last saved by': 'Lead Example',
+      'Last saved': '09:40',
+      'Edited (times)': 1,
+      'Minutes from first seen to first save': 10,
+      'Saved while the alert was open': 'Yes',
+      'Came back after the save': 'Yes',
+      'Got worse after the save': 'No',
+      'Now about another customer': 'No',
+      Incident: 1,
+      'Details removed (90 days)': 'No',
+    });
+    // Saved with the first one (one incident); saved before it was first seen: no minutes (critique item 8).
+    expect(silent).toMatchObject({ 'Cause code': 'OTHER', 'Cause (other)': 'Phone left at the depot', 'Action code': 'NONE_YET', 'Follow-up': 'Yes', Incident: 1, 'Minutes from first seen to first save': null, 'By GPS': 'No' });
+    // No cause & action: the alert is there, its cause & action columns are empty, so both can be counted.
+    expect(none).toMatchObject({ State: 'Open', 'Cause code': null, Cause: null, 'Follow-up': null, 'Last saved by': null, 'Saved while the alert was open': null, Incident: null });
+    const readme = JSON.stringify(s['ReadMe']);
+    expect(readme).toContain('Alert causes & actions (owner request 20 Oct 2026)');
+    expect(readme).toContain('Other: read the Other causes and actions once a month');
+  });
+
+  it('only=alerts: the ReadMe and this sheet alone, no fact read, up to 366 days; another "only" is 400', async () => {
+    as('PLANNER');
+    const db = store.db!;
+    let factReads = 0;
+    for (const m of ['factTruckDay', 'factVisit', 'factLeg', 'factDepotTurn']) {
+      const orig = db[m].findMany;
+      db[m].findMany = async (a: unknown) => {
+        factReads++;
+        return orig(a);
+      };
+    }
+    const res = await GET(req(`from=${D1}&to=${D2}&only=alerts`));
+    expect(res.headers.get('content-disposition')).toBe(`attachment; filename="alert-causes-${D1}_${D2}.xlsx"`);
+    const s = await sheets(res);
+    expect(Object.keys(s)).toEqual(['ReadMe', ALERT_SHEET]);
+    expect(sheetOf(s)).toHaveLength(3);
+    expect(factReads).toBe(0);
+    expect((await GET(req('from=2025-10-20&to=2026-10-20&only=alerts'))).status).toBe(200); // 366 days
+    const code = async (q: string) => {
+      const r = await GET(req(q));
+      return [r.status, ((await r.json()) as { error: { code?: string } }).error?.code];
+    };
+    expect(await code('from=2025-10-19&to=2026-10-20&only=alerts')).toEqual([400, 'RANGE_TOO_LONG']);
+    expect(await code(`from=${D1}&to=${D2}&only=facts`)).toEqual([400, 'INVALID_ONLY']);
+    as('VIEWER');
+    expect((await GET(req(`from=${D1}&to=${D2}&only=alerts`))).status).toBe(403);
+  });
+
+  it('the browser-side link and range rules of the Alerts page', () => {
+    expect(analysisExportUrl(D1, D2, 'dep-1', { only: 'alerts' })).toBe(`/api/analysis/export?from=${D1}&to=${D2}&depotId=dep-1&only=alerts`);
+    expect(analysisRangeProblem('2025-10-20', '2026-10-20', 'alerts')).toBeNull();
+    expect(analysisRangeProblem('2025-10-19', '2026-10-20', 'alerts')).toMatch(/366 days/);
   });
 });

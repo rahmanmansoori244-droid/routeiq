@@ -4,7 +4,7 @@
  * settings fields, and migration 20261016180000_ops_alerts (the column defaults and CHECKs repeat the
  * catalog). Names are invented (public repository).
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -42,6 +42,35 @@ import {
   type AlertConfig,
 } from '@/lib/alerts/catalog';
 import { alertStateOf, needsAttention, toOpsAlertRow } from '@/lib/alerts/types';
+import {
+  ALERT_REVIEW_ACTION_TEXT,
+  ALERT_REVIEW_ACTIONS,
+  ALERT_REVIEW_CAUSE_TEXT,
+  ALERT_REVIEW_CAUSES,
+  ALERT_REVIEW_CODE_RE,
+  ALERT_REVIEW_NOTE_MAX,
+  ALERT_REVIEW_OTHER_MAX,
+  ALERT_REVIEW_OTHER_MIN,
+  REVIEW_FAMILIES,
+  REVIEW_FAMILY_ACTIONS,
+  REVIEW_FAMILY_CAUSES,
+  REVIEW_FAMILY_OF,
+  actionLabel,
+  causeLabel,
+  charCount,
+  cutChars,
+  forcesFollowUp,
+  normaliseReview,
+  reviewCameBack,
+  reviewCodesFor,
+  reviewFamilyOf,
+  reviewFitsRule,
+  reviewGotWorse,
+  reviewOptions,
+  reviewOtherStop,
+  sameReview,
+} from '@/lib/alerts/review';
+import { alertReviewFlags, alertReviewText, alertText, reviewActionText, reviewCauseText } from '@/lib/alerts/view';
 import { ALERT_DETAIL_FIELDS, ALERT_SETTING_BOUNDS, ALERT_SETTINGS_FIELDS, DISPATCHER_SETTINGS_FIELDS, SETTINGS_FIELDS, alertQuietSaveProblem } from '@/lib/settings-fields';
 import { tenantConfigSchema } from '@/lib/schemas';
 import { BACK_AFTER_RETURN_MIN } from '@/lib/delivery/day-results';
@@ -317,14 +346,22 @@ describe('row states (review H4)', () => {
 });
 
 describe('the shared modules stay browser-safe', () => {
-  it('catalog.ts and types.ts import no server module', () => {
-    for (const f of ['lib/alerts/catalog.ts', 'lib/alerts/types.ts']) {
+  it('catalog.ts, types.ts and review.ts import no server module', () => {
+    const allowed: Record<string, string[]> = {
+      'lib/alerts/catalog.ts': ['./catalog', '../dispatch/time'],
+      'lib/alerts/types.ts': ['./catalog', '../dispatch/time', './review'],
+      // The cause & action lists (owner request 20 Oct 2026): the dialog, the API and the export share them.
+      'lib/alerts/review.ts': ['./catalog', './text'],
+    };
+    for (const [f, ok] of Object.entries(allowed)) {
       const imports = [...read(f).matchAll(/^import\s+(type\s+)?[^;]*?from\s+'([^']+)'/gm)].map((m) => ({ typeOnly: !!m[1], from: m[2]! }));
       for (const i of imports) {
         if (i.from === '@prisma/client') expect(i.typeOnly, `${f}: ${i.from}`).toBe(true);
-        else expect(['./catalog', '../dispatch/time'], `${f}: ${i.from}`).toContain(i.from);
+        else expect(ok, `${f}: ${i.from}`).toContain(i.from);
       }
     }
+    // types.ts only takes types from review.ts (no runtime cycle).
+    expect(read('lib/alerts/types.ts')).toMatch(/^import type \{[^}]*\} from '\.\/review';$/m);
   });
 });
 
@@ -385,5 +422,242 @@ describe('alert e-mail only for the companies the server lists (review H1 of 16 
   it("review of the branch (19 Oct 2026, finding 2): only the day's follow-up, Load not closed, is still raised open for a day that is over; it fires after the planned return, a CONDITION of a load", () => {
     expect(ALERT_AFTER_DAY_RULES).toEqual(['LOAD_NOT_CLOSED']);
     for (const r of ALERT_AFTER_DAY_RULES) expect(ALERT_RULE_SPECS[r]).toMatchObject({ kind: 'CONDITION', subject: 'LOAD', threshold: 120 });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Cause & action (owner request 20 Oct 2026: "a place where a note / reason for the alert to have happened and
+// the solution ... will help us gather data for what decisions are made when alerts are made"), with the
+// critique of the design applied: lib/alerts/review.ts, migration 20261020000000_alert_notes, the API row.
+// ---------------------------------------------------------------------------------------------
+
+describe('cause & action: the pick-lists (lib/alerts/review.ts)', () => {
+  it('every rule has a family; a rule no longer in the catalog offers the whole lists', () => {
+    for (const r of ALERT_RULES) expect(REVIEW_FAMILIES, r).toContain(REVIEW_FAMILY_OF[r]);
+    expect(reviewFamilyOf('ETA_LATE')).toBe('LATENESS');
+    expect(reviewFamilyOf('RETIRED_RULE')).toBeNull();
+    expect(reviewCodesFor('RETIRED_RULE')).toEqual({ causes: ALERT_REVIEW_CAUSES, actions: ALERT_REVIEW_ACTIONS });
+  });
+
+  it('family lists are part of the whole lists, without duplicates; every code is offered somewhere; every code has a short label and the database format', () => {
+    for (const f of REVIEW_FAMILIES) {
+      for (const [list, all] of [
+        [REVIEW_FAMILY_CAUSES[f], ALERT_REVIEW_CAUSES],
+        [REVIEW_FAMILY_ACTIONS[f], ALERT_REVIEW_ACTIONS],
+      ] as const) {
+        expect(new Set(list).size, f).toBe(list.length);
+        for (const c of list) expect(all as readonly string[], `${f}: ${c}`).toContain(c);
+      }
+    }
+    for (const c of ALERT_REVIEW_CAUSES) expect(REVIEW_FAMILIES.some((f) => REVIEW_FAMILY_CAUSES[f].includes(c)), c).toBe(true);
+    for (const a of ALERT_REVIEW_ACTIONS) expect(REVIEW_FAMILIES.some((f) => REVIEW_FAMILY_ACTIONS[f].includes(a)), a).toBe(true);
+    for (const c of [...ALERT_REVIEW_CAUSES, ...ALERT_REVIEW_ACTIONS]) expect(c).toMatch(ALERT_REVIEW_CODE_RE);
+    for (const label of [...Object.values(ALERT_REVIEW_CAUSE_TEXT), ...Object.values(ALERT_REVIEW_ACTION_TEXT)]) expect(label.length, label).toBeLessThanOrEqual(70);
+    expect(Object.keys(ALERT_REVIEW_CAUSE_TEXT).sort()).toEqual([...ALERT_REVIEW_CAUSES].sort());
+    expect(Object.keys(ALERT_REVIEW_ACTION_TEXT).sort()).toEqual([...ALERT_REVIEW_ACTIONS].sort());
+  });
+
+  it('every family ends with the same codes, so false alarms, tight settings and the unknown can be counted per rule', () => {
+    for (const f of REVIEW_FAMILIES) {
+      expect(REVIEW_FAMILY_CAUSES[f].slice(-4), f).toEqual(['SETTING_TOO_TIGHT', 'FALSE_ALARM', 'NOT_KNOWN', 'OTHER']);
+      expect(REVIEW_FAMILY_ACTIONS[f].slice(-3), f).toEqual(['NO_ACTION', 'NONE_YET', 'OTHER']);
+    }
+    // Critique item 10a: a tight setting and a false alarm are two causes; "No action needed" says no more.
+    expect(ALERT_REVIEW_CAUSE_TEXT.SETTING_TOO_TIGHT).not.toBe(ALERT_REVIEW_CAUSE_TEXT.FALSE_ALARM);
+    expect(ALERT_REVIEW_ACTION_TEXT.NO_ACTION).toBe('No action needed');
+  });
+
+  it('GPS is no rule: a GPS or tracker problem is offered wherever a rule can read the GPS or a position', () => {
+    for (const f of ['LATENESS', 'UNLOADING', 'DEPOT', 'PIN', 'DRIVER_APP'] as const) expect(REVIEW_FAMILY_CAUSES[f], f).toContain('GPS_ISSUE');
+  });
+
+  it('the NMWC options the owner named, and the critique additions (items 10c and 10d)', () => {
+    const late = REVIEW_FAMILY_CAUSES.LATENESS;
+    const named = ['TRAFFIC', 'CUSTOMER_NOT_READY', 'WAITING_AT_CUSTOMER', 'WRONG_PIN', 'LATE_DEPOT_START', 'LOADING_DELAY', 'LONG_UNLOADING', 'DRIVER_DID_NOT_TAP', 'TRUCK_BREAKDOWN', 'PLAN_WRONG', 'GPS_ISSUE'];
+    for (const c of [...named, 'CUSTOMER_CLOSED', 'OUT_OF_TIME', 'ACCESS_PROBLEM', 'EARLIER_STOPS_LONG', 'NO_CREW', 'NEW_DRIVER', 'CUSTOMER_ASKED_OTHER_TIME']) expect(late, c).toContain(c);
+    const actions = ['CALLED_DRIVER', 'CALLED_CUSTOMER', 'REPLANNED', 'MOVED_TRUCK', 'POSTPONED', 'FIXED_PIN', 'CHANGED_CUSTOMER_TIMES', 'NO_ACTION'];
+    for (const a of [...actions, 'DELIVERED_LATER', 'CANCELLED_ORDER', 'CALLED_WAREHOUSE']) expect(REVIEW_FAMILY_ACTIONS.LATENESS, a).toContain(a);
+    expect(REVIEW_FAMILY_ACTIONS.DRIVER_APP).toContain('SHOWED_DRIVER_PAGE');
+  });
+});
+
+describe('cause & action: normaliseReview', () => {
+  const ok = (rule: string, input: Record<string, unknown>, current: { cause?: string; action?: string } | null = null) => {
+    const r = normaliseReview(rule, { cause: 'TRAFFIC', action: 'CALLED_DRIVER', ...input } as never, current);
+    if (!r.ok) throw new Error(r.message);
+    return r.value;
+  };
+  const refused = (rule: string, input: Record<string, unknown>, current: { cause?: string; action?: string } | null = null) => {
+    const r = normaliseReview(rule, { cause: 'TRAFFIC', action: 'CALLED_DRIVER', ...input } as never, current);
+    return r.ok ? null : { code: r.code, field: r.field };
+  };
+
+  it('both codes are needed; the selects start empty, so an empty one is refused, never defaulted', () => {
+    expect(refused('ETA_LATE', { cause: '' })).toEqual({ code: 'REVIEW_CAUSE_REQUIRED', field: 'cause' });
+    expect(refused('ETA_LATE', { action: '' })).toEqual({ code: 'REVIEW_ACTION_REQUIRED', field: 'action' });
+  });
+
+  it('Other needs a text of 3 characters or more after cleaning; an Other text goes with another code', () => {
+    expect(refused('ETA_LATE', { cause: 'OTHER', causeOther: '  ab ' })).toEqual({ code: 'REVIEW_OTHER_REQUIRED', field: 'cause' });
+    expect(refused('ETA_LATE', { action: 'OTHER', actionOther: null })).toEqual({ code: 'REVIEW_OTHER_REQUIRED', field: 'action' });
+    expect(ok('ETA_LATE', { cause: 'OTHER', causeOther: '  Road\nclosed  ' })).toMatchObject({ cause: 'OTHER', causeOther: 'Road closed' });
+    expect(ok('ETA_LATE', { causeOther: 'left over', actionOther: 'left over' })).toMatchObject({ causeOther: null, actionOther: null });
+    expect(ok('ETA_LATE', { action: 'OTHER', actionOther: 'x'.repeat(300) }).actionOther).toHaveLength(ALERT_REVIEW_OTHER_MAX);
+  });
+
+  it('the note: one line, no phone number (dates written with digits go too), at most 500 characters without splitting a character; empty is none', () => {
+    expect(ok('ETA_LATE', { note: 'Driver said: call 9123 4567 for the gate' }).note).toBe('Driver said: call [number] for the gate');
+    expect(ok('ETA_LATE', { note: 'delivered on 20/10/2026' }).note).toBe('delivered on [number]');
+    expect(ok('ETA_LATE', { note: '   ' }).note).toBeNull();
+    expect(ok('ETA_LATE', { note: null }).note).toBeNull();
+    const long = ok('ETA_LATE', { note: `${'a'.repeat(498)}\u{1F600}\u{1F600}\u{1F600}` }).note!;
+    expect(charCount(long)).toBe(ALERT_REVIEW_NOTE_MAX);
+    expect(long).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(cutChars('\u{1F600}\u{1F600}\u{1F600}', 2)).toBe('\u{1F600}…');
+  });
+
+  it('"Nothing yet" and "Not found yet" always need follow-up; follow-up can be asked for any other', () => {
+    expect(ok('ETA_LATE', { action: 'NONE_YET' }).followUp).toBe(true);
+    expect(ok('ETA_LATE', { cause: 'NOT_KNOWN' }).followUp).toBe(true);
+    expect(ok('ETA_LATE', {}).followUp).toBe(false);
+    expect(ok('ETA_LATE', { followUp: true }).followUp).toBe(true);
+    expect(forcesFollowUp({ cause: 'NOT_KNOWN' })).toBe(true);
+  });
+
+  it("a code not offered for the alert's rule is refused, unless it is the one the alert already has; a retired rule takes any", () => {
+    expect(refused('PROOF_FAR', { cause: 'TRAFFIC' })).toEqual({ code: 'REVIEW_CODE_NOT_FOR_RULE', field: 'cause' });
+    expect(refused('PROOF_FAR', { cause: 'WRONG_PIN', action: 'REPLANNED' })).toEqual({ code: 'REVIEW_CODE_NOT_FOR_RULE', field: 'action' });
+    expect(ok('PROOF_FAR', { cause: 'TRAFFIC', action: 'FIXED_PIN' }, { cause: 'TRAFFIC' })).toMatchObject({ cause: 'TRAFFIC' });
+    expect(refused('PROOF_FAR', { cause: 'NO_SUCH_CODE' })).toEqual({ code: 'REVIEW_CODE_NOT_FOR_RULE', field: 'cause' });
+    expect(ok('RETIRED_RULE', { cause: 'PAYMENT_ISSUE', action: 'RESENT_LINK' })).toMatchObject({ cause: 'PAYMENT_ISSUE' });
+    expect(reviewFitsRule('PROOF_FAR', { cause: 'WRONG_PIN', action: 'FIXED_PIN' })).toBe(true);
+    expect(reviewFitsRule('PROOF_FAR', { cause: 'TRAFFIC', action: 'FIXED_PIN' })).toBe(false);
+  });
+
+  it('reviewOptions keeps an earlier choice last, so the row stays editable; sameReview compares every field', () => {
+    const o = reviewOptions('PROOF_FAR', { cause: 'TRAFFIC', action: 'OLD_CODE' });
+    expect(o.causes.at(-1)).toEqual({ code: 'TRAFFIC', label: 'Traffic or road delay (earlier choice)', earlier: true });
+    expect(o.actions.at(-1)).toEqual({ code: 'OLD_CODE', label: 'OLD_CODE (earlier choice)', earlier: true });
+    expect(reviewOptions('PROOF_FAR').causes.map((c) => c.code)).toEqual([...REVIEW_FAMILY_CAUSES.PIN]);
+    expect(causeLabel('GONE')).toBe('GONE');
+    expect(actionLabel('CALLED_DRIVER')).toBe('Called the driver');
+    const v = { cause: 'TRAFFIC', causeOther: null, action: 'CALLED_DRIVER', actionOther: null, note: 'n', followUp: false };
+    expect(sameReview(v, { ...v })).toBe(true);
+    expect(sameReview(v, { ...v, note: null })).toBe(false);
+    expect(sameReview(null, null)).toBe(true);
+    expect(sameReview(v, null)).toBe(false);
+  });
+
+  it('what changed since the save (critique items 5 and 6): came back, got worse, another customer at the stop', () => {
+    const r = { tier: 1, occurrences: 1, customerId: 'c1', review: { tier: 1, occurrences: 1, customerId: 'c1' } };
+    expect([reviewCameBack(r), reviewGotWorse(r), reviewOtherStop(r)]).toEqual([false, false, false]);
+    expect(reviewCameBack({ ...r, occurrences: 2 })).toBe(true);
+    expect(reviewGotWorse({ ...r, tier: 2 })).toBe(true);
+    expect(reviewOtherStop({ ...r, customerId: 'c2' })).toBe(true);
+    expect(reviewCameBack({ ...r, review: null })).toBe(false);
+  });
+});
+
+describe('migration 20261020000000_alert_notes and the schema', () => {
+  const NAME = '20261020000000_alert_notes';
+  const SQL = read(`prisma/migrations/${NAME}/migration.sql`);
+  const statements = SQL.split('\n').filter((l) => l.trim() && !l.trim().startsWith('--'));
+  const body = statements.join('\n');
+
+  it("sorts after every migration before it and after the parallel branch's 20261019180000; it is the last on disk", () => {
+    const dirs = readdirSync(path.join(WEB, 'prisma/migrations')).filter((n) => /^\d{14}_/.test(n)).sort();
+    expect(dirs.at(-1)).toBe(NAME);
+    expect(NAME > '20261019120000_gps_site_radius_away').toBe(true);
+    expect(NAME > '20261019180000_sales_link').toBe(true);
+    expect(SQL).toContain(`DELETE FROM "_prisma_migrations" WHERE migration_name = '${NAME}';`);
+    expect(SQL).toMatch(/-- Rollback:/);
+  });
+
+  it('is additive: takes its locks without waiting first, then adds columns, foreign keys (SET NULL) and CHECKs only', () => {
+    expect(statements.filter((l) => /^\s*(DROP|UPDATE|DELETE|TRUNCATE|INSERT)\b/i.test(l))).toEqual([]);
+    expect(statements.filter((l) => /\b(DROP (COLUMN|TABLE|INDEX|CONSTRAINT|DEFAULT|NOT NULL)|ALTER COLUMN|RENAME)\b/i.test(l))).toEqual([]);
+    const user = body.indexOf('LOCK TABLE "User" IN SHARE ROW EXCLUSIVE MODE NOWAIT;');
+    const alerts = body.indexOf('LOCK TABLE "OpsAlert" IN ACCESS EXCLUSIVE MODE NOWAIT;');
+    const firstAlter = body.indexOf('ALTER TABLE');
+    expect(user).toBeGreaterThan(0);
+    expect(alerts).toBeGreaterThan(user);
+    expect(firstAlter).toBeGreaterThan(alerts);
+    expect(body).toContain('"OpsAlert_reviewedById_fkey" FOREIGN KEY ("reviewedById") REFERENCES "User"("id") ON DELETE SET NULL');
+    expect(body).toContain('"OpsAlert_reviewFirstById_fkey" FOREIGN KEY ("reviewFirstById") REFERENCES "User"("id") ON DELETE SET NULL');
+    expect(body).toContain('"reviewFollowUp" BOOLEAN NOT NULL DEFAULT false');
+    expect(body).toContain('"reviewSaves" INTEGER NOT NULL DEFAULT 0');
+  });
+
+  it("checks the codes' format only (a new code needs no migration: critique item 9) and the app's lengths", () => {
+    const re = ALERT_REVIEW_CODE_RE.source;
+    expect(body).toContain(`CHECK ("reviewCause" IS NULL OR "reviewCause" ~ '${re}')`);
+    expect(body).toContain(`CHECK ("reviewAction" IS NULL OR "reviewAction" ~ '${re}')`);
+    expect(body).not.toMatch(/"reviewCause" IN \(/);
+    expect(body).toContain(`char_length("reviewCauseOther") BETWEEN ${ALERT_REVIEW_OTHER_MIN} AND ${ALERT_REVIEW_OTHER_MAX}`);
+    expect(body).toContain(`char_length("reviewActionOther") BETWEEN ${ALERT_REVIEW_OTHER_MIN} AND ${ALERT_REVIEW_OTHER_MAX}`);
+    expect(body).toContain(`char_length("reviewNote") BETWEEN 1 AND ${ALERT_REVIEW_NOTE_MAX}`);
+    expect(body).toMatch(/CONSTRAINT "OpsAlert_review_whole" CHECK/);
+    expect(body).toMatch(/CONSTRAINT "OpsAlert_review_other" CHECK/);
+    // An Other text may be missing only once the 90-day clean-up removed it.
+    expect(body).toContain('"detailsRemovedAt" IS NOT NULL');
+  });
+
+  it('the schema has the columns, the two user relations and the clean-up marker', () => {
+    const alert = block('OpsAlert');
+    const nullable = ['reviewCause', 'reviewCauseOther', 'reviewAction', 'reviewActionOther', 'reviewNote', 'reviewFirstAt', 'reviewFirstById', 'reviewedAt', 'reviewedById', 'reviewGroupId', 'reviewTier', 'reviewOccurrences', 'reviewCustomerId', 'detailsRemovedAt'];
+    for (const f of nullable) {
+      expect(alert, f).toMatch(new RegExp(`\\n\\s+${f}\\s+\\w+\\?`));
+      expect(body, f).toContain(`"${f}"`);
+    }
+    expect(alert).toMatch(/reviewFollowUp\s+Boolean\s+@default\(false\)/);
+    expect(alert).toMatch(/reviewSaves\s+Int\s+@default\(0\)/);
+    expect(alert).toMatch(/reviewedBy\s+User\?\s+@relation\("OpsAlertReviewedBy", fields: \[reviewedById\], references: \[id\], onDelete: SetNull\)/);
+    expect(alert).toMatch(/reviewFirstBy\s+User\?\s+@relation\("OpsAlertFirstReviewedBy", fields: \[reviewFirstById\], references: \[id\], onDelete: SetNull\)/);
+    expect(block('User')).toMatch(/opsAlertsReviewed\s+OpsAlert\[\]\s+@relation\("OpsAlertReviewedBy"\)/);
+  });
+});
+
+describe('cause & action on the API row', () => {
+  const base = {
+    id: 'a1', tenantId: 't', depotId: 'D1', deliveryDate: new Date('2026-10-16T00:00:00Z'), rule: 'ETA_LATE', subjectKey: 'D1|2026-10-16|T1|1',
+    truckId: 'T1', truckCode: 'T05', loadNo: 1, sequence: null, customerId: null, kind: 'CONDITION', severity: 'WARN', tier: 1, value: 35, threshold: 30,
+    text: 'T05 L1 is running about 35 min late.', factsJson: null, mayToast: true, mayEmail: true,
+    occurredAt: new Date('2026-10-16T05:10:00Z'), firstSeenAt: new Date('2026-10-16T05:12:00Z'), lastSeenAt: new Date('2026-10-16T05:30:00Z'),
+    resolvedAt: null, resolvedReason: null, occurrences: 1, ackedAt: null, ackedById: null, emailedTier: 0, emailedAt: null, digestId: null, emailAttempts: 0, emailError: null,
+    reviewCause: null, reviewCauseOther: null, reviewAction: null, reviewActionOther: null, reviewNote: null, reviewFollowUp: false, reviewFirstAt: null, reviewFirstById: null,
+    reviewedAt: null, reviewedById: null, reviewSaves: 0, reviewGroupId: null, reviewTier: null, reviewOccurrences: null, reviewCustomerId: null, detailsRemovedAt: null,
+  };
+
+  it('none: review null; saved: the codes, texts, who and when by name, never a user id', () => {
+    expect(toOpsAlertRow(base as never)).toMatchObject({ review: null, detailsRemoved: false });
+    const r = toOpsAlertRow({
+      ...base,
+      reviewCause: 'OTHER', reviewCauseOther: 'Road closed', reviewAction: 'CALLED_DRIVER', reviewNote: 'Gate shut', reviewFollowUp: true,
+      reviewFirstAt: new Date('2026-10-16T06:00:00Z'), reviewFirstById: 'u-first', reviewedAt: new Date('2026-10-16T07:00:00Z'), reviewedById: 'u-last', reviewSaves: 2,
+      reviewGroupId: 'a1', reviewTier: 1, reviewOccurrences: 1, reviewCustomerId: null,
+      reviewedBy: { name: 'Sam Example' }, reviewFirstBy: { name: 'Lee Example' },
+    } as never);
+    expect(r.review).toEqual({
+      cause: 'OTHER', causeOther: 'Road closed', action: 'CALLED_DRIVER', actionOther: null, note: 'Gate shut', followUp: true,
+      firstAt: '2026-10-16T06:00:00.000Z', savedAt: '2026-10-16T07:00:00.000Z', byName: 'Sam Example', firstByName: 'Lee Example', saves: 2,
+      groupId: 'a1', tier: 1, occurrences: 1, customerId: null,
+    });
+    expect(JSON.stringify(r)).not.toMatch(/u-first|u-last|reviewedById|emailError|factsJson/);
+    expect(toOpsAlertRow({ ...base, text: '', detailsRemovedAt: new Date() } as never).detailsRemoved).toBe(true);
+  });
+
+  it('the words: the cause & action line, Other with its text, the flags, and an alert whose details were removed', () => {
+    const row = toOpsAlertRow({
+      ...base, occurrences: 2, reviewCause: 'OTHER', reviewCauseOther: 'Road closed', reviewAction: 'CALLED_DRIVER', reviewFirstAt: new Date('2026-10-16T07:02:00Z'),
+      reviewedAt: new Date('2026-10-16T07:02:00Z'), reviewSaves: 1, reviewTier: 1, reviewOccurrences: 1, reviewedBy: { name: 'Sam Example' },
+    } as never);
+    expect(alertReviewText(row, 'Asia/Muscat')).toBe('Cause: Other - Road closed · Action: Called the driver · Sam Example 11:02');
+    expect(alertReviewText(row, 'Asia/Muscat', '2026-10-17')).toBe('Cause: Other - Road closed · Action: Called the driver · Sam Example Yesterday 11:02');
+    expect(reviewCauseText({ cause: 'TRAFFIC', causeOther: null })).toBe('Traffic or road delay');
+    expect(reviewActionText({ action: 'OTHER', actionOther: 'Sent a van' })).toBe('Other - Sent a van');
+    expect(alertReviewFlags(row)).toEqual(['came back after it was saved']);
+    expect(alertReviewText({ ...row, review: null }, 'Asia/Muscat')).toBe('');
+    expect(alertText({ text: '' })).toBe('Details removed after 90 days');
+    expect(alertText({ text: 'T05 L1' })).toBe('T05 L1');
   });
 });

@@ -55,7 +55,7 @@ async function sweep() {
   // most every 10 min (the daily drivers once a day). Its own try as well.
   try {
     const kept = await runDeliveryJanitor();
-    if (kept && (kept.photos.count || kept.locations.events || kept.locations.visits || kept.locations.photos || kept.casual?.deactivated || kept.casual?.phonesCleared || kept.alerts?.alerts || kept.alerts?.digests)) {
+    if (kept && (kept.photos.count || kept.locations.events || kept.locations.visits || kept.locations.photos || kept.casual?.deactivated || kept.casual?.phonesCleared || kept.alerts?.alerts || kept.alerts?.detailsRemoved || kept.alerts?.closed || kept.alerts?.digests)) {
       console.warn('janitor: delivery retention', kept);
     }
   } catch (err) {

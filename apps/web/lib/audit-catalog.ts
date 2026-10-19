@@ -97,6 +97,11 @@ export const AUDIT_ACTIONS = {
   HIRED_TRUCK_CHANGED: { label: 'One-day hired truck: plate or driver set' },
   // Operations alerts (owner request 16 Oct 2026): one row per acknowledgement (raising an alert is not audited).
   ALERTS_ACKNOWLEDGED: { label: 'Operations alerts acknowledged' },
+  // Cause & action of an alert (owner request 20 Oct 2026): one row per alert saved or removed (codes only), and
+  // the nightly clean-up of old alerts (their texts after 90 days, the rows after the analysis data's retention).
+  ALERT_REVIEW_SAVED: { label: 'Alert cause & action saved' },
+  ALERT_REVIEW_REMOVED: { label: 'Alert cause & action removed' },
+  OPS_ALERTS_PURGED: { label: 'Old operations alerts cleaned (texts removed, rows deleted)' },
   ONE_DAY_TRUCKS_RETIRED: { label: 'One-day hired trucks retired after their day' },
   // IVMS live link (16 Oct 2026): the company admin removed a truck-day's GPS times (the undo).
   GPS_TIMES_UNDONE: { label: "GPS times of a truck's day removed" },

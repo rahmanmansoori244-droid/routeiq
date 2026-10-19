@@ -8,8 +8,8 @@ import { ANALYSIS_MAX_DAYS, analysisDefaultRange, analysisExportUrl, analysisRan
 /**
  * "Analysis data (Excel)" on the Dashboard (owner request 19 Oct 2026: "build on more data for our analysis
  * later and improvement"): the facts the nightly job keeps per visit, sub-stay, drive, depot turn and
- * truck-day, plus the pins to review and the late result taps, for a From / To range (the last 30 days up to
- * yesterday by default, at most 92), every depot. Company admin and dispatcher only (the page shows it to
+ * truck-day, plus the pins to review, the late result taps and the alert causes & actions (20 Oct 2026), for
+ * a From / To range (the last 30 days up to yesterday by default, at most 92), every depot. Company admin and dispatcher only (the page shows it to
  * PLANNER and up; the route refuses a VIEWER): the pins to review are office data.
  */
 export function AnalysisExport({ today }: { today: string }) {
@@ -18,7 +18,7 @@ export function AnalysisExport({ today }: { today: string }) {
   return (
     <details className="rounded-md border p-3 text-sm" data-testid="analysis-export">
       <summary className="flex cursor-pointer items-center gap-2 font-medium">
-        <BarChart3 className="h-4 w-4" /> Analysis data (Excel): unloading, drives, depot turns, pins to review
+        <BarChart3 className="h-4 w-4" /> Analysis data (Excel): unloading, drives, depot turns, pins to review, alert causes &amp; actions
       </summary>
       <div className="mt-2 flex flex-wrap items-end gap-2 text-xs">
         <label className="flex flex-col gap-0.5">

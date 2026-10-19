@@ -121,6 +121,9 @@
  *   and dispatcher: its "Pins to review" sheet holds standing points worked out from the customer pins (office
  *   data, never a VIEWER's, never public). Reads only, through the caller's company; another company's depot is
  *   404. The nightly job that writes the facts has no route of its own (the janitor, and the cron route: TOKEN).
+ * - The cause & action of an operations alert (owner request 20 Oct 2026): PATCH /api/alerts is PLANNER (the
+ *   dispatcher and up record what was found and decided after checking an alert; every role reads it on GET
+ *   /api/alerts). The alerts-only Excel is GET /api/analysis/export?only=alerts (PLANNER, unchanged).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -132,6 +135,8 @@ const EXPECTED: Record<string, string> = {
   // Operations alerts (owner request 16 Oct 2026): every role reads them; the dispatcher and up acknowledge;
   // the test e-mail is the company admin's (Settings > Operations alerts).
   'GET /api/alerts': 'ANY',
+  // Owner request 20 Oct 2026: the cause & action of an alert is recorded by the dispatcher and up (every role reads it).
+  'PATCH /api/alerts': 'PLANNER',
   'POST /api/alerts/ack': 'PLANNER',
   'GET /api/alerts/summary': 'ANY',
   'POST /api/alerts/test-email': 'TENANT_ADMIN',

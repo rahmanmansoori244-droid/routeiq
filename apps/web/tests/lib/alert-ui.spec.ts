@@ -29,6 +29,8 @@ const net = vi.hoisted(() => ({
   plan: null as unknown,
   outcomes: null as unknown,
   ack: { acked: 1 } as unknown,
+  /** PATCH /api/alerts answers (the cause & action dialog), in order; an { error } item is a refused request. */
+  patches: [] as unknown[],
 }));
 vi.mock('@/app/t/[slug]/dispatch/client-api', async (importActual) => {
   const actual = (await importActual()) as Record<string, unknown>;
@@ -37,6 +39,11 @@ vi.mock('@/app/t/[slug]/dispatch/client-api', async (importActual) => {
     ...actual,
     api: async (url: string, init: { method?: string; json?: unknown } = {}) => {
       net.sent.push({ method: init.method ?? 'GET', url, json: init.json });
+      if (url === '/api/alerts' && init.method === 'PATCH') {
+        const a = structuredClone(net.patches.shift()) as { status?: number; error?: Record<string, unknown> } & Record<string, unknown>;
+        if (a?.error) return { ok: false, status: a.status ?? 409, data: null, error: String(a.error.message ?? 'refused'), errorBody: a.error };
+        return ok(a);
+      }
       if (url === '/api/alerts/summary') return ok(structuredClone(net.summaries.shift() ?? null));
       if (url === '/api/alerts/ack') return ok(net.ack);
       if (url.startsWith('/api/alerts?')) return ok(structuredClone(net.list));
@@ -60,6 +67,7 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ replace() {}, refresh() 
 vi.mock('next/dynamic', () => ({ default: () => function DynamicStub() { return null; } }));
 
 import { AlertBell } from '@/components/alert-bell';
+import { AlertReviewDialog, incidentAlerts } from '@/components/alert-review-dialog';
 import { AlertsCard, alertDayIsLive } from '@/app/t/[slug]/dispatch/alerts-card';
 import { AlertsClient } from '@/app/t/[slug]/alerts/alerts-client';
 import { PlanView } from '@/app/t/[slug]/dispatch/plan-view';
@@ -96,6 +104,8 @@ const row = (extra: Partial<OpsAlertRow> = {}): OpsAlertRow => ({
   ackedAt: null,
   ackedByName: null,
   mayToast: true,
+  review: null,
+  detailsRemoved: false,
   ...extra,
 });
 const high = (extra: Partial<OpsAlertRow> = {}) => row({ severity: 'HIGH', tier: 2, ...extra });
@@ -121,6 +131,7 @@ beforeEach(() => {
   net.plan = null;
   net.outcomes = null;
   net.ack = { acked: 1 };
+  net.patches = [];
   toasts.error = [];
   toasts.success = [];
   toasts.warning = [];
@@ -563,5 +574,258 @@ describe('the pure helpers', () => {
     expect(alertSettingsProblem({ alertQuietToMin: null }, { ...c, alertQuietToMin: null })).toMatch(/both a start and an end/);
     // A stored value that is out of bounds does not block saving another field.
     expect(alertSettingsProblem({ alertSilentMin: 120 }, { ...c, alertUnloadOverMin: 4 })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Cause & action (owner request 20 Oct 2026: "a place where a note / reason for the alert to have happened and
+// the solution ... entered by someone after checking"), with the critique of the design applied.
+// ---------------------------------------------------------------------------------------------
+
+const rv = (extra: Partial<NonNullable<OpsAlertRow['review']>> = {}): NonNullable<OpsAlertRow['review']> => ({
+  cause: 'TRAFFIC',
+  causeOther: null,
+  action: 'CALLED_DRIVER',
+  actionOther: null,
+  note: 'Road works',
+  followUp: false,
+  firstAt: '2026-10-16T06:30:00.000Z',
+  savedAt: '2026-10-16T07:00:00.000Z',
+  byName: 'Lee Example',
+  firstByName: 'Lee Example',
+  saves: 1,
+  groupId: null,
+  tier: 1,
+  occurrences: 1,
+  customerId: null,
+  ...extra,
+});
+const dialogOf = (tree: unknown) => elements(tree).find((e) => typeName(e) === 'AlertReviewDialog');
+
+describe('cause & action on the Alerts page, the day card and the bell', () => {
+  const list = (rows: OpsAlertRow[], extra: Record<string, unknown> = {}) => ({ enabled: true, today: '2026-10-16', truncated: false, rows, reviewCounts: { alerts: 3, saved: 1, other: 0, followUp: 1 }, ...extra });
+  async function mountPage(props: Record<string, unknown> = {}) {
+    const host: Host<any> = new Host(AlertsClient as any, { enabled: true, canAck: true, isAdmin: false, slug: 'example', timezone: 'Asia/Muscat', today: '2026-10-16', depots: [], initial: { from: '2026-10-16', to: '2026-10-16', depotId: '', state: 'all' }, ...props });
+    host.render();
+    await host.settle();
+    return host;
+  }
+  const rows = () => [
+    row({ id: 'o' }),
+    row({ id: 'a', state: 'ACKED', ackedAt: '2026-10-16T05:40:00.000Z', ackedByName: 'Sam Example' }),
+    row({ id: 'r', state: 'RESOLVED', resolvedAt: '2026-10-16T20:02:00.000Z', resolvedReason: 'DAY_ENDED', review: rv({ followUp: true, note: 'Road works near the gate' }) }),
+  ];
+
+  it("the dispatcher gets Cause & action under the text of every alert (open, acknowledged, over), the server's count line and the Excel; the dialog edits a snapshot", async () => {
+    net.list = list(rows());
+    const host = await mountPage();
+    expect(byTestId(host.tree, 'alerts-review').map(textOf)).toEqual(['Cause & action', 'Cause & action', 'Edit cause & action']);
+    const line = textOf(byTestId(host.tree, 'alerts-review-line')[0]);
+    expect(line).toContain('Cause: Traffic or road delay · Action: Called the driver · Lee Example 11:00');
+    expect(line).toContain('Note: Road works near the gate');
+    expect(byTestId(host.tree, 'alerts-review-followup')).toHaveLength(1);
+    expect(textOf(byTestId(host.tree, 'alerts-review-count')[0])).toBe('1 of 3 alerts of these dates has a cause & action · 1 to follow up (last 92 days)');
+    expect(byTestId(host.tree, 'alerts-excel')[0]!.props.href).toBe('/api/analysis/export?from=2026-10-16&to=2026-10-16&only=alerts');
+    expect(dialogOf(host.tree)!.props.target).toBeNull();
+    byTestId(host.tree, 'alerts-review')[0]!.props.onClick();
+    host.flush();
+    expect(dialogOf(host.tree)!.props.target.id).toBe('o');
+    expect(dialogOf(host.tree)!.props.related.map((r: OpsAlertRow) => r.id)).toEqual(['o', 'a', 'r']);
+    // The 60 s poll brings new rows: the dialog keeps the snapshot it was opened with.
+    net.list = list(rows().map((r) => ({ ...r, text: 'changed meanwhile' })));
+    polls[0]!();
+    await host.settle();
+    expect(dialogOf(host.tree)!.props.target.text).toBe('T05 L1 is running about 35 min late.');
+  });
+
+  it('a viewer sees the cause & action but no button, no Excel and no dialog', async () => {
+    net.list = list(rows());
+    const host = await mountPage({ canAck: false });
+    expect(byTestId(host.tree, 'alerts-review')).toHaveLength(0);
+    expect(byTestId(host.tree, 'alerts-excel')).toHaveLength(0);
+    expect(byTestId(host.tree, 'alerts-review-line')).toHaveLength(1);
+    expect(dialogOf(host.tree)).toBeUndefined();
+  });
+
+  it('the filter sends review=; Follow-up says it reads the last 92 days; the Other share is in the count line', async () => {
+    net.list = list([], { reviewCounts: { alerts: 10, saved: 4, other: 2, followUp: 0 } });
+    const host = await mountPage();
+    expect(textOf(byTestId(host.tree, 'alerts-review-count')[0])).toBe('4 of 10 alerts of these dates have a cause & action (2 say Other: worth a code of its own when it comes back often) · 0 to follow up (last 92 days)');
+    byTestId(host.tree, 'alerts-review-filter')[0]!.props.onChange({ target: { value: 'missing' } });
+    await host.settle();
+    expect(net.sent.at(-1)!.url).toBe('/api/alerts?from=2026-10-16&to=2026-10-16&state=all&review=missing');
+    byTestId(host.tree, 'alerts-review-filter')[0]!.props.onChange({ target: { value: 'followup' } });
+    await host.settle();
+    expect(net.sent.at(-1)!.url).toContain('review=followup');
+    expect(byTestId(host.tree, 'alerts-followup-note')).toHaveLength(1);
+  });
+
+  it("the bell's link (reviewId) opens that alert's dialog once its row is read", async () => {
+    net.list = list(rows());
+    const host = await mountPage({ initialReviewId: 'r' });
+    expect(dialogOf(host.tree)!.props.target.id).toBe('r');
+  });
+
+  it('the day card: the saved line, and a Cause & action button on each row shown for the dispatcher', async () => {
+    net.list = list(rows());
+    const host: Host<any> = new Host(AlertsCard as any, { slug: 'example', date: '2026-10-16', depotId: 'dep1', today: '2026-10-16', timezone: 'Asia/Muscat', canAck: true, enabled: true });
+    host.render();
+    await host.settle();
+    expect(byTestId(host.tree, 'alerts-card-review').map(textOf)).toEqual(['Cause & action', 'Cause & action']);
+    byTestId(host.tree, 'alerts-card-show-over')[0]!.props.onClick();
+    host.flush();
+    expect(byTestId(host.tree, 'alerts-card-review').map(textOf)).toEqual(['Cause & action', 'Cause & action', 'Edit cause']);
+    expect(textOf(byTestId(host.tree, 'alerts-card-review-line')[0])).toBe('Cause: Traffic or road delay · Action: Called the driver · Lee Example 11:00 · follow-up');
+    byTestId(host.tree, 'alerts-card-review')[2]!.props.onClick();
+    host.flush();
+    expect(dialogOf(host.tree)!.props.target.id).toBe('r');
+  });
+
+  it('the bell: who saved a cause & action (two dispatchers do not both call the driver), and a link to record one', async () => {
+    net.summaries = [summary([high({ id: 'h1' }), high({ id: 'h2', review: rv() })], { today: '2026-10-16' })];
+    const host: Host<any> = new Host(AlertBell as any, { slug: 'example', enabled: true, canAck: true, timezone: 'Asia/Muscat' });
+    host.render();
+    await host.settle();
+    expect(byTestId(host.tree, 'alert-bell-review').map((l) => [l.props.href, textOf(l)])).toEqual([
+      ['/t/example/alerts?date=2026-10-16&reviewId=h1', 'Cause & action'],
+      ['/t/example/alerts?date=2026-10-16&reviewId=h2', 'Edit cause & action'],
+    ]);
+    expect(byTestId(host.tree, 'alert-bell-review-line').map(textOf)).toEqual(['Cause & action saved by Lee Example: Traffic or road delay']);
+    net.summaries = [summary([high({ id: 'h2', review: rv() })])];
+    const viewer: Host<any> = new Host(AlertBell as any, { slug: 'example', enabled: true, canAck: false, timezone: 'Asia/Muscat' });
+    viewer.render();
+    await viewer.settle();
+    expect(byTestId(viewer.tree, 'alert-bell-review')).toHaveLength(0);
+    expect(byTestId(viewer.tree, 'alert-bell-review-line')).toHaveLength(1);
+  });
+});
+
+describe('the Cause & action dialog', () => {
+  async function mount(target: OpsAlertRow, related: OpsAlertRow[] = [], canAck = true) {
+    const onClose = vi.fn();
+    const onSaved = vi.fn();
+    const host: Host<any> = new Host(AlertReviewDialog as any, { target, related, timezone: 'Asia/Muscat', today: '2026-10-16', canAck, onClose, onSaved });
+    host.render();
+    await host.settle();
+    return { host, onClose, onSaved };
+  }
+  const pick = (host: Host<any>, id: string, value: string) => {
+    byTestId(host.tree, id)[0]!.props.onChange({ target: { value } });
+    host.flush();
+  };
+  const value = (host: Host<any>, id: string) => byTestId(host.tree, id)[0]?.props.value;
+  const problem = (host: Host<any>) => textOf(byTestId(host.tree, 'alert-review-problem')[0]);
+  const saveOff = (host: Host<any>) => byTestId(host.tree, 'alert-review-save')[0]!.props.disabled;
+  const saved = (r: OpsAlertRow) => ({ row: r, changed: true, also: [], skipped: [] });
+
+  it("starts empty (a default would skew the counts): the rule's own lists; Save waits for both codes; Other needs its text; Nothing yet turns follow-up on", async () => {
+    const { host } = await mount(row({ id: 'a1' }));
+    expect([value(host, 'alert-review-cause'), value(host, 'alert-review-action')]).toEqual(['', '']);
+    const options = elements(byTestId(host.tree, 'alert-review-cause')[0]).filter((e) => e.type === 'option').map((e) => e.props.value);
+    expect(options[0]).toBe('');
+    expect(options.slice(1)).toEqual([
+      'TRAFFIC', 'EARLIER_STOPS_LONG', 'LATE_DEPOT_START', 'NO_CREW', 'LOADING_DELAY', 'WAITING_AT_CUSTOMER', 'LONG_UNLOADING', 'CUSTOMER_NOT_READY', 'CUSTOMER_CLOSED',
+      'CUSTOMER_ASKED_OTHER_TIME', 'ACCESS_PROBLEM', 'WRONG_PIN', 'OUT_OF_TIME', 'DRIVER_BREAK', 'TRUCK_BREAKDOWN', 'PLAN_CHANGED', 'PLAN_WRONG', 'DRIVER_DID_NOT_TAP',
+      'NEW_DRIVER', 'GPS_ISSUE', 'SETTING_TOO_TIGHT', 'FALSE_ALARM', 'NOT_KNOWN', 'OTHER',
+    ]);
+    expect(problem(host)).toBe('Pick the main cause.');
+    expect(saveOff(host)).toBe(true);
+    pick(host, 'alert-review-cause', 'OTHER');
+    expect(byTestId(host.tree, 'alert-review-cause-other')).toHaveLength(1);
+    pick(host, 'alert-review-action', 'NONE_YET');
+    const follow = byTestId(host.tree, 'alert-review-followup')[0]!.props;
+    expect([follow.checked, follow.disabled]).toEqual([true, true]);
+    expect(problem(host)).toBe('Write the other cause (at least 3 characters).');
+    pick(host, 'alert-review-cause-other', 'Gate locked');
+    expect(problem(host)).toBe('');
+    expect(saveOff(host)).toBe(false);
+  });
+
+  it('seeded from the saved one; Save sends the codes, the texts and the last save it saw; Acknowledge it too at the tier the dialog showed', async () => {
+    const target = high({ id: 'h1', tier: 2, review: rv() });
+    const { host, onClose, onSaved } = await mount(target);
+    expect([value(host, 'alert-review-cause'), value(host, 'alert-review-action'), value(host, 'alert-review-note')]).toEqual(['TRAFFIC', 'CALLED_DRIVER', 'Road works']);
+    expect(textOf(byTestId(host.tree, 'alert-review-last')[0])).toContain('Last saved by Lee Example 11:00');
+    expect(byTestId(host.tree, 'alert-review-ack')[0]!.props.checked).toBe(true);
+    pick(host, 'alert-review-note', 'Road works, gate closed');
+    // The alert got worse meanwhile (tier 3): the acknowledgement names the tier shown, so it stays open.
+    net.patches = [saved({ ...target, tier: 3, review: rv({ note: 'Road works, gate closed', savedAt: '2026-10-16T07:30:00.000Z', saves: 2 }) })];
+    byTestId(host.tree, 'alert-review-save')[0]!.props.onClick();
+    await host.settle();
+    expect(net.sent.find((s) => s.method === 'PATCH')!.json).toEqual({ id: 'h1', baseReviewedAt: '2026-10-16T07:00:00.000Z', cause: 'TRAFFIC', action: 'CALLED_DRIVER', note: 'Road works, gate closed', followUp: false });
+    expect(net.sent.find((s) => s.url === '/api/alerts/ack')!.json).toEqual({ ids: ['h1'], seen: { h1: 2 } });
+    expect(toasts.success).toContain('Cause & action saved.');
+    expect([onClose.mock.calls.length, onSaved.mock.calls.length]).toEqual([1, 1]);
+  });
+
+  it('someone saved meanwhile: the draft stays, the dialog says what was saved, and the next Save replaces it', async () => {
+    const target = row({ id: 'a1' });
+    const { host, onClose } = await mount(target);
+    pick(host, 'alert-review-cause', 'TRAFFIC');
+    pick(host, 'alert-review-action', 'CALLED_DRIVER');
+    pick(host, 'alert-review-note', 'mine');
+    net.patches = [
+      { status: 409, error: { code: 'REVIEW_CHANGED', message: 'Someone saved a cause & action for this alert meanwhile.', row: { ...target, review: rv({ cause: 'WRONG_PIN', action: 'FIXED_PIN', savedAt: '2026-10-16T07:05:00.000Z' }) } } },
+      saved({ ...target, review: rv({ note: 'mine' }) }),
+    ];
+    byTestId(host.tree, 'alert-review-save')[0]!.props.onClick();
+    await host.settle();
+    expect(textOf(byTestId(host.tree, 'alert-review-notice')[0])).toBe('Saved meanwhile by Lee Example 11:05: cause "Wrong pin or address", action "Fixed the pin". Saving again replaces it.');
+    expect([value(host, 'alert-review-cause'), value(host, 'alert-review-note')]).toEqual(['TRAFFIC', 'mine']);
+    expect(onClose).not.toHaveBeenCalled();
+    byTestId(host.tree, 'alert-review-save')[0]!.props.onClick();
+    await host.settle();
+    expect(net.sent.filter((s) => s.method === 'PATCH').map((s) => (s.json as { baseReviewedAt: string | null }).baseReviewedAt)).toEqual([null, '2026-10-16T07:05:00.000Z']);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('the busy sweep keeps the draft and says so', async () => {
+    const { host, onClose } = await mount(row({ id: 'a1' }));
+    pick(host, 'alert-review-cause', 'TRAFFIC');
+    pick(host, 'alert-review-action', 'CALLED_DRIVER');
+    net.patches = [{ status: 409, error: { code: 'ALERT_BUSY', message: 'The alerts are being checked right now: save again in a moment.' } }];
+    byTestId(host.tree, 'alert-review-save')[0]!.props.onClick();
+    await host.settle();
+    expect(toasts.warning).toEqual(['The alerts are being checked right now: save again in a moment.']);
+    expect(value(host, 'alert-review-cause')).toBe('TRAFFIC');
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('one incident: the other alerts of the truck and day without one, unticked; those whose rule does not offer the codes cannot be ticked', async () => {
+    const target = row({ id: 'a1', state: 'ACKED' });
+    const related = [target, row({ id: 'a2', rule: 'DRIVER_SILENT' }), row({ id: 'a3', rule: 'PROOF_FAR', kind: 'EVENT' }), row({ id: 'a4', truckId: 'tr9' }), row({ id: 'a5', review: rv() }), row({ id: 'a6', deliveryDate: '2026-10-15' })];
+    expect(incidentAlerts(target, related).map((r) => r.id)).toEqual(['a2', 'a3']);
+    const { host } = await mount(target, related);
+    // Acknowledged already: no "Acknowledge it too".
+    expect(byTestId(host.tree, 'alert-review-ack')).toHaveLength(0);
+    pick(host, 'alert-review-cause', 'TRUCK_BREAKDOWN');
+    pick(host, 'alert-review-action', 'SENT_HELP');
+    const items = () => byTestId(host.tree, 'alert-review-also-item').map((c) => [c.props['data-id'], c.props.checked, c.props.disabled]);
+    expect(items()).toEqual([
+      ['a2', false, false],
+      ['a3', false, true],
+    ]);
+    byTestId(host.tree, 'alert-review-also-item')[0]!.props.onCheckedChange(true);
+    host.flush();
+    net.patches = [{ row: { ...target, review: rv() }, changed: true, also: ['a2'], skipped: [] }];
+    byTestId(host.tree, 'alert-review-save')[0]!.props.onClick();
+    await host.settle();
+    expect((net.sent.find((s) => s.method === 'PATCH')!.json as { alsoIds: string[] }).alsoIds).toEqual(['a2']);
+    expect(toasts.success).toContain('Cause & action saved (also on 1 other alert).');
+  });
+
+  it('Remove (saved on the wrong alert) names the last save; an alert older than 90 days is read-only', async () => {
+    const { host, onSaved } = await mount(row({ id: 'a1', review: rv() }));
+    net.patches = [saved(row({ id: 'a1' }))];
+    byTestId(host.tree, 'alert-review-remove')[0]!.props.onClick();
+    await host.settle();
+    expect(net.sent.find((s) => s.method === 'PATCH')!.json).toEqual({ id: 'a1', baseReviewedAt: '2026-10-16T07:00:00.000Z', remove: true });
+    expect(toasts.success).toContain('Cause & action removed.');
+    expect(onSaved).toHaveBeenCalledTimes(1);
+    const old = await mount(row({ id: 'o1', text: '', detailsRemoved: true, review: rv() }));
+    expect(byTestId(old.host.tree, 'alert-review-save')).toHaveLength(0);
+    expect(byTestId(old.host.tree, 'alert-review-remove')).toHaveLength(0);
+    expect(byTestId(old.host.tree, 'alert-review-readonly')).toHaveLength(1);
+    expect(textOf(byTestId(old.host.tree, 'alert-review-alert')[0])).toContain('Details removed after 90 days');
   });
 });

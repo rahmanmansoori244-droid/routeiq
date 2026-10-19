@@ -20,7 +20,7 @@
  *   so the timeline places the Leaving for next load tap that rule R2 counts.
  */
 import { prisma } from '../db';
-import { toOpsAlertRow } from '../alerts/types';
+import { ALERT_ROW_USERS, toOpsAlertRow } from '../alerts/types';
 import { liveRunsInRange, stopsOfLoads } from '../delivery/day-results';
 import { dispatchedAt } from '../dispatch/dispatched-at';
 import { shownTruckCode } from '../dispatch/hire';
@@ -128,7 +128,7 @@ export async function readTruckDay(tenantId: string, truckId: string, date: stri
     }),
     prisma.opsAlert.findMany({
       where: { tenantId, truckId, deliveryDate },
-      include: { ackedBy: { select: { name: true } } },
+      include: ALERT_ROW_USERS,
       orderBy: { occurredAt: 'asc' },
       take: TRUCK_DAY_ALERTS_MAX,
     }),

@@ -30,7 +30,10 @@ import {
   isAlertRule,
   type AlertRule,
 } from './catalog';
-import { toOpsAlertRow, type AlertState, type AlertSummary, type OpsAlertRow, type SweepCheck } from './types';
+import { ALERT_ROW_USERS, toOpsAlertRow, type AlertState, type AlertSummary, type OpsAlertRow, type SweepCheck } from './types';
+export { ALERT_ROW_USERS } from './types';
+import { ALERT_FOLLOWUP_DAYS, charCount, type AlertReviewValue } from './review';
+import { setLockTimeout } from '../dispatch/plan-locks';
 import { capWhere, emailCapReached } from './notify';
 
 /** The Alerts page lists at most this many rows (open ones first). */
@@ -53,12 +56,26 @@ export function compareAlertRows(a: OpsAlertRow, b: OpsAlertRow): number {
   );
 }
 
+/**
+ * The cause & action filter (owner request 20 Oct 2026, lib/alerts/review.ts): every alert, those without one,
+ * those with one, and those that need follow-up. "followup" reads the last ALERT_FOLLOWUP_DAYS days (and
+ * tomorrow) whatever dates were chosen, so a follow-up of five weeks ago is not lost (critique item 12).
+ */
+export const ALERT_REVIEW_FILTERS = ['all', 'missing', 'saved', 'followup'] as const;
+export type AlertReviewFilter = (typeof ALERT_REVIEW_FILTERS)[number];
+
 export interface AlertListQuery {
   from: string;
   to: string;
   depotId: string | null;
   state: AlertStateFilter;
   rule: AlertRule | null;
+  review: AlertReviewFilter;
+}
+
+/** The dates the "followup" filter reads: the last ALERT_FOLLOWUP_DAYS days up to tomorrow. */
+export function followUpWindow(today: string): { from: string; to: string } {
+  return { from: addDaysIso(today, -(ALERT_FOLLOWUP_DAYS - 1)), to: addDaysIso(today, ALERT_DAYS_AHEAD) };
 }
 
 /** The Alerts page's filters from the URL: today by default, at most ALERT_LIST_MAX_DAYS days. */
@@ -72,8 +89,11 @@ export function readAlertListQuery(params: URLSearchParams, today: string): { ok
   if (!(ALERT_STATE_FILTERS as readonly string[]).includes(state)) return { ok: false, error: 'state is open, acked, resolved or all.' };
   const ruleRaw = params.get('rule');
   if (ruleRaw && !isAlertRule(ruleRaw)) return { ok: false, error: 'Unknown rule.' };
+  const review = (params.get('review') || 'all') as AlertReviewFilter;
+  if (!(ALERT_REVIEW_FILTERS as readonly string[]).includes(review)) return { ok: false, error: 'review is all, missing, saved or followup.' };
   const depotId = params.get('depotId') || params.get('depot') || null;
-  return { ok: true, query: { from, to, depotId, state, rule: (ruleRaw as AlertRule | null) ?? null } };
+  const dates = review === 'followup' ? followUpWindow(today) : { from, to };
+  return { ok: true, query: { ...dates, depotId, state, rule: (ruleRaw as AlertRule | null) ?? null, review } };
 }
 
 function stateWhere(state: AlertStateFilter): Prisma.OpsAlertWhereInput {
@@ -83,18 +103,31 @@ function stateWhere(state: AlertStateFilter): Prisma.OpsAlertWhereInput {
   return {};
 }
 
-type RowWithUser = OpsAlert & { ackedBy: { name: string } | null };
-const withUser = { ackedBy: { select: { name: true } } } as const;
+function reviewWhere(review: AlertReviewFilter): Prisma.OpsAlertWhereInput {
+  if (review === 'missing') return { reviewedAt: null };
+  if (review === 'saved') return { reviewedAt: { not: null } };
+  if (review === 'followup') return { reviewFollowUp: true };
+  return {};
+}
+
+type UserName = { name: string } | null;
+type RowWithUser = OpsAlert & { ackedBy: UserName; reviewedBy?: UserName; reviewFirstBy?: UserName };
+const withUser = ALERT_ROW_USERS;
+
+/** The where of a list query, without its cause & action filter (the counts read every row of the dates). */
+function listWhere(q: AlertListQuery): Prisma.OpsAlertWhereInput {
+  return {
+    deliveryDate: { gte: dateOnly(q.from), lte: dateOnly(q.to) },
+    ...(q.depotId ? { depotId: q.depotId } : {}),
+    ...(q.rule ? { rule: q.rule } : {}),
+    ...stateWhere(q.state),
+  };
+}
 
 /** The rows of the Alerts page (and the day screen's card: one date and depot). */
 export async function listAlerts(db: TenantDb, q: AlertListQuery): Promise<{ rows: OpsAlertRow[]; truncated: boolean }> {
   const found = (await db.opsAlert.findMany({
-    where: {
-      deliveryDate: { gte: dateOnly(q.from), lte: dateOnly(q.to) },
-      ...(q.depotId ? { depotId: q.depotId } : {}),
-      ...(q.rule ? { rule: q.rule } : {}),
-      ...stateWhere(q.state),
-    },
+    where: { ...listWhere(q), ...reviewWhere(q.review) },
     include: withUser,
     // Open and acknowledged rows before history, so a long history never pushes them out of the list.
     orderBy: [{ resolvedAt: { sort: 'desc', nulls: 'first' } }, { lastSeenAt: 'desc' }],
@@ -102,6 +135,31 @@ export async function listAlerts(db: TenantDb, q: AlertListQuery): Promise<{ row
   })) as RowWithUser[];
   const rows = found.slice(0, ALERT_LIST_MAX).map(toOpsAlertRow).sort(compareAlertRows);
   return { rows, truncated: found.length > ALERT_LIST_MAX };
+}
+
+/**
+ * The Alerts page's count line (critique item 12: counted on the server, not from the rows shown, which a
+ * filter or the 500-row cap would make wrong): the alerts of the dates, depot, rule and state chosen (whatever
+ * the cause & action filter), how many have a cause & action, how many of those say Other, and how many alerts
+ * need follow-up over the last ALERT_FOLLOWUP_DAYS days (the depot only).
+ */
+export interface AlertReviewCounts {
+  alerts: number;
+  saved: number;
+  other: number;
+  followUp: number;
+}
+
+export async function alertReviewCounts(db: TenantDb, q: AlertListQuery, today: string): Promise<AlertReviewCounts> {
+  const base = listWhere(q);
+  const w = followUpWindow(today);
+  const [alerts, saved, other, followUp] = await Promise.all([
+    db.opsAlert.count({ where: base }),
+    db.opsAlert.count({ where: { ...base, reviewedAt: { not: null } } }),
+    db.opsAlert.count({ where: { ...base, OR: [{ reviewCause: 'OTHER' }, { reviewAction: 'OTHER' }] } }),
+    db.opsAlert.count({ where: { reviewFollowUp: true, deliveryDate: { gte: dateOnly(w.from), lte: dateOnly(w.to) }, ...(q.depotId ? { depotId: q.depotId } : {}) } }),
+  ]);
+  return { alerts, saved, other, followUp };
 }
 
 /**
@@ -211,4 +269,209 @@ export async function ackAlerts(tenantId: string, userId: string, req: AckReques
     if (acked.length && afterAck) await afterAck(tx, acked);
     return { acked, known };
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cause & action (owner request 20 Oct 2026, lib/alerts/review.ts): PATCH /api/alerts
+// ---------------------------------------------------------------------------------------------
+
+/** The columns a cause & action save reads of an alert (and audits). */
+export const REVIEW_ROW_SELECT = {
+  id: true,
+  rule: true,
+  deliveryDate: true,
+  truckId: true,
+  truckCode: true,
+  loadNo: true,
+  sequence: true,
+  customerId: true,
+  tier: true,
+  occurrences: true,
+  reviewCause: true,
+  reviewCauseOther: true,
+  reviewAction: true,
+  reviewActionOther: true,
+  reviewNote: true,
+  reviewFollowUp: true,
+  reviewFirstAt: true,
+  reviewedAt: true,
+  reviewedById: true,
+  reviewGroupId: true,
+  detailsRemovedAt: true,
+} as const;
+
+/** An alert as a save reads it (REVIEW_ROW_SELECT). */
+export interface ReviewRow {
+  id: string;
+  rule: string;
+  deliveryDate: Date;
+  truckId: string;
+  truckCode: string;
+  loadNo: number | null;
+  sequence: number | null;
+  customerId: string | null;
+  tier: number;
+  occurrences: number;
+  reviewCause: string | null;
+  reviewCauseOther: string | null;
+  reviewAction: string | null;
+  reviewActionOther: string | null;
+  reviewNote: string | null;
+  reviewFollowUp: boolean;
+  reviewFirstAt: Date | null;
+  reviewedAt: Date | null;
+  reviewedById: string | null;
+  reviewGroupId: string | null;
+  detailsRemovedAt: Date | null;
+}
+
+/** The stored cause & action of a row (null: none). */
+export function storedReview(r: ReviewRow): AlertReviewValue | null {
+  if (!r.reviewedAt || !r.reviewCause || !r.reviewAction) return null;
+  return { cause: r.reviewCause, causeOther: r.reviewCauseOther, action: r.reviewAction, actionOther: r.reviewActionOther, note: r.reviewNote, followUp: r.reviewFollowUp };
+}
+
+/** Why another alert of a save that also fills others was left as it was. */
+export type ReviewSkipReason = 'NOT_FOUND' | 'OTHER_TRUCK_OR_DAY' | 'ALREADY_SAVED' | 'NOT_FOR_RULE' | 'DETAILS_REMOVED';
+
+/** One row a save wrote (the audit row's matter). */
+export interface ReviewSaved {
+  row: ReviewRow;
+  value: AlertReviewValue;
+  groupId: string | null;
+  /** Filled by the save of another alert of the incident (never overwrites: it had none). */
+  also: boolean;
+}
+
+/** What runs inside the save's transaction once the rows are written (one audit row per alert). */
+export type AfterReviewSave = (tx: Prisma.TransactionClient, saved: ReviewSaved[]) => Promise<unknown>;
+
+/** The time of a save: now, and always after the row's last save (reviewedAt only grows: the next save names it). */
+export function reviewSaveTime(lastSave: Date | null, now: Date = new Date()): Date {
+  return new Date(Math.max(now.getTime(), (lastSave?.getTime() ?? 0) + 1));
+}
+
+function reviewData(row: ReviewRow, value: AlertReviewValue, userId: string, at: Date, groupId: string | null): Prisma.OpsAlertUncheckedUpdateManyInput {
+  return {
+    reviewCause: value.cause,
+    reviewCauseOther: value.causeOther,
+    reviewAction: value.action,
+    reviewActionOther: value.actionOther,
+    reviewNote: value.note,
+    reviewFollowUp: value.followUp,
+    reviewedAt: at,
+    reviewedById: userId,
+    // The first save stays (its time and who); an edit adds a save.
+    ...(row.reviewFirstAt ? {} : { reviewFirstAt: at, reviewFirstById: userId }),
+    reviewSaves: { increment: 1 },
+    reviewGroupId: groupId,
+    // The alert as the office saw it: the screens and the export say when it came back, got worse or names another stop since.
+    reviewTier: row.tier,
+    reviewOccurrences: row.occurrences,
+    reviewCustomerId: row.customerId,
+  };
+}
+
+/**
+ * Save the cause & action of `row` (and fill it into `also`, other alerts of the same truck and day without one:
+ * one incident, critique item 1). One transaction with a 5 s lock wait (a sweep holding the rows: the route
+ * answers 409 ALERT_BUSY). The row is written only while its last save is still `base` (the one the editor saw;
+ * 'CHANGED' otherwise, nothing written) and its details were not removed; an alert of `also` only while it has
+ * none (never overwritten: skipped as ALREADY_SAVED). `unchanged`: the row's own cause & action is already this
+ * one (only the others are filled; the row gets the incident's group id when it had none). Never touches the
+ * alert itself (state, tier, acknowledgement, e-mail).
+ */
+export async function saveAlertReview(args: {
+  tenantId: string;
+  userId: string;
+  row: ReviewRow;
+  value: AlertReviewValue;
+  base: Date | null;
+  unchanged: boolean;
+  also: ReviewRow[];
+  now?: Date;
+  afterSave: AfterReviewSave;
+}): Promise<{ result: 'SAVED' | 'UNCHANGED' | 'CHANGED'; also: string[]; skipped: { id: string; reason: ReviewSkipReason }[] }> {
+  const { tenantId, userId, row, value, base } = args;
+  return prisma.$transaction(async (tx) => {
+    await setLockTimeout(tx);
+    const at = reviewSaveTime(row.reviewedAt, args.now);
+    const groupId = args.also.length ? (row.reviewGroupId ?? row.id) : (row.reviewGroupId ?? null);
+    const saved: ReviewSaved[] = [];
+    const guard = { tenantId, id: row.id, reviewedAt: base ?? null, detailsRemovedAt: null };
+    if (!args.unchanged) {
+      const n = (await tx.opsAlert.updateMany({ where: guard, data: reviewData(row, value, userId, at, groupId) })).count;
+      if (!n) return { result: 'CHANGED' as const, also: [], skipped: [] };
+      saved.push({ row, value, groupId, also: false });
+    } else if (groupId !== (row.reviewGroupId ?? null)) {
+      const n = (await tx.opsAlert.updateMany({ where: guard, data: { reviewGroupId: groupId } })).count;
+      if (!n) return { result: 'CHANGED' as const, also: [], skipped: [] };
+    }
+    const skipped: { id: string; reason: ReviewSkipReason }[] = [];
+    const filled: string[] = [];
+    for (const a of args.also) {
+      const n = (await tx.opsAlert.updateMany({ where: { tenantId, id: a.id, reviewedAt: null, detailsRemovedAt: null }, data: reviewData(a, value, userId, at, groupId) })).count;
+      if (n) {
+        saved.push({ row: a, value, groupId, also: true });
+        filled.push(a.id);
+      } else skipped.push({ id: a.id, reason: 'ALREADY_SAVED' });
+    }
+    if (saved.length) await args.afterSave(tx, saved);
+    return { result: args.unchanged ? ('UNCHANGED' as const) : ('SAVED' as const), also: filled, skipped };
+  });
+}
+
+/** Every cause & action column back to "none" (the database CHECK OpsAlert_review_whole allows only all of them). */
+export const REVIEW_CLEARED = {
+  reviewCause: null,
+  reviewCauseOther: null,
+  reviewAction: null,
+  reviewActionOther: null,
+  reviewNote: null,
+  reviewFollowUp: false,
+  reviewFirstAt: null,
+  reviewFirstById: null,
+  reviewedAt: null,
+  reviewedById: null,
+  reviewSaves: 0,
+  reviewGroupId: null,
+  reviewTier: null,
+  reviewOccurrences: null,
+  reviewCustomerId: null,
+} as const satisfies Prisma.OpsAlertUncheckedUpdateManyInput;
+
+/**
+ * Remove a cause & action saved on the wrong alert (critique item 13), while its last save is still `base`
+ * and its details were not removed: 'CHANGED' otherwise, nothing written. Audited by `afterRemove`.
+ */
+export async function removeAlertReview(args: { tenantId: string; row: ReviewRow; base: Date; afterRemove: (tx: Prisma.TransactionClient) => Promise<unknown> }): Promise<'REMOVED' | 'CHANGED'> {
+  return prisma.$transaction(async (tx) => {
+    await setLockTimeout(tx);
+    const n = (await tx.opsAlert.updateMany({ where: { tenantId: args.tenantId, id: args.row.id, reviewedAt: args.base, detailsRemovedAt: null }, data: REVIEW_CLEARED })).count;
+    if (!n) return 'CHANGED' as const;
+    await args.afterRemove(tx);
+    return 'REMOVED' as const;
+  });
+}
+
+/**
+ * A cause & action as the audit row keeps it: the codes and follow-up, and only the LENGTH of each free text
+ * (like DELIVERY_OUTCOME_SET, which keeps no note: the audit log is never deleted, while the free texts go
+ * after 90 days with the alert's text; critique item 2). Null: none.
+ */
+export function reviewAuditValue(v: AlertReviewValue | null): Record<string, string | number | boolean | null> | null {
+  if (!v) return null;
+  return {
+    cause: v.cause,
+    action: v.action,
+    followUp: v.followUp,
+    causeOtherChars: v.causeOther ? charCount(v.causeOther) : null,
+    actionOtherChars: v.actionOther ? charCount(v.actionOther) : null,
+    noteChars: v.note ? charCount(v.note) : null,
+  };
+}
+
+/** The alert an audit row of a cause & action is about (the codes and numbers that name it, never its text). */
+export function reviewAuditSubject(r: ReviewRow): Record<string, string | number | null> {
+  return { rule: r.rule, deliveryDate: r.deliveryDate.toISOString().slice(0, 10), truckCode: r.truckCode, loadNo: r.loadNo, sequence: r.sequence, tier: r.tier, occurrences: r.occurrences };
 }

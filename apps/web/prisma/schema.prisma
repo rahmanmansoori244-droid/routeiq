@@ -455,6 +455,8 @@ model User {
   driverLeavesChanged  DriverLeave[]        @relation("DriverLeaveUpdatedBy")
   loadHelpersSet       PlanLoad[]           @relation("PlanLoadHelpersSetBy")
   opsAlertsAcked       OpsAlert[]           @relation("OpsAlertAckedBy")
+  opsAlertsReviewed    OpsAlert[]           @relation("OpsAlertReviewedBy")
+  opsAlertsFirstReviewed OpsAlert[]         @relation("OpsAlertFirstReviewedBy")
 
   @@index([tenantId])
 }
@@ -1666,8 +1668,10 @@ model DeliveryPhoto {
 /// acknowledged in the app. Nothing that plans or delivers reads it. States (lib/alerts/types.ts
 /// alertStateOf): a CONDITION row is open until its condition ends (resolvedAt); an EVENT row is open until
 /// it is acknowledged or corrected; resolvedReason says why a row closed. Rows hold customer names and
-/// shortened driver notes (digit runs removed, never a phone number): deleted after 90 days and by Start
-/// fresh with the day's data.
+/// shortened driver notes (digit runs removed, never a phone number): 90 days after their date the janitor
+/// removes them (text '', facts but "by GPS", the cause & action's free texts; detailsRemovedAt) and closes a
+/// row still open, and deletes the row once it is older than the analysis data's retention (at least 90
+/// days; owner request 20 Oct 2026: the cause & action is decision data). Start fresh deletes the day's rows.
 model OpsAlert {
   id             String    @id @default(cuid())
   tenantId       String
@@ -1709,6 +1713,35 @@ model OpsAlert {
   ackedAt        DateTime? @db.Timestamptz(3)
   ackedById      String?
   ackedBy        User?     @relation("OpsAlertAckedBy", fields: [ackedById], references: [id], onDelete: SetNull)
+  /// Cause & action (owner request 20 Oct 2026, lib/alerts/review.ts): what the office found after checking the
+  /// alert and what it decided. Written only by PATCH /api/alerts (never the sweep, the e-mail or the ack);
+  /// every save audited (ALERT_REVIEW_SAVED, codes only). All NULL (follow-up false, saves 0) = none recorded
+  /// (CHECK OpsAlert_review_whole). Codes: an upper-case word (CHECK on the format, the lists are the app's).
+  reviewCause       String?
+  /// Only with cause OTHER, 3-120 characters (CHECKs), digit runs removed; removed after 90 days.
+  reviewCauseOther  String?
+  reviewAction      String?
+  reviewActionOther String?
+  /// 1-500 characters, one line, digit runs removed; removed after 90 days.
+  reviewNote        String?
+  reviewFollowUp    Boolean   @default(false)
+  reviewFirstAt     DateTime? @db.Timestamptz(3)
+  reviewFirstById   String?
+  reviewFirstBy     User?     @relation("OpsAlertFirstReviewedBy", fields: [reviewFirstById], references: [id], onDelete: SetNull)
+  /// The last save; a save names the reviewedAt it was based on (two editors: the second gets 409).
+  reviewedAt        DateTime? @db.Timestamptz(3)
+  reviewedById      String?
+  reviewedBy        User?     @relation("OpsAlertReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  /// How many saves (1 = never edited).
+  reviewSaves       Int       @default(0)
+  /// The alert whose save also filled this one (one incident: the alerts of a truck and day saved together); no foreign key.
+  reviewGroupId     String?
+  /// The alert's tier, occurrences and customer at the last save: it came back, got worse or names another stop since.
+  reviewTier        Int?
+  reviewOccurrences Int?
+  reviewCustomerId  String?
+  /// When the 90-day clean-up removed the text, the facts and the cause & action's free texts (the row is then read-only).
+  detailsRemovedAt  DateTime? @db.Timestamptz(3)
   /// The tier last e-mailed (0 = never); the e-mail claim takes rows with emailedTier < tier.
   emailedTier    Int       @default(0)
   emailedAt      DateTime? @db.Timestamptz(3)

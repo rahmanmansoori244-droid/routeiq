@@ -147,27 +147,72 @@ describe('idle daily drivers (spec 12.4)', () => {
   });
 });
 
-describe('operations alerts retention (owner request 16 Oct 2026)', () => {
-  it('rows of a delivery date older than 90 days and e-mail records older than 90 days are deleted; newer ones and other companies stay', async () => {
-    tables.opsAlert = [
-      { id: 'old', tenantId: 'tA', deliveryDate: day('2026-07-05') },
-      { id: 'edge', tenantId: 'tA', deliveryDate: day('2026-07-06') },
-      { id: 'new', tenantId: 'tA', deliveryDate: day('2026-10-03') },
-      { id: 'other', tenantId: 'tB', deliveryDate: day('2026-01-01') },
-    ];
-    tables.opsAlertDigest = [
-      { id: 'd-old', tenantId: 'tA', createdAt: daysAgo(91) },
-      { id: 'd-new', tenantId: 'tA', createdAt: daysAgo(10) },
-    ];
-    // Today in Muscat is 4 Oct: the cutoff is 6 Jul.
-    expect(await purgeOldAlerts(NOW)).toEqual({ alerts: 1, digests: 1 });
-    expect(tables.opsAlert.map((a) => a.id)).toEqual(['edge', 'new', 'other']);
-    expect(tables.opsAlertDigest.map((a) => a.id)).toEqual(['d-new']);
-    // No audit row: the rows are derived.
-    expect(tables.auditLog).toEqual([]);
-    // The janitor runs it once a day with the daily drivers.
+describe('operations alerts retention (owner request 16 Oct 2026; cause & action, owner request 20 Oct 2026)', () => {
+  /** The in-memory database logs raw SQL only: apply the details removal (store.ts purgeOldAlertRows) to the rows. */
+  function applyDetailsRemoval() {
+    const orig = fakePrisma.$executeRaw;
+    fakePrisma.$executeRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      await orig(strings, ...values);
+      const [now, tenantId, cutoffIso] = values as [Date, string, string];
+      let n = 0;
+      for (const r of tables.opsAlert ?? []) {
+        if (r.tenantId !== tenantId || !(r.deliveryDate < day(cutoffIso)) || r.detailsRemovedAt) continue;
+        Object.assign(r, { text: '', factsJson: r.factsJson?.gps === true ? { gps: true } : null, emailError: null, reviewNote: null, reviewCauseOther: null, reviewActionOther: null, detailsRemovedAt: now });
+        n++;
+      }
+      return n;
+    };
+    return () => void (fakePrisma.$executeRaw = orig);
+  }
+
+  it('after 90 days a row loses its text, facts and free texts (a row still open is closed first); it is deleted after the analysis retention; e-mail records after 90 days; one audit row of counts', async () => {
+    const restore = applyDetailsRemoval();
+    try {
+      const saved = new Date('2024-10-01T08:00:00Z');
+      tables.opsAlert = [
+        { id: 'ancient', tenantId: 'tA', deliveryDate: day('2024-10-03'), resolvedAt: saved, text: 'T05 L1', reviewedAt: saved, reviewCause: 'TRAFFIC' },
+        { id: 'old', tenantId: 'tA', deliveryDate: day('2026-07-05'), resolvedAt: day('2026-07-05'), text: 'T05 L1 stop 2 Shop Example (TST0001)', factsJson: { gps: true, awayMin: 4 }, reviewedAt: saved, reviewCause: 'OTHER', reviewCauseOther: 'Gate locked', reviewNote: 'Waited', emailError: 'HTTP 500' },
+        { id: 'open-old', tenantId: 'tA', deliveryDate: day('2026-07-01'), resolvedAt: null, resolvedReason: null, text: 'T05 L1 is running late', factsJson: { delayMin: 40 } },
+        { id: 'edge', tenantId: 'tA', deliveryDate: day('2026-07-06'), resolvedAt: null, text: 'kept as it is' },
+        { id: 'new', tenantId: 'tA', deliveryDate: day('2026-10-03'), text: 'today' },
+        { id: 'other', tenantId: 'tB', deliveryDate: day('2024-01-01'), text: 'another company' },
+      ];
+      tables.opsAlertDigest = [
+        { id: 'd-old', tenantId: 'tA', createdAt: daysAgo(91) },
+        { id: 'd-new', tenantId: 'tA', createdAt: daysAgo(10) },
+      ];
+      // Today in Muscat is 4 Oct 2026: details go before 6 Jul 2026, rows before 4 Oct 2024 (730 days, the default).
+      expect(await purgeOldAlerts(NOW)).toEqual({ alerts: 1, reviewed: 1, closed: 1, detailsRemoved: 2, digests: 1 });
+      expect(tables.opsAlert.map((a) => a.id)).toEqual(['old', 'open-old', 'edge', 'new', 'other']);
+      const byId = (id: string) => tables.opsAlert.find((a) => a.id === id)!;
+      expect(byId('old')).toMatchObject({ text: '', factsJson: { gps: true }, reviewCause: 'OTHER', reviewCauseOther: null, reviewNote: null, emailError: null, detailsRemovedAt: NOW });
+      expect(byId('open-old')).toMatchObject({ resolvedAt: NOW, resolvedReason: 'EXPIRED', text: '', factsJson: null, detailsRemovedAt: NOW });
+      expect(byId('edge')).toMatchObject({ text: 'kept as it is', resolvedAt: null });
+      expect(byId('other').text).toBe('another company');
+      expect(tables.opsAlertDigest.map((a) => a.id)).toEqual(['d-new']);
+      expect(rawLog.find((s) => s.startsWith('UPDATE "OpsAlert"'))).toMatch(/"text" = '', "factsJson" = CASE .* "reviewNote" = NULL, "reviewCauseOther" = NULL, "reviewActionOther" = NULL, "detailsRemovedAt" = \?/);
+      // The rows now hold the office's own input: one audit row of counts (no text).
+      expect(tables.auditLog.map((a) => [a.action, a.entity, a.afterJson])).toEqual([
+        ['OPS_ALERTS_PURGED', 'Tenant', { deleted: 1, deletedWithCauseAndAction: 1, closedAsExpired: 1, detailsRemoved: 2, detailsAfterDays: 90, rowsAfterDays: 730 }],
+      ]);
+    } finally {
+      restore();
+    }
+    // The janitor runs it once a day with the daily drivers; nothing more to do: no second audit row.
     const r = await runDeliveryJanitor(new Date(NOW.getTime() + 60 * 60_000), { force: true });
-    expect(r).toMatchObject({ alerts: { alerts: 0, digests: 0 } });
+    expect(r).toMatchObject({ alerts: { alerts: 0, detailsRemoved: 0, digests: 0 } });
+    expect(tables.auditLog.filter((a) => a.action === 'OPS_ALERTS_PURGED')).toHaveLength(1);
+  });
+
+  it('a company that keeps its analysis data less than 90 days: the alert rows still go at 90 days, as before (never sooner)', async () => {
+    tables.tenantConfig = [{ tenantId: 'tA', photoRetentionDays: 365, locationRetentionDays: 90, analysisRetentionDays: 30, timezone: 'Asia/Muscat' }];
+    tables.opsAlert = [
+      { id: 'old', tenantId: 'tA', deliveryDate: day('2026-07-05'), reviewedAt: new Date('2026-07-05T08:00:00Z') },
+      { id: 'edge', tenantId: 'tA', deliveryDate: day('2026-07-06') },
+    ];
+    expect(await purgeOldAlerts(NOW)).toMatchObject({ alerts: 1, reviewed: 1, closed: 0, detailsRemoved: 0 });
+    expect(tables.opsAlert.map((a) => a.id)).toEqual(['edge']);
+    expect(rawLog.filter((s) => s.startsWith('UPDATE "OpsAlert"'))).toEqual([]);
   });
 
   it('review L3: a failing alert purge is logged under its own name and stops nothing after it', async () => {

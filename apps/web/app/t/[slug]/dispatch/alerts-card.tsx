@@ -7,10 +7,11 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { acknowledgeAlerts } from '@/components/alerts-api';
+import { AlertReviewDialog } from '@/components/alert-review-dialog';
 import { daysBetween } from '@/lib/dispatch/time';
 import { ALERT_DAYS_AHEAD, ALERT_DAYS_BACK, ALERT_POLL_MS } from '@/lib/alerts/catalog';
 import type { OpsAlertRow } from '@/lib/alerts/types';
-import { alertStateText, alertTime, alertWhere, groupByTruck, ruleLabel, SEVERITY_BADGE } from '@/lib/alerts/view';
+import { alertReviewText, alertStateText, alertText, alertTime, alertWhere, groupByTruck, ruleLabel, SEVERITY_BADGE } from '@/lib/alerts/view';
 import { api } from './client-api';
 
 interface ListAnswer {
@@ -30,6 +31,8 @@ export function alertDayIsLive(date: string, today: string): boolean {
  * alerts, one block per truck with its worst state first, so 8-10 trucks fit on one screen. Open and
  * acknowledged rows are listed; what is over is behind "Show N over". Reads every 60 s while the tab is
  * visible and the day is yesterday, today or tomorrow. Shown only while alerts are switched on.
+ * Cause & action (owner request 20 Oct 2026): each row says what the office recorded ("Cause & action saved by
+ * Sam", so two dispatchers do not both call the driver); the dispatcher and up record or edit it here too.
  */
 export function AlertsCard({
   slug,
@@ -52,6 +55,8 @@ export function AlertsCard({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showOver, setShowOver] = useState(false);
+  // A snapshot of the alert whose cause & action is being edited: the poll never resets the dialog.
+  const [reviewing, setReviewing] = useState<OpsAlertRow | null>(null);
 
   const read = useCallback(async () => {
     const r = await api<ListAnswer>(`/api/alerts?date=${encodeURIComponent(date)}&depotId=${encodeURIComponent(depotId)}&state=all`);
@@ -139,12 +144,23 @@ export function AlertsCard({
                     <Badge variant={r.state === 'RESOLVED' ? 'outline' : SEVERITY_BADGE[r.severity]}>{r.severity}</Badge>
                     <span className="text-xs text-muted-foreground">{alertTime(r.occurredAt, timezone)}</span>
                     <span className="min-w-0 flex-1 break-words">
-                      <span className="font-medium">{ruleLabel(r.rule)}</span> - {r.text}
+                      <span className="font-medium">{ruleLabel(r.rule)}</span> - {alertText(r)}
                       <span className="ms-1 text-xs text-muted-foreground">({r.state === 'OPEN' ? alertWhere(r) : alertStateText(r, timezone)})</span>
+                      {r.review ? (
+                        <span className="block text-xs text-muted-foreground" data-testid="alerts-card-review-line">
+                          {alertReviewText(r, timezone)}
+                          {r.review.followUp ? ' · follow-up' : ''}
+                        </span>
+                      ) : null}
                     </span>
                     {canAck && r.state === 'OPEN' ? (
                       <Button size="sm" variant="outline" className="h-6 px-2 text-xs" disabled={busy} onClick={() => void ack([r])} data-testid="alerts-card-ack">
                         Acknowledge
+                      </Button>
+                    ) : null}
+                    {canAck ? (
+                      <Button size="sm" variant="outline" className="h-6 whitespace-nowrap px-2 text-xs" onClick={() => setReviewing(r)} data-testid="alerts-card-review">
+                        {r.review ? 'Edit cause' : 'Cause & action'}
                       </Button>
                     ) : null}
                   </li>
@@ -159,6 +175,9 @@ export function AlertsCard({
           </button>
         ) : null}
         {answer?.truncated ? <p className="text-xs text-muted-foreground">Only the latest 500 are shown: open the Alerts page for the rest.</p> : null}
+        {canAck ? (
+          <AlertReviewDialog target={reviewing} related={rows} timezone={timezone} today={today} canAck={canAck} onClose={() => setReviewing(null)} onSaved={() => void read()} />
+        ) : null}
       </CardContent>
     </Card>
   );

@@ -27,7 +27,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 const session = vi.hoisted(() => ({ user: null as null | Record<string, unknown> }));
 vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => (session.user ? { user: session.user } : null)) }));
 
-import { GET as LIST } from '@/app/api/alerts/route';
+import { GET as LIST, PATCH } from '@/app/api/alerts/route';
+import { purgeOldAlertRows } from '@/lib/alerts/store';
 import { GET as SUMMARY } from '@/app/api/alerts/summary/route';
 import { POST as ACK } from '@/app/api/alerts/ack/route';
 import { prismaDigestStore, sendAlertDigest } from '@/lib/alerts/notify';
@@ -272,5 +273,157 @@ describe("the day's end (owner request 19 Oct 2026: yesterday's alerts looked li
     expect((await prisma.opsAlert.findUniqueOrThrow({ where: { id: dayEnded.id } })).emailedTier).toBe(2);
     await store.finish(B.tenantId, (out as { digestId: string }).digestId, claimed as never, now, { ok: true });
     expect(await store.claim(B.tenantId, new Date(now.getTime() + 16 * 60_000), { everyMin: 15, minSeverity: 'HIGH', dayStart, today, recipients: 1 })).toEqual({ ok: false, skip: 'NOTHING_NEW' });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 5. Cause & action (owner request 20 Oct 2026: "a place where a note / reason for the alert to have happened and
+//    the solution"): PATCH /api/alerts on the real database - the guarded save, the audit row, any state and
+//    day, another company's id, the CHECKs of migration 20261020000000_alert_notes, the filter, the incident,
+//    the removal, and the 90-day clean-up of lib/alerts/store.ts purgeOldAlertRows.
+// ---------------------------------------------------------------------------------------------
+
+const patch = async (body: unknown) => {
+  const res = await PATCH(new Request('http://localhost/api/alerts', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+  return { status: res.status, body: (await res.json()) as { data: any; error: any } };
+};
+const save = (id: string, extra: Record<string, unknown> = {}) => ({ id, baseReviewedAt: null, cause: 'TRAFFIC', action: 'CALLED_DRIVER', ...extra });
+
+describe('cause & action (owner request 20 Oct 2026)', () => {
+  it('an own open alert: the columns of the cause & action only, first = last save, the user from the session, one audit row with the codes', async () => {
+    const a = await alert(A, { emailedTier: 2 });
+    as(A);
+    const r = await patch(save(a.id, { note: 'Driver says call 9123 4567 at the gate' }));
+    expect(r.status).toBe(200);
+    expect(r.body.data.row.review).toMatchObject({ cause: 'TRAFFIC', byName: 'Dispatcher Example', saves: 1, note: 'Driver says call [number] at the gate' });
+    const row = await prisma.opsAlert.findUniqueOrThrow({ where: { id: a.id } });
+    expect(row).toMatchObject({ reviewCause: 'TRAFFIC', reviewAction: 'CALLED_DRIVER', reviewedById: A.plannerId, reviewFirstById: A.plannerId, reviewSaves: 1, reviewTier: 2, reviewOccurrences: 1 });
+    expect(row.reviewFirstAt).toEqual(row.reviewedAt);
+    // The alert itself as it was: still open, not acknowledged, its e-mail state kept.
+    expect(row).toMatchObject({ ackedAt: null, resolvedAt: null, emailedTier: 2, text: a.text, tier: a.tier });
+    const audits = await prisma.auditLog.findMany({ where: { tenantId: A.tenantId, action: 'ALERT_REVIEW_SAVED', entityId: a.id } });
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ userId: A.plannerId, entity: 'OpsAlert', beforeJson: null });
+    expect(JSON.stringify(audits[0]!.afterJson)).not.toContain('gate');
+  });
+
+  it('works on acknowledged, over and yesterday\'s Day-ended alerts; their state stays', async () => {
+    as(A);
+    const yesterday = new Date(`${addDaysIso(today, -1)}T00:00:00.000Z`);
+    const acked = await alert(A, { ackedAt: new Date(), ackedById: A.plannerId });
+    const over = await alert(A, { resolvedAt: new Date(), resolvedReason: 'ENDED' });
+    const ended = await alert(A, { deliveryDate: yesterday, resolvedAt: new Date(), resolvedReason: 'DAY_ENDED' });
+    for (const a of [acked, over, ended]) {
+      expect((await patch(save(a.id, { cause: 'FALSE_ALARM', action: 'NO_ACTION' }))).status).toBe(200);
+      const row = await prisma.opsAlert.findUniqueOrThrow({ where: { id: a.id } });
+      expect(row).toMatchObject({ reviewCause: 'FALSE_ALARM', ackedAt: a.ackedAt, resolvedAt: a.resolvedAt, resolvedReason: a.resolvedReason });
+    }
+  });
+
+  it('an edit names the last save: the first save stays, the audit row has before and after; a stale one is 409 and changes nothing', async () => {
+    const a = await alert(A);
+    as(A);
+    await patch(save(a.id));
+    const first = await prisma.opsAlert.findUniqueOrThrow({ where: { id: a.id } });
+    const edit = await patch(save(a.id, { baseReviewedAt: first.reviewedAt!.toISOString(), cause: 'OTHER', causeOther: 'Road closed by police' }));
+    expect(edit.status).toBe(200);
+    const second = await prisma.opsAlert.findUniqueOrThrow({ where: { id: a.id } });
+    expect(second).toMatchObject({ reviewCause: 'OTHER', reviewCauseOther: 'Road closed by police', reviewSaves: 2, reviewFirstAt: first.reviewFirstAt });
+    expect(second.reviewedAt!.getTime()).toBeGreaterThan(first.reviewedAt!.getTime());
+    const audit = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: A.tenantId, action: 'ALERT_REVIEW_SAVED', entityId: a.id }, orderBy: { createdAt: 'desc' } });
+    expect(audit.beforeJson).toMatchObject({ cause: 'TRAFFIC' });
+    expect(audit.afterJson).toMatchObject({ cause: 'OTHER', causeOtherChars: 21 });
+    const stale = await patch(save(a.id, { baseReviewedAt: first.reviewedAt!.toISOString(), cause: 'GPS_ISSUE' }));
+    expect([stale.status, stale.body.error.code]).toEqual([409, 'REVIEW_CHANGED']);
+    expect(stale.body.error.row.review).toMatchObject({ cause: 'OTHER' });
+    expect((await prisma.opsAlert.findUniqueOrThrow({ where: { id: a.id } })).reviewCause).toBe('OTHER');
+  });
+
+  it("another company's id is 404 and changes nothing; a VIEWER is 403", async () => {
+    const b = await alert(B);
+    as(A);
+    expect((await patch(save(b.id))).status).toBe(404);
+    expect((await prisma.opsAlert.findUniqueOrThrow({ where: { id: b.id } })).reviewedAt).toBeNull();
+    as(A, 'VIEWER');
+    const own = await alert(A);
+    expect((await patch(save(own.id))).status).toBe(403);
+    expect(await prisma.auditLog.count({ where: { tenantId: B.tenantId, action: 'ALERT_REVIEW_SAVED' } })).toBe(0);
+  });
+
+  it('the database refuses a broken or half cause & action (the CHECKs), and takes a code the lists do not have yet', async () => {
+    const a = await alert(A);
+    const now = new Date();
+    const whole = { reviewCause: 'TRAFFIC', reviewAction: 'CALLED_DRIVER', reviewFirstAt: now, reviewedAt: now, reviewSaves: 1, reviewTier: 2, reviewOccurrences: 1 };
+    const refused = async (data: Record<string, unknown>) => expect(prisma.opsAlert.update({ where: { id: a.id }, data })).rejects.toThrow();
+    await refused({ ...whole, reviewCause: 'traffic' });
+    await refused({ ...whole, reviewCause: 'OTHER' });
+    await refused({ ...whole, reviewCauseOther: 'Gate locked' });
+    await refused({ reviewCause: 'TRAFFIC' });
+    await refused({ ...whole, reviewNote: 'x'.repeat(501) });
+    await refused({ ...whole, reviewNote: '' });
+    await refused({ ...whole, reviewFirstAt: new Date(now.getTime() + 1000) });
+    await refused({ ...whole, reviewTier: 4 });
+    await prisma.opsAlert.update({ where: { id: a.id }, data: { ...whole, reviewCause: 'A_FUTURE_CODE', reviewAction: 'OTHER', reviewActionOther: 'Sent a van' } });
+    expect((await prisma.opsAlert.findUniqueOrThrow({ where: { id: a.id } })).reviewCause).toBe('A_FUTURE_CODE');
+  });
+
+  it('GET filters by cause & action, counts on the server and names who saved it', async () => {
+    const d = new Date(`${addDaysIso(today, -3)}T00:00:00.000Z`);
+    const iso = addDaysIso(today, -3);
+    const none = await alert(A, { deliveryDate: d });
+    const done = await alert(A, { deliveryDate: d });
+    as(A);
+    await patch(save(done.id, { action: 'NONE_YET' }));
+    as(A, 'VIEWER');
+    const missing = await call(LIST, `/api/alerts?date=${iso}&review=missing`);
+    expect(missing.body.data.rows.map((r: any) => r.id)).toEqual([none.id]);
+    const saved = await call(LIST, `/api/alerts?date=${iso}&review=saved`);
+    expect(saved.body.data.rows.map((r: any) => [r.id, r.review.byName, r.review.followUp])).toEqual([[done.id, 'Dispatcher Example', true]]);
+    expect(saved.body.data.reviewCounts).toMatchObject({ alerts: 2, saved: 1, other: 0 });
+    const follow = await call(LIST, `/api/alerts?date=${today}&review=followup`);
+    expect(follow.body.data.rows.map((r: any) => r.id)).toContain(done.id);
+  });
+
+  it('one incident: the other alerts of the truck and day without one are filled, never one that has its own; remove clears it', async () => {
+    const truck = { truckId: 'tr-incident', truckCode: 'T42' };
+    const lead = await alert(A, { ...truck, subjectKey: `${A.depotId}|${today}|tr-incident|1` });
+    const silent = await alert(A, { ...truck, rule: 'DRIVER_SILENT', subjectKey: `${A.depotId}|${today}|tr-incident|1` });
+    const own = await alert(A, { ...truck, rule: 'AFTER_CLOSING', subjectKey: `${A.depotId}|${today}|tr-incident|1|2`, sequence: 2 });
+    as(A);
+    await patch(save(own.id, { cause: 'CUSTOMER_CLOSED' }));
+    const r = await patch(save(lead.id, { cause: 'TRUCK_BREAKDOWN', action: 'SENT_HELP', alsoIds: [silent.id, own.id] }));
+    expect(r.body.data).toMatchObject({ also: [silent.id], skipped: [{ id: own.id, reason: 'ALREADY_SAVED' }] });
+    const rows = await prisma.opsAlert.findMany({ where: { id: { in: [lead.id, silent.id, own.id] } } });
+    const by = Object.fromEntries(rows.map((x) => [x.id, x]));
+    expect([by[lead.id]!.reviewGroupId, by[silent.id]!.reviewGroupId, by[silent.id]!.reviewCause, by[own.id]!.reviewCause]).toEqual([lead.id, lead.id, 'TRUCK_BREAKDOWN', 'CUSTOMER_CLOSED']);
+    const gone = await patch({ id: silent.id, baseReviewedAt: by[silent.id]!.reviewedAt!.toISOString(), remove: true });
+    expect(gone.status).toBe(200);
+    expect(await prisma.opsAlert.findUniqueOrThrow({ where: { id: silent.id } })).toMatchObject({ reviewedAt: null, reviewCause: null, reviewSaves: 0, reviewFollowUp: false, reviewGroupId: null });
+    expect(await prisma.auditLog.count({ where: { tenantId: A.tenantId, action: 'ALERT_REVIEW_REMOVED', entityId: silent.id } })).toBe(1);
+  });
+
+  it('the 90-day clean-up keeps every row until the analysis retention: text, facts and free texts removed, an open one closed first, then read-only; older rows deleted', async () => {
+    const old = new Date(`${addDaysIso(today, -100)}T00:00:00.000Z`);
+    const ancient = new Date(`${addDaysIso(today, -800)}T00:00:00.000Z`);
+    const reviewedAt = new Date(old.getTime() + 8 * 3_600_000);
+    const review = { reviewCause: 'OTHER', reviewCauseOther: 'Gate locked', reviewAction: 'CALLED_CUSTOMER', reviewNote: 'Waited 20 min', reviewFirstAt: reviewedAt, reviewedAt, reviewSaves: 1, reviewTier: 2, reviewOccurrences: 1 };
+    const kept = await alert(B, { deliveryDate: old, resolvedAt: reviewedAt, resolvedReason: 'ENDED', factsJson: { gps: true, awayMin: 4 }, emailError: 'HTTP 500', ...review });
+    const open = await alert(B, { deliveryDate: old, factsJson: { delayMin: 40 } });
+    const gone = await alert(B, { deliveryDate: ancient, resolvedAt: ancient, resolvedReason: 'ENDED' });
+    const now = new Date();
+    const r = await purgeOldAlertRows(prisma, B.tenantId, addDaysIso(today, -90), new Date(now.getTime() - 90 * 86_400_000), { keepUntilIso: addDaysIso(today, -730), now });
+    expect(r).toMatchObject({ alerts: 1, closed: 1 });
+    expect(r.detailsRemoved).toBeGreaterThanOrEqual(2);
+    expect(await prisma.opsAlert.findUnique({ where: { id: gone.id } })).toBeNull();
+    expect(await prisma.opsAlert.findUniqueOrThrow({ where: { id: kept.id } })).toMatchObject({
+      text: '', factsJson: { gps: true }, emailError: null, reviewCause: 'OTHER', reviewCauseOther: null, reviewNote: null, reviewAction: 'CALLED_CUSTOMER', detailsRemovedAt: now,
+    });
+    expect(await prisma.opsAlert.findUniqueOrThrow({ where: { id: open.id } })).toMatchObject({ text: '', factsJson: null, resolvedReason: 'EXPIRED', resolvedAt: now, detailsRemovedAt: now });
+    // A second run changes nothing; the row is read-only for the API.
+    const again = await purgeOldAlertRows(prisma, B.tenantId, addDaysIso(today, -90), new Date(now.getTime() - 90 * 86_400_000), { keepUntilIso: addDaysIso(today, -730), now });
+    expect(again).toMatchObject({ alerts: 0, closed: 0, detailsRemoved: 0 });
+    as(B);
+    const locked = await patch(save(kept.id, { baseReviewedAt: reviewedAt.toISOString() }));
+    expect([locked.status, locked.body.error.code]).toEqual([409, 'REVIEW_LOCKED']);
   });
 });

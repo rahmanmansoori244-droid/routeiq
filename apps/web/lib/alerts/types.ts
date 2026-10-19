@@ -11,6 +11,7 @@
 import type { OpsAlert } from '@prisma/client';
 import { isoOf } from '../dispatch/time';
 import type { AlertKind, AlertRule, AlertSeverity, AlertTier, ResolvedReason } from './catalog';
+import type { AlertReviewValue } from './review';
 
 /** One rule that is true now for one physical subject (rules.ts -> store.ts). */
 export interface Candidate {
@@ -104,6 +105,28 @@ export function needsAttention(row: StateFields): boolean {
   return alertStateOf(row) === 'OPEN';
 }
 
+/**
+ * The cause & action the office recorded after checking an alert (owner request 20 Oct 2026, lib/alerts/review.ts):
+ * the codes (a code no longer offered stays as it was saved), the cleaned texts, follow-up, who and when, and the
+ * alert as it was at the last save (its tier, occurrences and customer: it came back, got worse or names another
+ * stop since). Never the users' ids.
+ */
+export interface AlertReviewView extends AlertReviewValue {
+  /** ISO times of the first and the last save. */
+  firstAt: string;
+  savedAt: string;
+  /** The names of who saved it last and first (null: the user was deleted). */
+  byName: string | null;
+  firstByName: string | null;
+  /** How many saves (1: never edited). */
+  saves: number;
+  /** The alert whose save also filled this one (one incident), or null. */
+  groupId: string | null;
+  tier: number;
+  occurrences: number;
+  customerId: string | null;
+}
+
 /** One alert as the API sends it to the screens (never factsJson or the e-mail state). */
 export interface OpsAlertRow {
   id: string;
@@ -134,6 +157,10 @@ export interface OpsAlertRow {
   /** The name of the user who acknowledged it (null: nobody, or the user was deleted). */
   ackedByName: string | null;
   mayToast: boolean;
+  /** The cause & action recorded for it (null: none yet). */
+  review: AlertReviewView | null;
+  /** The 90-day clean-up removed its text and free texts: read-only (its cause & action codes stay). */
+  detailsRemoved: boolean;
 }
 
 /** GET /api/alerts/summary: the bell. */
@@ -164,8 +191,38 @@ export type SweepCheck = Pick<AlertSummary, 'checkedAt' | 'checkStale' | 'checkF
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
 
-/** An OpsAlert row (with its acknowledging user's name when read) as the API sends it. */
-export function toOpsAlertRow(row: OpsAlert & { ackedBy?: { name: string } | null }): OpsAlertRow {
+type UserName = { name: string } | null | undefined;
+
+/** The users' names a row is read with (Prisma include): who acknowledged it, who saved its cause & action last and first. */
+export const ALERT_ROW_USERS = { ackedBy: { select: { name: true } }, reviewedBy: { select: { name: true } }, reviewFirstBy: { select: { name: true } } } as const;
+
+/** The cause & action of a row, or null (none recorded: reviewedAt is NULL; the database keeps it whole). */
+export function reviewViewOf(row: OpsAlert & { reviewedBy?: UserName; reviewFirstBy?: UserName }): AlertReviewView | null {
+  if (!row.reviewedAt || !row.reviewCause || !row.reviewAction) return null;
+  return {
+    cause: row.reviewCause,
+    causeOther: row.reviewCauseOther ?? null,
+    action: row.reviewAction,
+    actionOther: row.reviewActionOther ?? null,
+    note: row.reviewNote ?? null,
+    followUp: !!row.reviewFollowUp,
+    firstAt: (row.reviewFirstAt ?? row.reviewedAt).toISOString(),
+    savedAt: row.reviewedAt.toISOString(),
+    byName: row.reviewedBy?.name ?? null,
+    firstByName: row.reviewFirstBy?.name ?? null,
+    saves: Math.max(1, row.reviewSaves ?? 1),
+    groupId: row.reviewGroupId ?? null,
+    tier: row.reviewTier ?? row.tier,
+    occurrences: row.reviewOccurrences ?? row.occurrences,
+    customerId: row.reviewCustomerId ?? null,
+  };
+}
+
+/**
+ * An OpsAlert row (with the names of the users who acknowledged it and saved its cause & action, when read) as
+ * the API sends it.
+ */
+export function toOpsAlertRow(row: OpsAlert & { ackedBy?: UserName; reviewedBy?: UserName; reviewFirstBy?: UserName }): OpsAlertRow {
   return {
     id: row.id,
     rule: row.rule as AlertRule,
@@ -192,5 +249,7 @@ export function toOpsAlertRow(row: OpsAlert & { ackedBy?: { name: string } | nul
     ackedAt: iso(row.ackedAt),
     ackedByName: row.ackedBy?.name ?? null,
     mayToast: row.mayToast,
+    review: reviewViewOf(row),
+    detailsRemoved: !!row.detailsRemovedAt,
   };
 }

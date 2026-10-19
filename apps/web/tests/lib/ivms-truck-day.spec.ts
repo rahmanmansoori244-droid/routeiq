@@ -266,6 +266,8 @@ describe('the timeline: what happened in order, with who recorded it', () => {
       ackedAt: null,
       ackedByName: null,
       mayToast: true,
+      review: null,
+      detailsRemoved: false,
     });
     const m = buildTruckDay(input({ alerts: [alert('a1', 'HIGH', '08:45', 'OPEN'), alert('a2', 'WARN', '08:42', 'RESOLVED')] }));
     const alerts = m.timeline.filter((t) => t.kind === 'ALERT');
@@ -275,6 +277,23 @@ describe('the timeline: what happened in order, with who recorded it', () => {
     // Between stop 2's arrival (08:40) and the depot (10:38).
     const order = m.timeline.map((t) => t.key);
     expect(order.indexOf('alert:a1')).toBe(order.indexOf('stop:D1:1:2') + 2);
+    // Its cause & action (owner request 20 Oct 2026): shown under it, with the note and what changed since.
+    const reviewed: OpsAlertRow = {
+      ...alert('a3', 'HIGH', '08:50', 'OPEN'),
+      occurrences: 2,
+      review: {
+        cause: 'WAITING_AT_CUSTOMER', causeOther: null, action: 'CALLED_CUSTOMER', actionOther: null, note: 'Receiver at lunch', followUp: false,
+        firstAt: T('09:00').toISOString(), savedAt: T('09:00').toISOString(), byName: 'Office Example', firstByName: 'Office Example', saves: 1, groupId: null, tier: 2, occurrences: 1, customerId: null,
+      },
+    };
+    const withReview = buildTruckDay(input({ alerts: [reviewed] })).timeline.find((t) => t.key === 'alert:a3')!;
+    expect(withReview.lines).toEqual([
+      'T-100 L1 stop 2, Shop Example B: unloading 50 min (planned 15)',
+      'High · Open',
+      'Cause: Waiting at the customer (queue, receiver busy, paperwork) · Action: Called the customer · Office Example 09:00',
+      'Note: Receiver at lunch',
+      '(came back after it was saved)',
+    ]);
   });
 });
 

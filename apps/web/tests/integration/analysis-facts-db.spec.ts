@@ -272,6 +272,36 @@ describe('5. the export (GET /api/analysis/export)', () => {
     wb.getWorksheet('Visits')!.eachRow((row) => visits.push((row.values as unknown[]).slice(1)));
     expect(visits).toHaveLength(3);
     expect(JSON.stringify(visits)).not.toContain('T-200');
+    // The alerts with their cause & action (owner request 20 Oct 2026): the last sheet, the company's own only,
+    // read through the real select (the names of who saved it, never an id).
+    const saved = new Date(`${D}T06:00:00.000Z`);
+    const alert = (c: Company, truckCode: string, extra: Record<string, unknown> = {}) =>
+      prisma.opsAlert.create({
+        data: {
+          tenantId: c.tenantId, depotId: c.depotId, deliveryDate: dayDate, rule: 'UNLOAD_OVER', subjectKey: `${c.depotId}|${D}|${c.truckId}|1|1`, truckId: c.truckId, truckCode, loadNo: 1, sequence: 1,
+          kind: 'CONDITION', severity: 'HIGH', tier: 2, value: 70, threshold: 30, text: `${truckCode} L1 stop 1: unloading 70 min.`, factsJson: { gps: true }, occurredAt: new Date(`${D}T05:00:00.000Z`),
+          firstSeenAt: new Date(`${D}T05:02:00.000Z`), lastSeenAt: new Date(`${D}T05:30:00.000Z`), ...extra,
+        },
+      });
+    await alert(A, 'T-100', { reviewCause: 'WAITING_AT_CUSTOMER', reviewAction: 'CALLED_CUSTOMER', reviewFirstAt: saved, reviewFirstById: A.userId, reviewedAt: saved, reviewedById: A.userId, reviewSaves: 1, reviewTier: 2, reviewOccurrences: 1 });
+    await alert(B, 'T-200');
+    const again = await GET(new Request(`http://localhost/api/analysis/export?from=${D}&to=${D}`));
+    const wb2 = new ExcelJS.Workbook();
+    await wb2.xlsx.load(Buffer.from(await again.arrayBuffer()) as never);
+    expect(wb2.worksheets.map((w) => w.name).at(-1)).toBe('Alert causes & actions');
+    const alerts: unknown[][] = [];
+    wb2.getWorksheet('Alert causes & actions')!.eachRow((row) => alerts.push((row.values as unknown[]).slice(1)));
+    const head = alerts[0]!.map(String);
+    expect(alerts).toHaveLength(2);
+    const r = alerts[1]!;
+    expect([r[head.indexOf('Truck')], r[head.indexOf('Cause code')], r[head.indexOf('Last saved by')], r[head.indexOf('By GPS')], r[head.indexOf('Minutes from first seen to first save')]]).toEqual(['T-100', 'WAITING_AT_CUSTOMER', 'Admin', 'Yes', 58]);
+    expect(JSON.stringify(alerts)).not.toContain('T-200');
+    expect(JSON.stringify(alerts)).not.toContain(A.userId);
+    // Alone (the Alerts page's link): the ReadMe and that sheet.
+    const only = await GET(new Request(`http://localhost/api/analysis/export?from=${D}&to=${D}&only=alerts`));
+    const wb3 = new ExcelJS.Workbook();
+    await wb3.xlsx.load(Buffer.from(await only.arrayBuffer()) as never);
+    expect(wb3.worksheets.map((w) => w.name)).toEqual(['ReadMe', 'Alert causes & actions']);
     expect((await GET(new Request(`http://localhost/api/analysis/export?from=${D}&to=${D}&depotId=${B.depotId}`))).status).toBe(404);
     session.user = { ...session.user, role: 'VIEWER' };
     expect((await GET(new Request(`http://localhost/api/analysis/export?from=${D}&to=${D}`))).status).toBe(403);
