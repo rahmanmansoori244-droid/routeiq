@@ -27,6 +27,7 @@ import { prisma as libPrisma } from '@/lib/db';
 import { GET } from '@/app/api/analysis/export/route';
 import { _resetAnalysisJobState, runAnalysisJob } from '@/lib/analysis/job';
 import { purgeAnalysisFacts } from '@/lib/ivms/retention';
+import { DETECTOR_VERSION } from '@/lib/ivms/types';
 import { addDaysIso } from '@/lib/dispatch/time';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 
@@ -142,7 +143,7 @@ describe('1-2. the nightly job on PostgreSQL', () => {
     const r = await run(1);
     expect(r).toMatchObject({ tenants: 2, built: 2, refreshed: 0, failed: 0, unfinished: false });
     const [[dayA], visitsA, legsA] = await facts(A);
-    expect(dayA).toMatchObject({ truckCode: 'T-100', tracked: true, loads: 1, stopsPlanned: 2, delivered: 2, gpsNote: null, lastInFrom: 'TRAIL', frozenAt: null, analysisVersion: 'analysis-v1', detectorVersion: 'ivms-v1' });
+    expect(dayA).toMatchObject({ truckCode: 'T-100', tracked: true, loads: 1, stopsPlanned: 2, delivered: 2, gpsNote: null, lastInFrom: 'TRAIL', frozenAt: null, analysisVersion: 'analysis-v1', detectorVersion: DETECTOR_VERSION });
     expect(dayA!.kmGps).toBeGreaterThan(10);
     expect(dayA!.gpsBuiltAt).toEqual(night(1));
     expect(visitsA.map((v) => [v.sequence, v.customerCode, v.unloadSource])).toEqual([
