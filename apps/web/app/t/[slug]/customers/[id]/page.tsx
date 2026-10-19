@@ -14,6 +14,7 @@ import { CustomerEditor } from './customer-editor';
 import { CustomerDetailsButton } from './customer-details-button';
 import { SMALL_TRUCK_BADGE, SMALL_TRUCK_FIELD_LABEL } from '@/lib/dispatch/small-truck';
 import { LOADING_INSTRUCTION_FIELD_LABEL, loadingInstructionText } from '@/lib/dispatch/loading-instruction';
+import { SITE_RADIUS_FIELD_LABEL } from '@/lib/ivms/site-radius';
 import type { EditableCustomer } from '../../dispatch/customer-dialog';
 
 export const dynamic = 'force-dynamic';
@@ -79,6 +80,7 @@ export default async function CustomerDetailPage({
     phone: customer.phone,
     smallTruckOnly: customer.smallTruckOnly,
     loadingInstruction: customer.loadingInstruction,
+    siteRadiusM: customer.siteRadiusM,
   };
   // As the sheets print it (one line; a longer value written by hand is shortened, never hidden).
   const loadingInstruction = loadingInstructionText(customer.loadingInstruction);
@@ -214,6 +216,10 @@ export default async function CustomerDetailPage({
                     <span className="block text-xs text-muted-foreground">Optional: add it in Details when the warehouse must load this customer in a specific way.</span>
                   ) : null}
                 </span>
+              </Field>
+              {/* Owner request 19 Oct 2026: a big customer's GPS site radius (set in Details). */}
+              <Field label={SITE_RADIUS_FIELD_LABEL}>
+                <span data-testid="customer-site-radius">{customer.siteRadiusM ? `${customer.siteRadiusM} m` : 'company stop radius'}</span>
               </Field>
               {customer.accessNotes ? <Field label="Access notes">{customer.accessNotes}</Field> : null}
             </CardContent>

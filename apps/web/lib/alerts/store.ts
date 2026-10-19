@@ -17,6 +17,24 @@
  *   switched off; acknowledged, they stay open but no longer count on the bell. An event that happens
  *   again after a correction reopens its row.
  * - History rows (Candidate.history) are written already closed, never toast or e-mail, and never reopen.
+ * - The day's end (owner request 19 Oct 2026: alerts of yesterday looked like today's on the bell, "ok add
+ *   the date fix"): a row whose delivery date is before the company's today (PlanContext.today) and that is
+ *   still open - a condition or an event, acknowledged or not, whatever its rule says now - closes as
+ *   DAY_ENDED at the first sweep after midnight, keeping who acknowledged it. Before, it stayed open (and on
+ *   the bell) for the whole next day and closed only when its date left the window (EXPIRED; production
+ *   closed 17 Oct's rows at 19 Oct 00:02). Only a rule that answers for it in the same sweep with its own
+ *   final words (ENDED, CORRECTED, NOT_FOLLOWED, a history row) closes it otherwise, and RULE_OFF stays first
+ *   for a row nobody answered for. After that the day is history: a row of it is never escalated, updated or
+ *   reopened, and a subject of it found true only after midnight (a result tapped late, a late arrival) is
+ *   written already closed as DAY_ENDED (no toast, no e-mail), so the Alerts page still lists it.
+ *   Today's and tomorrow's rows are not touched by any of this.
+ * - The day's follow-up after it ended (review of the branch, 19 Oct 2026, finding 2; catalog.ts
+ *   ALERT_AFTER_DAY_RULES): LOAD_NOT_CLOSED first found true after that midnight (a load planned back at
+ *   22:30 fires at 00:31 with the default 120 min) is raised OPEN, not written closed: written closed it
+ *   would never reach the bell, a toast or an e-mail, and the other rules leave a late load to it. Such a
+ *   row (firstSeenAt at or after PlanContext.todayStart) lives like a row of today: escalated, updated,
+ *   closed by its own words or NOT_IN_PLAN, and EXPIRED when its date leaves the window at the next midnight;
+ *   it never closes as DAY_ENDED. A LOAD_NOT_CLOSED row already open at midnight closes as DAY_ENDED like any.
  *
  * The rules of a raise:
  * 1. New subject: one insert (createMany skipDuplicates = ON CONFLICT DO NOTHING on tenantId, rule,
@@ -37,6 +55,7 @@ import type { Prisma } from '@prisma/client';
 import type { AppPrismaClient } from '../db';
 import { dateOnly, isoOf } from '../dispatch/time';
 import {
+  ALERT_AFTER_DAY_RULES,
   ALERT_REOPEN_KEEP_MS,
   ALERT_VALUE_STEP,
   RESOLVED_REASON_TEXT,
@@ -70,6 +89,11 @@ export interface StoredAlert {
   resolvedAt: Date | null;
   /** Why it closed (null while open). */
   resolvedReason?: string | null;
+  /**
+   * When the row was raised (OpsAlert.firstSeenAt): a row of the day's follow-up raised after the midnight
+   * that ended its day lives on (ALERT_AFTER_DAY_RULES). Absent: raised before it.
+   */
+  firstSeenAt?: Date | null;
 }
 
 /** The columns the store writes on a raise, an escalation, an update or a reopen. */
@@ -155,8 +179,19 @@ export interface PlanContext {
   alertsEnabledAt: Date | null;
   /** TenantConfig.alertRuleOnAtJson read back: the same per rule (the later of the two counts). */
   ruleOnAt?: RuleOnAt | null;
-  /** The first date of the sweep's window (yesterday): open CONDITION rows of older dates close as EXPIRED. */
+  /** The first date of the sweep's window (yesterday): open rows of older dates (no sweep closed them on the night after their date) close as EXPIRED. */
   windowFrom: string;
+  /**
+   * The company's today (its time zone; AlertFacts.today): open rows of an earlier date close as DAY_ENDED,
+   * and nothing of an earlier date is raised open, escalated, updated or reopened (owner request 19 Oct 2026).
+   */
+  today: string;
+  /**
+   * The start of the company's today (zonedDayStart(today, its time zone)): a row of ALERT_AFTER_DAY_RULES of
+   * an earlier date raised at or after it was raised after its day ended and is not closed as DAY_ENDED
+   * (review of the branch, 19 Oct 2026, finding 2).
+   */
+  todayStart: Date;
   /** The rules that are on: open rows of the others close as RULE_OFF. */
   rulesOn: readonly AlertRule[];
 }
@@ -197,6 +232,17 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
   };
   const created = new Set<string>();
   const backlog = (c: { rule: AlertRule; occurredAt: Date }) => beforeSwitchOn(c.occurredAt, switchOnOf(c.rule, ctx.alertsEnabledAt, ctx.ruleOnAt));
+  /** A delivery day that is over (before the company's today): its rows are history (owner request 19 Oct 2026). */
+  const dayOver = (deliveryDate: string) => deliveryDate < ctx.today;
+  /** The day's follow-up (LOAD_NOT_CLOSED): still raised open for a day that is over (finding 2). */
+  const followsAfterDay = (rule: string) => (ALERT_AFTER_DAY_RULES as readonly string[]).includes(rule);
+  /**
+   * A row of a day that is over that is history: every one, except a follow-up row raised after the midnight
+   * that ended its day (it lives like a row of today until its own words, NOT_IN_PLAN or EXPIRED close it).
+   */
+  const pastDay = (row: StoredAlert) =>
+    dayOver(row.deliveryDate) && !(followsAfterDay(row.rule) && !!row.firstSeenAt && row.firstSeenAt.getTime() >= ctx.todayStart.getTime());
+  const dayEndedWords = (text: string) => `${text} (${RESOLVED_REASON_TEXT.DAY_ENDED.toLowerCase()})`;
 
   for (const c of ev.active) {
     const k = keyOf(c.rule, c.subjectKey);
@@ -209,7 +255,12 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
         continue;
       }
       created.add(k);
-      const f = fieldsOf(c, now);
+      // A subject of a day that is over, found true only after midnight: written already closed (no toast,
+      // no e-mail), so the Alerts page still lists it under its day and the bell never shows it - except the
+      // day's follow-up (LOAD_NOT_CLOSED: a load planned back late still not closed), raised open (finding 2).
+      const late = !c.history && dayOver(c.deliveryDate) && !followsAfterDay(c.rule);
+      const closedAtOnce = !!c.history || late;
+      const f = fieldsOf({ ...c, history: closedAtOnce }, now);
       plan.creates.push({
         depotId: c.depotId,
         deliveryDate: c.deliveryDate,
@@ -225,22 +276,24 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
         tier: c.tier,
         value: f.value!,
         threshold: f.threshold!,
-        text: c.text,
+        text: late ? dayEndedWords(c.text) : c.text,
         factsJson: f.factsJson ?? null,
         mayToast: f.mayToast!,
         mayEmail: f.mayEmail!,
         occurredAt: c.occurredAt,
         firstSeenAt: now,
         lastSeenAt: now,
-        resolvedAt: c.history ? now : null,
-        resolvedReason: c.history ? 'ENDED' : null,
+        resolvedAt: closedAtOnce ? now : null,
+        resolvedReason: c.history ? 'ENDED' : late ? 'DAY_ENDED' : null,
       });
-      if (c.history) plan.counts.history++;
+      if (closedAtOnce) plan.counts.history++;
       else plan.counts.raised++;
       continue;
     }
     if (row.resolvedAt) {
       if (c.history) continue; // a history row never reopens, and a closed row is never rewritten as history
+      // A day that is over never reopens (it would close again at once, and page someone in between).
+      if (pastDay(row)) continue;
       // Switching a rule off and on again is not news (review H2): a row closed as RULE_OFF reopens only
       // for something that began after it closed (a new episode), never for what was already true then.
       if ((row.resolvedReason === 'RULE_OFF' && c.occurredAt.getTime() <= row.resolvedAt.getTime()) || backlog(c)) {
@@ -265,6 +318,8 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
       resolve(row, row.kind === 'EVENT' ? 'CORRECTED' : 'ENDED', c.text);
       continue;
     }
+    // Still true, but its day is over: it closes as DAY_ENDED below, as it is (no escalation, no new words).
+    if (pastDay(row)) continue;
     if (c.tier > row.tier) {
       plan.escalations.push({ id: row.id, tier: c.tier, data: { ...fieldsOf(c, now), ackedAt: null, ackedById: null } });
       plan.counts.escalated++;
@@ -292,16 +347,21 @@ export function planApply(rows: readonly StoredAlert[], ev: Evaluation, ctx: Pla
   }
   for (const h of ev.held ?? []) touched.add(keyOf(h.rule, h.subjectKey));
 
-  // Rows nobody answered for: their rule is off, their date left the window, or their subject left the plan.
+  // Rows nobody answered for: their rule is off, their date left the window, their day is over, or their
+  // subject left the plan. And the rows a rule still answers for (true now, or held) whose day is over.
   const on = new Set<string>(ctx.rulesOn);
   const scopes = new Set(ev.scopes.map((s) => `${s.depotId}|${s.deliveryDate}`));
   const closed = (row: StoredAlert, reason: ResolvedReason) => resolve(row, reason, `${row.text} (${RESOLVED_REASON_TEXT[reason].toLowerCase()})`);
   for (const row of rows) {
-    if (row.resolvedAt || touched.has(keyOf(row.rule, row.subjectKey))) continue;
-    if (!on.has(row.rule)) closed(row, 'RULE_OFF');
+    if (row.resolvedAt || closing.has(row.id)) continue;
+    const answered = touched.has(keyOf(row.rule, row.subjectKey));
+    if (!answered && !on.has(row.rule)) closed(row, 'RULE_OFF');
     // Events too (M7): an event of a date the sweep no longer reads is history, acknowledged or not.
-    else if (row.deliveryDate < ctx.windowFrom) closed(row, 'EXPIRED');
-    else if (row.kind === 'CONDITION' && scopes.has(`${row.depotId}|${row.deliveryDate}`)) closed(row, 'NOT_IN_PLAN');
+    else if (!answered && row.deliveryDate < ctx.windowFrom) closed(row, 'EXPIRED');
+    // The first sweep after midnight: every row of the day before still open (owner request 19 Oct 2026),
+    // not the day's follow-up raised after that midnight (finding 2).
+    else if (pastDay(row)) closed(row, 'DAY_ENDED');
+    else if (!answered && row.kind === 'CONDITION' && scopes.has(`${row.depotId}|${row.deliveryDate}`)) closed(row, 'NOT_IN_PLAN');
   }
   return plan;
 }
@@ -444,6 +504,7 @@ export function storedOf(r: {
   deliveryDate: Date | string;
   resolvedAt: Date | null;
   resolvedReason?: string | null;
+  firstSeenAt?: Date | null;
 }): StoredAlert {
   return {
     id: r.id,
@@ -458,11 +519,12 @@ export function storedOf(r: {
     deliveryDate: typeof r.deliveryDate === 'string' ? r.deliveryDate : isoOf(r.deliveryDate),
     resolvedAt: r.resolvedAt,
     resolvedReason: r.resolvedReason ?? null,
+    firstSeenAt: r.firstSeenAt ?? null,
   };
 }
 
 /** The columns facts.ts reads of the rows already there. */
-export const STORED_SELECT = { id: true, rule: true, subjectKey: true, kind: true, tier: true, value: true, text: true, truckCode: true, depotId: true, deliveryDate: true, resolvedAt: true, resolvedReason: true } as const;
+export const STORED_SELECT = { id: true, rule: true, subjectKey: true, kind: true, tier: true, value: true, text: true, truckCode: true, depotId: true, deliveryDate: true, resolvedAt: true, resolvedReason: true, firstSeenAt: true } as const;
 
 // ---------------------------------------------------------------------------------------------
 // Retention

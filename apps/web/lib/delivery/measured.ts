@@ -12,8 +12,11 @@
  * min(240, planned + 60)) are left out. The per-case part of the planned time is taken off, so the
  * figure is the customer's BASE time, the same base as Customer.avgServiceTimeMin (every visit of a
  * split delivery takes the full base time plus its own cases: rule of 29 Sep), and split visits count.
+ * The minutes the GPS showed the truck away from the customer in between (StopVisit.awayMinutes: owner
+ * request 19 Oct 2026, a leave-and-return) are taken off first: the figure is the time on site.
  */
 import { fmtDayMonth } from '../dispatch/time';
+import { onSite } from './office-text';
 
 /** At most this many recent visits are used; fewer than MIN_VISITS gives no measured time. */
 export const MEASURED_LAST = 10;
@@ -34,6 +37,24 @@ export interface MeasuredVisit {
   autoArrivedAt: Date | string | null;
   /** YYYY-MM-DD */
   deliveryDate: string;
+  /**
+   * Minutes the GPS showed the truck away from the customer during the visit (StopVisit.awayMinutes, owner
+   * request 19 Oct 2026): never unloading, so taken off the measured time (office-text.ts onSite). Absent or
+   * null: none.
+   */
+  awayMinutes?: number | null;
+  /** The automatic timing from the arrival (StopVisit.autoMinutes): with autoServiceMinutes, the time before the window start. Absent: none. */
+  autoMinutes?: number | null;
+}
+
+/**
+ * The visit's measured unloading on site: autoServiceMinutes less the minutes away that can have been after
+ * the window start (office-text.ts onSite; null: not timed).
+ */
+export function measuredOnSite(v: Pick<MeasuredVisit, 'autoServiceMinutes' | 'awayMinutes' | 'autoMinutes'>): number | null {
+  if (v.autoServiceMinutes === null || !Number.isFinite(v.autoServiceMinutes)) return null;
+  const before = typeof v.autoMinutes === 'number' && Number.isFinite(v.autoMinutes) ? v.autoMinutes - v.autoServiceMinutes : 0;
+  return onSite(v.autoServiceMinutes, v.awayMinutes, before);
 }
 
 export interface MeasuredUnloading {
@@ -49,10 +70,11 @@ export interface MeasuredUnloading {
 /** A visit that may feed the measured time (spec section 11.1). */
 export function eligibleForMeasured(v: MeasuredVisit): boolean {
   if (v.outcome !== 'DELIVERED' && v.outcome !== 'PARTLY_DELIVERED') return false;
-  if (v.autoServiceMinutes === null || !Number.isFinite(v.autoServiceMinutes)) return false;
+  const m = measuredOnSite(v);
+  if (m === null) return false;
   if (v.timingSuspect || v.outcomeLate) return false;
   const cap = Math.min(MEASURED_MAX_MIN, v.plannedServiceMin !== null ? v.plannedServiceMin + MEASURED_OVER_PLAN_MIN : MEASURED_MAX_MIN);
-  return v.autoServiceMinutes >= 1 && v.autoServiceMinutes <= cap;
+  return m >= 1 && m <= cap;
 }
 
 export function median(xs: readonly number[]): number {
@@ -75,7 +97,7 @@ export function measuredUnloading(visits: readonly MeasuredVisit[], serviceMinPe
     .slice(0, MEASURED_LAST);
   if (used.length < MEASURED_MIN_VISITS) return null;
   const perCase = Math.max(0, serviceMinPerCase || 0);
-  const bases = used.map((v) => Math.max(0, v.autoServiceMinutes! - perCase * Math.max(0, v.casesDelivered ?? 0)));
+  const bases = used.map((v) => Math.max(0, measuredOnSite(v)! - perCase * Math.max(0, v.casesDelivered ?? 0)));
   const dates = used.map((v) => v.deliveryDate).sort();
   return { minutes: Math.round(median(bases)), n: used.length, from: dates[0]!, to: dates[dates.length - 1]! };
 }

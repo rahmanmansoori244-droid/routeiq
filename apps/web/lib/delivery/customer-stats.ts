@@ -53,7 +53,8 @@ async function recentTimedVisits(db: Db, tenantId: string, ids: readonly string[
         timingSuspect: false,
         outcomeLate: false,
       },
-      select: { customerId: true, outcome: true, autoServiceMinutes: true, timingSuspect: true, outcomeLate: true, plannedServiceMin: true, casesDelivered: true, autoArrivedAt: true, deliveryDate: true },
+      // awayMinutes: the minutes the GPS showed the truck away are taken off (owner request 19 Oct 2026, measured.ts measuredOnSite).
+      select: { customerId: true, outcome: true, autoServiceMinutes: true, autoMinutes: true, awayMinutes: true, timingSuspect: true, outcomeLate: true, plannedServiceMin: true, casesDelivered: true, autoArrivedAt: true, deliveryDate: true },
       orderBy: [{ autoArrivedAt: 'desc' }],
       take: TIMED_VISITS_PER_CUSTOMER,
     });

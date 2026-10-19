@@ -15,6 +15,7 @@ import { runAlertSweep } from '../alerts/sweep';
 import { sendAlertDigest } from '../alerts/notify';
 import { startIvmsTimer } from '../ivms/poll';
 import { ivmsRetentionChanged, runIvmsRetention } from '../ivms/retention';
+import { analysisChanged, runAnalysisJob } from '../analysis/job';
 
 const INTERVAL_MS = 60_000;
 /** The returned-loads sweep: the last result already completes a load at once; this is the safety net. */
@@ -59,6 +60,18 @@ async function sweep() {
     }
   } catch (err) {
     console.error('janitor: delivery retention not run', (err as Error)?.message ?? err);
+  }
+  // The analysis dataset (owner request 19 Oct 2026: "build on more data for our analysis later and
+  // improvement", lib/analysis/job.ts): from about 03:00 company time the day before is built while its GPS
+  // trail still exists (so before the GPS retention below), the 2nd to 4th days before are refreshed and the
+  // 4th frozen, and facts older than analysisRetentionDays are deleted. At most every 10 min, at most 20 s of
+  // work per run (the rest at the next run), and its own try: it never stops the GPS retention or the alert
+  // sweep after it. ROUTEIQ_DISABLE_ANALYSIS=1 skips it.
+  try {
+    const facts = await runAnalysisJob();
+    if (analysisChanged(facts)) console.warn('janitor: analysis facts', facts);
+  } catch (err) {
+    console.error('janitor: analysis facts not built', (err as { code?: string } | null)?.code ?? (err as Error)?.name ?? 'error');
   }
   // IVMS live link (16 Oct 2026): the trackers' trail, live positions and depot moves age out (at most
   // every 10 min; one EXISTS and nothing else while no GPS data exists). Its own try as well.

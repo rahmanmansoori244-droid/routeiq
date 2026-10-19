@@ -377,6 +377,8 @@ export async function rebuildVisit(tx: Tx, visit: VisitRow, ctx: { dayStart: Dat
       autoBasis: v.autoBasis,
       autoMinutes: v.autoMinutes,
       autoServiceMinutes: v.autoServiceMinutes,
+      // Owner request 19 Oct 2026: the minutes the GPS stays showed the truck away (never unloading); null: none.
+      awayMinutes: v.awayMinutes ?? null,
       // After the location purge the positions the plausibility flags were read from are gone: a
       // visit flagged before keeps its flag (it must never start feeding measured times and KPIs).
       timingSuspect: visit.locationPurgedAt ? !!visit.timingSuspect || v.timingSuspect : v.timingSuspect,

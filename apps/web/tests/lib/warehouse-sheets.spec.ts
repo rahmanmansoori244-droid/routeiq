@@ -33,6 +33,7 @@ function overlayStop(over: Partial<OverlayStop>): OverlayStop {
     departureNote: null,
     actualMin: null,
     actualLabel: null,
+    awayMin: null,
     plannedMin: null,
     autoTimed: false,
     timingSuspect: false,

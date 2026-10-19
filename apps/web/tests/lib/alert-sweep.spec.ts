@@ -58,19 +58,20 @@ function stubDb(configs: Record<string, unknown>[]) {
   const created: Record<string, any>[] = [];
   const queries: Record<string, any>[] = [];
   const stamped: Record<string, any>[] = [];
+  const updated: Record<string, any>[] = [];
   const tx = {
     $executeRawUnsafe: async () => 0,
     tenantConfig: { updateMany: async (a: Record<string, any>) => (stamped.push(a), { count: 1 }) },
     opsAlert: {
       createMany: async (a: Record<string, any>) => (created.push(...a.data), { count: a.data.length }),
-      updateMany: async () => ({ count: 1 }),
+      updateMany: async (a: Record<string, any>) => (updated.push(a), { count: 1 }),
     },
   };
   const db = {
     tenantConfig: { findMany: async (a: Record<string, any>) => (queries.push(a), configs) },
     $transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(tx),
   };
-  return { db: db as never, created, queries, stamped };
+  return { db: db as never, created, queries, stamped, updated };
 }
 
 beforeEach(() => {
@@ -152,6 +153,39 @@ describe('runAlertSweep', () => {
     expect(JSON.stringify(h)).not.toMatch(/tA|tB/);
   });
 
+  it("owner request 19 Oct 2026: the first sweep after the company's midnight closes the day before's open rows as DAY_ENDED (the facts' today), today's stay", async () => {
+    // 21 Oct 00:02 in Muscat: the facts read 20-22 Oct and say today is the 21st.
+    const after = at(24 * 60 + 2);
+    const facts = { ...lateFacts().facts, today: '2026-10-21', dates: [D, '2026-10-21', '2026-10-22'], loads: [] };
+    const open = (id: string, date: string) => ({
+      id, rule: 'ETA_LATE', subjectKey: `D1|${date}|TR1|1`, kind: 'CONDITION', tier: 1, value: 40, text: 'T05 L1 is running about 40 min late.', truckCode: 'T05', depotId: 'D1', deliveryDate: date, resolvedAt: null, resolvedReason: null,
+    });
+    state.facts.set('tA', { facts, rows: [open('y1', D), open('t1', '2026-10-21')] });
+    const { db, updated } = stubDb([cfg('tA')]);
+    const notified: string[] = [];
+    const r = await runAlertSweep(after, { db, notify: async (t) => void notified.push(t) });
+    expect(r).toMatchObject({ resolved: 1, raised: 0, reopened: 0 });
+    expect(updated).toEqual([{ where: { tenantId: 'tA', id: 'y1', resolvedAt: null }, data: { resolvedAt: after, resolvedReason: 'DAY_ENDED', text: 'T05 L1 is running about 40 min late. (day ended)' } }]);
+    // The rows are closed before the e-mail step runs (it then never sees them open).
+    expect(notified).toEqual(['tA']);
+    expect(console.warn).toHaveBeenCalledWith('alerts: sweep', expect.objectContaining({ tenantId: 'tA', resolved: { DAY_ENDED: 1 } }));
+  });
+
+  it("review of the branch (finding 2): the day's follow-up raised after the company's midnight (Load not closed at 00:35) stays open; a row raised before it closes as DAY_ENDED", async () => {
+    // 21 Oct 00:40 in Muscat (20:40 UTC on the 20th): the start of the company's today is 21 Oct 00:00 Muscat, not UTC's.
+    const after = at(24 * 60 + 40);
+    const facts = { ...lateFacts().facts, today: '2026-10-21', dates: [D, '2026-10-21', '2026-10-22'], loads: [] };
+    const open = (id: string, loadNo: number, firstSeenAt: Date) => ({
+      id, rule: 'LOAD_NOT_CLOSED', subjectKey: `D1|${D}|TR1|${loadNo}`, kind: 'CONDITION', tier: 1, value: 125, text: `T05 L${loadNo} still not closed.`, truckCode: 'T05', depotId: 'D1', deliveryDate: D, resolvedAt: null, resolvedReason: null, firstSeenAt,
+    });
+    // L1's row was raised at 23:10 (on the bell during its day); L2's at 00:35, after the midnight.
+    state.facts.set('tA', { facts, rows: [open('y1', 1, at(23 * 60 + 10)), open('f1', 2, at(24 * 60 + 35))] });
+    const { db, updated } = stubDb([cfg('tA')]);
+    const r = await runAlertSweep(after, { db });
+    expect(r).toMatchObject({ resolved: 1 });
+    expect(updated.map((u) => [u.where.id, u.data.resolvedReason])).toEqual([['y1', 'DAY_ENDED']]);
+  });
+
   it('at most every 2 min (the cron route forces it); never twice at once; off with ROUTEIQ_DISABLE_ALERTS=1', async () => {
     state.facts.set('tA', lateFacts());
     const { db } = stubDb([cfg('tA')]);
@@ -202,7 +236,8 @@ describe('the hooks', () => {
     // route's `step`: a database error answers `alerts: { error }`, never a 500; tests/lib/ivms-off.spec.ts).
     expect(cron).toContain("const alerts = await step('alerts', () => runAlertSweep(new Date(), { force: true, notify: sendAlertDigest }));");
     expect(cron).toContain("import { sendAlertDigest } from '@/lib/alerts/notify';");
-    expect(cron).toContain('return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts, ...(ivms ? { ivms } : {}) };');
+    // The analysis dataset (19 Oct 2026) runs after the sweep, its own step, in the answer only when it did something.
+    expect(cron).toContain('return { jobs, shifts, returnedLoads, deliveryRetention, hire, alerts, ...(ivms ? { ivms } : {}), ...(analysis ? { analysis } : {}) };');
   });
 
   it('nothing in the driver, office or load-status paths calls the alerts engine', () => {

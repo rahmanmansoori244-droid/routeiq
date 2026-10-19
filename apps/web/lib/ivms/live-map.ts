@@ -129,6 +129,9 @@ export function gpsFactText(f: unknown, tz: string): string | null {
       return `GPS: short stop at ${load}${stop1(seqs)} out of sequence${at}; not timed by GPS`;
     case 'NO_DEPOT_BOUNDARY':
       return 'GPS: depot visits not seen, so stops cannot be told apart between loads; not timed by GPS';
+    // A stay at a stop's pin shorter than the dwell (owner request 19 Oct 2026): kept for later analysis, never shown.
+    case 'SHORT_DWELL':
+      return null;
     default:
       return null;
   }

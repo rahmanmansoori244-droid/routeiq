@@ -56,7 +56,10 @@ export interface ExportEvent {
   receivedAt: string;
   distanceM: number | null;
   accuracyM: number | null;
-  /** The keys deriveVisit reads (outcome, reason, note, late, observed, gap, ...). */
+  /**
+   * The keys deriveVisit reads (outcome, reason, note, late, observed, gap, ...; a GPS event's segmentStartAt
+   * and its stay summary's minutes away, `stay: { awayMin }`, from 19 Oct 2026: absent in an older export).
+   */
   payload: Record<string, unknown> | null;
 }
 
@@ -225,6 +228,8 @@ function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: {
     windowEndMin: v.windowEndMin,
     photos,
     ...(ctx.gps ? { departureSource: s.departureSource, departureObserved: !s.departureGap } : {}),
+    // The minutes away the GPS stays showed (owner request 19 Oct 2026): with the GPS alerts only, as the live facts.
+    ...(ctx.gps && s.awayMinutes ? { awayMinutes: s.awayMinutes } : {}),
   };
 }
 
@@ -408,7 +413,10 @@ export function replayDay(exp: AlertDayExport, opts: ReplayOptions = {}): Replay
     const now = at(m);
     const facts = factsAsOf(exp, now, rows, opts.radiusM, { gps });
     const ev = evaluate(facts, now, thresholds);
-    const plan = planApply(rows, ev, { now, alertsEnabledAt: switchOn, windowFrom: exp.date, rulesOn: on });
+    // The company's today at this step: a replay that runs past midnight closes the day's rows still open
+    // as DAY_ENDED at the first step after it, as the live sweep does (owner request 19 Oct 2026), and
+    // raises the day's follow-up (Load not closed) found only after it open (review of the branch, finding 2).
+    const plan = planApply(rows, ev, { now, alertsEnabledAt: switchOn, windowFrom: exp.date, today: facts.today, todayStart: zonedDayStart(facts.today, exp.tz), rulesOn: on });
     const byId = new Map(rows.map((r) => [r.id, r]));
     const before = new Map(rows.map((r) => [r.id, { tier: r.tier, resolved: !!r.resolvedAt }]));
     const added = applyPlanInMemory(rows, plan, now);

@@ -32,6 +32,11 @@ export interface EtaStop {
   done: boolean;
   /** Arrived (phone, office or GPS) and not left: the truck is there now. */
   arrivedAt: Date | null;
+  /**
+   * "At the stop" radius of this stop (m), when its customer has a site radius larger than the input's
+   * (owner request 19 Oct 2026, lib/alerts/gps.ts atStopRadiusOf); absent: the input's.
+   */
+  atStopRadiusM?: number;
 }
 
 export interface EtaInput {
@@ -101,7 +106,7 @@ export function liveEta(i: EtaInput): StopEta[] {
   // An open arrival while the fresh fix is away from that stop's pin: the truck left it (the result or the
   // departure is not in yet), it is behind the truck.
   const radius = i.atStopRadiusM ?? 100 + AT_STOP_MARGIN_M;
-  if (ahead[0]?.arrivedAt && ahead[0].pin && distanceM(fix, ahead[0].pin) > radius) ahead = ahead.slice(1);
+  if (ahead[0]?.arrivedAt && ahead[0].pin && distanceM(fix, ahead[0].pin) > (ahead[0].atStopRadiusM ?? radius)) ahead = ahead.slice(1);
   if (!ahead.length) return [];
   const plannedAt = (s: EtaStop) => (s.etaMin === null ? null : new Date(i.dayStart.getTime() + s.etaMin * MIN));
   const out: StopEta[] = [];

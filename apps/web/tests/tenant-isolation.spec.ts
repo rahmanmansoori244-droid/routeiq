@@ -450,6 +450,49 @@ describe('tenantDb isolation (Phase 1 scope)', () => {
     expect(await tenantDb(tenantBId).ivmsEvent.count()).toBe(1);
   });
 
+  it('FactTruckDay, FactVisit, FactLeg and FactDepotTurn (the analysis dataset, owner request 19 Oct 2026) are scoped both ways: reads and writes', async () => {
+    // Invented ids and codes; the same natural keys in both companies (unique per company only).
+    const date = new Date('2026-10-18T00:00:00Z');
+    const at = new Date('2026-10-18T05:00:00Z');
+    const settings = { serviceMinPerCase: 0.25, reloadMinutes: 30, stopRadiusM: 100, dwellMin: 3, detectorVersion: 'ivms-v1', analysisVersion: 'analysis-v1', builtAt: at, refreshedAt: at };
+    const key = { depotId: 'D-FACT', deliveryDate: date, truckId: 'T-100' };
+    const seedFacts = async (tid: string, tag: string) => {
+      const db = tenantDb(tid);
+      const day = await db.factTruckDay.create({
+        data: { ...key, truckCode: `T-100-${tag}`, loads: 1, stopsPlanned: 1, stopsWithResult: 1, delivered: 1, partlyDelivered: 0, notDelivered: 0, casesPlanned: 10, casesDelivered: 10, overtimeAfterMin: 540, loadingMinPerCase: 0, distanceMultiplier: 1.3, avgSpeedKmh: 40, roadTimeFactor: 1.25, ...settings } as Any,
+      });
+      const visit = await db.factVisit.create({ data: { ...key, loadNo: 1, sequence: 1, customerId: 'C-FACT', truckCode: 'T-100', customerCode: 'TST0001', casesPlanned: 10, flags: ['PIN_OFFSET'], ...settings } as Any });
+      const leg = await db.factLeg.create({ data: { ...key, truckCode: 'T-100', loadNo: 1, legNo: 1, distanceMultiplier: 1.3, avgSpeedKmh: 40, roadTimeFactor: 1.25, ...settings } as Any });
+      const turn = await db.factDepotTurn.create({ data: { ...key, truckCode: 'T-100', afterLoadNo: 1, nextLoadNo: 2, casesLoaded: 5, loadingMinPerCase: 0, ...settings } as Any });
+      return { day, visit, leg, turn };
+    };
+    const a = await seedFacts(tenantAId, 'A');
+    const b = await seedFacts(tenantBId, 'B');
+    for (const [tid, own, other] of [
+      [tenantAId, a, b],
+      [tenantBId, b, a],
+    ] as const) {
+      const db = tenantDb(tid);
+      expect((await db.factTruckDay.findMany()).map((r) => r.id)).toEqual([own.day.id]);
+      expect(await db.factTruckDay.findUnique({ where: { id: other.day.id } })).toBeNull();
+      expect((await db.factVisit.findMany()).map((r) => r.id)).toEqual([own.visit.id]);
+      expect(await db.factVisit.findUnique({ where: { id: other.visit.id } })).toBeNull();
+      expect((await db.factLeg.findMany()).map((r) => r.id)).toEqual([own.leg.id]);
+      expect(await db.factLeg.findUnique({ where: { id: other.leg.id } })).toBeNull();
+      expect((await db.factDepotTurn.findMany()).map((r) => r.id)).toEqual([own.turn.id]);
+      expect(await db.factDepotTurn.findUnique({ where: { id: other.turn.id } })).toBeNull();
+    }
+    // A write through one company (a refresh, a freeze, the retention) never touches the other's rows.
+    await tenantDb(tenantAId).factVisit.updateMany({ data: { frozenAt: new Date() } });
+    expect((await tenantDb(tenantBId).factVisit.findFirst())?.frozenAt).toBeNull();
+    await tenantDb(tenantAId).factTruckDay.deleteMany({});
+    await tenantDb(tenantAId).factLeg.deleteMany({});
+    await tenantDb(tenantAId).factDepotTurn.deleteMany({});
+    expect(await tenantDb(tenantBId).factTruckDay.count()).toBe(1);
+    expect(await tenantDb(tenantBId).factLeg.count()).toBe(1);
+    expect(await tenantDb(tenantBId).factDepotTurn.count()).toBe(1);
+  });
+
   it('tenantDb refuses an empty tenantId', () => {
     expect(() => tenantDb('')).toThrow(/tenantId/i);
   });

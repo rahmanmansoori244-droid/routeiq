@@ -26,7 +26,8 @@ const { processGpsTimes, suppressGpsTimes } = await import('@/lib/ivms/stop-even
 const { readAlertFacts } = await import('@/lib/alerts/facts');
 const { evaluate } = await import('@/lib/alerts/rules');
 const { gpsAlertConfigOf } = await import('@/lib/alerts/gps');
-const { exportGps } = await import('@/lib/alerts/replay-export');
+const { exportAlertDay, exportGps } = await import('@/lib/alerts/replay-export');
+const { factsAsOf } = await import('@/lib/alerts/replay');
 const { thresholdsOf } = await import('@/lib/alerts/catalog');
 
 const TEN = 'tA';
@@ -209,6 +210,35 @@ describe('GPS tracking ALERTS: the alerts read the GPS times and the depot moves
     const legacy = (await exportGps(fakePrisma as never, TEN, DATE, TZ, ['t1'], later))!;
     expect(legacy.truckDays[0]!.moves.every((m) => !m.observed)).toBe(true);
     expect(legacy.warnings?.[0]).toMatch(/^\d+ GPS depot moves were stored before RouteIQ kept whether their time is exact, and the trail points of that time may be deleted already \(trail kept 2 days\)/);
+  });
+
+  it('review of 19 Oct 2026: a leave-and-return - the replay of the exported day measures UNLOAD_OVER on site, with the same words, as the live alerts do', async () => {
+    seed('ALERTS');
+    // Shop A: 20 min at the pin, a 6 km trip to stand 20 min elsewhere, back for 30 min, then shop B and the depot.
+    const trail = new Trail('06:30').park(30).drive(3000).park(20).drive(9000, 0, 40).park(20).drive(3000, 0, 40).park(30).drive(6000).park(8).drive(0).park(20);
+    tables.truckTrailPoint = trail.pts.map((p, i) => ({ id: `tp${i}`, tenantId: TEN, truckId: 't1', ...p }));
+    // The driver tapped the arrival at 07:05 and the result at 08:25 (in the second stay).
+    tables.stopVisit!.push({ id: 'v1', tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't1', loadNo: 1, sequence: 1, customerId: 'C-A', firstLoadId: 'L1', plannedLat: SHOP_A.lat, plannedLng: SHOP_A.lng, plannedServiceMin: 10, windowStartMin: null, windowEndMin: null, linesJson: [], casesPlanned: 30, arrivalSource: 'PHONE_MANUAL', locationPurgedAt: null });
+    tables.stopEvent!.push(
+      { id: 'tap', tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't1', loadNo: 1, sequence: 1, visitId: 'v1', kind: 'ARRIVED', source: 'PHONE_MANUAL', at: T('07:05'), receivedAt: T('07:05'), idempotencyKey: 'dl:tap', payloadJson: { mode: 'MANUAL' } },
+      { id: 'res', tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't1', loadNo: 1, sequence: 1, visitId: 'v1', kind: 'OUTCOME', source: 'PHONE_MANUAL', at: T('08:25'), receivedAt: T('08:25'), idempotencyKey: 'dl:res', payloadJson: { outcome: 'DELIVERED' } },
+    );
+    await processGpsTimes(TEN, 't1', DATE, NOW);
+    const visit = tables.stopVisit!.find((v) => v.id === 'v1')!;
+    expect(visit.awayMinutes).toBeGreaterThan(30);
+    const live = (await sweepFacts()).ev.active.find((c) => c.rule === 'UNLOAD_OVER' && c.sequence === 1)!;
+    expect(live.text).toMatch(new RegExp(`\\(away ${Math.round(visit.awayMinutes)} min not counted, GPS\\)`));
+    expect(live.facts).toMatchObject({ awayMin: Math.round(visit.awayMinutes) });
+    // The day saved for the replay keeps each GPS event's stay start and minutes away (never a position) ...
+    const exp = await exportAlertDay(fakePrisma as never, TEN, DATE, { now: NOW });
+    const saved = exp.loads[0]!.stops[0]!.visit!.events.filter((e) => e.source === 'AYUN' && e.kind === 'ARRIVED');
+    expect(saved.map((e) => e.payload)).toEqual([
+      expect.objectContaining({ segmentStartAt: expect.any(String), stay: { awayMin: null } }),
+      expect.objectContaining({ segmentStartAt: expect.any(String), stay: { awayMin: visit.awayMinutes } }),
+    ]);
+    // ... so the replayed UNLOAD_OVER is the live one: the same minutes, tier and words (before: the absence counted).
+    const replayed = evaluate(factsAsOf(exp, NOW, [], 100, { gps: true }), NOW, THRESHOLDS).active.find((c) => c.rule === 'UNLOAD_OVER' && c.sequence === 1)!;
+    expect({ text: replayed.text, value: replayed.value, tier: replayed.tier, facts: replayed.facts }).toEqual({ text: live.text, value: live.value, tier: live.tier, facts: live.facts });
   });
 
   it('the truck-day undone (suppressed): read as with the link off', async () => {

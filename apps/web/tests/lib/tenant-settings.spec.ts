@@ -97,6 +97,8 @@ const CHANGED: Record<string, unknown> = {
   alertEmails: 'owner@ops.example', alertEmailEveryMin: 30, alertEmailMinSeverity: 'WARN', alertQuietFromMin: 1380, alertQuietToMin: 300,
   ivmsMode: 'TIMES', ivmsPollSec: 120, ivmsRoutePullMin: 30, ivmsFromMin: 240, ivmsToMin: 1320, ivmsDailyCallBudget: 3000,
   ivmsStopRadiusM: 150, ivmsStopDwellMin: 5, ivmsDepotRadiusM: 500, ivmsTrailDays: 3,
+  // The analysis dataset (owner request 19 Oct 2026): read by the nightly job's retention only.
+  analysisRetentionDays: 365,
 };
 /**
  * Read by the order intake, not by the optimizer request (checked against their consumer below). Also
@@ -125,6 +127,8 @@ const HIRED_TODAY = { hired: true, onlyOnDate: new Date('2026-09-26T00:00:00Z'),
 const INTAKE_ONLY = new Set(['planningCutoffMin', 'dateOrder', 'requireDataBeforeLoading', 'dataCollectDays', 'geofenceRadiusM', 'photoProofRequired', 'photoRetentionDays', 'locationRetentionDays', 'dispatcherPhone']);
 /** Operations alerts (owner request 16 Oct 2026): read by the alert sweep and the e-mail digest (lib/alerts), never by a plan. */
 const ALERTS_ONLY = new Set<string>(ALERT_SETTINGS_FIELDS);
+/** The analysis dataset (owner request 19 Oct 2026): how long its facts are kept (lib/ivms/retention.ts), never a planning input. */
+const ANALYSIS_ONLY = new Set<string>(['analysisRetentionDays']);
 
 beforeEach(() => {
   customers = [customer('C1', 23.6, 58.4), customer('C2', 23.55, 58.3)];
@@ -142,7 +146,7 @@ describe('Settings fields drive the planner (review F21)', () => {
       expect(CHANGED, k).toHaveProperty(k);
       expect(tenantConfigSchema.partial().safeParse({ [k]: CHANGED[k] }).success, k).toBe(true);
       const changed = await build({ ...BASE_CFG, [k]: CHANGED[k] });
-      if (INTAKE_ONLY.has(k) || HIRED_ONLY.has(k) || SMALL_TRUCK_ONLY.has(k) || ALERTS_ONLY.has(k) || IVMS_ONLY.has(k)) expect(changed, k).toBe(base);
+      if (INTAKE_ONLY.has(k) || HIRED_ONLY.has(k) || SMALL_TRUCK_ONLY.has(k) || ALERTS_ONLY.has(k) || IVMS_ONLY.has(k) || ANALYSIS_ONLY.has(k)) expect(changed, k).toBe(base);
       else expect(changed, k).not.toBe(base);
       if (HIRED_ONLY.has(k)) expect(await build({ ...BASE_CFG, [k]: CHANGED[k] }, { truck: HIRED_TODAY }), k).not.toBe(hiredBase);
       if (SMALL_TRUCK_ONLY.has(k)) {

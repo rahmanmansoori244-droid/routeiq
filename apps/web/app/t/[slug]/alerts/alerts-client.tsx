@@ -11,7 +11,7 @@ import { acknowledgeAlerts } from '@/components/alerts-api';
 import { api } from '@/app/t/[slug]/dispatch/client-api';
 import { ALERT_POLL_MS, ALERT_RULE_LIST } from '@/lib/alerts/catalog';
 import type { OpsAlertRow, SweepCheck } from '@/lib/alerts/types';
-import { alertStateText, alertTime, alertWhere, ruleLabel, SEVERITY_BADGE, sweepCheckText } from '@/lib/alerts/view';
+import { alertStateText, alertWhen, alertWhere, ruleLabel, SEVERITY_BADGE, sweepCheckText } from '@/lib/alerts/view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 
 interface Filters {
@@ -24,6 +24,8 @@ interface Filters {
 
 interface ListAnswer extends Partial<SweepCheck> {
   enabled: boolean;
+  /** The company's today when the answer was read (GET /api/alerts). */
+  today?: string;
   rows: OpsAlertRow[];
   truncated: boolean;
 }
@@ -47,6 +49,9 @@ export function alertsQuery(f: Filters): string {
  * The Alerts page (operations alerts, owner request 16 Oct 2026): the filters, then every alert of the
  * range, open ones first and HIGH before warnings, with who acknowledged what. Reads again every 60 s
  * while the tab is visible, alerts are on and the range reaches today (switched off: one read, no polling).
+ * Dates (owner request 19 Oct 2026): an alert of another day than today says its day in Since and State
+ * ("Yesterday 17:20", "18 Oct 17:20"; today's keep the time only), from the company's today in the last
+ * answer (the page's until then); a row closed at the end of its day says "Day ended".
  */
 export function AlertsClient({
   enabled,
@@ -104,6 +109,7 @@ export function AlertsClient({
 
   const rows = answer?.rows ?? [];
   const open = rows.filter((r) => r.state === 'OPEN');
+  const dayNow = answer?.today ?? today;
   const check = enabled && answer ? sweepCheckText({ checkedAt: answer.checkedAt ?? null, checkStale: !!answer.checkStale, checkFailed: !!answer.checkFailed }, timezone) : null;
   const depotCode = (id: string) => depots.find((d) => d.id === id)?.code ?? '';
   return (
@@ -208,14 +214,18 @@ export function AlertsClient({
                     {fmtDayMonth(r.deliveryDate)}
                     {depots.length > 1 ? <span className="ms-1 text-xs text-muted-foreground">{depotCode(r.depotId)}</span> : null}
                   </td>
-                  <td className="whitespace-nowrap p-2">{alertTime(r.occurredAt, timezone)}</td>
+                  <td className="whitespace-nowrap p-2" data-testid="alerts-when">
+                    {alertWhen(r.occurredAt, r.deliveryDate, timezone, dayNow)}
+                  </td>
                   <td className="whitespace-nowrap p-2 font-medium">{alertWhere(r)}</td>
                   <td className="p-2">{ruleLabel(r.rule)}</td>
                   <td className="min-w-[16rem] break-words p-2">
                     {r.text}
                     {r.occurrences > 1 ? <span className="ms-1 text-xs text-muted-foreground">(came back {r.occurrences - 1}×)</span> : null}
                   </td>
-                  <td className="whitespace-nowrap p-2 text-xs">{alertStateText(r, timezone)}</td>
+                  <td className="whitespace-nowrap p-2 text-xs" data-testid="alerts-state">
+                    {alertStateText(r, timezone, dayNow)}
+                  </td>
                   <td className="p-2">
                     {canAck && r.state === 'OPEN' ? (
                       <Button size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={busy} onClick={() => void ack([r])} data-testid="alerts-ack">

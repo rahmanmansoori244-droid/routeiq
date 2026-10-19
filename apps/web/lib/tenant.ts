@@ -64,6 +64,11 @@ const TENANT_SCOPED_MODELS = new Set([
   'IvmsEvent',
   'IvmsState',
   'IvmsTruckDay',
+  // The analysis dataset (owner request 19 Oct 2026): the nightly facts and their export
+  'FactTruckDay',
+  'FactVisit',
+  'FactLeg',
+  'FactDepotTurn',
 ]);
 
 const SCOPED_WRITE_OPS = new Set(['create', 'createMany', 'upsert']);

@@ -210,8 +210,39 @@ export function timedByText(v: { autoBasis: string | null; arrivalSource: string
 const minutesBetween = (a: Date, b: Date) => Math.round(((b.getTime() - a.getTime()) / 60_000) * 10) / 10;
 
 /**
+ * On-site minutes (owner request 19 Oct 2026, the GPS study's leave-and-return guard): a time measured at
+ * a stop less the minutes the truck was away from it in between (StopVisit.awayMinutes: the GPS stays
+ * showed it gone beyond 500 m of the pin, or at another customer, and back), never below 0. A visit
+ * without time away (null or absent: every visit without GPS) keeps its minutes exactly.
+ */
+export function onSite(minutes: number, awayMinutes: number | null | undefined, beforeStartMin = 0): number {
+  const away = awayInside(awayMinutes, beforeStartMin);
+  return away > 0 ? Math.max(0, Math.round((minutes - away) * 10) / 10) : minutes;
+}
+
+/**
+ * The minutes away to take off a time counted from a later start than the arrival (the window start of a
+ * truck that came early: `beforeStartMin` minutes after the arrival). The visit stores only the total
+ * between its arrival and departure, so the part after that start is at least the total less the time
+ * before it: never more is taken off than can have been inside (an unloading is never under-measured).
+ */
+export function awayInside(awayMinutes: number | null | undefined, beforeStartMin = 0): number {
+  if (!awayMinutes || !Number.isFinite(awayMinutes) || awayMinutes <= 0) return 0;
+  return Math.max(0, awayMinutes - Math.max(0, Number.isFinite(beforeStartMin) ? beforeStartMin : 0));
+}
+
+/** "away 53 min" (whole minutes) for a visit's time away, or null when none. */
+export function awayText(awayMinutes: number | null | undefined): string | null {
+  if (!awayMinutes || !Number.isFinite(awayMinutes) || awayMinutes <= 0) return null;
+  return `away ${Math.max(1, Math.round(awayMinutes))} min`;
+}
+
+/**
  * Actual unloading of a visit (spec section 10.1), the plan screen's and the actuals Excel's: automatic
- * from the window start, else automatic, else arrival to departure (an office or manual timing).
+ * from the window start, else automatic, else arrival to departure (an office or manual timing). The
+ * minutes the GPS showed the truck away in between (owner request 19 Oct 2026, `awayMinutes`) are never
+ * unloading: taken off (onSite; from the window start only what can have been after it), and the label
+ * says so ("arrival to departure, less 53 min away").
  */
 export function actualMinutes(v: {
   autoServiceMinutes: number | null;
@@ -220,12 +251,21 @@ export function actualMinutes(v: {
   departedAt: Date | null;
   departedAtOutcome: boolean;
   outcomeSource: string | null;
+  awayMinutes?: number | null;
 }): { min: number | null; label: string | null; auto: boolean } {
-  if (v.autoServiceMinutes !== null) return { min: v.autoServiceMinutes, label: 'auto, from the window start', auto: true };
-  if (v.autoMinutes !== null) return { min: v.autoMinutes, label: 'auto', auto: true };
+  const less = (label: string, beforeStartMin = 0) => {
+    const away = awayText(awayInside(v.awayMinutes, beforeStartMin));
+    return away ? `${label}, less ${away.slice(5)} away` : label;
+  };
+  if (v.autoServiceMinutes !== null) {
+    // The time before the window start: the automatic timing from the arrival less the one from the window start.
+    const before = v.autoMinutes !== null ? v.autoMinutes - v.autoServiceMinutes : 0;
+    return { min: onSite(v.autoServiceMinutes, v.awayMinutes, before), label: less('auto, from the window start', before), auto: true };
+  }
+  if (v.autoMinutes !== null) return { min: onSite(v.autoMinutes, v.awayMinutes), label: less('auto'), auto: true };
   // An office result recorded later is not the end of the stop.
   if (v.arrivedAt && v.departedAt && v.departedAt > v.arrivedAt && !(v.departedAtOutcome && v.outcomeSource === 'DISPATCHER')) {
-    return { min: minutesBetween(v.arrivedAt, v.departedAt), label: v.departedAtOutcome ? 'arrival to result' : 'arrival to departure', auto: false };
+    return { min: onSite(minutesBetween(v.arrivedAt, v.departedAt), v.awayMinutes), label: less(v.departedAtOutcome ? 'arrival to result' : 'arrival to departure'), auto: false };
   }
   return { min: null, label: null, auto: false };
 }
