@@ -74,6 +74,21 @@ function stubDb(configs: Record<string, unknown>[]) {
   return { db: db as never, created, queries, stamped, updated };
 }
 
+/**
+ * This process "started following the sweep" at `t` (the time resetAlertSweepClock stamps), whatever the
+ * real clock says. Review of 20 Oct 2026: with the fixed NOW and the real start time, review M2 passed only
+ * when the tests ran before 08:05 Muscat on 20 Oct 2026, and failed on every run after.
+ */
+function processStartedAt(t: Date): void {
+  const fake = vi.isFakeTimers();
+  const clock = Date.now();
+  if (!fake) vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(t);
+  resetAlertSweepClock();
+  if (fake) vi.setSystemTime(clock);
+  else vi.useRealTimers();
+}
+
 beforeEach(() => {
   resetAlertSweepClock();
   state.facts.clear();
@@ -84,6 +99,7 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   delete process.env.ROUTEIQ_DISABLE_ALERTS;
   delete process.env.ROUTEIQ_DISABLE_IVMS;
@@ -136,21 +152,46 @@ describe('runAlertSweep', () => {
   });
 
   it('review M2: each company\'s last good sweep is kept ("Checked"); a failure or 10 min without one says so; /api/health gets counts only', async () => {
+    // This process started following the sweep at 08:00, 15 min before NOW (a fixed time, never the real clock).
+    processStartedAt(at(8 * 60));
     state.facts.set('tA', lateFacts());
     state.fail.add('tB');
     const { db } = stubDb([cfg('tA'), cfg('tB')]);
     await runAlertSweep(NOW, { db });
     expect(alertSweepStatus('tA', NOW)).toEqual({ checkedAt: NOW.toISOString(), failed: false, stale: false });
-    expect(alertSweepStatus('tB', NOW)).toMatchObject({ checkedAt: null, failed: true });
+    expect(alertSweepStatus('tB', NOW)).toEqual({ checkedAt: null, failed: true, stale: true });
     expect(alertSweepStatus('tA', new Date(NOW.getTime() + 10 * 60_000 + 1))).toMatchObject({ stale: true });
-    // A company never swept yet: stale only 10 min after its switch-on (or this process's start).
-    const later = new Date(Date.now() + 5 * 60_000);
-    expect(alertSweepStatus('tC', later, later).stale).toBe(false);
-    expect(alertSweepStatus('tC', new Date(Date.now() + 11 * 60_000), null).stale).toBe(true);
+    // A company never swept yet: stale only 10 min after the later of this process's start (08:00) and its switch-on.
+    expect(alertSweepStatus('tC', at(8 * 60 + 10), null).stale).toBe(false);
+    expect(alertSweepStatus('tC', at(8 * 60 + 11), null).stale).toBe(true);
+    expect(alertSweepStatus('tC', NOW, at(8 * 60 + 10)).stale).toBe(false);
+    expect(alertSweepStatus('tC', at(8 * 60 + 21), at(8 * 60 + 10)).stale).toBe(true);
     const h = alertSweepHealth(NOW);
     // tB never had a good sweep and this process started more than 10 min before NOW: failing and overdue.
     expect(h).toEqual({ lastRunAt: NOW.toISOString(), companies: 2, failing: 1, stale: 1 });
     expect(JSON.stringify(h)).not.toMatch(/tA|tB/);
+  });
+
+  it.each([
+    ['the day before', '2026-10-19T03:00:00Z'],
+    ['20 Oct 2026 just after 08:05 Muscat', '2026-10-20T04:06:00Z'],
+    ['months later', '2027-03-01T12:00:00Z'],
+  ])('review of 20 Oct 2026: the M2 health does not depend on the day the tests run (real clock %s)', async (_label, clock) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(clock));
+    state.facts.set('tA', lateFacts());
+    state.fail.add('tB');
+    const { db } = stubDb([cfg('tA'), cfg('tB')]);
+    // Started following the sweep 15 min before NOW: tB, never good, is failing and overdue.
+    processStartedAt(at(8 * 60));
+    await runAlertSweep(NOW, { db, force: true });
+    expect(alertSweepHealth(NOW)).toEqual({ lastRunAt: NOW.toISOString(), companies: 2, failing: 1, stale: 1 });
+    // Started 5 min before NOW (a deploy): tB is failing, not overdue yet.
+    processStartedAt(at(8 * 60 + 10));
+    await runAlertSweep(NOW, { db, force: true });
+    expect(alertSweepHealth(NOW)).toEqual({ lastRunAt: NOW.toISOString(), companies: 2, failing: 1, stale: 0 });
+    // The helper leaves the test's own clock as it found it.
+    expect(new Date().toISOString()).toBe(new Date(clock).toISOString());
   });
 
   it("owner request 19 Oct 2026: the first sweep after the company's midnight closes the day before's open rows as DAY_ENDED (the facts' today), today's stay", async () => {

@@ -106,7 +106,8 @@ export function stop(orderId: string, sequence: number, legKm: number, cumulativ
     cancelled: false,
     cancelledOrderIds: [],
     // One entry per order line, no aggregation (the driver page and Part 2's partly-delivered entry).
-    orderLines: o.lines.map((l, i) => ({ orderId: o.id, lineId: `${o.id}-l${i + 1}`, salesOrderNo: l.so, productCode: l.sku, productName: PRODUCTS[l.sku].name, cases: l.cases })),
+    // weightKg: the line's kg as planned (getPlanDetail sets it; the special-loading lines split a product's kg with it).
+    orderLines: o.lines.map((l, i) => ({ orderId: o.id, lineId: `${o.id}-l${i + 1}`, salesOrderNo: l.so, productCode: l.sku, productName: PRODUCTS[l.sku].name, cases: l.cases, weightKg: l.cases * PRODUCTS[l.sku].kg })),
     plannedHours: { hardStart: 360, hardEnd: 840, prefStart: 420, prefEnd: 600 },
     promisedWindow: null,
   };
@@ -336,6 +337,8 @@ export function palletFixture(): PlanDetail {
       palletFillPct: 95,
       palletRoomUnits: palletRoomUnits(b, 95),
       manifest: withManifestPallets(l.manifest, { unitsByCode, factorByCode }),
+      // Each order line's pallet units, as getPlanDetail gives them on a load planned by pallets.
+      stops: l.stops.map((s) => ({ ...s, orderLines: s.orderLines.map((ln) => ({ ...ln, palletUnits: palletUnits(ln.cases, CPP[ln.productCode]) })) })),
     };
   });
   d.scenarios = [

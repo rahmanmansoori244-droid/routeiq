@@ -190,8 +190,8 @@ describe('getPlanDetail: the additive stop fields (orderLines, plannedHours, pro
     const d = (await getPlanDetail('tA', 'P'))!;
     const s = d.loads[0].stops[0];
     expect(s.orderLines).toEqual([
-      { orderId: 'O1', lineId: 'LN1', salesOrderNo: 'SO-1', productCode: 'A', productName: 'Product A', cases: 20 },
-      { orderId: 'O1', lineId: 'LN2', salesOrderNo: 'SO-1', productCode: 'A', productName: 'Product A', cases: 10 },
+      { orderId: 'O1', lineId: 'LN1', salesOrderNo: 'SO-1', productCode: 'A', productName: 'Product A', cases: 20, weightKg: 200 },
+      { orderId: 'O1', lineId: 'LN2', salesOrderNo: 'SO-1', productCode: 'A', productName: 'Product A', cases: 10, weightKg: 100 },
     ]);
     // The SKU list stays aggregated, as before.
     expect(s.skus).toEqual([expect.objectContaining({ productCode: 'A', cases: 30 })]);
@@ -204,7 +204,8 @@ describe('getPlanDetail: the additive stop fields (orderLines, plannedHours, pro
     tables.routeAssignment[0].portionLinesJson = [{ lineId: 'LN1', cases: 5 }];
     tables.routeAssignment[0].portionCases = 5;
     const s = (await getPlanDetail('tA', 'P'))!.loads[0].stops[0];
-    expect(s.orderLines).toEqual([{ orderId: 'O1', lineId: 'LN1', salesOrderNo: 'SO-1', productCode: 'A', productName: 'Product A', cases: 5 }]);
+    // Its kg: the row's planned kg (no portion kg is stored here, so the order's), on its one line.
+    expect(s.orderLines).toEqual([{ orderId: 'O1', lineId: 'LN1', salesOrderNo: 'SO-1', productCode: 'A', productName: 'Product A', cases: 5, weightKg: 300 }]);
   });
 
   it("driverManifest (GET /api/d/manifest): the customer's phone with a tel: link dialling the company's country, only on the link's own truck-day (owner request 12 Oct 2026)", async () => {

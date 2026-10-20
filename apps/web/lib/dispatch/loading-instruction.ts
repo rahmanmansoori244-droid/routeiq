@@ -11,7 +11,10 @@
  *    stop numbers, and a tag on the customer's invoice rows (warehouse-sheets.ts / -html.ts);
  *  - the driver sheet (PDF) and the Excel per-load sheet: the same lines at the top, and the text on the
  *    customer's stop (driver-pack.tsx, workbook.ts);
- *  - the plan screen: a badge on the load and on the stop (plan-view.tsx).
+ *  - the plan screen: a badge on the load and on the stop (plan-view.tsx);
+ *  - every per-load list of products (owner request 20 Oct 2026: such a customer's products have their
+ *    own barcodes and are loaded apart): the load's products split into the normal lines and one block
+ *    per instruction text with its own total (loading-split.ts).
  * A stop nothing of which is loaded - every order cancelled, or brought forward to a later day - is not
  * listed: those orders must not be loaded from the paper anyway.
  *
@@ -171,3 +174,78 @@ export function customerRef(i: Pick<LoadInstruction, 'customerCode' | 'branchCod
 export function instructionLine(i: LoadInstruction): string {
   return `${stopsText(i.stops)} ${i.customerName} (${customerRef(i)}): ${i.text}`;
 }
+
+// ---------------------------------------------------------------------------------------
+// The special-loading lines (owner request 20 Oct 2026, loading-split.ts): a load's products split into
+// the normal lines and one block per instruction text, so the warehouse never subtracts those customers'
+// cases from a product's total itself. The words of every sheet and of the plan screen.
+// ---------------------------------------------------------------------------------------
+
+/** The heading of the normal lines when a load has special-loading lines. */
+export const NORMAL_LOADING_HEADING = 'NORMAL LOADING - every other customer';
+
+/** The subtotal of the normal lines. */
+export const NORMAL_LOADING_TOTAL = 'Normal loading total';
+
+/** What a special-loading block says after its tag. */
+export const SPECIAL_LINES_LEAD = 'load separately, as the SPECIAL LOADING box says';
+
+/**
+ * A block's heading: "SPECIAL: load separately, as the SPECIAL LOADING box says · Stops 1, 3", and the whole
+ * text after it when the tag is shortened. Without stops (the day's SKU summary), no stop numbers.
+ */
+export function specialLinesHeading(tag: string, text: string, stops?: readonly number[]): string {
+  return `${tag}: ${SPECIAL_LINES_LEAD}${stops?.length ? ` · ${stopsText(stops)}` : ''}${tag !== text ? ` - ${text}` : ''}`;
+}
+
+/** A block's subtotal: "SPECIAL total". */
+export function specialLinesTotal(tag: string): string {
+  return `${tag} total`;
+}
+
+const count = (n: number, one: string) => `${n.toLocaleString('en-US')} ${one}${n === 1 ? '' : 's'}`;
+
+/**
+ * A special-loading block's pallets in words (loading-split.ts blockPallets; owner, 20 Oct 2026: the block's
+ * pallets stay apart from the normal lines, but its products' loose cases go on one pallet together): "2 full
+ * pallets + 1 mixed pallet (the loose cases of all SPECIAL products together)"; a part that is 0 is left out;
+ * the cases of a product without cases per pallet: "+ 12 cases of products without cases per pallet (counted
+ * separately)".
+ * '' when the block has no cases. `tag` as the paper prints it: the load sheet passes it escaped in <bdi>
+ * (the words around it have nothing to escape).
+ */
+export function blockPalletsText(tag: string, p: { full: number; mixed: number; casesWithoutFactor: number }): string {
+  return [
+    p.full ? count(p.full, 'full pallet') : '',
+    p.mixed ? `${count(p.mixed, 'mixed pallet')} (the loose cases of all ${tag} products together)` : '',
+    p.casesWithoutFactor ? `${count(p.casesWithoutFactor, 'case')} of products without cases per pallet (counted separately)` : '',
+  ]
+    .filter(Boolean)
+    .join(' + ');
+}
+
+/**
+ * A block's total line on a load planned by pallets: "SPECIAL total: 70 cases - 2 full pallets + 1 mixed pallet
+ * (the loose cases of all SPECIAL products together)". `tag` as in blockPalletsText.
+ */
+export function specialLinesPalletTotal(tag: string, cases: number, p: { full: number; mixed: number; casesWithoutFactor: number }): string {
+  const pallets = blockPalletsText(tag, p);
+  return `${specialLinesTotal(tag)}: ${count(cases, 'case')}${pallets ? ` - ${pallets}` : ''}`;
+}
+
+/** The load's grand total under the blocks: the whole truck, as before the split. */
+export const SPLIT_GRAND_TOTAL = 'Total on this truck (normal + special loading)';
+
+/** The printed load sheet's line under "Products to load" when the load has special-loading lines. */
+export const SPLIT_LEAD =
+  "Load the normal lines as usual. Load each block below separately, as the SPECIAL LOADING box says: its lines are exactly those customers' cases - nothing to take off.";
+
+/** Added to the cancelled and brought-forward banners of a load with special-loading lines. */
+export const SPECIAL_LINES_NOTE = 'Their cases are in the normal lines, never in the special-loading lines.';
+
+/**
+ * A load whose stops' order lines do not add up to its products (never expected: both come from the same
+ * plan rows): no special-loading lines are printed, and the sheet says so.
+ */
+export const SPLIT_MISMATCH_TEXT =
+  'The special-loading lines could not be worked out (the invoices and the products differ): load those customers from their invoices and ask the dispatcher.';

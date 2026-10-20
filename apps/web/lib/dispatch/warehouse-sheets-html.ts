@@ -8,8 +8,23 @@
  * hash, PRINT_SCRIPT_HASH) and nothing else: no other script, no fetch, no images from anywhere.
  */
 import { createHash } from 'node:crypto';
-import type { LoadSheet, LoadSheetModel, ReturnNote, ReturnNoteModel, SheetHead } from './warehouse-sheets';
-import { customerRef, SPECIAL_LOADING_HEADING, SPECIAL_LOADING_ROW_TAG, specialLoadingLead, stopsText } from './loading-instruction';
+import type { LoadingSplitSheet, LoadSheet, LoadSheetModel, ProductCases, ReturnNote, ReturnNoteModel, SheetHead } from './warehouse-sheets';
+import {
+  customerRef,
+  NORMAL_LOADING_HEADING,
+  NORMAL_LOADING_TOTAL,
+  SPECIAL_LINES_LEAD,
+  SPECIAL_LINES_NOTE,
+  SPECIAL_LOADING_HEADING,
+  SPECIAL_LOADING_ROW_TAG,
+  specialLinesPalletTotal,
+  specialLinesTotal,
+  specialLoadingLead,
+  SPLIT_GRAND_TOTAL,
+  SPLIT_LEAD,
+  SPLIT_MISMATCH_TEXT,
+  stopsText,
+} from './loading-instruction';
 
 export function esc(s: string | number | null | undefined): string {
   return String(s ?? '')
@@ -76,6 +91,20 @@ const INSTRUCTION_CSS = `
 @media print { .instr { break-inside: avoid; } }
 `;
 
+/**
+ * The special-loading lines (owner request 20 Oct 2026): each block in a thick black frame, its heading and
+ * rows bold, a bordered tag on every row - the box's style, never shading (black-and-white print). Added to
+ * the page only when a sheet has such lines.
+ */
+const SPLIT_CSS = `
+tbody.split { border: 4px solid #000; }
+.split-h td { font-size: 13pt; font-weight: 700; overflow-wrap: anywhere; }
+.split-row td { font-weight: 700; }
+.split-tag { border: 2px solid #000; padding: 0 4px; white-space: nowrap; font-weight: 700; }
+tr.sub td, tr.sub-h td { font-weight: 700; }
+@media print { tbody.split { break-inside: avoid; } }
+`;
+
 function page(title: string, body: string, count: string, extraCss = ''): string {
   return `<!doctype html>
 <html lang="en">
@@ -120,10 +149,42 @@ function instructionBox(s: LoadSheet): string {
   return `<div class="instr" data-kind="loading-instruction"><div class="instr-h">${esc(SPECIAL_LOADING_HEADING)}</div><div class="instr-sub">${esc(specialLoadingLead(list.length))}</div><ul>${items}</ul></div>\n`;
 }
 
-function loadSheetHtml(h: SheetHead, s: LoadSheet): string {
-  const products = s.products
-    .map((p) => `<tr><td>${esc(p.productCode)}</td><td>${esc(p.productName)}</td><td class="n">${p.cases}</td><td class="box"></td></tr>`)
+const productRow = (p: ProductCases) => `<tr><td>${esc(p.productCode)}</td><td>${esc(p.productName)}</td><td class="n">${p.cases}</td><td class="box"></td></tr>`;
+
+/**
+ * "1. Products to load" of a load with special-loading lines (owner request 20 Oct 2026): the normal lines
+ * with their total, then one framed block per instruction (its heading, its rows each with the tag, its
+ * total), then the truck's total, as before the split. On a load planned by pallets a block's total line says
+ * its pallets (owner, 20 Oct 2026): "SPECIAL total: 70 cases - 2 full pallets + 1 mixed pallet (the loose cases
+ * of all SPECIAL products together)". Every value escaped, tags and texts isolated.
+ */
+function splitProducts(s: LoadSheet, split: LoadingSplitSheet): string {
+  const tag = (t: string) => `<span class="split-tag"><bdi>${esc(t)}</bdi></span>`;
+  const normal = split.normalCases
+    ? `<tbody><tr class="sub-h"><td colspan="4">${esc(NORMAL_LOADING_HEADING)}</td></tr>${split.normal.map(productRow).join('')}<tr class="sub"><td colspan="2">${esc(NORMAL_LOADING_TOTAL)}</td><td class="n">${split.normalCases}</td><td></td></tr></tbody>\n`
+    : '';
+  const blocks = split.groups
+    .map(
+      (g) =>
+        `<tbody class="split" data-kind="special-loading-lines"><tr class="split-h"><td colspan="4">${tag(g.tag)} ${esc(SPECIAL_LINES_LEAD)} · ${esc(stopsText(g.stops))}${
+          g.tag !== g.text ? ` - <bdi>${esc(g.text)}</bdi>` : ''
+        }</td></tr>${g.products
+          .map((p) => `<tr class="split-row"><td>${esc(p.productCode)}</td><td>${tag(g.tag)} ${esc(p.productName)}</td><td class="n">${p.cases}</td><td class="box"></td></tr>`)
+          .join('')}<tr class="sub split-total"><td colspan="2">${
+          g.pallets ? specialLinesPalletTotal(`<bdi>${esc(g.tag)}</bdi>`, g.cases, g.pallets) : `<bdi>${esc(specialLinesTotal(g.tag))}</bdi>`
+        }</td><td class="n">${g.cases}</td><td></td></tr></tbody>\n`,
+    )
     .join('');
+  return `<p class="muted">${esc(SPLIT_LEAD)}</p>
+<table><thead><tr><th>Product code</th><th>Product</th><th class="n">Cases</th><th>Loaded ✓</th></tr></thead>
+${normal}${blocks}<tbody><tr class="total"><td colspan="2">${esc(SPLIT_GRAND_TOTAL)}</td><td class="n">${s.totalCases}</td><td></td></tr></tbody></table>`;
+}
+
+function loadSheetHtml(h: SheetHead, s: LoadSheet): string {
+  const products = s.products.map(productRow).join('');
+  // Owner request 20 Oct 2026: on a load with special-loading lines, the banners about orders not to load say
+  // where their cases are (the normal lines), so nobody takes them off a special-loading block.
+  const note = s.loadingSplit ? ` ${SPECIAL_LINES_NOTE}` : '';
   const invoices = s.invoices
     .map(
       (i) =>
@@ -152,17 +213,21 @@ ${h.superseded ? box : ''}${s.notLocked ? `<div class="banner">NOT LOCKED: this 
 ${s.matches ? '' : `<div class="banner">The product total and the invoice total differ: ask the dispatcher before loading.</div>`}
 ${
   s.carriedAway > 0
-    ? `<div class="banner">${s.carriedAway} order(s) on this load were brought forward to ${esc(s.carriedToDays)}: do not load them from this paper (unload them if already loaded) - ask the dispatcher. They are marked CARRIED OVER below.</div>`
+    ? `<div class="banner">${s.carriedAway} order(s) on this load were brought forward to ${esc(s.carriedToDays)}: do not load them from this paper (unload them if already loaded) - ask the dispatcher. They are marked CARRIED OVER below.${esc(note)}</div>`
     : ''
 }
 ${
   s.cancelledHere > 0
-    ? `<div class="banner">${s.cancelledHere} cancelled order(s) on this load: do not load them (unload them if already loaded); their cases are still in the products below. Their invoices are marked CANCELLED below. Re-plan the day to take them off.</div>`
+    ? `<div class="banner">${s.cancelledHere} cancelled order(s) on this load: do not load them (unload them if already loaded); their cases are still in the products below. Their invoices are marked CANCELLED below. Re-plan the day to take them off.${esc(note)}</div>`
     : ''
 }
-<h2>1. Products to load</h2>
-<table><thead><tr><th>Product code</th><th>Product</th><th class="n">Cases</th><th>Loaded ✓</th></tr></thead>
-<tbody>${products}<tr class="total"><td colspan="2">Total</td><td class="n">${s.totalCases}</td><td></td></tr></tbody></table>
+${s.loadingSplitMismatch ? `<div class="banner">${esc(SPLIT_MISMATCH_TEXT)}</div>\n` : ''}<h2>1. Products to load</h2>
+${
+  s.loadingSplit
+    ? splitProducts(s, s.loadingSplit)
+    : `<table><thead><tr><th>Product code</th><th>Product</th><th class="n">Cases</th><th>Loaded ✓</th></tr></thead>
+<tbody>${products}<tr class="total"><td colspan="2">Total</td><td class="n">${s.totalCases}</td><td></td></tr></tbody></table>`
+}
 <h2>2. Invoices to put in the truck</h2>
 <p class="muted">Put each invoice paper in the truck with its goods, in the order of the stops. Stop = the stop number on the driver sheet.</p>
 <table><thead><tr><th class="n">Stop</th><th>Invoice no.</th><th>Customer</th><th>Products × cases</th><th class="n">Cases</th><th>Invoice in truck ✓</th></tr></thead>
@@ -175,7 +240,8 @@ ${
 export function renderLoadSheetHtml(m: LoadSheetModel): string {
   const body = m.sheets.map((s) => loadSheetHtml(m, s)).join('\n');
   const boxes = m.sheets.some((s) => s.loadingInstructions?.length);
-  return page(m.title, body, `${m.sheets.length} load sheet${m.sheets.length === 1 ? '' : 's'}`, boxes ? INSTRUCTION_CSS : '');
+  const split = m.sheets.some((s) => s.loadingSplit);
+  return page(m.title, body, `${m.sheets.length} load sheet${m.sheets.length === 1 ? '' : 's'}`, `${boxes ? INSTRUCTION_CSS : ''}${split ? SPLIT_CSS : ''}`);
 }
 
 function returnNoteHtml(h: SheetHead, r: ReturnNote): string {
