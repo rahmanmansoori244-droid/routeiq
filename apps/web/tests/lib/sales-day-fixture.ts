@@ -244,14 +244,13 @@ export const extraOrder = (o: Partial<SalesExtraOrderIn> & { id: string; lines: 
 });
 
 /** GPS input with one truck's fix (fresh by default) and its history pulled to `trailTo`. */
-export function gpsIn(o: { truckId?: string; fixAt: Date; pos: { lat: number; lng: number }; trailTo?: Date | null; speedKmh?: number; tracked?: boolean; depotId?: string }): SalesGpsIn {
+export function gpsIn(o: { truckId?: string; fixAt: Date; pos: { lat: number; lng: number }; trailTo?: Date | null; speedKmh?: number; depotId?: string }): SalesGpsIn {
   const truckId = o.truckId ?? 't5';
   return {
     settings: { ...gpsReadConfigOf({ ivmsStopRadiusM: 100, ivmsDepotRadiusM: 300, avgSpeedKmh: 40, distanceMultiplier: 1.3 }), depots: new Map([[o.depotId ?? 'D1', east(0)]]) },
     positions: new Map([[truckId, { fixAt: o.fixAt, lat: o.pos.lat, lng: o.pos.lng, speedKmh: o.speedKmh ?? 40, flags: [], movedAt: null }]]),
     trailTo: new Map([[truckId, o.trailTo === undefined ? o.fixAt : o.trailTo]]),
     moves: new Map(),
-    tracked: new Set(o.tracked === false ? [] : [truckId]),
   };
 }
 

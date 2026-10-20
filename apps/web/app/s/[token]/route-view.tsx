@@ -1,73 +1,45 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { Info } from 'lucide-react';
-import type { SalesRouteView } from '@/lib/sales-link/view-types';
-import { filterView, noDeliveriesText, rowKey, summaryChips, UI, type SummaryKey } from '@/lib/sales-page/format';
-import { DeliveryCard } from './delivery-card';
-import { MapCard } from './map-card';
-import { OffTruckList } from './off-truck-list';
-import { SummaryBar } from './summary-bar';
-import { TruckCard } from './truck-card';
+import type { SalesRouteView, SalesStatus } from '@/lib/sales-link/view-types';
+import { allNotPlannedYet, rowKey, rowsOf, statusButtons, statusLabel } from '@/lib/sales-page/format';
+import { st, type SalesLang } from '@/lib/sales-page/i18n';
+import { RowCard } from './row-card';
+import { StatusGrid } from './status-grid';
 
 /**
- * One route's dashboard (or one truck's: its deliveries of the day, every route): the count chips (a tap filters the
- * list), the trucks carrying the route (the truck itself), the map, one card per delivery in expected order, and the
- * orders not on a truck (a truck's: taken off it). Keys carry the result's query: the answer's keys are unique per
- * result only.
+ * One route's customers (or one truck's: its customers of the day, every route; owner feedback of 20 Oct 2026): the
+ * status buttons, then the customers of the status picked ("All" first: every customer by time). No truck, trip,
+ * map or reason. Keys carry the result's query: the answer's keys are unique per result only.
  */
-export function RouteView({ view }: { view: SalesRouteView }) {
-  const [filter, setFilter] = useState<SummaryKey | null>(null);
-  const chips = useMemo(() => summaryChips(view), [view]);
-  const shown = useMemo(() => filterView(view, filter), [view, filter]);
-  const total = view.deliveries.length + view.offTruck.length;
-  const showing = shown.deliveries.length + shown.offTruck.length;
+export function RouteView({ view, lang, future, date }: { view: SalesRouteView; lang: SalesLang; future: boolean; date: string }) {
+  const [filter, setFilter] = useState<SalesStatus | null>(null);
+  const buttons = useMemo(() => statusButtons(view.rows), [view.rows]);
+  const shown = useMemo(() => rowsOf(view.rows, filter), [view.rows, filter]);
   return (
     <div className="space-y-4" data-testid={`${view.kind === 'TRUCK' ? 'truck-view' : 'route'}-${view.code}`} data-kind={view.kind}>
-      {view.notLocked ? (
-        <p className="flex items-start gap-2 rounded-md bg-amber-50 p-2 text-sm text-amber-900 ring-1 ring-amber-200">
-          <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden /> Not locked yet: times can change if the day is re-planned.
+      <StatusGrid lang={lang} buttons={buttons} total={view.rows.length} active={filter} onPick={setFilter} />
+      {allNotPlannedYet(view.rows) ? (
+        <p className="rounded-lg bg-white p-3 text-sm text-slate-700 ring-1 ring-slate-200" data-testid="not-planned-yet">
+          {st(lang, 'notPlannedYetAll')}
         </p>
       ) : null}
-      <SummaryBar chips={chips} active={filter} onPick={setFilter} />
-      {filter ? (
-        <p className="flex items-center justify-between gap-2 px-1 text-sm text-slate-700" aria-live="polite">
-          <span>{UI.filtered(showing, total)}</span>
-          <button type="button" onClick={() => setFilter(null)} className="min-h-10 rounded-md px-2 font-semibold text-sky-800 underline">
-            {UI.showAll}
-          </button>
-        </p>
-      ) : null}
-
-      {!filter && view.trucks.length ? (
-        <section className="space-y-2">
-          <h3 className="px-1 text-sm font-semibold uppercase tracking-wide text-slate-600">{UI.trucks}</h3>
+      <section className="space-y-2" aria-live="polite">
+        <h2 className="px-1 text-base font-semibold text-slate-700" data-testid="list-heading">
+          {filter ? statusLabel(lang, filter) : st(lang, 'all')} · {shown.length}
+        </h2>
+        {shown.length ? (
           <ul className="space-y-2">
-            {view.trucks.map((t) => (
-              <TruckCard key={rowKey(view.query, t.key)} t={t} rowKey={rowKey(view.query, t.key)} kind={view.kind} />
+            {shown.map((r) => (
+              <RowCard key={rowKey(view.query, r.key)} lang={lang} r={r} rowKey={rowKey(view.query, r.key)} future={future} date={date} />
             ))}
           </ul>
-        </section>
-      ) : null}
-      {!filter ? <MapCard view={view} /> : null}
-
-      {shown.deliveries.length || !filter ? (
-        <section className="space-y-2">
-          <h3 className="px-1 text-sm font-semibold uppercase tracking-wide text-slate-600">{UI.deliveries}</h3>
-          {shown.deliveries.length ? (
-            <ul className="space-y-2">
-              {shown.deliveries.map((d) => (
-                <DeliveryCard key={rowKey(view.query, d.key)} d={d} rowKey={rowKey(view.query, d.key)} kind={view.kind} />
-              ))}
-            </ul>
-          ) : (
-            <p className="rounded-lg bg-white p-3 text-sm text-slate-600 ring-1 ring-slate-200" data-testid="no-deliveries">
-              {filter ? UI.noDeliveries : noDeliveriesText(view)}
-            </p>
-          )}
-        </section>
-      ) : null}
-      <OffTruckList items={shown.offTruck} route={view.query} heading={view.kind === 'TRUCK' ? UI.offThisTruck : UI.offTruck} />
+        ) : (
+          <p className="rounded-lg bg-white p-3 text-sm text-slate-600 ring-1 ring-slate-200" data-testid="no-rows">
+            {view.rows.length ? st(lang, 'noneHere') : st(lang, 'nothingYet')}
+          </p>
+        )}
+      </section>
     </div>
   );
 }

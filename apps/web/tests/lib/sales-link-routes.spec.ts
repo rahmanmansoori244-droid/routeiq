@@ -7,12 +7,13 @@
  *  - the guard: the token only in the header; 404 for a bad shape or an unknown token, counted against a public
  *    IP only (the 31st from one IP gets 429 with Retry-After; an internal IP is never counted); 410 replaced,
  *    turned off, expired; 503 without a secret; 403 signed in to another company; the office's own session is
- *    never counted as a salesman's phone; no-store, strict-origin, noindex on every answer;
+ *    never counted as a salesman's phone; no-store, no-referrer, noindex on every answer;
  *  - the limits (critique item 9): per link AND client IP, never the page's device id (rotating it changes
  *    nothing), never the whole link (one holder cannot lock the group out); route codes with no deliveries;
- *  - the answer: meta without a route, the route's deliveries with one, 400 for an empty or too long code, the
- *    same answer for an unknown code and a code with nothing that day, nothing of another company, no private
- *    keys; one build of the day for many requests (memo and single flight); the phone and route recorded;
+ *  - the answer: meta without a route, the route's customers with one (owner feedback of 20 Oct 2026: one status
+ *    and one time each, no truck, trip, window, reason, invoice or customer code), 400 for an empty or too long
+ *    code, the same answer for an unknown code and a code with nothing that day, nothing of another company, no
+ *    private keys; one build of the day for many requests (memo and single flight); the phone and route recorded;
  *  - a truck code (owner decision of 20 Oct 2026): the truck's deliveries of the day, every route ("t05", "T-05",
  *    "Truck T05", Arabic-Indic digits), recorded as "T:T05"; a route and a truck at once; an unknown truck counted
  *    as a miss; several trucks with the digits offered, a route code that is also a truck's (the route shown, the
@@ -243,10 +244,10 @@ describe('the guard', () => {
     expect(tables.salesLink![0]!.lastSeenAt).toBeNull();
   });
 
-  it('every answer: no-store, strict-origin, noindex', async () => {
+  it('every answer: no-store, no-referrer, noindex', async () => {
     for (const r of [await view(makeLink()), await view('A'.repeat(24))]) {
       expect(r.headers.get('cache-control')).toBe('no-store');
-      expect(r.headers.get('referrer-policy')).toBe('strict-origin');
+      expect(r.headers.get('referrer-policy')).toBe('no-referrer');
       expect(r.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive');
     }
   });
@@ -283,35 +284,35 @@ describe('the answer', () => {
     const r = await body(await view(token, { device: 'ab'.repeat(16) }));
     expect(r.error).toBeNull();
     expect(r.data!.lookup).toBeNull();
-    expect(r.data!.meta).toMatchObject({ date: D, company: 'Example Water Co', tz: TZ, refreshSec: 60, routeHint: 'Your route code (as on your Salesman ETA page) or a truck code' });
-    expect(r.data!.meta.expiryText).toMatch(/^Works until \w{3} \d{1,2} \w{3} 06:00$/);
+    expect(r.data!.meta).toMatchObject({ date: D, company: 'Example Water Co', tz: TZ, refreshSec: 60 });
+    // Language-neutral: the page says the day and the link's end itself, in English, Arabic or Urdu.
+    expect(Object.keys(r.data!.meta).sort()).toEqual(['company', 'date', 'expiresAt', 'refreshSec', 'serverNow', 'tz']);
     const touch = rawLog.filter((s) => s.includes('UPDATE "SalesLink"'));
     expect(touch).toHaveLength(1);
     expect(touch[0]).toContain('"devicesJson" = COALESCE("devicesJson", \'[]\'::jsonb) || jsonb_build_array(?::text)');
     expect(touch[0]).toContain('NOT (COALESCE("devicesJson", \'[]\'::jsonb) @> jsonb_build_array(?::text))');
   });
 
-  it("a route: its deliveries and orders not on a truck; nothing of another company; the route found is recorded", async () => {
+  it("a route: its customers, one status each (the cancelled order too); nothing of another company; the route found is recorded", async () => {
     const token = makeLink();
     rawLog.length = 0;
     const r = await body(await view(token, { route: ' r1 ' }));
     const lookup = r.data!.lookup!;
     expect(lookup.asked).toEqual(['R1']);
     expect(lookup.notFound).toEqual([]);
-    expect(lookup.notFoundText).toBeNull();
     const v = lookup.results[0]!;
     expect(v).toMatchObject({ kind: 'ROUTE', code: 'R1', query: 'R1' });
-    expect(v.heading).toMatch(/^Route R1 · /);
-    expect(v.deliveries.map((d) => `${d.customerCode} ${d.cases} ${d.status}`)).toEqual(['TST0001 20 PLANNED', 'TST0002 12 PLANNED']);
-    expect(v.offTruck.map((o) => `${o.kind} ${o.customerCode} ${o.why}`)).toEqual(['CANCELLED TST0009 Cancelled - Customer cancelled']);
+    expect(v.updated).toMatch(/^\d{2}:\d{2}$/);
+    expect(v.rows.map((d) => `${d.key} ${d.customer} ${d.status}`)).toEqual(['d1 Example Mart TST0001 ON_THE_WAY', 'd2 Example Mart TST0002 ON_THE_WAY', 'o1 Example Mart TST0009 CANCELLED']);
+    for (const d of v.rows.slice(0, 2)) expect(d.eta).toMatch(/^\d{2}:\d{2}( \+1)?$/);
     const text = JSON.stringify(r);
-    for (const s of ['TSTB', 'Other company', 'INV-B', 'OFFICE-NOTE-SENTINEL', 'DRIVER-NAME-SENTINEL', 'CUSTOMER-PHONE-SENTINEL']) expect(text).not.toContain(s);
+    for (const s of ['TSTB', 'Other company', 'INV-', 'OFFICE-NOTE-SENTINEL', 'DRIVER-NAME-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', 'CUSTOMER_CANCELLED', 'T05', 'Trip']) expect(text).not.toContain(s);
     expect(rawLog.some((s) => s.includes('"routesJson" = COALESCE("routesJson"'))).toBe(true);
     // Two routes at once ("R1, R2X"), and an unknown code next to them.
     const both = await body(await view(token, { route: 'R2X, r1, R9' }));
     expect(both.data!.lookup!.results.map((x) => x.code)).toEqual(['R1', 'R2X']);
     expect(both.data!.lookup!.notFound).toEqual(['R9']);
-    expect(both.data!.lookup!.notFoundText).toMatch(/^No deliveries for route or truck R9 on \w{3} \d{1,2} \w{3}\. Check the route code on your Salesman ETA page, or the truck code\.$/);
+    expect(Object.keys(both.data!.lookup!).sort()).toEqual(['ambiguous', 'asked', 'choices', 'notFound', 'results']);
   });
 
   it('an unknown code and "Route not given": the same answer as a code with nothing that day', async () => {
@@ -323,7 +324,7 @@ describe('the answer', () => {
     expect([a.notFound, b.notFound]).toEqual([['R77'], ['ROUTE NOT GIVEN']]);
   });
 
-  it('a truck code (owner decision of 20 Oct 2026): the deliveries of the truck that day, every route; recorded as "T:<code>"', async () => {
+  it('a truck code (owner decision of 20 Oct 2026): the customers of the truck that day, every route - nothing of the truck but the code typed; recorded as "T:<code>"', async () => {
     const token = makeLink();
     rawLog.length = 0;
     rawValues.length = 0;
@@ -332,12 +333,10 @@ describe('the answer', () => {
       expect(l.notFound).toEqual([]);
       expect(l.results.map((x) => `${x.kind} ${x.code} ${x.query}`)).toEqual(['TRUCK T05 Truck T05']);
       const t = l.results[0]!;
-      expect(t.heading).toMatch(/^Truck T05 · /);
-      // Every line of the stop (R1 and R2X), with its routes; the cancelled order is not the truck's.
-      expect(t.deliveries.map((d) => `${d.customerCode} ${d.cases} ${d.routes.join('+')} ${d.invoices.join('+')}`)).toEqual(['TST0001 30 R1+R2X INV-1', 'TST0002 12 R1 INV-2']);
-      expect(t.offTruck).toEqual([]);
-      expect(t.trucks.map((x) => x.truckCode)).toEqual(['T05']);
-      // Nothing of the other company (its truck has the same code).
+      // Every stop of the truck (one row for the stop with R1 and R2X lines); the cancelled order is not the truck's.
+      expect(t.rows.map((d) => `${d.customer} ${d.status}`)).toEqual(['Example Mart TST0001 ON_THE_WAY', 'Example Mart TST0002 ON_THE_WAY']);
+      // No trip, route, invoice or truck card; nothing of the other company (its truck has the same code).
+      expect(JSON.stringify(t.rows)).not.toMatch(/T05|R2X|INV-|loadNo|trip/i);
       expect(JSON.stringify(l)).not.toMatch(/TSTB|Other company|INV-B/);
     }
     expect(rawValues.some((v) => v.includes('T:T05'))).toBe(true);
@@ -347,7 +346,6 @@ describe('the answer', () => {
     expect(mixed.notFound).toEqual(['9999']);
     const unknownTruck = (await body(await view(token, { route: 'Truck 9999' }))).data!.lookup!;
     expect(unknownTruck).toMatchObject({ results: [], notFound: ['TRUCK 9999'] });
-    expect(unknownTruck.notFoundText).toMatch(/^No deliveries for truck 9999 on /);
   });
 
   it('several trucks with the digits typed: offered, none shown; a route code that is also a truck code: the route, the truck offered', async () => {
@@ -364,12 +362,11 @@ describe('the answer', () => {
     const token = makeLink();
     const ip = freshIp();
     const several = (await body(await view(token, { ip, route: '1234' }))).data!.lookup!;
-    expect(several).toMatchObject({ results: [], notFound: [], notFoundText: null });
+    expect(several).toMatchObject({ results: [], notFound: [] });
     expect(several.choices).toEqual([
       {
         asked: '1234',
         kind: 'SEVERAL_TRUCKS',
-        text: '1234 matches 2 trucks today. Pick one:',
         options: [
           { code: '1234-AB', query: 'Truck 1234-AB' },
           { code: '1234-CD', query: 'Truck 1234-CD' },
@@ -379,11 +376,11 @@ describe('the answer', () => {
     // A truck picked: its deliveries, also a line without a route.
     const picked = (await body(await view(token, { ip, route: 'Truck 1234-CD' }))).data!.lookup!;
     expect(picked.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['TRUCK 1234-CD']);
-    expect(picked.results[0]!.deliveries.map((x) => `${x.customerCode} ${x.cases} [${x.routes.join(',')}]`)).toEqual(['TST0006 6 []']);
+    expect(picked.results[0]!.rows.map((x) => `${x.customer} ${x.status}`)).toEqual(['Example Mart TST0006 ON_THE_WAY']);
     // R1 is a route and also truck R-1's code: the route is shown, the truck offered in its place.
     const also = (await body(await view(token, { ip, route: 'R2X, r1' }))).data!.lookup!;
     expect(also.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['ROUTE R1', 'ROUTE R2X']);
-    expect(also.choices).toEqual([{ asked: 'R1', kind: 'ALSO_TRUCK', text: 'R1 is also a truck code. Show the truck instead:', options: [{ code: 'R-1', query: 'R2X, Truck R-1' }] }]);
+    expect(also.choices).toEqual([{ asked: 'R1', kind: 'ALSO_TRUCK', options: [{ code: 'R-1', query: 'R2X, Truck R-1' }] }]);
     const truckR1 = (await body(await view(token, { ip, route: 'R2X, Truck R-1' }))).data!.lookup!;
     expect(truckR1.results.map((x) => `${x.kind} ${x.code}`)).toEqual(['ROUTE R2X', 'TRUCK R-1']);
     expect(truckR1.choices).toEqual([]);
@@ -416,7 +413,6 @@ describe('the answer', () => {
       {
         asked: 'AB1',
         kind: 'SEVERAL_TRUCKS',
-        text: 'AB1 matches 2 trucks today. Pick one:',
         options: [
           { code: 'AB-1', query: 'R1, R2X, R3, R4, Truck AB-1' },
           { code: 'AB.1', query: 'R1, R2X, R3, R4, Truck AB.1' },
@@ -482,7 +478,9 @@ describe('the answer', () => {
         }
     };
     walk(r);
-    expect(keys.filter((k) => /^(id|.*Id|driver.*|.*[pP]hone.*|imei|priority|salesValue|margin.*|payment.*|address|accessNotes|reasonNote|cancelNote|tokenHash|salt)$/.test(k))).toEqual([]);
+    expect(keys.filter((k) => /^(id|.*Id|driver.*|.*[pP]hone.*|imei|priority|salesValue|margin.*|payment.*|address|accessNotes|reasonNote|cancelNote|tokenHash|salt|truck.*|trips?|loadNo|stop.*|pin|lat|lng|position|window|reason|invoices?|customerCode|notes?|deliveries|offTruck)$/.test(k))).toEqual([]);
+    // Each customer: exactly these, nothing more.
+    for (const v of r.data!.lookup!.results) for (const row of v.rows) expect(Object.keys(row).sort()).toEqual(['at', 'atCustomer', 'branch', 'cases', 'customer', 'eta', 'inMin', 'key', 'movedTo', 'off', 'status']);
   });
 });
 

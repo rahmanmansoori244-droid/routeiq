@@ -1,10 +1,14 @@
 /**
- * The salesman link's API answer (GET /api/s/view, owner request 19 Oct 2026; the truck lookup: owner decision
- * of 20 Oct 2026). Browser-safe: types only. The page (app/s/[token]) renders these; every text is ready to show
- * (plain English, times in the company's time zone, "HH:MM" with " +1" after midnight). The answer never carries
- * an internal id (customer, order, load, truck, run), a driver's name or phone, an IMEI, a customer's phone,
- * address or notes, money, a priority, or customers of a route or truck not asked for: `key` and `truckKey` are
- * per-answer indexes ("d7", "t2").
+ * The salesman link's API answer (GET /api/s/view, owner request 19 Oct 2026; the truck lookup: owner decision of
+ * 20 Oct 2026; made simple on the owner's feedback of 20 Oct 2026). Browser-safe: types only.
+ *
+ * Language-neutral: codes, numbers and "HH:MM" times only (the company's time zone, " +1" after midnight); the page
+ * says them in English, Arabic or Urdu (lib/sales-page/i18n.ts). Per customer: the name (and branch), ONE status
+ * and at most one time. The answer never carries a truck of a delivery, a trip, a stop number, a position, a
+ * window, a reason, a note, an invoice, a customer code, an internal id (customer, order, load, truck, run), a
+ * driver's name or phone, an IMEI, a customer's phone or address, money, a priority, or customers of a route or
+ * truck not asked for: `key` is a per-answer index ("d7", "o2"). How the detailed day becomes these rows:
+ * lib/sales-link/simple-view.ts.
  */
 
 /** What a result is: one sales route's deliveries, or one truck's deliveries of the day (every route). */
@@ -16,224 +20,60 @@ export type SalesLinkStateCode = 'LINK_NOT_FOUND' | 'LINK_REPLACED' | 'LINK_REVO
 /** A refused lookup (400), or too many requests (429, with Retry-After). */
 export type SalesQueryErrorCode = 'ROUTE_CODE_MISSING' | 'ROUTE_CODE_TOO_LONG' | 'TOO_MANY_CODES' | 'RATE_LIMITED';
 
-/** What happened, or will happen, at one delivery (one stop of one trip) of the route. */
-export type DeliveryStatus =
-  | 'DELIVERED'
-  | 'PARTLY_DELIVERED'
-  | 'NOT_DELIVERED'
-  /** The trip is over (or probably over) and the driver recorded no result for this stop. */
-  | 'NO_RESULT'
-  /** The truck was there (arrival or departure known) but the result is not in yet. */
-  | 'VISITED'
-  | 'AT_CUSTOMER'
-  | 'NEXT'
-  | 'ON_THE_WAY'
-  /** Not visited yet while later stops were: still due, the driver serves other customers first. */
-  | 'PASSED'
-  | 'LOADING'
-  | 'PLANNED'
-  /** An earlier day's trip that never left. */
-  | 'TRUCK_DID_NOT_GO';
-
-/** Orders of the route that are not on a truck of the day (listed under the deliveries). */
-export type OffTruckKind = 'CANCELLED' | 'MOVED' | 'NOT_PLANNED' | 'PART_NOT_PLANNED' | 'ADDED_AFTER_PLAN' | 'NOT_PLANNED_YET';
-
-/** Where an expected time comes from: the truck's GPS, the trip so far (the plan moved by the driver's updates), or the plan. */
-export type EtaSource = 'GPS' | 'TRIP' | 'PLAN';
-
 /**
- * The expected time against the window the salesman gave the customer (the printed Salesman ETA window):
- * inside it, after it, before it (GPS only), "due now - no update yet" (the plan says the truck should be
- * there and nothing says it is: no minutes), or no time to give: no live updates from this truck at all, a trip
- * not marked as left, or a stop after one the clock decides ("Not before 11:00 - no update from the truck yet").
+ * The one status of a customer's delivery, each a button on the page:
+ * - DELIVERED / PARTLY_DELIVERED / NOT_DELIVERED: the driver's (or the office's) result for this route's lines; a
+ *   trip that never left on an earlier day is NOT_DELIVERED;
+ * - NOT_CONFIRMED: the truck has been there or its trip is over, and no result was recorded (never said as delivered
+ *   or not delivered);
+ * - ON_THE_WAY: still to be delivered and not late (planned, being loaded, on the road, being delivered now);
+ * - DELAYED: still to be delivered and later than the window printed on the Salesman ETA;
+ * - CANCELLED: the order was cancelled;
+ * - NOT_IN_PLAN: not on a truck of the day: moved to another day, left out of the plan, or not planned yet.
  */
-export type EtaTiming = 'ON_TIME' | 'LATE' | 'EARLY' | 'DUE_NOW' | 'NO_UPDATES';
+export type SalesStatus = 'DELIVERED' | 'PARTLY_DELIVERED' | 'NOT_DELIVERED' | 'NOT_CONFIRMED' | 'ON_THE_WAY' | 'DELAYED' | 'CANCELLED' | 'NOT_IN_PLAN';
 
-export type TripStatus = 'PLANNED' | 'LOCKED' | 'LOADING' | 'DISPATCHED' | 'COMPLETED';
+/** Why a NOT_IN_PLAN order is not on a truck: moved to another day, not planned yet (or received after planning), or left out. */
+export type SalesOffKind = 'MOVED' | 'NOT_PLANNED_YET' | 'NOT_IN_PLAN';
 
-export interface SalesMeta {
-  /** The delivery date, YYYY-MM-DD. */
-  date: string;
-  /** "Sunday 19 October 2026". */
-  dayText: string;
-  /** "Sun 19 Oct". */
-  dayShort: string;
-  /** The company's name. */
-  company: string;
-  /** When the link stops working (ISO instant). */
-  expiresAt: string;
-  /** "Works until Mon 20 Oct 06:00". */
-  expiryText: string;
-  /** The company's time zone (every time in the answer is already in it). */
-  tz: string;
-  /** The server's clock (ISO instant). */
-  serverNow: string;
-  /** The page refreshes every this many seconds while visible. */
-  refreshSec: number;
-  /** "Your route code (as on your Salesman ETA page) or a truck code". */
-  routeHint: string;
-}
-
-export interface SalesEta {
-  /** "10:45" (company time, " +1" after midnight); never earlier than now. Null: no time to show (timing DUE_NOW / NO_UPDATES). */
-  expected: string | null;
-  source: EtaSource | null;
-  timing: EtaTiming;
-  /** Minutes after the window's end, rounded to 5 (timing LATE only; never when the time is only "not reached yet"). */
-  lateMin: number | null;
-  /** Minutes before the window's start, rounded to 5 (timing EARLY: GPS only). */
-  earlyMin: number | null;
-  /** The line to show: "Expected about 10:45 (GPS) - within 10:15-11:15", "Due now - no update from the truck yet", ... */
-  text: string;
-}
-
-export interface SalesDelivery {
-  /** 1, 2, ... in expected order (the planned arrival, then truck, trip, stop). The map pins carry it. */
-  no: number;
-  /** Per answer ("d7"). */
+/** One customer's delivery (or order not on a truck) of the result. */
+export interface SalesRow {
+  /** Per answer ("d7": a delivery, "o2": an order not on a truck). */
   key: string;
-  customerName: string;
-  customerCode: string;
-  branchCode: string | null;
-  /** The route's invoices on this delivery (no other route's); a truck's result: every invoice of the stop. */
-  invoices: string[];
-  /** The route's cases on this delivery (a truck's result: the stop's). */
-  cases: number;
-  /** The sales routes of the delivery's lines, in natural order (a route's result: that route only; [] = none given). */
-  routes: string[];
-  /** The truck of this delivery in `trucks` (per answer, "t2"). */
-  truckKey: string;
-  /** The truck code as on the plan (a hired truck: its plate). */
-  truckCode: string;
-  loadNo: number;
-  /** 1-based position of the stop on its trip, and the trip's stops: "Trip 2 · stop 3 of 9". */
-  stopNo: number;
-  stopsOnTrip: number;
-  /** "part 1 of 2" when the route's customer has more than one delivery that day; else null. */
-  part: string | null;
-  status: DeliveryStatus;
-  /** "Delivered", "On the way", "Truck at the customer now", ... */
-  statusText: string;
-  /** The second line: "Delivered 10:31", "Truck there since 10:31", "Truck stopped there 10:31-10:52 - result not recorded", ... (null: none). */
-  detailText: string | null;
-  /** The window printed on the Salesman ETA ("07:45-09:00"); null when the plan has no time for the stop. */
-  window: string | null;
-  /** The planned arrival "08:05"; null = not planned. */
-  planned: string | null;
-  /** The live expected arrival (pending deliveries of today's trips); null when done or not live (plan only). */
-  eta: SalesEta | null;
-  /** NEXT / ON_THE_WAY / PASSED: stops of the same trip still to be served before this one; else null. */
-  stopsBefore: number | null;
-  /** "May arrive after the customer's receiving hours (until 14:00)"; null = no. */
-  afterHours: string | null;
-  /** The result's time "10:31" (DELIVERED / PARTLY / NOT_DELIVERED); else null. */
+  /** The customer's name as stored. */
+  customer: string;
+  branch: string | null;
+  status: SalesStatus;
+  /** DELIVERED: when ("10:31"); else null. */
   at: string | null;
-  /** The route's delivered cases of the route's cases (results only). */
-  delivered: { cases: number; of: number } | null;
-  /** Why not (or not all) delivered: "Shop closed (as reported by the driver)"; never the driver's own note. */
-  reason: string | null;
-  /** The receiving hours "06:00-14:00", "any time", or null (only the order's own time is known). */
-  hours: string | null;
-  /** "this order: 10:00-11:00" when an order has its own delivery time; else null. */
-  orderTime: string | null;
-  /** "Not locked yet: times can change if the day is re-planned", "Moved here from Sat 18 Oct", ... */
-  notes: string[];
-  /** The customer's planned pin, 4 decimals (about 10 m), for the map only (no name on it); null = none. */
-  pin: { lat: number; lng: number } | null;
-  /** A WhatsApp text for the customer (`https://wa.me/?text=` + encodeURIComponent): status, window or time; never a link. */
-  shareText: string;
-}
-
-export interface SalesTruckPosition {
-  /** About 100 m (3 decimals). */
-  lat: number;
-  lng: number;
-  /** The GPS time of the position (ISO). */
-  fixAt: string;
-  /** "Updated 10:32", or "Last GPS position 10:12 (25 min ago)" when not fresh. */
-  updatedText: string;
-  ageMin: number;
-  /** Older than 5 minutes (or an invalid fix): drawn grey. */
-  stale: boolean;
-  moving: boolean;
-}
-
-export interface SalesTruck {
-  /** Per answer ("t2"). */
-  key: string;
-  /** As on the plan (a hired truck: its plate). */
-  truckCode: string;
-  /** The trip that matters now: the first on the road, else being loaded, else the next to go, else the last finished. */
-  trip: { loadNo: number; status: TripStatus; text: string } | null;
-  /** How many trips of the day carry this route (a truck's result: its trips with deliveries). */
-  trips: number;
-  /** "Running about 20 min late" (the trip on the road, past its plan by 15 min or more); null otherwise. */
-  lateText: string | null;
-  /** The route's next customer on this truck (a truck's result: the truck's next customer): "Example Mart · about 10:45 · 2 stops before it"; null = none. */
-  nextYours: string | null;
   /**
-   * Only while the trip on the road still has deliveries of this result to make (a route's: that route's; a truck's:
-   * any), on the delivery day itself, and the GPS position is at most 60 min old.
+   * ON_THE_WAY / DELAYED: the approximate expected arrival ("16:30", rounded to 5 minutes), never a time already
+   * past; null when there is none to give (or the truck is at the customer now).
    */
-  position: SalesTruckPosition | null;
-  /** "GPS: updated 10:32", "No GPS on this truck - times from the driver's updates", ...; null when GPS tracking is off. */
-  gpsText: string | null;
+  eta: string | null;
+  /** Minutes from now to `eta` on the delivery day itself (0: any minute now); null otherwise. The page rounds it. */
+  inMin: number | null;
+  /** ON_THE_WAY / DELAYED: the truck is at the customer now (being delivered). */
+  atCustomer: boolean;
+  /** PARTLY_DELIVERED: the route's cases delivered of its cases; else null. */
+  cases: { delivered: number; of: number } | null;
+  /** NOT_IN_PLAN: why; else null. */
+  off: SalesOffKind | null;
+  /** off MOVED: the day it was moved to (YYYY-MM-DD); else null. */
+  movedTo: string | null;
 }
 
-export interface SalesOffTruck {
-  kind: OffTruckKind;
-  /** "Cancelled", "Moved to another day", "Not on a truck", ... */
-  kindText: string;
-  customerName: string;
-  customerCode: string;
-  branchCode: string | null;
-  invoices: string[];
-  cases: number;
-  /** "Cancelled - Customer cancelled", "Moved to Mon 20 Oct", "No room on the trucks for this day (the office will advise)", ... */
-  why: string;
-}
-
-export interface SalesCounts {
-  delivered: number;
-  partly: number;
-  notDelivered: number;
-  noResult: number;
-  /** AT_CUSTOMER + NEXT. */
-  now: number;
-  /** ON_THE_WAY + VISITED + PASSED. */
-  onTheWay: number;
-  /** PLANNED + LOADING. */
-  planned: number;
-  didNotGo: number;
-  /** Deliveries not done whose expected time is after their window (EtaTiming LATE). */
-  delayed: number;
-  cancelled: number;
-  moved: number;
-  /** NOT_PLANNED + PART_NOT_PLANNED + ADDED_AFTER_PLAN + NOT_PLANNED_YET. */
-  notPlanned: number;
-}
-
-/** One result of a lookup: a sales route's deliveries (kind ROUTE) or a truck's deliveries of the day (kind TRUCK). */
+/** One result of a lookup: a sales route's customers (kind ROUTE) or a truck's customers of the day (kind TRUCK). */
 export interface SalesRouteView {
   kind: SalesViewKind;
   /** The route code as stored ("R2X"), or the truck code as the plan shows it ("1234-AB"; a day-hired truck: its plate). */
   code: string;
   /** What the page asks for to refresh this result: the route code ("R2X"), or the truck form ("Truck 1234-AB"). */
   query: string;
-  /** "Route R2X · Sunday 19 October 2026", "Truck 1234-AB · Sunday 19 October 2026". */
-  heading: string;
-  /** When the data was read (ISO) and "Updated 10:32". */
-  updatedAt: string;
-  updatedText: string;
-  /** A trip of this result is not locked yet: times can change if the day is re-planned. */
-  notLocked: boolean;
-  counts: SalesCounts;
-  /** "4 delivered · 1 at the customer now · 6 on the way · 2 not on a truck". */
-  summaryText: string;
-  trucks: SalesTruck[];
-  deliveries: SalesDelivery[];
-  /** A route's orders not on a truck; a truck's: the orders taken off its trips (cancelled, moved to another day). */
-  offTruck: SalesOffTruck[];
+  /** When the data was read: "10:32" (company time). */
+  updated: string;
+  /** The deliveries by time (delivered at, else expected, else planned), then the orders cancelled or not on a truck. */
+  rows: SalesRow[];
 }
 
 /** One truck the salesman can pick: its code as shown and the lookup to send when he does. */
@@ -251,8 +91,6 @@ export interface SalesChoiceOption {
 export interface SalesChoice {
   asked: string;
   kind: 'SEVERAL_TRUCKS' | 'ALSO_TRUCK';
-  /** "5678 matches 2 trucks today. Pick one:", "C1 is also a truck code. Show the truck instead:". */
-  text: string;
   options: SalesChoiceOption[];
 }
 
@@ -267,8 +105,21 @@ export interface SalesLookup {
   ambiguous: string[];
   /** Trucks to pick from (several trucks with the compact key or the digits typed; a route code that is also a truck's). */
   choices: SalesChoice[];
-  /** "No deliveries for route or truck R9 on Sun 19 Oct. ..."; null when every code matched. */
-  notFoundText: string | null;
+}
+
+export interface SalesMeta {
+  /** The delivery date, YYYY-MM-DD. */
+  date: string;
+  /** The company's name. */
+  company: string;
+  /** When the link stops working (ISO instant: 06:00 company time the day after the delivery date). */
+  expiresAt: string;
+  /** The company's time zone (every time in the answer is already in it). */
+  tz: string;
+  /** The server's clock (ISO instant). */
+  serverNow: string;
+  /** The page refreshes every this many seconds while visible. */
+  refreshSec: number;
 }
 
 /** GET /api/s/view (no `route`: meta only, lookup null) and GET /api/s/view?route=<codes> (route and truck codes). */
@@ -277,9 +128,10 @@ export interface SalesViewAnswer {
   lookup: SalesLookup | null;
 }
 
-/** The error object of a refused answer: { data: null, error: SalesErrorBody }. */
+/** The error object of a refused answer: { data: null, error: SalesErrorBody }. The page says it by `code` in its language. */
 export interface SalesErrorBody {
   code: SalesLinkStateCode | SalesQueryErrorCode | string;
+  /** English, for API clients and logs. */
   message: string;
   /** LINK_EXPIRED / LINK_REPLACED / LINK_REVOKED: the link's delivery date. */
   date?: string;

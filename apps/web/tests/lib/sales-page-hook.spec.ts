@@ -6,7 +6,8 @@
  *    form; a path without a token is "link does not work" without a request.
  *  - Found routes are followed every `refreshSec` while the page is visible and when it comes back; only the codes
  *    FOUND are asked again (an unknown code counts against the link's limit: never re-asked); nothing found goes
- *    back to the form with the server's words and forgets the saved code.
+ *    back to the form ("no deliveries for R9", said in the page's language) and forgets the saved code. The state
+ *    holds codes and problems by kind, never words (the page picks the language).
  *  - A link that does not work stops everything; 429 waits Retry-After; a failed refresh keeps the data shown;
  *    the newest request wins (an answer for the route left behind is dropped); Change route drops the fragment.
  *  - A first request that failed is asked again by itself (signal back, page back, every period); a server error
@@ -191,18 +192,18 @@ describe('following the routes found', () => {
   it('refreshes every refreshSec while visible, asking only the codes found; a code not found is shown once and never asked again', async () => {
     const w = world({ answer: () => metaOnly });
     await w.mount();
-    w.answer = (r) => (r === 'R1, R9' ? ok(['R1'], { asked: ['R1', 'R9'], notFound: ['R9'], notFoundText: 'No deliveries for route R9 on Mon 19 Oct. Check the code on your Salesman ETA page.' }) : ok(['R1']));
+    w.answer = (r) => (r === 'R1, R9' ? ok(['R1'], { asked: ['R1', 'R9'], notFound: ['R9'] }) : ok(['R1']));
     await w.act((a) => a.submit(' r1 , r9 '));
     expect(w.calls).toEqual([null, 'R1, R9']);
     expect(w.state().phase).toBe('ready');
-    expect(w.state().notice).toMatch(/No deliveries for route R9/);
+    expect(w.state().notice).toEqual({ notFound: ['R9'], ambiguous: [] });
     expect(w.data['riq.s.route']).toBe('R1');
     expect(w.every.filter((e) => e.on).map((e) => e.ms)).toEqual([60_000]);
 
     await w.tick();
     expect(w.calls).toEqual([null, 'R1, R9', 'R1']);
     // The notice of the first answer stays until the route changes.
-    expect(w.state().notice).toMatch(/R9/);
+    expect(w.state().notice).toEqual({ notFound: ['R9'], ambiguous: [] });
 
     // Hidden: no refresh.
     w.setVisible(false);
@@ -228,11 +229,11 @@ describe('following the routes found', () => {
     expect(refreshMsOf({ refreshSec: 3600 })).toBe(600_000);
   });
 
-  it('nothing found: back to the form with the server\'s words; the saved code is forgotten and nothing is followed', async () => {
-    const w = world({ saved: 'R9', answer: () => ok([], { asked: ['R9'], notFound: ['R9'], notFoundText: 'No deliveries for route R9 on Mon 19 Oct. Check the code on your Salesman ETA page.' }) });
+  it('nothing found: back to the form with the codes not found; the saved code is forgotten and nothing is followed', async () => {
+    const w = world({ saved: 'R9', answer: () => ok([], { asked: ['R9'], notFound: ['R9'] }) });
     await w.mount();
     expect(w.state()).toMatchObject({ phase: 'form', formText: 'R9' });
-    expect(w.state().formError).toMatch(/No deliveries for route R9/);
+    expect(w.state().formError).toEqual({ kind: 'NOT_FOUND', codes: ['R9'] });
     expect(w.data['riq.s.route']).toBeUndefined();
     expect(w.every.filter((e) => e.on)).toEqual([]);
     await w.tick();
@@ -243,13 +244,13 @@ describe('following the routes found', () => {
     const w = world({ answer: () => metaOnly });
     await w.mount();
     await w.act((a) => a.submit('   '));
-    expect(w.state().formError).toBe('Type your route or truck code.');
+    expect(w.state().formError).toEqual({ kind: 'CODE', code: 'ROUTE_CODE_MISSING' });
     await w.act((a) => a.submit('R1, R2, R3, R4, R5, R6'));
-    expect(w.state().formError).toBe('At most 5 codes at once.');
+    expect(w.state().formError).toEqual({ kind: 'CODE', code: 'TOO_MANY_CODES' });
     expect(w.calls).toEqual([null]);
     w.answer = () => ({ kind: 'badCode', code: 'ROUTE_CODE_TOO_LONG', message: 'That route code is too long.' });
     await w.act((a) => a.submit('R1'));
-    expect(w.state()).toMatchObject({ phase: 'form', formError: 'That route code is too long.' });
+    expect(w.state()).toMatchObject({ phase: 'form', formError: { kind: 'CODE', code: 'ROUTE_CODE_TOO_LONG' } });
   });
 
   it('Change route: back to the form with the codes, nothing kept, the fragment dropped, an answer still on its way ignored', async () => {
@@ -276,7 +277,6 @@ describe('a truck looked up (owner decision of 20 Oct 2026)', () => {
   const several = {
     asked: '1234',
     kind: 'SEVERAL_TRUCKS' as const,
-    text: '1234 matches 2 trucks today. Pick one:',
     options: [
       { code: '1234-AB', query: 'Truck 1234-AB' },
       { code: '1234-CD', query: 'Truck 1234-CD' },
@@ -316,7 +316,7 @@ describe('a truck looked up (owner decision of 20 Oct 2026)', () => {
   });
 
   it('a route code that is also a truck code: the route with the truck offered; kept on refresh, gone on Change route', async () => {
-    const also = { asked: 'R1', kind: 'ALSO_TRUCK' as const, text: 'R1 is also a truck code. Show the truck instead:', options: [{ code: 'R-1', query: 'Truck R-1' }] };
+    const also = { asked: 'R1', kind: 'ALSO_TRUCK' as const, options: [{ code: 'R-1', query: 'Truck R-1' }] };
     const w = world({ saved: 'R1', answer: () => ok(['R1'], { choices: [also] }) });
     await w.mount();
     expect(w.state()).toMatchObject({ phase: 'ready', choices: [also] });
@@ -425,11 +425,11 @@ describe('when things go wrong', () => {
     await w.mount();
     w.answer = () => ({ kind: 'error', status: 0 });
     await w.act((a) => a.submit('r1'));
-    expect(w.state()).toMatchObject({ phase: 'form', formText: 'R1', formError: 'No connection. Check your signal and try again.' });
+    expect(w.state()).toMatchObject({ phase: 'form', formText: 'R1', formError: { kind: 'OFFLINE' } });
     // A server error is not the signal.
     w.answer = () => ({ kind: 'error', status: 500 });
     await w.act((a) => a.submit('r1'));
-    expect(w.state().formError).toBe('The server could not answer just now. Try again in a minute.');
+    expect(w.state().formError).toEqual({ kind: 'SERVER' });
   });
 
   it('no connection at the start: asked again by itself when the signal returns, when the page comes back and every refresh period', async () => {

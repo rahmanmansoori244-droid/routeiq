@@ -8,13 +8,15 @@
  * What the browser keeps (localStorage, when it works: WhatsApp's in-app browser may not keep it, so a route can
  * also come in the link's #fragment, "/s/<token>#R1"):
  * - `riq.s.route`: the route codes last found ("R1" or "R1, R2X");
- * - `riq.s.device`: the random id. Never the driver page's `riq.d.*` keys.
+ * - `riq.s.device`: the random id;
+ * - `riq.s.lang`: the language picked (en, ar, ur). Never the driver page's `riq.d.*` keys.
  */
 import type { SalesLinkStateCode, SalesQueryErrorCode, SalesViewAnswer } from '../sales-link/view-types';
 import { MAX_QUERY_CHARS } from '../sales-link/route-code';
 
 export const ROUTE_KEY = 'riq.s.route';
 export const DEVICE_KEY = 'riq.s.device';
+export const LANG_KEY = 'riq.s.lang';
 
 /** How long one request may take on a weak signal before it counts as failed (the page keeps what it shows). */
 export const VIEW_TIMEOUT_MS = 20_000;
@@ -100,6 +102,23 @@ export function forgetRoute(storage: KeyStore | null = safeLocalStorage()): void
     storage?.removeItem(ROUTE_KEY);
   } catch {
     // nothing kept
+  }
+}
+
+/** The language this browser picked, or null (the page then follows the phone's language). */
+export function savedLang(storage: KeyStore | null = safeLocalStorage()): string | null {
+  try {
+    return storage?.getItem(LANG_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveLang(lang: string, storage: KeyStore | null = safeLocalStorage()): void {
+  try {
+    storage?.setItem(LANG_KEY, lang);
+  } catch {
+    // Private mode or blocked storage: the language lasts for this page view only.
   }
 }
 

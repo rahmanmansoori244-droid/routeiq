@@ -7,13 +7,14 @@
  *
  *  1. A planner makes today's link (201, then 200 with the same URL; one SALES_LINK_ISSUED row without the
  *     token, its hash or the salt); a date after tomorrow is refused (400 DATE_OUT_OF_RANGE).
- *  2. The salesman's page: R1 shows its delivered stop (R1's line fully delivered on a stop partly delivered
- *     overall) and its planned stop; R2X the same stop not delivered, with the driver's reason; the order
- *     cancelled before planning under "Cancelled" with the reason's label, never the office's note; an unknown
- *     code answers "no deliveries"; nothing of the other company, which has a plan of the same day too: its own
- *     truck T05 carrying its order TSTB01 of route R1 (the relation filters, real here). A truck code ("t05",
- *     "T-05", its digits "05", "Truck T05"; owner decision of 20 Oct 2026) shows both trips of T05 with every
- *     route's lines on the stop (partly delivered: 20 of 30, the driver's reason); never the other company's T05.
+ *  2. The salesman's page (one status and one time per customer: owner feedback of 20 Oct 2026): R1 shows its
+ *     delivered stop (R1's line fully delivered on a stop partly delivered overall) and its planned stop; R2X the
+ *     same stop not delivered (no reason: the owner asked for none); the order cancelled before planning as
+ *     "Cancelled", never the office's note; an unknown code answers "no deliveries"; nothing of the other company,
+ *     which has a plan of the same day too: its own truck T05 carrying its order TSTB01 of route R1 (the relation
+ *     filters, real here). A truck code ("t05", "T-05", its digits "05", "Truck T05"; owner decision of 20 Oct 2026)
+ *     shows the customers of both trips of T05 (the shared stop partly delivered: 20 of 30) and nothing of the truck;
+ *     never the other company's T05.
  *  3. Tenant scoping: the other company's planner changing this link: 404; signed in to the other company on
  *     the page: 403.
  *  4. Phones opening the page at once are each counted once (the atomic jsonb append), the route found once; the
@@ -294,20 +295,19 @@ describe("2. the salesman's page", () => {
     const r1 = await answer(await view(tokenOf(url), { route: 'r1' }));
     const v = r1.data!.lookup!.results[0]!;
     expect(v).toMatchObject({ kind: 'ROUTE', code: 'R1' });
-    const byCode = new Map(v.deliveries.map((d) => [d.customerCode, d]));
-    expect([...byCode.keys()].sort()).toEqual(['TST0001', 'TST0002']);
-    expect(byCode.get('TST0001')).toMatchObject({ status: 'DELIVERED', invoices: ['INV-1'], cases: 20, delivered: { cases: 20, of: 20 } });
-    expect(byCode.get('TST0002')).toMatchObject({ invoices: ['INV-2'], cases: 12 });
-    expect(v.offTruck.map((o) => `${o.kind} ${o.customerCode} ${o.why}`)).toEqual(['CANCELLED TST0003 Cancelled - Customer cancelled']);
+    const byName = new Map(v.rows.map((d) => [d.customer, d]));
+    expect([...byName.keys()].sort()).toEqual(['Example Mart TST0001', 'Example Mart TST0002', 'Example Mart TST0003']);
+    expect(byName.get('Example Mart TST0001')).toMatchObject({ status: 'DELIVERED', at: expect.stringMatching(/^\d{2}:\d{2}/) });
+    expect(byName.get('Example Mart TST0003')).toMatchObject({ key: 'o1', status: 'CANCELLED' });
     const r2x = (await answer(await view(tokenOf(url), { route: 'R2X' }))).data!.lookup!.results[0]!;
-    expect(r2x.deliveries.map((d) => [d.customerCode, d.status, d.cases, d.reason])).toEqual([['TST0001', 'NOT_DELIVERED', 10, 'Shop closed (as reported by the driver)']]);
+    expect(r2x.rows.map((d) => [d.customer, d.status])).toEqual([['Example Mart TST0001', 'NOT_DELIVERED']]);
     const text = JSON.stringify([r1, r2x]);
-    for (const s of ['TSTB01', 'INV-B', 'OFFICE-NOTE-SENTINEL', 'DRIVER-NOTE-SENTINEL', 'ORDER-NOTE-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', 'Rule 20 Driver', ids.truckA, ids.depotA, ids.runA, ids.truckB, ids.runB]) expect(text).not.toContain(s);
+    for (const s of ['TSTB01', 'INV-', 'OFFICE-NOTE-SENTINEL', 'DRIVER-NOTE-SENTINEL', 'ORDER-NOTE-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', 'Rule 20 Driver', 'Shop closed', 'T05', ids.truckA, ids.depotA, ids.runA, ids.truckB, ids.runB]) expect(text).not.toContain(s);
     const unknown = (await answer(await view(tokenOf(url), { route: 'R9' }))).data!.lookup!;
     expect(unknown).toMatchObject({ results: [], notFound: ['R9'] });
   });
 
-  it('a truck code (owner decision of 20 Oct 2026): both trips of T05, every route on the stop, its result and reason', async () => {
+  it('a truck code (owner decision of 20 Oct 2026): the customers of both trips of T05, the shared stop partly delivered, nothing of the truck', async () => {
     as(null);
     for (const typed of ['t05', 'T-05', '05', 'Truck T05']) {
       const l = (await answer(await view(tokenOf(url), { route: typed }))).data!.lookup!;
@@ -315,16 +315,13 @@ describe("2. the salesman's page", () => {
       expect(l.results.map((x) => `${x.kind} ${x.code} ${x.query}`)).toEqual(['TRUCK T05 Truck T05']);
     }
     const t = (await answer(await view(tokenOf(url), { route: 'T05' }))).data!.lookup!.results[0]!;
-    expect(t.heading).toMatch(/^Truck T05 · /);
-    const byCode = new Map(t.deliveries.map((d) => [d.customerCode, d]));
-    expect([...byCode.keys()].sort()).toEqual(['TST0001', 'TST0002']);
-    // The stop partly delivered overall: both salesmen's lines on the truck's card.
-    expect(byCode.get('TST0001')).toMatchObject({ status: 'PARTLY_DELIVERED', routes: ['R1', 'R2X'], invoices: ['INV-1'], cases: 30, delivered: { cases: 20, of: 30 }, reason: 'Shop closed (as reported by the driver)' });
-    expect(byCode.get('TST0002')).toMatchObject({ routes: ['R1'], invoices: ['INV-2'], cases: 12 });
-    expect(t.trucks.map((x) => [x.truckCode, x.trips])).toEqual([['T05', 2]]);
-    expect(new Set(t.deliveries.map((d) => d.loadNo)).size).toBe(2);
-    // The order cancelled before planning was never on the truck.
-    expect(t.offTruck).toEqual([]);
+    const byName = new Map(t.rows.map((d) => [d.customer, d]));
+    // Both trips' customers; the order cancelled before planning was never on the truck.
+    expect([...byName.keys()].sort()).toEqual(['Example Mart TST0001', 'Example Mart TST0002']);
+    // The stop partly delivered overall: both salesmen's lines on the truck's row.
+    expect(byName.get('Example Mart TST0001')).toMatchObject({ status: 'PARTLY_DELIVERED', cases: { delivered: 20, of: 30 } });
+    // Nothing of the truck but the code typed: no trip, route, invoice, reason or card.
+    expect(JSON.stringify(t.rows)).not.toMatch(/T05|R2X|INV-|Shop closed|loadNo|truck/i);
     // A route and the truck at once. The other company's T05, on its own plan of the same day with TSTB01, is never
     // found: each lookup above named one truck (a second T05 would be a second result), and none of B's lines.
     const mixed = (await answer(await view(tokenOf(url), { route: 'R2X, T05' }))).data!.lookup!;

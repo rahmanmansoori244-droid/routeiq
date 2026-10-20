@@ -38,7 +38,7 @@ import { asciiDigits, codeDigits, compactRouteKey, compactTruckKey, explicitTruc
 import { salesBadTokenKey, salesDeviceFromHeader, salesIpKey, salesMissLimit, salesTokenFromHeader, salesViewLimit, SALES_HEADERS } from '@/lib/sales-link/guard';
 import { salesLinkDateProblem, salesTouchPlan, seenLists, TRUCK_SEEN_PREFIX } from '@/lib/sales-link/service';
 import { LIMITS } from '@/lib/rate-limit';
-import { choiceText, expiryText, notFoundText, salesLinkMessage, shortDayText } from '@/lib/sales-link/text';
+import { expiryText, salesLinkMessage, shortDayText } from '@/lib/sales-link/text';
 
 const ENV = { NEXTAUTH_SECRET: 'sales-link-token-test-secret' } as unknown as NodeJS.ProcessEnv;
 
@@ -99,7 +99,7 @@ describe('the token', () => {
     const m = salesLinkMessage({ dayShort: 'Mon 19 Oct', company: 'Example Water Co', url: 'https://routeiq.example/s/tok', expiryText: 'Works until Tue 20 Oct 06:00' });
     expect(m.split('\n')).toEqual([
       'RouteIQ - live deliveries for Mon 19 Oct (Example Water Co): https://routeiq.example/s/tok',
-      "Open it, type your route code (as on your Salesman ETA page) and see each customer's delivery: delivered, on the way with the expected time, delayed, not delivered or cancelled.",
+      "Open it, type your route code (as on your Salesman ETA page) and see each customer's delivery: delivered, on the way with the expected time, delayed, not delivered or cancelled. English, Arabic or Urdu.",
       'Works until Tue 20 Oct 06:00. For the sales team only - please do not forward.',
     ]);
   });
@@ -237,15 +237,6 @@ describe('the truck code a salesman types (owner decision of 20 Oct 2026)', () =
     expect(m.routes.length + m.trucks.length).toBeLessThanOrEqual(MAX_CODES);
   });
 
-  it('the words: not found as a route or a truck; the choices', () => {
-    expect(notFoundText(['R9'], 'Mon 19 Oct')).toBe('No deliveries for route or truck R9 on Mon 19 Oct. Check the route code on your Salesman ETA page, or the truck code.');
-    expect(notFoundText(['R9', 'TRUCK 9999'], 'Mon 19 Oct')).toBe('No deliveries for route or truck R9 or truck 9999 on Mon 19 Oct. Check the route code on your Salesman ETA page, or the truck code.');
-    expect(notFoundText(['TRUCK 1', 'TRUCK 2'], 'Mon 19 Oct')).toMatch(/^No deliveries for trucks 1, 2 on /);
-    expect(notFoundText([], 'Mon 19 Oct')).toBeNull();
-    expect(choiceText('SEVERAL_TRUCKS', '1234', 2)).toBe('1234 matches 2 trucks today. Pick one:');
-    expect(choiceText('ALSO_TRUCK', 'C1', 1)).toBe('C1 is also a truck code. Show the truck instead:');
-  });
-
   it('the trucks found are kept as "T:<code>" in the routes looked up, and read apart for the office', () => {
     expect(TRUCK_SEEN_PREFIX).toBe('T:');
     expect(seenLists(['R2X', 'T:1234-AB', 'R1', 'T:TEST-01', 'R1', 'T:'])).toEqual({ routes: ['R1', 'R2X'], trucks: ['1234-AB', 'TEST-01'] });
@@ -281,7 +272,7 @@ describe('the rate-limit keys (critique item 9) and the request parts', () => {
     expect(salesTokenFromHeader(req({}))).toBeNull();
     expect(salesDeviceFromHeader(req({ 'x-sales-device': '0123456789ABCDEF0123456789abcdef' }))).toMatch(/^[0-9a-f]{8}$/);
     expect(salesDeviceFromHeader(req({ 'x-sales-device': 'not-a-device' }))).toBeNull();
-    expect(SALES_HEADERS).toEqual({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'strict-origin', 'X-Robots-Tag': 'noindex, nofollow, noarchive' });
+    expect(SALES_HEADERS).toEqual({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex, nofollow, noarchive' });
   });
 
   it('what a request adds to the link: a new phone, new routes, lastSeenAt at most every 5 minutes', () => {

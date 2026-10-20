@@ -1,16 +1,17 @@
 /**
- * What the salesman link page shows (owner request 19 Oct 2026), pure and browser-safe: the status colours, the
- * count chips and their filters, the card lines, the share link, the map's points and the page's own words.
- * The answer's texts come ready from the server (lib/sales-link/text.ts, plain English, company time); the page
- * adds only its own labels, kept here (UI, LINK_STATE_TEXT) so an Arabic version can follow the same keys later.
+ * What the salesman link page shows (owner request 19 Oct 2026; made simple on the owner's feedback of 20 Oct 2026),
+ * pure and browser-safe: the status buttons and the list each one shows, the one line under a customer, the
+ * WhatsApp text for the customer, the problems of the route form, and which codes the page follows. Every word comes
+ * from i18n.ts in the language the salesman picked; the answer itself is language-neutral.
  */
-import type { DeliveryStatus, EtaTiming, OffTruckKind, SalesDelivery, SalesEta, SalesLinkStateCode, SalesLookup, SalesOffTruck, SalesRouteView } from '../sales-link/view-types';
+import type { SalesChoice, SalesLookup, SalesMeta, SalesRouteView, SalesRow, SalesStatus, SalesViewKind } from '../sales-link/view-types';
 import { fmtDayMonth } from '../dispatch/time';
 import { MAX_CODES, normTypedRoute } from '../sales-link/route-code';
+import { aboutText, dayText, st, zonedParts, type SalesKey, type SalesLang } from './i18n';
 
 const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-/** "2026-10-19" -> "Sun 19 Oct" (as the server's shortDayText: the weekday from the date itself). */
+/** "2026-10-19" -> "Sun 19 Oct" (English, for the office's Salesman link dialog; as the server's shortDayText). */
 export function shortDayText(iso: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
   if (!m) return iso;
@@ -18,160 +19,138 @@ export function shortDayText(iso: string): string {
   return `${WEEKDAY_SHORT[wd]} ${fmtDayMonth(iso)}`;
 }
 
-/** The page's own words. */
-export const UI = {
-  title: 'Deliveries',
-  routeLabel: 'Route or truck code',
-  routeHelp: 'Two routes? Type both: R1, R2X. A truck: its code (1234-AB, or just 1234)',
-  show: 'Show my deliveries',
-  changeRoute: 'Change route',
-  refresh: 'Refresh',
-  loading: 'Loading…',
-  offline: 'No connection. Check your signal and try again.',
-  /** The server answered with an error (not the signal): the page asks again by itself. */
-  serverError: 'The server could not answer just now. Trying again shortly.',
-  /** The same on the route form (asked again when the salesman presses Show). */
-  serverErrorForm: 'The server could not answer just now. Try again in a minute.',
-  tryAgain: 'Try again',
-  readOnly: (tz: string) => `Read-only. Times are company time (${tz}).`,
-  refreshes: 'Refreshes every minute while open.',
-  trucks: 'Trucks',
-  deliveries: 'Deliveries',
-  // The link may be tomorrow's (sent the evening before): never "today" here.
-  offTruck: 'Not on a truck',
-  /** A truck's orders not on it any more (cancelled, moved to another day). */
-  offThisTruck: 'Taken off this truck',
-  noDeliveries: 'No deliveries on a truck for this route.',
-  notPlannedYet: 'Not planned yet - the plan is usually made the evening before. Check again later.',
-  filtered: (n: number, of: number) => `Showing ${n} of ${of}`,
-  showAll: 'Show all',
-  share: 'Send to customer',
-  shareTitle: 'Send this delivery’s status to the customer on WhatsApp (no link is sent)',
-  map: 'Map',
-  showMap: 'Show map',
-  hideMap: 'Hide map',
-  mapNote: 'Numbers are the deliveries below. Truck positions are approximate (about 100 m).',
-  noMap: 'The map cannot be shown on this phone.',
-  openInMaps: 'Open in Maps',
-  window: (w: string) => `Window ${w}`,
-  planned: (t: string) => `Planned ${t}`,
-  hours: (h: string) => `Receiving hours ${h}`,
-  invoices: (list: readonly string[]) => (list.length === 1 ? `Invoice ${list[0]}` : `Invoices ${list.join(', ')}`),
-  stale: (updated: string) => `Could not refresh - showing the data of ${updated.replace(/^Updated\s+/i, '')}. Trying again every minute.`,
-  busy: (sec: number | null) => (sec ? `Too many requests. Trying again in ${sec} s.` : 'Too many requests. Trying again in a minute.'),
-  codeMissing: 'Type your route or truck code.',
-  codeTooLong: 'That code is too long.',
-  tooManyCodes: 'At most 5 codes at once.',
-  ambiguous: (codes: readonly string[]) => `${codes.join(', ')} matched more than one route or truck: each is shown.`,
-  /** The heading and tab of a result: "Route R1", "Truck 1234-AB". */
-  viewTitle: (v: Pick<SalesRouteView, 'kind' | 'code'>) => `${v.kind === 'TRUCK' ? 'Truck' : 'Route'} ${v.code}`,
-  /** A truck offered for a code ("Truck 1234-AB"). */
-  pickTruck: (code: string) => `Truck ${code}`,
-  /** A delivery's sales routes on a truck's result. */
-  routesOf: (routes: readonly string[]) => (routes.length === 1 ? `Route ${routes[0]}` : `Routes ${routes.join(', ')}`),
-} as const;
+// ---------------------------------------------------------------------------------------
+// The status buttons and the list each one shows
+// ---------------------------------------------------------------------------------------
 
-/** The full-page texts of a link that does not work (the same words as the server's SALES_STATE_TEXT). */
-export const LINK_STATE_TEXT: Record<SalesLinkStateCode, string> = {
-  LINK_NOT_FOUND: 'This link does not work. Ask the office for the link of the day.',
-  LINK_REPLACED: 'This link was replaced by a newer one. Use the newest link in your group, or ask the office.',
-  LINK_REVOKED: 'This link was turned off by the office. Ask the office for a new one.',
-  LINK_EXPIRED: "This link has expired. Ask the office for today's link.",
-  SALES_LINKS_OFF: 'Salesman links are not available on this server. Ask the office.',
-  SIGNED_IN_OTHER_TENANT: 'You are signed in to RouteIQ for another company. Sign out to use this link.',
-};
+/** The buttons in order: the six the owner asked for always, then "not confirmed" and "not in the plan" when there are some. */
+export const STATUS_ORDER: readonly SalesStatus[] = ['DELIVERED', 'ON_THE_WAY', 'DELAYED', 'PARTLY_DELIVERED', 'NOT_DELIVERED', 'CANCELLED', 'NOT_CONFIRMED', 'NOT_IN_PLAN'];
+const ALWAYS: ReadonlySet<SalesStatus> = new Set(['DELIVERED', 'ON_THE_WAY', 'DELAYED', 'PARTLY_DELIVERED', 'NOT_DELIVERED', 'CANCELLED']);
 
 /**
- * The status chip's colours (Tailwind), the driver page's palette. Every pair reads at 4.5:1 or better (WCAG AA for
- * the chips' 14 px text; a salesman reads it outdoors): tests/lib/sales-page.spec.ts checks it.
+ * The status chip of a customer (solid; white text reads at 4.5:1 or better: WCAG AA for 14 px text, outdoors in the
+ * sun - tests/lib/sales-page.spec.ts checks it).
  */
-export const STATUS_TONE: Record<DeliveryStatus, string> = {
+export const STATUS_CHIP: Record<SalesStatus, string> = {
   DELIVERED: 'bg-emerald-700 text-white',
   PARTLY_DELIVERED: 'bg-amber-700 text-white',
   NOT_DELIVERED: 'bg-red-700 text-white',
-  NO_RESULT: 'bg-slate-500 text-white',
-  VISITED: 'bg-slate-300 text-slate-900',
-  AT_CUSTOMER: 'bg-blue-600 text-white',
-  NEXT: 'bg-slate-900 text-white',
-  ON_THE_WAY: 'bg-sky-100 text-sky-900',
-  PASSED: 'bg-amber-200 text-amber-950',
-  LOADING: 'bg-amber-200 text-amber-950',
-  PLANNED: 'bg-slate-200 text-slate-800',
-  TRUCK_DID_NOT_GO: 'bg-red-200 text-red-950',
+  NOT_CONFIRMED: 'bg-slate-600 text-white',
+  ON_THE_WAY: 'bg-sky-700 text-white',
+  DELAYED: 'bg-orange-700 text-white',
+  CANCELLED: 'bg-zinc-800 text-white',
+  NOT_IN_PLAN: 'bg-violet-700 text-white',
 };
 
-/** The card's left border by status (a glance down the list shows what is done and what is not). */
-export const STATUS_EDGE: Record<DeliveryStatus, string> = {
-  DELIVERED: 'border-l-emerald-600',
-  PARTLY_DELIVERED: 'border-l-amber-500',
-  NOT_DELIVERED: 'border-l-red-700',
-  NO_RESULT: 'border-l-slate-500',
-  VISITED: 'border-l-slate-400',
-  AT_CUSTOMER: 'border-l-blue-600',
-  NEXT: 'border-l-slate-900',
-  ON_THE_WAY: 'border-l-sky-400',
-  PASSED: 'border-l-amber-400',
-  LOADING: 'border-l-amber-300',
-  PLANNED: 'border-l-slate-300',
-  TRUCK_DID_NOT_GO: 'border-l-red-300',
+/** The status button (light, the same hue as its chip; the count in the chip's colour). */
+export const STATUS_BUTTON: Record<SalesStatus, string> = {
+  DELIVERED: 'bg-emerald-50 text-emerald-900 ring-emerald-200',
+  PARTLY_DELIVERED: 'bg-amber-50 text-amber-900 ring-amber-200',
+  NOT_DELIVERED: 'bg-red-50 text-red-900 ring-red-200',
+  NOT_CONFIRMED: 'bg-slate-50 text-slate-900 ring-slate-300',
+  ON_THE_WAY: 'bg-sky-50 text-sky-900 ring-sky-200',
+  DELAYED: 'bg-orange-50 text-orange-900 ring-orange-200',
+  CANCELLED: 'bg-zinc-100 text-zinc-900 ring-zinc-300',
+  NOT_IN_PLAN: 'bg-violet-50 text-violet-900 ring-violet-200',
 };
 
-/** The map pin's colour by status (hex: drawn by MapLibre, not Tailwind). */
-export const PIN_COLOR: Record<DeliveryStatus, string> = {
-  DELIVERED: '#059669',
-  PARTLY_DELIVERED: '#f59e0b',
-  NOT_DELIVERED: '#b91c1c',
-  NO_RESULT: '#64748b',
-  VISITED: '#94a3b8',
-  AT_CUSTOMER: '#2563eb',
-  NEXT: '#0f172a',
-  ON_THE_WAY: '#0284c7',
-  PASSED: '#d97706',
-  LOADING: '#a16207',
-  PLANNED: '#64748b',
-  TRUCK_DID_NOT_GO: '#ef4444',
+/** The card's edge by status (a glance down the list shows what is done and what is not). */
+export const STATUS_EDGE: Record<SalesStatus, string> = {
+  DELIVERED: 'border-s-emerald-600',
+  PARTLY_DELIVERED: 'border-s-amber-500',
+  NOT_DELIVERED: 'border-s-red-700',
+  NOT_CONFIRMED: 'border-s-slate-400',
+  ON_THE_WAY: 'border-s-sky-500',
+  DELAYED: 'border-s-orange-600',
+  CANCELLED: 'border-s-zinc-500',
+  NOT_IN_PLAN: 'border-s-violet-500',
 };
 
-export const OFF_TONE: Record<OffTruckKind, string> = {
-  CANCELLED: 'bg-red-100 text-red-900',
-  MOVED: 'bg-purple-100 text-purple-900',
-  NOT_PLANNED: 'bg-amber-100 text-amber-900',
-  PART_NOT_PLANNED: 'bg-amber-100 text-amber-900',
-  ADDED_AFTER_PLAN: 'bg-amber-100 text-amber-900',
-  NOT_PLANNED_YET: 'bg-slate-200 text-slate-800',
-};
+export const statusLabel = (lang: SalesLang, s: SalesStatus): string => st(lang, `st.${s}` as SalesKey);
 
-export const TIMING_TONE: Record<EtaTiming, string> = {
-  ON_TIME: 'bg-emerald-100 text-emerald-900',
-  LATE: 'bg-orange-100 text-orange-800',
-  EARLY: 'bg-violet-100 text-violet-900',
-  DUE_NOW: 'bg-amber-100 text-amber-900',
-  NO_UPDATES: 'bg-slate-100 text-slate-700',
-};
+export interface StatusButton {
+  status: SalesStatus;
+  n: number;
+}
 
-/** The small chip next to the status: "Late ~20 min", "Early ~15 min", "On time", "Due now"; none without live updates. */
-export function timingChip(eta: SalesEta | null): { text: string; tone: string } | null {
-  if (!eta) return null;
-  switch (eta.timing) {
-    case 'LATE':
-      return { text: eta.lateMin ? `Late ~${eta.lateMin} min` : 'Late', tone: TIMING_TONE.LATE };
-    case 'EARLY':
-      return { text: eta.earlyMin ? `Early ~${eta.earlyMin} min` : 'Early', tone: TIMING_TONE.EARLY };
-    case 'DUE_NOW':
-      return { text: 'Due now', tone: TIMING_TONE.DUE_NOW };
-    case 'ON_TIME':
-      return { text: 'On time', tone: TIMING_TONE.ON_TIME };
+/** The buttons of a result: the six always (a 0 is shown, not hidden), the other two only when they count something. */
+export function statusButtons(rows: readonly Pick<SalesRow, 'status'>[]): StatusButton[] {
+  return STATUS_ORDER.map((status) => ({ status, n: rows.filter((r) => r.status === status).length })).filter((b) => ALWAYS.has(b.status) || b.n > 0);
+}
+
+/** The rows a button shows (all of them for "All"). */
+export function rowsOf<R extends Pick<SalesRow, 'status'>>(rows: readonly R[], status: SalesStatus | null): R[] {
+  return status ? rows.filter((r) => r.status === status) : [...rows];
+}
+
+/** Every row is an order of a depot whose plan is not made yet (the evening before, for tomorrow's link). */
+export function allNotPlannedYet(rows: readonly Pick<SalesRow, 'status' | 'off'>[]): boolean {
+  return rows.length > 0 && rows.every((r) => r.status === 'NOT_IN_PLAN' && r.off === 'NOT_PLANNED_YET');
+}
+
+// ---------------------------------------------------------------------------------------
+// One customer: the line under the name, and the WhatsApp text
+// ---------------------------------------------------------------------------------------
+
+/** The delivery date is after the company's today (tomorrow's link, opened the evening before): times are the plan's. */
+export function isFutureDay(meta: Pick<SalesMeta, 'date' | 'serverNow' | 'tz'>): boolean {
+  const today = zonedParts(meta.serverNow, meta.tz)?.date;
+  return !!today && meta.date > today;
+}
+
+/**
+ * The one line under a customer: "at 10:31" (delivered), "18 of 24 cases" (partly), "about 16:30 · in about 1 h 20
+ * min" (on the way or delayed; "any minute" when it is close), "Being delivered now", "Moved to Tue 21 Oct", "Not
+ * planned yet"; null when the status says it all (not delivered, not confirmed, cancelled, or no time to give).
+ */
+export function rowLine(lang: SalesLang, r: SalesRow): string | null {
+  switch (r.status) {
+    case 'DELIVERED':
+      return r.at ? st(lang, 'deliveredAt', { time: r.at }) : null;
+    case 'PARTLY_DELIVERED':
+      return r.cases ? st(lang, 'casesOf', { n: r.cases.delivered, m: r.cases.of }) : null;
+    case 'ON_THE_WAY':
+    case 'DELAYED':
+      if (r.atCustomer) return st(lang, 'beingDelivered');
+      if (!r.eta) return null;
+      return r.inMin === null ? st(lang, 'expectedAbout', { time: r.eta }) : `${st(lang, 'expectedAbout', { time: r.eta })} · ${aboutText(lang, r.inMin)}`;
+    case 'NOT_IN_PLAN':
+      if (r.off === 'MOVED' && r.movedTo) return st(lang, 'movedTo', { day: dayText(lang, r.movedTo) });
+      return r.off === 'NOT_PLANNED_YET' ? st(lang, 'notPlannedYet') : null;
     default:
       return null;
   }
 }
 
-/** Results and finished stops: no live time, no window line, not on the map. */
-export const DONE_STATUSES: ReadonlySet<DeliveryStatus> = new Set(['DELIVERED', 'PARTLY_DELIVERED', 'NOT_DELIVERED', 'NO_RESULT', 'VISITED', 'TRUCK_DID_NOT_GO']);
+/** "Example Mart (B2)": the name as stored with its branch. */
+export const customerText = (r: Pick<SalesRow, 'customer' | 'branch'>): string => (r.branch ? `${r.customer} (${r.branch})` : r.customer);
 
-/** Deliveries still to come (drawn on the map). */
-export function isPending(d: Pick<SalesDelivery, 'status'>): boolean {
-  return !DONE_STATUSES.has(d.status);
+/**
+ * The WhatsApp text for the customer, in the page's language: the customer, the status and the approximate time,
+ * nothing else (no link, no invoice, no truck); null for an order not on a truck (no button).
+ */
+export function shareText(lang: SalesLang, r: SalesRow, o: { future: boolean; date: string }): string | null {
+  const customer = customerText(r);
+  switch (r.status) {
+    case 'DELIVERED':
+      return r.at ? st(lang, 'msg.DELIVERED', { customer, time: r.at }) : st(lang, 'msg.DELIVERED_NO_TIME', { customer });
+    case 'PARTLY_DELIVERED':
+      return r.cases ? st(lang, 'msg.PARTLY', { customer, n: r.cases.delivered, m: r.cases.of }) : st(lang, 'msg.PARTLY_NO_CASES', { customer });
+    case 'NOT_DELIVERED':
+      return st(lang, 'msg.NOT_DELIVERED', { customer });
+    case 'NOT_CONFIRMED':
+      return st(lang, 'msg.NOT_CONFIRMED', { customer });
+    case 'ON_THE_WAY':
+    case 'DELAYED':
+      if (r.atCustomer) return st(lang, 'msg.AT_CUSTOMER', { customer });
+      if (o.future) {
+        const day = dayText(lang, o.date);
+        return r.eta ? st(lang, 'msg.PLANNED', { customer, day, time: r.eta }) : st(lang, 'msg.PLANNED_NO_TIME', { customer, day });
+      }
+      return r.eta ? st(lang, 'msg.COMING', { customer, time: r.eta }) : st(lang, 'msg.COMING_NO_TIME', { customer });
+    default:
+      return null;
+  }
 }
 
 /** WhatsApp with the text and no number (the salesman picks the customer's chat). The text never holds a link. */
@@ -179,129 +158,73 @@ export function shareUrl(text: string): string {
   return `https://wa.me/?text=${encodeURIComponent(text)}`;
 }
 
-/** "TST0001 / B1", "TST0001". */
-export function codeText(code: string, branch: string | null): string {
-  return branch ? `${code} / ${branch}` : code;
+// ---------------------------------------------------------------------------------------
+// The header, the route form and the notices
+// ---------------------------------------------------------------------------------------
+
+/** The heading and tab of a result: "Route R1", "Truck 1234-AB" (the code the salesman typed, as the day names it). */
+export function viewTitle(lang: SalesLang, v: { kind: SalesViewKind; code: string }): string {
+  return st(lang, v.kind === 'TRUCK' ? 'truckTitle' : 'routeTitle', { code: v.code });
 }
 
-/** "T05 · Trip 2 · stop 3 of 9 · part 1 of 2". */
-export function tripText(d: Pick<SalesDelivery, 'truckCode' | 'loadNo' | 'stopNo' | 'stopsOnTrip' | 'part'>): string {
-  return [d.truckCode, `Trip ${d.loadNo}`, d.stopNo > 0 ? `stop ${d.stopNo} of ${d.stopsOnTrip}` : null, d.part].filter(Boolean).join(' · ');
+/** "Works until Tue 20 Oct 06:00 ..." from the link's end, in the company's time. */
+export function untilText(lang: SalesLang, meta: Pick<SalesMeta, 'expiresAt' | 'tz'>): string | null {
+  const p = zonedParts(meta.expiresAt, meta.tz);
+  return p ? st(lang, 'footerUntil', { day: dayText(lang, p.date), time: p.time }) : null;
 }
 
-const casesOf = (n: number) => `${n} ${n === 1 ? 'case' : 'cases'}`;
+/** What is wrong on the route form (said in the page's language). */
+export type FormProblem =
+  | { kind: 'CODE'; code: 'ROUTE_CODE_MISSING' | 'ROUTE_CODE_TOO_LONG' | 'TOO_MANY_CODES' }
+  | { kind: 'NOT_FOUND'; codes: string[] }
+  | { kind: 'OFFLINE' }
+  | { kind: 'SERVER' };
 
-/** "24 cases" (to come), "24 cases delivered", "Delivered 18 of 24 cases", "24 cases - none delivered". */
-export function casesText(d: Pick<SalesDelivery, 'cases' | 'delivered'>): string {
-  const r = d.delivered;
-  if (!r) return casesOf(d.cases);
-  if (r.cases >= r.of) return `${casesOf(r.of)} delivered`;
-  if (r.cases <= 0) return `${casesOf(r.of)} - none delivered`;
-  return `Delivered ${r.cases} of ${casesOf(r.of)}`;
+/** The codes as a list in the page's language ("R9, TRUCK 9999"). */
+const codesText = (codes: readonly string[]) => codes.join(', ');
+
+export function problemText(lang: SalesLang, p: FormProblem, date: string | null): string {
+  switch (p.kind) {
+    case 'CODE':
+      return st(lang, p.code === 'ROUTE_CODE_MISSING' ? 'codeMissing' : p.code === 'TOO_MANY_CODES' ? 'tooManyCodes' : 'codeTooLong');
+    case 'NOT_FOUND':
+      return st(lang, 'notFound', { codes: p.codes.length ? codesText(p.codes) : '?', day: date ? dayText(lang, date) : '' });
+    case 'OFFLINE':
+      return st(lang, 'offline');
+    default:
+      return st(lang, 'serverErrorForm');
+  }
 }
 
-/**
- * The cases line: the server's time line of a partly delivered stop already says "Delivered 12 of 20 cases", so the
- * card does not say it twice (it then shows the ordered cases).
- */
-export function casesLine(d: Pick<SalesDelivery, 'cases' | 'delivered' | 'detailText'>): string {
-  const r = d.delivered;
-  if (r && r.cases > 0 && r.cases < r.of && (d.detailText ?? '').includes(`${r.cases} of ${r.of}`)) return `${casesOf(r.of)} ordered`;
-  return casesText(d);
+/** The notice above the results: codes that found nothing, and codes that found several routes or trucks. */
+export interface LookupNotice {
+  notFound: string[];
+  ambiguous: string[];
 }
 
-/**
- * The card's time line: the server's line (the result, the live expected time with the window, "Due now", ...),
- * else, before the day, the printed window as the Salesman ETA has it, else the planned time.
- */
-export function timeLine(d: Pick<SalesDelivery, 'detailText' | 'window' | 'planned' | 'status'>): string | null {
-  if (d.detailText) return d.detailText;
-  if (DONE_STATUSES.has(d.status)) return null;
-  if (d.window) return `Expected between ${d.window}`;
-  return d.planned ? UI.planned(d.planned) : null;
+export function noticeText(lang: SalesLang, n: LookupNotice, date: string | null): string | null {
+  const parts = [n.notFound.length ? problemText(lang, { kind: 'NOT_FOUND', codes: n.notFound }, date) : null, n.ambiguous.length ? st(lang, 'ambiguous', { codes: codesText(n.ambiguous) }) : null];
+  const text = parts.filter(Boolean).join(' ');
+  return text || null;
 }
 
-/** The printed window as its own line, when the time line does not already name it (and the stop is still to come). */
-export function windowLine(d: Pick<SalesDelivery, 'detailText' | 'window' | 'planned' | 'status'>): string | null {
-  if (!d.window || DONE_STATUSES.has(d.status)) return null;
-  const line = timeLine(d) ?? '';
-  return line.includes(d.window) ? null : `${UI.window(d.window)} (as on the Salesman ETA)`;
+/** The line above the trucks offered for a code. */
+export function choiceText(lang: SalesLang, c: Pick<SalesChoice, 'kind' | 'asked'>): string {
+  return st(lang, c.kind === 'SEVERAL_TRUCKS' ? 'severalTrucks' : 'alsoTruck', { code: c.asked });
 }
 
-/** "Receiving hours 06:00-14:00 · this order: 10:00-11:00". */
-export function hoursLine(d: Pick<SalesDelivery, 'hours' | 'orderTime'>): string | null {
-  const parts = [d.hours ? UI.hours(d.hours) : null, d.orderTime].filter(Boolean);
-  return parts.length ? parts.join(' · ') : null;
+/** "Too many requests. Trying again in 30 s." */
+export function busyText(lang: SalesLang, sec: number | null): string {
+  return sec ? st(lang, 'busy', { n: sec }) : st(lang, 'busySoon');
+}
+
+/** "Could not refresh - showing the data of 10:30 ..." */
+export function staleText(lang: SalesLang, updated: string): string {
+  return st(lang, 'stale', { time: updated });
 }
 
 // ---------------------------------------------------------------------------------------
-// The count chips at the top, and the list each one filters to
-// ---------------------------------------------------------------------------------------
-
-export type SummaryKey = 'delivered' | 'onTheWay' | 'delayed' | 'notDelivered' | 'cancelled' | 'planned' | 'noResult' | 'didNotGo' | 'moved' | 'notOnTruck';
-
-interface SummaryDef {
-  key: SummaryKey;
-  label: string;
-  tone: string;
-  /** Shown even at 0 (the five the owner asked for). */
-  always: boolean;
-  delivery?: (d: SalesDelivery) => boolean;
-  off?: (o: SalesOffTruck) => boolean;
-}
-
-const SUMMARY: readonly SummaryDef[] = [
-  { key: 'delivered', label: 'Delivered', tone: 'bg-emerald-50 text-emerald-900 ring-emerald-200', always: true, delivery: (d) => d.status === 'DELIVERED' || d.status === 'PARTLY_DELIVERED' },
-  { key: 'onTheWay', label: 'On the way', tone: 'bg-sky-50 text-sky-900 ring-sky-200', always: true, delivery: (d) => ['AT_CUSTOMER', 'NEXT', 'ON_THE_WAY', 'PASSED'].includes(d.status) },
-  { key: 'delayed', label: 'Delayed', tone: 'bg-orange-50 text-orange-900 ring-orange-200', always: true, delivery: (d) => !DONE_STATUSES.has(d.status) && d.eta?.timing === 'LATE' },
-  { key: 'notDelivered', label: 'Not delivered', tone: 'bg-red-50 text-red-900 ring-red-200', always: true, delivery: (d) => d.status === 'NOT_DELIVERED' },
-  { key: 'cancelled', label: 'Cancelled', tone: 'bg-red-50 text-red-900 ring-red-200', always: true, off: (o) => o.kind === 'CANCELLED' },
-  { key: 'planned', label: 'Planned', tone: 'bg-slate-50 text-slate-800 ring-slate-200', always: false, delivery: (d) => d.status === 'PLANNED' || d.status === 'LOADING' },
-  // The truck was there (or the trip is over) and the driver's result is not in: neither done nor on the way.
-  { key: 'noResult', label: 'No result yet', tone: 'bg-slate-50 text-slate-800 ring-slate-200', always: false, delivery: (d) => d.status === 'NO_RESULT' || d.status === 'VISITED' },
-  { key: 'didNotGo', label: 'Truck did not go', tone: 'bg-red-50 text-red-900 ring-red-200', always: false, delivery: (d) => d.status === 'TRUCK_DID_NOT_GO' },
-  { key: 'moved', label: 'Moved', tone: 'bg-purple-50 text-purple-900 ring-purple-200', always: false, off: (o) => o.kind === 'MOVED' },
-  { key: 'notOnTruck', label: 'Not on a truck', tone: 'bg-amber-50 text-amber-900 ring-amber-200', always: false, off: (o) => o.kind !== 'CANCELLED' && o.kind !== 'MOVED' },
-];
-
-export interface SummaryChip {
-  key: SummaryKey;
-  label: string;
-  n: number;
-  tone: string;
-}
-
-/** The chips of a route: the five always, the others when they count something. Counted from the lists the chips filter. */
-export function summaryChips(view: Pick<SalesRouteView, 'deliveries' | 'offTruck'>): SummaryChip[] {
-  return SUMMARY.map((s) => ({
-    key: s.key,
-    label: s.label,
-    tone: s.tone,
-    always: s.always,
-    n: s.delivery ? view.deliveries.filter(s.delivery).length : view.offTruck.filter(s.off!).length,
-  }))
-    .filter((c) => c.always || c.n > 0)
-    .map(({ key, label, n, tone }) => ({ key, label, n, tone }));
-}
-
-/**
- * The line in place of the delivery list when the route has none on a truck: one calm line when every order of
- * the route is only "not planned yet" (its depot's plan is not made: the evening before, for tomorrow's link).
- */
-export function noDeliveriesText(view: Pick<SalesRouteView, 'deliveries' | 'offTruck'>): string {
-  if (!view.deliveries.length && view.offTruck.length && view.offTruck.every((o) => o.kind === 'NOT_PLANNED_YET')) return UI.notPlannedYet;
-  return UI.noDeliveries;
-}
-
-/** The deliveries and the not-on-a-truck entries a chip shows (all without a filter). */
-export function filterView(view: Pick<SalesRouteView, 'deliveries' | 'offTruck'>, key: SummaryKey | null): { deliveries: SalesDelivery[]; offTruck: SalesOffTruck[] } {
-  const def = key ? SUMMARY.find((s) => s.key === key) : null;
-  if (!def) return { deliveries: view.deliveries, offTruck: view.offTruck };
-  return { deliveries: def.delivery ? view.deliveries.filter(def.delivery) : [], offTruck: def.off ? view.offTruck.filter(def.off) : [] };
-}
-
-// ---------------------------------------------------------------------------------------
-// Several routes, the poll, the map
+// Several routes and the poll
 // ---------------------------------------------------------------------------------------
 
 /**
@@ -333,64 +256,7 @@ export function followQuery(lookup: Pick<SalesLookup, 'results' | 'asked' | 'not
 /** A key unique on a page that shows several results (the answer's keys are unique per result only): the result's query and the key. */
 export const rowKey = (query: string, key: string) => `${query}:${key}`;
 
-export interface MapTruck {
-  key: string;
-  label: string;
-  lat: number;
-  lng: number;
-  stale: boolean;
-  moving: boolean;
-  text: string;
-}
-
-export interface MapPin {
-  key: string;
-  no: number;
-  lat: number;
-  lng: number;
-  color: string;
-  text: string;
-}
-
-const isPoint = (lat: number, lng: number) => Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
-
-/** What the map draws for a route or truck: the trucks the server gives a position for, and the deliveries still to come (numbered, no names). */
-export function mapModel(view: Pick<SalesRouteView, 'query' | 'trucks' | 'deliveries'>): { trucks: MapTruck[]; pins: MapPin[]; fitKey: string } {
-  const trucks: MapTruck[] = view.trucks
-    .filter((t) => t.position && isPoint(t.position.lat, t.position.lng))
-    .map((t) => ({ key: rowKey(view.query, t.key), label: t.truckCode, lat: t.position!.lat, lng: t.position!.lng, stale: t.position!.stale, moving: t.position!.moving, text: `${t.truckCode} · ${t.position!.updatedText}` }));
-  const pins: MapPin[] = view.deliveries
-    .filter((d) => isPending(d) && d.pin && isPoint(d.pin.lat, d.pin.lng))
-    .map((d) => ({ key: rowKey(view.query, d.key), no: d.no, lat: d.pin!.lat, lng: d.pin!.lng, color: PIN_COLOR[d.status], text: [`No. ${d.no}`, d.statusText, d.eta?.expected ? `about ${d.eta.expected}` : d.window].filter(Boolean).join(' · ') }));
-  // The view is fitted once per result and set of pins: a refresh that only moves a truck never moves the map.
-  const fitKey = `${view.query}|${pins.map((p) => `${p.no}@${p.lat},${p.lng}`).join(';')}|${trucks.length > 0}`;
-  return { trucks, pins, fitKey };
-}
-
-/** The map is worth showing: a truck position or a delivery still to come with a pin. */
-export function hasMapContent(view: Pick<SalesRouteView, 'query' | 'trucks' | 'deliveries'>): boolean {
-  const m = mapModel(view);
-  return m.trucks.length > 0 || m.pins.length > 0;
-}
-
-/** An "Open in Maps" link for a point (the map fallback without WebGL). */
-export function mapsHref(lat: number, lng: number): string {
-  return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
-}
-
-/**
- * The phone can draw a MapLibre map (WebGL). Some older phones and locked-down in-app browsers cannot: the page
- * then shows the positions as text instead of a broken map. The test context is released at once.
- */
-export function webglAvailable(doc: { createElement(tag: 'canvas'): HTMLCanvasElement } | null = typeof document !== 'undefined' ? document : null): boolean {
-  if (!doc) return false;
-  try {
-    const canvas = doc.createElement('canvas');
-    const gl = (canvas.getContext('webgl2') ?? canvas.getContext('webgl') ?? canvas.getContext('experimental-webgl' as 'webgl')) as WebGLRenderingContext | null;
-    if (!gl) return false;
-    gl.getExtension?.('WEBGL_lose_context')?.loseContext();
-    return true;
-  } catch {
-    return false;
-  }
+/** The tab of a result: its title and its customers. */
+export function tabText(lang: SalesLang, v: Pick<SalesRouteView, 'kind' | 'code' | 'rows'>): string {
+  return `${viewTitle(lang, v)} · ${v.rows.length}`;
 }

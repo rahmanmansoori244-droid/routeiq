@@ -1,72 +1,68 @@
 /**
- * The salesman link's page (owner request 19 Oct 2026): lib/sales-page/api.ts and format.ts (pure), and the cards
- * of app/s/[token] rendered as element trees (no DOM). Invented data only (sales-page-fixture.ts).
+ * The salesman link's page (owner request 19 Oct 2026; made simple on the owner's feedback of 20 Oct 2026):
+ * lib/sales-page/api.ts and format.ts (pure), and the cards of app/s/[token] rendered as element trees (no DOM).
+ * Invented data only (sales-page-fixture.ts).
  *
  *  - The token: read from /s/<token> only, sent only in `Authorization: SalesLink`, never in the API's URL; the
  *    request is no-store, same-origin, no-referrer; a network failure or a timeout is "no answer".
- *  - The route from the link's fragment (#R1, critique 20), the browser's saved route and random id, every one
- *    surviving a browser that blocks storage.
+ *  - The route from the link's fragment (#R1, critique 20), the browser's saved route, language and random id, every
+ *    one surviving a browser that blocks storage.
  *  - Every answer of GET /api/s/view is read as the page needs it: ok, link states full-page (with the link's
  *    date), refused codes on the form, 429 with Retry-After, anything else an error.
- *  - Every status and kind has its colours; the timing chip against the printed window (critique 5); the count
- *    chips agree with the lists they filter; only the routes FOUND are followed (no unknown code re-asked), never
- *    more than 5 codes (the server's limit): with more results, the codes typed that found them.
- *  - The map: only deliveries still to come and the trucks the server places, no names; fitted once per route
- *    and pins; the WebGL check (critique 20: no-WebGL fallback).
- *  - The delivery card: the reason as the driver reported it, "Send to customer" as wa.me/?text= with no number
- *    and no link in the text.
- *  - A truck looked up (owner decision of 20 Oct 2026): followed as "Truck X", titled "Truck X", keys apart from a
- *    route of the same code, its card ("Next", its trips), each delivery's routes, "Taken off this truck", and the
- *    trucks offered for a code as buttons sending their lookup.
+ *  - The status buttons: the six the owner asked for always, "not confirmed" and "not in the plan" only when there
+ *    are some; each count is what its list shows; every status has readable colours.
+ *  - One line per customer: delivered at, x of y cases, "about 16:30 · in about 1 h 20 min" ("any minute" when
+ *    close), being delivered now, moved to a day - nothing else (no truck, trip, window, reason, invoice).
+ *  - "Send to customer": the customer, the status and the approximate time in the page's language; no link, no
+ *    number; none for an order not on a truck.
+ *  - Only the routes and trucks FOUND are followed, never more than 5 codes.
+ *  - The cards: a customer, the status buttons, the trucks offered for a code, a link that does not work, the
+ *    language switch.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import tailwindColors from 'tailwindcss/colors';
-
-vi.mock('@/lib/db', () => ({ prisma: {} }));
-
-import { DEVICE_KEY, ROUTE_KEY, deviceId, fetchSalesView, forgetRoute, readSalesAnswer, routeFromHash, saveRoute, savedRoute, salesHeaders, tokenFromPath, viewUrl, type KeyStore } from '@/lib/sales-page/api';
+import { DEVICE_KEY, LANG_KEY, ROUTE_KEY, deviceId, fetchSalesView, forgetRoute, readSalesAnswer, routeFromHash, saveLang, saveRoute, savedLang, savedRoute, salesHeaders, tokenFromPath, viewUrl, type KeyStore } from '@/lib/sales-page/api';
 import {
-  DONE_STATUSES,
-  LINK_STATE_TEXT,
-  OFF_TONE,
-  PIN_COLOR,
-  STATUS_EDGE,
-  STATUS_TONE,
-  TIMING_TONE,
-  UI,
-  casesLine,
-  casesText,
-  codeText,
-  filterView,
+  allNotPlannedYet,
+  busyText,
+  choiceText,
+  customerText,
   followQuery,
-  hasMapContent,
-  hoursLine,
-  mapModel,
-  noDeliveriesText,
+  isFutureDay,
+  noticeText,
+  problemText,
+  rowLine,
+  rowsOf,
+  shareText,
   shareUrl,
   shortDayText,
-  summaryChips,
-  timeLine,
-  timingChip,
-  tripText,
-  webglAvailable,
-  windowLine,
+  staleText,
+  STATUS_BUTTON,
+  STATUS_CHIP,
+  STATUS_EDGE,
+  STATUS_ORDER,
+  statusButtons,
+  tabText,
+  untilText,
+  viewTitle,
 } from '@/lib/sales-page/format';
+import { aboutText, SALES_DICT, st, type SalesKey } from '@/lib/sales-page/i18n';
 import { SALES_STATE_TEXT } from '@/lib/sales-link/service';
 import { MAX_CODES, parseRouteQuery } from '@/lib/sales-link/route-code';
-import { shortDayText as serverShortDay, STATUS_TEXT, OFF_KIND_TEXT } from '@/lib/sales-link/text';
-import type { DeliveryStatus, OffTruckKind } from '@/lib/sales-link/view-types';
-import { DeliveryCard } from '@/app/s/[token]/delivery-card';
+import { shortDayText as serverShortDay } from '@/lib/sales-link/text';
+import type { SalesLinkStateCode, SalesStatus } from '@/lib/sales-link/view-types';
+import { RowCard } from '@/app/s/[token]/row-card';
+import { StatusGrid } from '@/app/s/[token]/status-grid';
 import { LinkState } from '@/app/s/[token]/link-state';
-import { TruckCard } from '@/app/s/[token]/truck-card';
-import { MapFallback } from '@/app/s/[token]/map-card';
 import { ChoiceList } from '@/app/s/[token]/choice-list';
-import { OffTruckList } from '@/app/s/[token]/off-truck-list';
+import { LangSwitch } from '@/app/s/[token]/lang-switch';
 import { elements, textOf } from './hook-host';
-import { TOKEN, answer, delivery, lookup, meta, offTruck, routeView, truck, truckView } from './sales-page-fixture';
+import { TOKEN, answer, lookup, meta, routeView, row, truckView } from './sales-page-fixture';
 
-const ALL_STATUSES = Object.keys(STATUS_TEXT) as DeliveryStatus[];
-const ALL_KINDS = Object.keys(OFF_KIND_TEXT) as OffTruckKind[];
+const ALL: SalesStatus[] = ['DELIVERED', 'PARTLY_DELIVERED', 'NOT_DELIVERED', 'NOT_CONFIRMED', 'ON_THE_WAY', 'DELAYED', 'CANCELLED', 'NOT_IN_PLAN'];
+const ARABIC = /[؀-ۿ]/;
+const ISOLATES = /[⁦-⁩]/g;
+const plain = (s: string | null) => (s ?? '').replace(ISOLATES, '');
 
 function memoryStore(init: Record<string, string> = {}): KeyStore & { data: Record<string, string> } {
   const data = { ...init };
@@ -103,7 +99,7 @@ describe('the token, the fragment and what the browser keeps', () => {
     expect(tokenFromPath(`/s/${TOKEN}/more`)).toBeNull();
   });
 
-  it('reads the route of the link\'s fragment: #R1, encoded spaces and commas, nothing for an empty or a too long one', () => {
+  it("reads the route of the link's fragment: #R1, encoded spaces and commas, nothing for an empty or a too long one", () => {
     expect(routeFromHash('#R1')).toBe('R1');
     expect(routeFromHash('#r%201')).toBe('r 1');
     expect(routeFromHash('#R1,%20R2X')).toBe('R1, R2X');
@@ -116,7 +112,7 @@ describe('the token, the fragment and what the browser keeps', () => {
     expect(routeFromHash(null)).toBeNull();
   });
 
-  it('keeps the route found and the random id under its own keys (never the driver page\'s), and works when storage is blocked', () => {
+  it("keeps the route found, the language and the random id under its own keys (never the driver page's), and works when storage is blocked", () => {
     const s = memoryStore();
     expect(savedRoute(s)).toBeNull();
     saveRoute('R1, R2X', s);
@@ -124,8 +120,10 @@ describe('the token, the fragment and what the browser keeps', () => {
     expect(savedRoute(s)).toBe('R1, R2X');
     forgetRoute(s);
     expect(savedRoute(s)).toBeNull();
-    expect(ROUTE_KEY).toBe('riq.s.route');
-    expect(DEVICE_KEY).toBe('riq.s.device');
+    expect([ROUTE_KEY, DEVICE_KEY, LANG_KEY]).toEqual(['riq.s.route', 'riq.s.device', 'riq.s.lang']);
+    expect(savedLang(s)).toBeNull();
+    saveLang('ur', s);
+    expect(savedLang(s)).toBe('ur');
 
     const id = deviceId(s);
     expect(id).toMatch(/^[0-9a-f]{32}$/);
@@ -135,7 +133,9 @@ describe('the token, the fragment and what the browser keeps', () => {
 
     expect(() => saveRoute('R1', blocked)).not.toThrow();
     expect(() => forgetRoute(blocked)).not.toThrow();
+    expect(() => saveLang('ar', blocked)).not.toThrow();
     expect(savedRoute(blocked)).toBeNull();
+    expect(savedLang(blocked)).toBeNull();
     const a = deviceId(blocked);
     expect(a).toMatch(/^[0-9a-f]{32}$/);
     expect(deviceId(blocked)).toBe(a);
@@ -182,23 +182,22 @@ describe('every answer of GET /api/s/view as the page reads it', () => {
     expect(readSalesAnswer(200, { data: {}, error: null }, null).kind).toBe('error');
   });
 
-  it('the link states are full-page, with the link\'s date when the server gives it', () => {
+  it("the link states are full-page, with the link's date when the server gives it", () => {
     expect(readSalesAnswer(404, fail('LINK_NOT_FOUND'), null)).toEqual({ kind: 'link', status: 404, code: 'LINK_NOT_FOUND', date: null });
     expect(readSalesAnswer(410, fail('LINK_REPLACED', { date: '2026-10-19' }), null)).toEqual({ kind: 'link', status: 410, code: 'LINK_REPLACED', date: '2026-10-19' });
     expect(readSalesAnswer(410, fail('LINK_REVOKED', { date: '2026-10-19' }), null)).toMatchObject({ code: 'LINK_REVOKED' });
     expect(readSalesAnswer(410, fail('LINK_EXPIRED', { date: '2026-10-18' }), null)).toMatchObject({ code: 'LINK_EXPIRED', date: '2026-10-18' });
     expect(readSalesAnswer(503, fail('SALES_LINKS_OFF'), null)).toMatchObject({ kind: 'link', code: 'SALES_LINKS_OFF' });
     expect(readSalesAnswer(403, fail('SIGNED_IN_OTHER_TENANT'), null)).toMatchObject({ kind: 'link', code: 'SIGNED_IN_OTHER_TENANT' });
-    // A proxy's or the platform's own 404 / 410 / 503 page (no code: a restart, a deploy): an error the page rides out
-    // (it keeps polling), never "the link does not work" for good.
+    // A proxy's or the platform's own 404 / 410 / 503 page (no code: a restart, a deploy): an error the page rides out.
     expect(readSalesAnswer(404, '<html>', null)).toEqual({ kind: 'error', status: 404 });
     expect(readSalesAnswer(503, null, null)).toEqual({ kind: 'error', status: 503 });
     expect(readSalesAnswer(410, { data: null, error: { code: 'SOMETHING_ELSE' } }, null)).toEqual({ kind: 'error', status: 410 });
     expect(readSalesAnswer(410, fail('LINK_EXPIRED', { date: 'yesterday' }), null)).toMatchObject({ date: null });
   });
 
-  it('refused codes go to the route form with the server\'s words', () => {
-    expect(readSalesAnswer(400, { data: null, error: { code: 'ROUTE_CODE_MISSING', message: 'Type your route code.' } }, null)).toEqual({ kind: 'badCode', code: 'ROUTE_CODE_MISSING', message: 'Type your route code.' });
+  it('refused codes go to the route form (said by code in the page\'s language)', () => {
+    expect(readSalesAnswer(400, { data: null, error: { code: 'ROUTE_CODE_MISSING', message: 'Type your route or truck code.' } }, null)).toMatchObject({ kind: 'badCode', code: 'ROUTE_CODE_MISSING' });
     expect(readSalesAnswer(400, fail('TOO_MANY_CODES'), null)).toMatchObject({ kind: 'badCode', code: 'TOO_MANY_CODES' });
     expect(readSalesAnswer(400, fail('ROUTE_CODE_TOO_LONG'), null)).toMatchObject({ kind: 'badCode' });
     expect(readSalesAnswer(400, fail('BAD_REQUEST'), null)).toEqual({ kind: 'error', status: 400 });
@@ -212,23 +211,23 @@ describe('every answer of GET /api/s/view as the page reads it', () => {
     expect(readSalesAnswer(502, null, null)).toEqual({ kind: 'error', status: 502 });
   });
 
-  it('the page\'s link texts are the server\'s, and its day is the server\'s', () => {
-    expect(LINK_STATE_TEXT).toEqual(SALES_STATE_TEXT);
+  it("the page's English link texts are the server's; the office dialog's day is the server's", () => {
+    for (const [code, text] of Object.entries(SALES_STATE_TEXT)) expect(st('en', `link.${code}` as SalesKey)).toBe(text);
     for (const d of ['2026-10-19', '2026-10-20', '2026-12-31', '2027-01-01']) expect(shortDayText(d)).toBe(serverShortDay(d));
   });
 });
 
-describe('colours, chips and lines', () => {
-  it('every status and every kind not on a truck has its colours', () => {
-    for (const s of ALL_STATUSES) {
-      expect(STATUS_TONE[s], s).toMatch(/bg-/);
-      expect(STATUS_EDGE[s], s).toMatch(/border-l-/);
-      expect(PIN_COLOR[s], s).toMatch(/^#[0-9a-f]{6}$/);
+describe('the status buttons and their colours', () => {
+  it('every status has a chip, a button and an edge', () => {
+    expect([...STATUS_ORDER].sort()).toEqual([...ALL].sort());
+    for (const s of ALL) {
+      expect(STATUS_CHIP[s], s).toMatch(/bg-.* text-/);
+      expect(STATUS_BUTTON[s], s).toMatch(/bg-.* text-/);
+      expect(STATUS_EDGE[s], s).toMatch(/^border-s-/);
     }
-    for (const k of ALL_KINDS) expect(OFF_TONE[k], k).toMatch(/bg-/);
   });
 
-  it('every chip reads at 4.5:1 or better (WCAG AA for 14 px text, outdoors in the sun): "Partly delivered" above all', () => {
+  it('every chip and button reads at 4.5:1 or better (WCAG AA for 14 px text, outdoors in the sun)', () => {
     const palette = tailwindColors as unknown as Record<string, Record<string, string> | string>;
     const hexOf = (cls: string, prefix: 'bg-' | 'text-'): string => {
       const name = cls.split(/\s+/).find((c) => c.startsWith(prefix))!.slice(prefix.length);
@@ -244,81 +243,148 @@ describe('colours, chips and lines', () => {
       const [a, b] = [lum(hexOf(tone, 'bg-')), lum(hexOf(tone, 'text-'))].sort((x, y) => y - x);
       return (a! + 0.05) / (b! + 0.05);
     };
-    for (const [s, tone] of [...Object.entries(STATUS_TONE), ...Object.entries(OFF_TONE), ...Object.entries(TIMING_TONE)]) expect(contrast(tone), `${s}: ${tone}`).toBeGreaterThanOrEqual(4.5);
+    for (const [s, tone] of [...Object.entries(STATUS_CHIP), ...Object.entries(STATUS_BUTTON)]) expect(contrast(tone), `${s}: ${tone}`).toBeGreaterThanOrEqual(4.5);
   });
 
-  it('the timing chip is against the printed window: late and early with minutes, due now without, nothing without live updates', () => {
-    const eta = (timing: 'ON_TIME' | 'LATE' | 'EARLY' | 'DUE_NOW' | 'NO_UPDATES', lateMin: number | null = null, earlyMin: number | null = null) => ({ expected: '10:45', source: 'GPS' as const, timing, lateMin, earlyMin, text: '' });
-    expect(timingChip(eta('LATE', 20))?.text).toBe('Late ~20 min');
-    expect(timingChip(eta('EARLY', null, 15))?.text).toBe('Early ~15 min');
-    expect(timingChip(eta('ON_TIME'))?.text).toBe('On time');
-    expect(timingChip(eta('DUE_NOW'))?.text).toBe('Due now');
-    expect(timingChip(eta('NO_UPDATES'))).toBeNull();
-    expect(timingChip(null)).toBeNull();
-  });
-
-  it('the card\'s lines: code and branch, trip and stop, cases x of y, the time, the window once, the hours', () => {
-    expect(codeText('TST0001', 'B1')).toBe('TST0001 / B1');
-    expect(codeText('TST0001', null)).toBe('TST0001');
-    expect(tripText(delivery({ no: 3, loadNo: 2, stopNo: 3, stopsOnTrip: 9, part: 'part 1 of 2' }))).toBe('T05 · Trip 2 · stop 3 of 9 · part 1 of 2');
-    expect(casesText(delivery({ no: 1, cases: 24, delivered: { cases: 18, of: 24 } }))).toBe('Delivered 18 of 24 cases');
-    expect(casesText(delivery({ no: 1, cases: 24, delivered: { cases: 24, of: 24 } }))).toBe('24 cases delivered');
-    expect(casesText(delivery({ no: 1, cases: 24, delivered: { cases: 0, of: 24 } }))).toBe('24 cases - none delivered');
-    expect(casesText(delivery({ no: 1, cases: 1 }))).toBe('1 case');
-    // Partly delivered: the time line already says "Delivered 12 of 20 cases", so the cases line does not repeat it.
-    expect(casesLine(delivery({ no: 2, cases: 20, delivered: { cases: 12, of: 20 }, detailText: 'Delivered 12 of 20 cases at 08:40' }))).toBe('20 cases ordered');
-    expect(casesLine(delivery({ no: 2, cases: 20, delivered: { cases: 12, of: 20 }, detailText: 'Partly delivered' }))).toBe('Delivered 12 of 20 cases');
-    expect(casesLine(delivery({ no: 1, cases: 24, delivered: { cases: 24, of: 24 }, detailText: 'Delivered 08:10' }))).toBe('24 cases delivered');
-
-    // Before the day (no live time): the printed window, as on the Salesman ETA page.
-    const planned = delivery({ no: 1 });
-    expect(timeLine(planned)).toBe('Expected between 07:45-09:00');
-    expect(windowLine(planned)).toBeNull();
-    // A live time that already names the window: not twice.
+  it('the six the owner asked for always (0 shown), the other two only when they count something; each count is what its list shows', () => {
     const v = routeView();
-    expect(windowLine(v.deliveries[2]!)).toBeNull();
-    // A live time without it ("Due now"): the window under it.
-    expect(windowLine(delivery({ no: 2, status: 'NEXT', detailText: 'Due now - no update from the truck yet' }))).toBe('Window 07:45-09:00 (as on the Salesman ETA)');
-    // Done: the result's line, no window.
-    expect(timeLine(v.deliveries[0]!)).toBe('Delivered 08:10');
-    expect(windowLine(v.deliveries[0]!)).toBeNull();
-    expect(timeLine(delivery({ no: 1, window: null }))).toBe('Planned 08:05');
-    expect(hoursLine(delivery({ no: 1, orderTime: 'this order: 10:00-11:00' }))).toBe('Receiving hours 06:00-14:00 · this order: 10:00-11:00');
-    expect(hoursLine(delivery({ no: 1, hours: null }))).toBeNull();
+    expect(statusButtons(v.rows).map((b) => `${b.status}:${b.n}`)).toEqual(['DELIVERED:1', 'ON_THE_WAY:2', 'DELAYED:1', 'PARTLY_DELIVERED:1', 'NOT_DELIVERED:0', 'CANCELLED:1']);
+    const more = [...v.rows, row({ key: 'd9', status: 'NOT_CONFIRMED' }), row({ key: 'o2', status: 'NOT_IN_PLAN', off: 'MOVED', movedTo: '2026-10-21' })];
+    const buttons = statusButtons(more);
+    expect(buttons.map((b) => b.status)).toEqual(['DELIVERED', 'ON_THE_WAY', 'DELAYED', 'PARTLY_DELIVERED', 'NOT_DELIVERED', 'CANCELLED', 'NOT_CONFIRMED', 'NOT_IN_PLAN']);
+    for (const b of buttons) expect(rowsOf(more, b.status).length, b.status).toBe(b.n);
+    expect(rowsOf(more, null)).toEqual(more);
+    expect(buttons.reduce((t, b) => t + b.n, 0)).toBe(more.length);
   });
 
-  it('the five chips always, the others when they count something; each count is what its filter shows', () => {
-    const v = routeView('R1', {
-      deliveries: [
-        ...routeView().deliveries,
-        delivery({ no: 5, status: 'NOT_DELIVERED', statusText: 'Not delivered', reason: 'Shop closed (as reported by the driver)' }),
-        delivery({ no: 6, status: 'VISITED', statusText: 'Truck was there' }),
-        delivery({ no: 7, status: 'PARTLY_DELIVERED', statusText: 'Partly delivered', delivered: { cases: 4, of: 70 } }),
-      ],
-      offTruck: [offTruck(), offTruck({ kind: 'MOVED', kindText: 'Moved', why: 'Moved to Tue 20 Oct' }), offTruck({ kind: 'NOT_PLANNED_YET', kindText: 'Not planned yet' })],
-    });
-    const chips = summaryChips(v);
-    expect(chips.map((c) => `${c.key}:${c.n}`)).toEqual(['delivered:2', 'onTheWay:2', 'delayed:1', 'notDelivered:1', 'cancelled:1', 'planned:1', 'noResult:1', 'moved:1', 'notOnTruck:1']);
-    for (const c of chips) {
-      const f = filterView(v, c.key);
-      expect(f.deliveries.length + f.offTruck.length, c.key).toBe(c.n);
+  it('a route only "not planned yet" (its depot plans the evening before) says so calmly', () => {
+    const notYet = row({ key: 'o1', status: 'NOT_IN_PLAN', off: 'NOT_PLANNED_YET' });
+    expect(allNotPlannedYet([notYet, { ...notYet, key: 'o2' }])).toBe(true);
+    expect(allNotPlannedYet([notYet, row({ key: 'o2', status: 'CANCELLED' })])).toBe(false);
+    expect(allNotPlannedYet([])).toBe(false);
+  });
+});
+
+describe('one line per customer, in the page\'s language', () => {
+  const v = routeView();
+  const r = (key: string) => v.rows.find((x) => x.key === key)!;
+
+  it('delivered at, x of y cases, being delivered now, about when and how far; nothing for the rest', () => {
+    expect(rowLine('en', r('d1'))).toBe('at 08:10');
+    expect(rowLine('en', r('d2'))).toBe('18 of 24 cases');
+    expect(rowLine('en', r('d3'))).toBe('Being delivered now');
+    expect(rowLine('en', r('d4'))).toBe('about 11:50 · in about 1 h 20 min');
+    expect(rowLine('en', r('d5'))).toBe('about 12:30 · in about 2 h');
+    expect(rowLine('en', r('o1'))).toBeNull();
+    expect(rowLine('en', row({ key: 'x', status: 'NOT_DELIVERED' }))).toBeNull();
+    expect(rowLine('en', row({ key: 'x', status: 'NOT_CONFIRMED' }))).toBeNull();
+    // The evening before: the planned time without minutes; no time to give: nothing.
+    expect(rowLine('en', row({ key: 'x', eta: '08:05', inMin: null }))).toBe('about 08:05');
+    expect(rowLine('en', row({ key: 'x', status: 'DELAYED' }))).toBeNull();
+    expect(rowLine('en', row({ key: 'x', status: 'NOT_IN_PLAN', off: 'MOVED', movedTo: '2026-10-21' }))).toBe('Moved to Wed 21 Oct');
+    expect(rowLine('en', row({ key: 'x', status: 'NOT_IN_PLAN', off: 'NOT_PLANNED_YET' }))).toBe('Not planned yet');
+    expect(rowLine('en', row({ key: 'x', status: 'NOT_IN_PLAN', off: 'NOT_IN_PLAN' }))).toBeNull();
+    expect(customerText(r('d4'))).toBe('Customer D (B2)');
+  });
+
+  it('how far: "any minute" under 10 min, to 5 min under an hour, then to 10 min', () => {
+    expect([0, 9, 10, 23, 58, 80, 124, 125, 600].map((m) => aboutText('en', m))).toEqual([
+      'any minute',
+      'any minute',
+      'in about 10 min',
+      'in about 25 min',
+      'in about 1 h',
+      'in about 1 h 20 min',
+      'in about 2 h',
+      'in about 2 h 10 min',
+      'in about 10 h',
+    ]);
+    expect(rowLine('en', row({ key: 'x', eta: '10:35', inMin: 4 }))).toBe('about 10:35 · any minute');
+  });
+
+  it('Arabic and Urdu: their own words, the time kept left to right inside right-to-left text (Western digits)', () => {
+    for (const lang of ['ar', 'ur'] as const) {
+      const line = rowLine(lang, r('d4'))!;
+      expect(line, lang).toMatch(ARABIC);
+      expect(line, lang).toContain('⁨11:50⁩');
+      expect(plain(line), lang).not.toMatch(/[٠-٩۰-۹]/);
+      expect(plain(line), lang).toMatch(/1.*20/);
     }
-    expect(filterView(v, null)).toEqual({ deliveries: v.deliveries, offTruck: v.offTruck });
-    const quiet = summaryChips(routeView('R1', { deliveries: [delivery({ no: 1 })], offTruck: [] }));
-    expect(quiet.map((c) => c.key)).toEqual(['delivered', 'onTheWay', 'delayed', 'notDelivered', 'cancelled', 'planned']);
-    // A delivery done is never "delayed", whatever its last time said.
-    const done = delivery({ no: 1, status: 'DELIVERED', eta: { expected: '10:00', source: 'TRIP', timing: 'LATE', lateMin: 30, earlyMin: null, text: '' } });
-    expect(summaryChips(routeView('R1', { deliveries: [done], offTruck: [] })).find((c) => c.key === 'delayed')?.n).toBe(0);
+    expect(plain(rowLine('ar', r('d4')))).toBe('حوالي الساعة 11:50 · بعد حوالي 1 س 20 د');
+    expect(plain(rowLine('ur', r('d4')))).toBe('تقریباً 11:50 بجے · تقریباً 1 گھنٹہ 20 منٹ میں');
+    expect(plain(rowLine('ur', r('d5')))).toBe('تقریباً 12:30 بجے · تقریباً 2 گھنٹے میں');
+    expect(plain(rowLine('ar', r('d2')))).toBe('الكراتين: 18 من 24');
+  });
+});
+
+describe('"Send to customer": the customer, the status and the approximate time', () => {
+  const v = routeView();
+  const r = (key: string) => v.rows.find((x) => x.key === key)!;
+  const today = { future: false, date: '2026-10-19' };
+
+  it('one short text per status; never a link, an invoice, a truck or a reason; none for an order not on a truck', () => {
+    expect(shareText('en', r('d1'), today)).toBe('Customer A: your order was delivered at 08:10.');
+    expect(shareText('en', r('d2'), today)).toBe('Customer B: part of your order was delivered (18 of 24 cases). We will contact you about the rest.');
+    expect(shareText('en', r('d3'), today)).toBe('Customer C: your order is being delivered now.');
+    // Delayed or not, the customer is told the approximate time only (the owner: no reason).
+    expect(shareText('en', r('d4'), today)).toBe('Customer D (B2): your order is on the way, expected at about 11:50.');
+    expect(shareText('en', r('d5'), { future: true, date: '2026-10-19' })).toBe('Customer E: your order is planned for Mon 19 Oct, at about 12:30.');
+    expect(shareText('en', row({ key: 'x', customer: 'Customer X', status: 'NOT_DELIVERED' }), today)).toBe('Customer X: your order could not be delivered. We will contact you.');
+    expect(shareText('en', row({ key: 'x', customer: 'Customer X', status: 'NOT_CONFIRMED' }), today)).toBe('Customer X: we are checking your delivery and will contact you.');
+    expect(shareText('en', row({ key: 'x', customer: 'Customer X', status: 'DELAYED' }), today)).toBe('Customer X: your order is on the way.');
+    expect(shareText('en', r('o1'), today)).toBeNull();
+    expect(shareText('en', row({ key: 'o2', status: 'NOT_IN_PLAN', off: 'MOVED', movedTo: '2026-10-21' }), today)).toBeNull();
+    for (const x of v.rows) for (const lang of ['en', 'ar', 'ur'] as const) expect(shareText(lang, x, today) ?? '').not.toMatch(/https?:|wa\.me|\/s\/|invoice|INV-|truck|late|delay/i);
   });
 
-  it('never "today" over the orders not on a truck (the link may be tomorrow\'s); a route only "not planned yet" says so calmly', () => {
-    expect(UI.offTruck).toBe('Not on a truck');
-    const notYet = offTruck({ kind: 'NOT_PLANNED_YET', kindText: 'Not planned yet', why: 'Not planned yet - the plan is made the evening before' });
-    expect(noDeliveriesText(routeView('R1', { deliveries: [], offTruck: [notYet, notYet] }))).toBe('Not planned yet - the plan is usually made the evening before. Check again later.');
-    expect(noDeliveriesText(routeView('R1', { deliveries: [], offTruck: [notYet, offTruck()] }))).toBe('No deliveries on a truck for this route.');
-    expect(noDeliveriesText(routeView('R1', { deliveries: [], offTruck: [] }))).toBe('No deliveries on a truck for this route.');
+  it('in Arabic and Urdu, with the customer\'s name and the time isolated', () => {
+    const ar = shareText('ar', r('d4'), today)!;
+    expect(ar).toMatch(ARABIC);
+    expect(ar).toContain('⁨Customer D (B2)⁩');
+    expect(ar).toContain('⁨11:50⁩');
+    expect(plain(shareText('ur', r('d1'), today))).toBe('Customer A: آپ کا آرڈر 08:10 بجے ڈیلیور ہو گیا۔');
   });
 
+  it('opens WhatsApp with the text and no number', () => {
+    const text = shareText('en', r('d4'), today)!;
+    const url = shareUrl(text);
+    expect(url.startsWith('https://wa.me/?text=')).toBe(true);
+    expect(decodeURIComponent(url.slice('https://wa.me/?text='.length))).toBe(text);
+  });
+});
+
+describe('the header, the form and the notices', () => {
+  it('titles, the date ahead of the company\'s today, the link\'s end, busy and stale lines', () => {
+    expect(viewTitle('en', routeView('C1'))).toBe('Route C1');
+    expect(viewTitle('en', truckView('1234-AB'))).toBe('Truck 1234-AB');
+    expect(plain(viewTitle('ar', truckView('1234-AB')))).toBe('الشاحنة 1234-AB');
+    expect(tabText('en', routeView('R2X'))).toBe('Route R2X · 6');
+    expect(isFutureDay(meta())).toBe(false);
+    expect(isFutureDay(meta({ date: '2026-10-20' }))).toBe(true);
+    // 21:30 company time the evening before is still the day before.
+    expect(isFutureDay(meta({ date: '2026-10-20', serverNow: '2026-10-19T17:30:00.000Z' }))).toBe(true);
+    expect(untilText('en', meta())).toBe('Works until Tue 20 Oct 06:00. For the sales team only - please do not forward.');
+    expect(busyText('en', 30)).toBe('Too many requests. Trying again in 30 s.');
+    expect(busyText('en', null)).toBe('Too many requests. Trying again in a minute.');
+    expect(staleText('en', '10:30')).toBe('Could not refresh - showing the data of 10:30. Trying again every minute.');
+  });
+
+  it('every problem of the route form and the notice above the results', () => {
+    expect(problemText('en', { kind: 'CODE', code: 'ROUTE_CODE_MISSING' }, null)).toBe('Type your route code.');
+    expect(problemText('en', { kind: 'CODE', code: 'TOO_MANY_CODES' }, null)).toBe('At most 5 codes at once.');
+    expect(problemText('en', { kind: 'CODE', code: 'ROUTE_CODE_TOO_LONG' }, null)).toBe('That code is too long.');
+    expect(problemText('en', { kind: 'NOT_FOUND', codes: ['R9', 'TRUCK 9999'] }, '2026-10-19')).toBe('No deliveries for R9, TRUCK 9999 on Mon 19 Oct. Check the code on your Salesman ETA page.');
+    expect(problemText('en', { kind: 'OFFLINE' }, null)).toBe('No connection. Check your signal and try again.');
+    expect(problemText('en', { kind: 'SERVER' }, null)).toBe('The server could not answer just now. Try again in a minute.');
+    expect(noticeText('en', { notFound: ['R9'], ambiguous: ['R-10'] }, '2026-10-19')).toBe('No deliveries for R9 on Mon 19 Oct. Check the code on your Salesman ETA page. R-10: more than one route or truck has this code - each is shown.');
+    expect(noticeText('en', { notFound: [], ambiguous: [] }, null)).toBeNull();
+    expect(choiceText('en', { kind: 'SEVERAL_TRUCKS', asked: '1234' })).toBe('1234: more than one truck has this code. Pick one:');
+    expect(choiceText('en', { kind: 'ALSO_TRUCK', asked: 'C1' })).toBe('C1 is also a truck code. Show the truck instead:');
+    expect(plain(problemText('ur', { kind: 'NOT_FOUND', codes: ['R9'] }, '2026-10-19'))).toMatch(/^پیر، 19 اکتوبر کو R9 کی/);
+  });
+});
+
+describe('the codes followed', () => {
   it('only the routes found are followed: an unknown code is never asked again', () => {
     expect(followQuery(lookup([routeView('R1'), routeView('R2X')], { asked: ['R1', 'R2X', 'R9'], notFound: ['R9'] }))).toBe('R1, R2X');
     expect(followQuery(lookup([], { asked: ['R9'], notFound: ['R9'] }))).toBeNull();
@@ -332,7 +398,7 @@ describe('colours, chips and lines', () => {
     const six = lookup(['R1', 'R2', 'R3', 'R4', 'R 10', 'R10'].map((r) => routeView(r)), { asked: ['R1', 'R2', 'R3', 'R4', 'R-10'], ambiguous: ['R-10'] });
     expect(followQuery(six)).toBe('R1, R2, R3, R4, R-10');
     // A code that matched nothing, or only offered trucks (none shown), is not followed.
-    const several = { asked: 'AB1', kind: 'SEVERAL_TRUCKS' as const, text: 'AB1 matches 2 trucks today. Pick one:', options: [{ code: 'AB-1', query: 'Truck AB-1' }, { code: 'AB.1', query: 'Truck AB.1' }] };
+    const several = { asked: 'AB1', kind: 'SEVERAL_TRUCKS' as const, options: [{ code: 'AB-1', query: 'Truck AB-1' }, { code: 'AB.1', query: 'Truck AB.1' }] };
     const mixed = lookup(['R 10', 'R10', 'R 20', 'R20', 'R 30', 'R30'].map((r) => routeView(r)), { asked: ['R-10', 'R-20', 'R9', 'R-30', 'AB1'], notFound: ['R9'], ambiguous: ['R-10', 'R-20', 'R-30'], choices: [several] });
     expect(followQuery(mixed)).toBe('R-10, R-20, R-30');
     // The same code twice (two trucks whose codes differ in letter case: "Truck ab-1" is "Truck AB-1") is asked once.
@@ -344,167 +410,86 @@ describe('colours, chips and lines', () => {
       expect(q.ok && q.codes.length).toBeLessThanOrEqual(MAX_CODES);
     }
   });
-
-  it('a route or a truck: its title, and keys unique when a route and a truck share a code', () => {
-    expect(UI.viewTitle(routeView('C1'))).toBe('Route C1');
-    expect(UI.viewTitle(truckView('1234-AB'))).toBe('Truck 1234-AB');
-    expect(UI.routeLabel).toBe('Route or truck code');
-    const r = mapModel(routeView('R1'));
-    const t = mapModel(truckView('R1'));
-    expect(r.trucks[0]!.key).toBe('R1:t1');
-    expect(t.trucks[0]!.key).toBe('Truck R1:t1');
-    expect(t.fitKey).not.toBe(r.fitKey);
-  });
-
-  it('"Send to customer" opens WhatsApp with the text and no number', () => {
-    const text = 'Customer A: your delivery (invoice INV-1) is on the way, expected about 10:45 today.';
-    const url = shareUrl(text);
-    expect(url.startsWith('https://wa.me/?text=')).toBe(true);
-    expect(decodeURIComponent(url.slice('https://wa.me/?text='.length))).toBe(text);
-  });
-});
-
-describe('the map', () => {
-  it('draws the deliveries still to come with a pin, numbered, no names, and the trucks the server places', () => {
-    const v = routeView();
-    const m = mapModel(v);
-    expect(m.pins.map((p) => p.no)).toEqual([2, 3]);
-    for (const p of m.pins) expect(p.text).not.toMatch(/Customer/);
-    expect(m.pins[1]!.text).toBe('No. 3 · On the way · about 10:50');
-    expect(m.trucks).toEqual([{ key: 'R1:t1', label: 'T05', lat: 20.101, lng: 55.102, stale: false, moving: true, text: 'T05 · Updated 10:29' }]);
-    for (const s of DONE_STATUSES) expect(mapModel(routeView('R1', { deliveries: [delivery({ no: 1, status: s })] })).pins).toEqual([]);
-    expect(mapModel(routeView('R1', { deliveries: [delivery({ no: 1, pin: { lat: 95, lng: 55 } })] })).pins).toEqual([]);
-  });
-
-  it('a refresh that only moves a truck keeps the fit; another route or other pins fit again', () => {
-    const a = mapModel(routeView());
-    const moved = mapModel(routeView('R1', { trucks: [truck({ position: { ...truck().position!, lat: 20.2, lng: 55.3 } })] }));
-    expect(moved.fitKey).toBe(a.fitKey);
-    expect(mapModel(routeView('R2X')).fitKey).not.toBe(a.fitKey);
-    const fewer = routeView();
-    fewer.deliveries = fewer.deliveries.filter((d) => d.no !== 3);
-    expect(mapModel(fewer).fitKey).not.toBe(a.fitKey);
-  });
-
-  it('no map card without a truck position and without a delivery to come on the map', () => {
-    expect(hasMapContent(routeView())).toBe(true);
-    expect(hasMapContent(routeView('R1', { trucks: [truck({ position: null })], deliveries: [delivery({ no: 1, status: 'DELIVERED' })] }))).toBe(false);
-  });
-
-  it('checks WebGL before loading MapLibre, and lets the test context go', () => {
-    const lose = vi.fn();
-    const ctx = { getExtension: (n: string) => (n === 'WEBGL_lose_context' ? { loseContext: lose } : null) };
-    expect(webglAvailable({ createElement: () => ({ getContext: (k: string) => (k === 'webgl' ? ctx : null) }) as unknown as HTMLCanvasElement })).toBe(true);
-    expect(lose).toHaveBeenCalledTimes(1);
-    expect(webglAvailable({ createElement: () => ({ getContext: () => null }) as unknown as HTMLCanvasElement })).toBe(false);
-    expect(
-      webglAvailable({
-        createElement: () => {
-          throw new Error('blocked');
-        },
-      }),
-    ).toBe(false);
-    expect(webglAvailable(null)).toBe(false);
-  });
-
-  it('without WebGL: the truck positions as text with an Open in Maps link', () => {
-    const tree = MapFallback({ trucks: mapModel(routeView()).trucks, pins: 2 });
-    expect(textOf(tree)).toMatch(/The map cannot be shown on this phone/);
-    expect(textOf(tree)).toMatch(/T05 · Updated 10:29/);
-    expect(textOf(tree)).toMatch(/2 deliveries still to come/);
-    const link = elements(tree).find((e) => e.type === 'a');
-    expect(link?.props.href).toBe('https://www.google.com/maps/search/?api=1&query=20.101,55.102');
-    expect(link?.props.rel).toMatch(/noreferrer/);
-  });
 });
 
 describe('the cards', () => {
-  it('a delivery not delivered: the reason as the driver reported it, the cases, the trip and stop, and Send to customer', () => {
-    const d = delivery({
-      no: 5,
-      status: 'NOT_DELIVERED',
-      statusText: 'Not delivered',
-      detailText: 'Not delivered (10:31)',
-      at: '10:31',
-      delivered: { cases: 0, of: 50 },
-      reason: 'Shop closed (as reported by the driver)',
-      loadNo: 2,
-      stopNo: 3,
-      stopsOnTrip: 9,
-      shareText: 'Customer E: your delivery (invoice INV-5) could not be delivered on Mon 19 Oct. We will contact you.',
-    });
-    const tree = DeliveryCard({ d, rowKey: 'R1:d5' });
-    const text = textOf(tree);
-    expect(text).toMatch(/Not delivered \(10:31\)/);
-    expect(text).toMatch(/Reason: Shop closed \(as reported by the driver\)/);
-    expect(text).toMatch(/50 cases - none delivered · T05 · Trip 2 · stop 3 of 9/);
-    expect(text).toMatch(/TST0005 · Invoice INV-5/);
-    const share = elements(tree).find((e) => e.props?.['data-testid'] === 'delivery-share');
-    expect(share?.props.href).toBe(`https://wa.me/?text=${encodeURIComponent(d.shareText)}`);
+  const v = routeView();
+  const r = (key: string) => v.rows.find((x) => x.key === key)!;
+
+  it('a customer: the name and branch, one status, one line, and Send to customer', () => {
+    const tree = RowCard({ lang: 'en', r: r('d4'), rowKey: 'R1:d4', future: false, date: '2026-10-19' });
+    expect(textOf(tree)).toBe('Customer D (B2)Delayedabout 11:50 · in about 1 h 20 min Send to customer');
+    expect(tree.props['data-status']).toBe('DELAYED');
+    const share = elements(tree).find((e) => e.props?.['data-testid'] === 'row-share');
+    expect(share?.props.href).toBe(shareUrl('Customer D (B2): your order is on the way, expected at about 11:50.'));
     expect(share?.props.target).toBe('_blank');
     expect(share?.props.rel).toMatch(/noreferrer/);
-    expect(textOf(share)).toMatch(/Send to customer/);
-    expect(tree.props['data-status']).toBe('NOT_DELIVERED');
+    // A cancelled order: its status only, nothing to send.
+    const cancelled = RowCard({ lang: 'en', r: r('o1'), rowKey: 'R1:o1', future: false, date: '2026-10-19' });
+    expect(textOf(cancelled)).toBe('Customer ZCancelled');
+    expect(elements(cancelled).some((e) => e.props?.['data-testid'] === 'row-share')).toBe(false);
+    // In Urdu.
+    expect(plain(textOf(RowCard({ lang: 'ur', r: r('d1'), rowKey: 'R1:d1', future: false, date: '2026-10-19' })))).toContain('ڈیلیور ہو گیا08:10 بجے');
   });
 
-  it('a delivery on the way: the live time against the window, the late chip, stops before', () => {
-    const tree = DeliveryCard({ d: routeView().deliveries[2]!, rowKey: 'R1:d3' });
-    const text = textOf(tree);
-    expect(text).toMatch(/Late ~20 min/);
-    expect(text).toMatch(/Expected about 10:50 \(GPS\) - about 20 min after the window 09:15-10:30 · 1 stop before/);
-    expect(text).not.toMatch(/Reason/);
-  });
-
-  it('a truck card: its code, the trip, how late, the route\'s next customer, the GPS line', () => {
-    const text = textOf(TruckCard({ t: truck({ lateText: 'Running about 20 min behind plan' }), rowKey: 'R1:t1' }));
-    expect(text).toMatch(/T05/);
-    expect(text).toMatch(/On the road \(trip 1\) since 07:10/);
-    expect(text).toMatch(/Running about 20 min behind plan/);
-    expect(text).toMatch(/Your next: Customer B · about 09:10 · 1 stop before it/);
-    expect(text).toMatch(/GPS: updated 10:29 · on the map below/);
-  });
-
-  it('a truck looked up: the card says "Next" and its trips (not "your customers"); each delivery says its routes', () => {
-    const v = truckView('1234-AB');
-    const card = textOf(TruckCard({ t: v.trucks[0]!, rowKey: 'Truck 1234-AB:t1', kind: 'TRUCK' }));
-    expect(card).toMatch(/1234-AB/);
-    expect(card).toMatch(/2 trips/);
-    expect(card).not.toMatch(/your customers|Your next/);
-    expect(card).toMatch(/Next: Customer B · about 09:10/);
-    const two = textOf(DeliveryCard({ d: v.deliveries[2]!, rowKey: 'Truck 1234-AB:d3', kind: 'TRUCK' }));
-    expect(two).toMatch(/Routes R1, R2X/);
-    expect(textOf(DeliveryCard({ d: v.deliveries[0]!, rowKey: 'Truck 1234-AB:d1', kind: 'TRUCK' }))).toMatch(/Route R1/);
-    // A route's card never repeats its own route.
-    expect(textOf(DeliveryCard({ d: v.deliveries[2]!, rowKey: 'R1:d3' }))).not.toMatch(/Routes? R/);
-    expect(textOf(OffTruckList({ items: v.offTruck, route: v.query, heading: UI.offThisTruck }))).toMatch(/^Taken off this truck/);
+  it('the status buttons: "All" with every customer, then each status with its count; a tap picks it, a second tap shows all; 0 cannot be picked', () => {
+    const picked: (SalesStatus | null)[] = [];
+    const buttons = statusButtons(v.rows);
+    const tree = StatusGrid({ lang: 'en', buttons, total: v.rows.length, active: null, onPick: (s) => picked.push(s) });
+    const all = elements(tree).find((e) => e.props?.['data-testid'] === 'status-all')!;
+    expect(textOf(all)).toBe('All6');
+    expect(all.props['aria-pressed']).toBe(true);
+    const els = elements(tree).filter((e) => /^status-[A-Z_]+$/.test(e.props?.['data-testid'] ?? ''));
+    expect(els.map((e) => textOf(e))).toEqual(['1Delivered', '2On the way', '1Delayed', '1Partly delivered', '0Not delivered', '1Cancelled']);
+    expect(els.find((e) => e.props['data-testid'] === 'status-NOT_DELIVERED')!.props.disabled).toBe(true);
+    els.find((e) => e.props['data-testid'] === 'status-DELAYED')!.props.onClick();
+    const on = StatusGrid({ lang: 'en', buttons, total: v.rows.length, active: 'DELAYED', onPick: (s) => picked.push(s) });
+    const delayed = elements(on).find((e) => e.props?.['data-testid'] === 'status-DELAYED')!;
+    expect(delayed.props['aria-pressed']).toBe(true);
+    delayed.props.onClick();
+    expect(picked).toEqual(['DELAYED', null]);
+    expect(textOf(StatusGrid({ lang: 'ar', buttons, total: 6, active: null, onPick: () => undefined }))).toMatch(/الكل6.*تم التسليم.*في الطريق.*متأخر.*تسليم جزئي.*لم يتم التسليم.*ملغى/);
   });
 
   it('the trucks offered for a code: one button each, sending its whole lookup', () => {
     const picked: string[] = [];
     const choices = [
-      { asked: '1234', kind: 'SEVERAL_TRUCKS' as const, text: '1234 matches 2 trucks today. Pick one:', options: [{ code: '1234-AB', query: 'Truck 1234-AB' }, { code: '1234-CD', query: 'Truck 1234-CD' }] },
-      { asked: 'C1', kind: 'ALSO_TRUCK' as const, text: 'C1 is also a truck code. Show the truck instead:', options: [{ code: 'C-1', query: 'R2X, Truck C-1' }] },
+      { asked: '1234', kind: 'SEVERAL_TRUCKS' as const, options: [{ code: '1234-AB', query: 'Truck 1234-AB' }, { code: '1234-CD', query: 'Truck 1234-CD' }] },
+      { asked: 'C1', kind: 'ALSO_TRUCK' as const, options: [{ code: 'C-1', query: 'R2X, Truck C-1' }] },
     ];
-    const tree = ChoiceList({ choices, working: false, onPick: (q) => picked.push(q) })!;
-    expect(textOf(tree)).toMatch(/1234 matches 2 trucks today\. Pick one:.*Truck 1234-AB.*Truck 1234-CD.*C1 is also a truck code/);
+    const tree = ChoiceList({ lang: 'en', choices, working: false, onPick: (q) => picked.push(q) })!;
+    expect(textOf(tree)).toMatch(/1234: more than one truck has this code\. Pick one:.*Truck 1234-AB.*Truck 1234-CD.*C1 is also a truck code/);
     const buttons = elements(tree).filter((e) => e.props?.['data-testid'] === 'choice-option');
     expect(buttons.map((b) => b.props['data-query'])).toEqual(['Truck 1234-AB', 'Truck 1234-CD', 'R2X, Truck C-1']);
     for (const b of buttons) b.props.onClick();
     expect(picked).toEqual(['Truck 1234-AB', 'Truck 1234-CD', 'R2X, Truck C-1']);
-    expect(ChoiceList({ choices: [], working: false, onPick: () => undefined })).toBeNull();
+    expect(ChoiceList({ lang: 'en', choices: [], working: false, onPick: () => undefined })).toBeNull();
+    expect(textOf(ChoiceList({ lang: 'ar', choices, working: false, onPick: () => undefined }))).toMatch(ARABIC);
   });
 
-  it('a link that does not work: its own words, and the link\'s day', () => {
-    for (const code of Object.keys(LINK_STATE_TEXT) as (keyof typeof LINK_STATE_TEXT)[]) {
-      const tree = LinkState({ code, date: code === 'LINK_EXPIRED' ? '2026-10-18' : null });
-      expect(textOf(tree)).toContain(LINK_STATE_TEXT[code]);
-      expect(tree.props['data-code']).toBe(code);
+  it("a link that does not work: its own words in the page's language, and the link's day", () => {
+    for (const code of Object.keys(SALES_STATE_TEXT) as SalesLinkStateCode[]) {
+      for (const lang of ['en', 'ar', 'ur'] as const) {
+        const tree = LinkState({ lang, code, date: null });
+        expect(textOf(tree)).toBe(SALES_DICT[lang][`link.${code}` as SalesKey]);
+        expect(tree.props['data-code']).toBe(code);
+      }
     }
-    expect(textOf(LinkState({ code: 'LINK_EXPIRED', date: '2026-10-18' }))).toMatch(/Link of Sun 18 Oct/);
+    expect(textOf(LinkState({ lang: 'en', code: 'LINK_EXPIRED', date: '2026-10-18' }))).toMatch(/Link of Sun 18 Oct/);
+    expect(plain(textOf(LinkState({ lang: 'ar', code: 'LINK_EXPIRED', date: '2026-10-18' })))).toMatch(/رابط يوم الأحد، 18 أكتوبر/);
   });
 
-  it('the answer the page shows carries the day and the company (meta) for the header', () => {
-    expect(meta().dayText).toBe('Monday 19 October 2026');
-    expect(shortDayText(meta().date)).toBe('Mon 19 Oct');
+  it('the language switch: English, Arabic and Urdu each in its own script, the one in use pressed', () => {
+    const picked: string[] = [];
+    const tree = LangSwitch({ lang: 'ur', onPick: (l) => picked.push(l) });
+    const buttons = elements(tree).filter((e) => e.type === 'button');
+    expect(buttons.map((b) => [textOf(b), b.props.lang, b.props.dir, b.props['aria-pressed']])).toEqual([
+      ['English', 'en', 'ltr', false],
+      ['العربية', 'ar', 'rtl', false],
+      ['اردو', 'ur', 'rtl', true],
+    ]);
+    for (const b of buttons) b.props.onClick();
+    expect(picked).toEqual(['en', 'ar', 'ur']);
+    for (const b of buttons) expect(b.props.className).toMatch(/min-h-10/);
   });
 });

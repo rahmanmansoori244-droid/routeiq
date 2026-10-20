@@ -3,24 +3,29 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Search } from 'lucide-react';
 import { MAX_QUERY_CHARS } from '@/lib/sales-link/route-code';
-import { UI } from '@/lib/sales-page/format';
+import { busyText, problemText, type FormProblem } from '@/lib/sales-page/format';
+import { st, type SalesLang } from '@/lib/sales-page/i18n';
 
 /**
- * The route code entry: one big field for a phone (16 px text, so iPhones do not zoom; capitals; no
- * autocorrect), the hint from the server ("as on your Salesman ETA page"), and the error of the last try.
- * Several routes at once: "R1, R2X"; a truck by its code ("1234-AB", or its digits "1234"; owner decision of 20 Oct 2026).
+ * The route code entry: one big field for a phone (16 px text, so iPhones do not zoom; capitals; no autocorrect;
+ * the code typed left to right in every language), the hint ("as on your Salesman ETA page"), and the problem of
+ * the last try in the page's language. Several routes at once: "R1, R2X"; a truck by its code ("1234-AB", or its
+ * digits "1234"; owner decision of 20 Oct 2026).
  */
 export function RouteForm({
+  lang,
   initial,
-  hint,
   error,
+  date,
   working,
   waitSec,
   onSubmit,
 }: {
+  lang: SalesLang;
   initial: string;
-  hint: string | null;
-  error: string | null;
+  error: FormProblem | null;
+  /** The link's delivery date (the "no deliveries on ..." text). */
+  date: string | null;
   working: boolean;
   waitSec: number | null;
   onSubmit: (text: string) => void;
@@ -34,13 +39,14 @@ export function RouteForm({
   return (
     <form onSubmit={send} className="space-y-3 rounded-lg bg-white p-4 shadow-sm ring-1 ring-slate-200" data-testid="route-form" noValidate>
       <label htmlFor="sales-route" className="block text-base font-semibold">
-        {UI.routeLabel}
+        {st(lang, 'routeLabel')}
       </label>
       <input
         id="sales-route"
         name="route"
         value={text}
         onChange={(e) => setText(e.target.value)}
+        dir="ltr"
         autoCapitalize="characters"
         autoComplete="off"
         autoCorrect="off"
@@ -54,15 +60,15 @@ export function RouteForm({
         data-testid="route-input"
       />
       <p id="sales-route-hint" className="text-sm text-slate-600">
-        {hint ?? 'Your route code (as on your Salesman ETA page) or a truck code'}. {UI.routeHelp}.
+        {st(lang, 'routeHelp')}
       </p>
       <div id="sales-route-error" aria-live="polite">
         {error ? (
-          <p className="rounded-md bg-red-50 p-2 text-sm text-red-900" data-testid="route-error">
-            {error}
+          <p className="rounded-md bg-red-50 p-2 text-sm text-red-900" data-testid="route-error" data-kind={error.kind}>
+            {problemText(lang, error, date)}
           </p>
         ) : null}
-        {waitSec ? <p className="rounded-md bg-amber-50 p-2 text-sm text-amber-900">{UI.busy(waitSec)}</p> : null}
+        {waitSec ? <p className="rounded-md bg-amber-50 p-2 text-sm text-amber-900">{busyText(lang, waitSec)}</p> : null}
       </div>
       <button
         type="submit"
@@ -70,7 +76,7 @@ export function RouteForm({
         className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-md bg-slate-900 px-4 text-base font-semibold text-white disabled:opacity-60"
         data-testid="route-submit"
       >
-        <Search className="h-5 w-5" aria-hidden /> {working ? UI.loading : UI.show}
+        <Search className="h-5 w-5" aria-hidden /> {working ? st(lang, 'loading') : st(lang, 'show')}
       </button>
     </form>
   );

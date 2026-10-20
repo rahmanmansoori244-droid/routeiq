@@ -3,6 +3,10 @@
  * a salesman should be told them. Pure (no database, no clock: `now` is an input): day-read.ts reads the
  * input once per company and date (memoised 30 s, one build at a time) and the API picks the routes asked for.
  *
+ * This is the DETAILED day (twelve statuses, the expected time and where it comes from, the printed window): it
+ * never leaves the server. The API sends each result through simple-view.ts (owner feedback of 20 Oct 2026: one
+ * status and one time per customer, no truck, no trip, no reason, no position).
+ *
  * WHICH DELIVERIES BELONG TO ROUTE R: per order LINE (OrderLine.salesRoute), as the printed Salesman ETA
  * (lib/exports/salesman-eta.ts salesmanEtaModel; a parity test keeps them together): one delivery = one stop
  * of one trip carrying a line of R that is neither cancelled nor moved to another day; its invoices and cases
@@ -10,16 +14,15 @@
  *
  * WHICH DELIVERIES BELONG TO TRUCK T (owner decision of 20 Oct 2026: a lookup by truck code): every stop of every
  * trip of T on the day's plans in use (every depot), with all its lines that are neither cancelled nor moved to
- * another day (every route, and lines without one); a stop with none left is no delivery. The statuses, expected
- * times and truck card follow the same rules; its position shows while T's trip on the road has any delivery still
- * to make. Its "orders not on a truck" are the orders taken off its trips: cancelled, or moved to another day. The
- * truck is named by the code its plan shows (a day-hired truck: its plate, lib/dispatch/hire.ts shownTruckCode).
+ * another day (every route, and lines without one); a stop with none left is no delivery. The statuses and
+ * expected times follow the same rules. Its "orders not on a truck" are the orders taken off its trips: cancelled,
+ * or moved to another day. The truck is found by the code its plan shows (a day-hired truck: its plate,
+ * lib/dispatch/hire.ts shownTruckCode); the answer names it only in the heading the salesman typed.
  *
  * THE STATUS of a delivery (stop S of trip L; the first rule that holds; D = the delivery date):
  *  1. a result is recorded: DELIVERED / PARTLY_DELIVERED / NOT_DELIVERED from R's own lines of the visit
- *     (a stop partly delivered overall can be fully delivered for R); the reason's label with who said it;
- *  2. L is COMPLETED, or the driver tapped Back at depot: NO_RESULT ("Truck stopped there 10:31-10:52 -
- *     result not recorded" when GPS or the phone saw the truck there; never "Delivered");
+ *     (a stop partly delivered overall can be fully delivered for R);
+ *  2. L is COMPLETED, or the driver tapped Back at depot: NO_RESULT (never "Delivered");
  *  3. L is DISPATCHED (also an earlier day's trip still out after midnight: now is then past 1440):
  *     - Back at depot tapped (the trip is not closed): rule 2;
  *     - "probably over" (critique 4): GPS saw the truck back at its depot after its last stop; or a later
@@ -42,78 +45,38 @@
  *
  * THE EXPECTED TIME of a delivery still to come, today (lib/alerts/load-eta.ts: one input with the alerts):
  * - a trip on the road: the live GPS ETA while it may be used, else the projection (projection.ts) of the
- *   plan moved by the driver's taps and photos; never earlier than now: "Due now - no update yet" instead,
- *   with no minutes when the clock pushed it or the phone was heard since (critique 4). The stops after such
- *   a stop, or after a stop whose unloading the clock is stretching, get "not before HH:MM" only: their
- *   projected times are lower bounds that grow with the clock - never late, never counted as delayed, never
- *   the truck's "behind plan";
+ *   plan moved by the driver's taps and photos; never earlier than now: "due now" instead (DUE_NOW, no
+ *   time) when the clock pushed it or the phone was heard since (critique 4). The stops after such a stop, or
+ *   after a stop whose unloading the clock is stretching, get a lower bound only (NO_UPDATES with
+ *   `notBeforeMin`): it grows with the clock, so it is never LATE by itself;
  * - a trip that has not left: the projection from the later of its planned departure (moved by how late the
  *   truck's trip before it will be back: critique 6 - with GPS from the last stop's GPS arrival + its
  *   unloading + the planned drive back; never before now + the work left when the next stop waits on the
- *   clock or on a phone heard since) and now; more than 30 min past that departure it says
- *   "should have left - not marked as left yet" and gives no time (critique 14);
- * - a trip with no live source at all (no sign from the phone, no GPS: critique 4): no time, "No live
- *   updates from this truck", the printed window;
- * - delayed / early is judged against the printed window (critique 5), not the planned minute.
+ *   clock or on a phone heard since) and now; more than 30 min past that departure (not marked as left) no
+ *   time (NO_UPDATES, critique 14);
+ * - a trip with no live source at all (no sign from the phone, no GPS: critique 4): no time (NO_UPDATES);
+ * - late is judged against the printed window (critique 5), not the planned minute.
  *
- * ORDERS NOT ON A TRUCK: cancelled (every order of D with a cancel, whatever its plan state; the reason's
- * label, never the office's note), moved to another day, left out of the plan (the reason in a salesman's
- * words), the rest of a split delivery, received after the plan, and not planned yet (every order of D of a
- * depot without a plan in use with an applied option: critique 7).
+ * ORDERS NOT ON A TRUCK: cancelled (every order of D with a cancel, whatever its plan state), moved to another
+ * day, left out of the plan, the rest of a split delivery, received after the plan, and not planned yet (every
+ * order of D of a depot without a plan in use with an applied option: critique 7).
  */
 import type { DetailLoad, DetailStop, PlanDetail } from '../dispatch/plan-detail';
 import { compareSalesRoutes } from '../dispatch/sales-route';
 import { carriedLoadShows } from '../dispatch/carry-view';
-import { localMinutes, todayIso, zonedDayStart } from '../dispatch/time';
-import { etaSlot, FIXED_STATUSES, hhmmRange, invoiceText, longDayText, stopWindow, type SalesmanEtaFacts } from '../exports/salesman-eta';
+import { todayIso, zonedDayStart } from '../dispatch/time';
+import { etaSlot, hhmmRange, stopWindow, type SalesmanEtaFacts } from '../exports/salesman-eta';
 import { readVisitLines } from '../delivery/visit';
 import { projectLoad, type ProjectedStop, type Projection, type ProjectionStopIn } from '../alerts/projection';
 import { RETURN_GRACE_MIN, thresholdsOf, type AlertConfig } from '../alerts/catalog';
 import { clockText, minutesOnDate } from '../alerts/text';
 import { firstInAfter, gpsBackOf, gpsLiveOf, gpsTruckDayFactOf, type AlertGpsSettings } from '../alerts/gps';
 import { firstPhotoAt, liveEtaAllowed, loadLiveEtas, projectionInputOf, projectionStopsOf, type EtaFactPhoto, type EtaFactStop, type EtaGps } from '../alerts/load-eta';
-import { fixStale } from '../ivms/live-map';
-import { MOVING_KMH, type GpsTruckDayFact } from '../ivms/types';
+import type { GpsTruckDayFact } from '../ivms/types';
 import type { StopEta } from '../ivms/eta';
 import { truckQuery, type DayTruckRef } from './route-code';
-import {
-  ADDED_AFTER_PLAN_WHY,
-  cancelledWhy,
-  ceil5,
-  GPS_NONE_TEXT,
-  hhmm,
-  movedHereNote,
-  movedWhy,
-  NO_LIVE_TEXT,
-  NOT_LOCKED_NOTE,
-  NOT_PLANNED_WHY,
-  NOT_PLANNED_YET_WHY,
-  OFF_KIND_TEXT,
-  PART_NOT_PLANNED_WHY,
-  REST_NOT_PLANNED_NOTE,
-  restMovedNote,
-  resultReason,
-  round5,
-  shareTextOf,
-  shortDayText,
-  SOURCE_TEXT,
-  STATUS_TEXT,
-  STILL_DUE_NOTE,
-} from './text';
-import type {
-  DeliveryStatus,
-  EtaSource,
-  OffTruckKind,
-  SalesCounts,
-  SalesDelivery,
-  SalesEta,
-  SalesOffTruck,
-  SalesRouteView,
-  SalesTruck,
-  SalesTruckPosition,
-  SalesViewKind,
-  TripStatus,
-} from './view-types';
+import { ceil5, round5 } from './text';
+import type { SalesViewKind } from './view-types';
 
 // ---------------------------------------------------------------------------------------------
 // The input (day-read.ts reads it; the unit tests build it)
@@ -175,7 +138,7 @@ export interface SalesPositionIn {
   movedAt: Date | null;
 }
 
-/** The GPS the day may read (GPS tracking MAP or higher, the link not switched off); null: none. */
+/** The GPS the day may read for its expected times (GPS tracking MAP or higher, the link not switched off); null: none. */
 export interface SalesGpsIn {
   settings: AlertGpsSettings;
   positions: ReadonlyMap<string, SalesPositionIn>;
@@ -183,8 +146,6 @@ export interface SalesGpsIn {
   trailTo: ReadonlyMap<string, Date | null>;
   /** Trail-confirmed depot moves per truck around D (GPS tracking TIMES and up). */
   moves: ReadonlyMap<string, readonly { kind: 'DEPOT_IN' | 'DEPOT_OUT'; at: Date; observed: boolean; depotId: string | null }[]>;
-  /** The trucks with a tracker. */
-  tracked: ReadonlySet<string>;
 }
 
 export interface SalesDayInput {
@@ -208,13 +169,107 @@ export interface SalesDayInput {
   lateDispatchMin?: number | null;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The output (server only: the API sends simple-view.ts salesRouteView of it)
+// ---------------------------------------------------------------------------------------------
+
+/** What happened, or will happen, at one delivery (one stop of one trip) of the route. */
+export type DeliveryStatus =
+  | 'DELIVERED'
+  | 'PARTLY_DELIVERED'
+  | 'NOT_DELIVERED'
+  /** The trip is over (or probably over) and the driver recorded no result for this stop. */
+  | 'NO_RESULT'
+  /** The truck was there (arrival or departure known) but the result is not in yet. */
+  | 'VISITED'
+  | 'AT_CUSTOMER'
+  | 'NEXT'
+  | 'ON_THE_WAY'
+  /** Not visited yet while later stops were: still due, the driver serves other customers first. */
+  | 'PASSED'
+  | 'LOADING'
+  | 'PLANNED'
+  /** An earlier day's trip that never left. */
+  | 'TRUCK_DID_NOT_GO';
+
+/** Orders of the route that are not on a truck of the day. */
+export type OffTruckKind = 'CANCELLED' | 'MOVED' | 'NOT_PLANNED' | 'PART_NOT_PLANNED' | 'ADDED_AFTER_PLAN' | 'NOT_PLANNED_YET';
+
+/** Where an expected time comes from: the truck's GPS, the trip so far (the plan moved by the driver's updates), or the plan. */
+export type EtaSource = 'GPS' | 'TRIP' | 'PLAN';
+
+/**
+ * The expected time against the window printed on the Salesman ETA: inside it, after it, "due now" (the plan says
+ * the truck should be there and nothing says it is: no time), or no live time to give (no live updates from this
+ * truck at all, a trip not marked as left, or a stop after one the clock decides: a lower bound at most).
+ */
+export type EtaTiming = 'ON_TIME' | 'LATE' | 'DUE_NOW' | 'NO_UPDATES';
+
+/** The expected arrival of a delivery still to come (minutes of the delivery day). */
+export interface DayEta {
+  /** Rounded to 5, never before now; null: DUE_NOW or NO_UPDATES. */
+  min: number | null;
+  /** NO_UPDATES after a stop the clock decides: its projected arrival while it is still ahead, a lower bound (rounded to 5); else null. */
+  notBeforeMin: number | null;
+  source: EtaSource | null;
+  timing: EtaTiming;
+}
+
+/** One delivery (one stop of one trip) of a route, or of a truck. */
+export interface DayDelivery {
+  customerName: string;
+  customerCode: string;
+  branchCode: string | null;
+  /** The route's cases on this delivery (a truck's: the stop's). */
+  cases: number;
+  /** The truck and trip (never sent: the order of deliveries at the same time, and the tests). */
+  truckCode: string;
+  loadNo: number;
+  status: DeliveryStatus;
+  /** The window printed on the Salesman ETA ("07:45-09:00") and its minutes; null when the plan has no time for the stop. */
+  window: string | null;
+  slot: { from: number; to: number } | null;
+  /** The planned arrival (minutes of D); null = not planned. */
+  plannedMin: number | null;
+  /** The result's time (DELIVERED / PARTLY / NOT_DELIVERED): "10:31" and its minutes of D; else null. */
+  at: string | null;
+  atMin: number | null;
+  /** The route's delivered cases of the route's cases (results only). */
+  delivered: { cases: number; of: number } | null;
+  /** The expected arrival (deliveries still to come on the delivery day, or a trip still out after midnight); else null. */
+  eta: DayEta | null;
+}
+
+/** An order of the route (or taken off the truck) that is not on a truck of the day. */
+export interface DayOffTruck {
+  kind: OffTruckKind;
+  customerName: string;
+  customerCode: string;
+  branchCode: string | null;
+  cases: number;
+  /** MOVED: the day it was moved to (YYYY-MM-DD); else null. */
+  movedTo: string | null;
+}
+
+/** One route's day (kind ROUTE) or one truck's (kind TRUCK). */
+export interface DayView {
+  kind: SalesViewKind;
+  /** The route code as stored, or the truck code as the plan shows it. */
+  code: string;
+  /** What the page asks for to refresh it: the route code, or "Truck <code>". */
+  query: string;
+  /** In expected order (the planned arrival, then truck, trip, stop). */
+  deliveries: DayDelivery[];
+  offTruck: DayOffTruck[];
+}
+
 export interface SalesDay {
   builtAt: Date;
   date: string;
   /** Every route of the day with a delivery or an order not on a truck, by its code. */
-  routes: ReadonlyMap<string, SalesRouteView>;
+  routes: ReadonlyMap<string, DayView>;
   /** Every truck with a delivery on a plan in use of the day (all its trips, every route), by its truck id (never sent). */
-  trucks: ReadonlyMap<string, SalesRouteView>;
+  trucks: ReadonlyMap<string, DayView>;
   /** The day's trucks as a lookup reads them (route-code.ts matchLookup): the id and the code the plan shows. */
   truckRefs: readonly DayTruckRef[];
 }
@@ -223,27 +278,30 @@ export interface SalesDay {
 // Live state of each trip
 // ---------------------------------------------------------------------------------------------
 
-type DayRel = 'PAST' | 'TODAY' | 'FUTURE';
-/** Where a trip's live times come from (critique 4); OVER: probably finished; BACK: Back at depot tapped, not closed. */
-type LiveClass = 'GPS' | 'PHONE' | 'NONE' | 'OVER' | 'BACK';
-/** The trip is finished or probably finished (not on the road any more). */
-const isOver = (c: LiveClass | null) => c === 'OVER' || c === 'BACK';
+/** The delivery date against the company's today (critique item 2): before it (a link still open after midnight), on it, after it. */
+export type DayRel = 'PAST' | 'TODAY' | 'FUTURE';
+
+export function dayRelOf(date: string, tz: string, now: Date): DayRel {
+  const today = todayIso(tz, now);
+  return date < today ? 'PAST' : date === today ? 'TODAY' : 'FUTURE';
+}
+
+/** Where a trip's live times come from (critique 4); OVER: probably finished. */
+type LiveClass = 'GPS' | 'PHONE' | 'NONE' | 'OVER';
 
 type StopKind = 'RESULT' | 'NO_RESULT' | 'AT_CUSTOMER' | 'VISITED' | 'PASSED' | 'NEXT' | 'ON_THE_WAY' | 'LOADING' | 'PLANNED' | 'TRUCK_DID_NOT_GO';
 
 interface StopLive {
   kind: StopKind;
-  detail: string | null;
   /** The expected arrival (minutes of D) when it is a real time; null otherwise. */
   expectedMin: number | null;
   source: EtaSource | null;
-  /** The clock pushed it or the phone was heard since: "due now", no minutes. */
+  /** The clock pushed it or the phone was heard since: "due now", no time. */
   dueNow: boolean;
-  /** No live time for this stop: none for the trip at all, a trip not marked as left, or after a stop with no update. */
-  noLive: string | null;
+  /** No live time for this stop: none for the trip at all, a trip not marked as left, or after a stop the clock decides. */
+  noLive: boolean;
   /** After a stop the clock pushed (or a phone heard since held): its projected arrival, a lower bound only. */
   notBefore: number | null;
-  stopsBefore: number | null;
 }
 
 interface LoadRec {
@@ -259,22 +317,13 @@ interface LoadRec {
 
 interface LoadLive {
   rec: LoadRec;
-  liveClass: LiveClass | null;
-  /** The trip's own departure moved by the trip before (not-left trips of today). */
-  shiftMin: number;
-  /** Today's trip not left more than 30 min after its (moved) departure. */
-  notMarkedLeft: boolean;
   stop: Map<number, StopLive>;
-  /** The next stop ahead's delay against its planned minute (a trip on the road, real times only). */
-  behindMin: number | null;
 }
 
 const has = (v: number | null | undefined): v is number => v !== null && v !== undefined && Number.isFinite(v);
 const backKeyOf = (depotId: string, date: string, truckId: string, loadNo: number) => `${depotId}|${date}|${truckId}|${loadNo}`;
 const visitKeyOf = (depotId: string, date: string, truckId: string, loadNo: number, sequence: number) => `${depotId}|${date}|${truckId}|${loadNo}|${sequence}`;
 const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-const r3 = (x: number) => Math.round(x * 1e3) / 1e3;
-const r4 = (x: number) => Math.round(x * 1e4) / 1e4;
 /** A load whose not-left time counts as "should have left" this long after its (moved) departure (critique 14). */
 export const NOT_LEFT_AFTER_MIN = 30;
 /** The late Dispatch press threshold without an alert setting (the ETA_LATE alert's default). */
@@ -290,29 +339,12 @@ export function salesLateDispatchMin(cfg: Partial<AlertConfig> | null | undefine
 }
 /** A trip with no sign of the truck for this long, past its planned return + RETURN_GRACE_MIN, is "probably over". */
 export const SILENT_OVER_MIN = 60;
-/** A truck's position is shown at most this old. */
-export const POSITION_MAX_AGE_MIN = 60;
-/** An expected time this much after the window's end is "late" (whole minutes, then rounded to 5). */
+/** An expected time this much after the window's end is "late". */
 export const LATE_TOLERANCE_MIN = 3;
-/** A GPS time this much before the window's start is "earlier than the window". */
-export const EARLY_MIN = 10;
-/** A truck running this much behind its plan says so on its card. */
-export const BEHIND_SHOWN_MIN = 15;
 
 function signTimes(v: SalesVisitIn | null): Date[] {
   if (!v) return [];
   return [v.arrivedAt, v.departedAt, v.outcomeSource !== 'DISPATCHER' ? v.outcomeAt : null, firstPhotoAt(v)].filter((t): t is Date => !!t);
-}
-
-/** "Truck stopped there 10:31-10:52", "Truck was there at 10:31"; null without an arrival or departure. */
-function thereText(v: SalesVisitIn | null, date: string, tz: string, lead: string): string | null {
-  if (!v) return null;
-  const arr = v.arrivedAt ?? firstPhotoAt(v);
-  const dep = v.departedAt;
-  if (arr && dep) return `${lead} ${clockText(arr, date, tz)}-${clockText(dep, date, tz)}`;
-  if (arr) return `${lead} at ${clockText(arr, date, tz)}`;
-  if (dep) return `${lead} until ${clockText(dep, date, tz)}`;
-  return null;
 }
 
 /**
@@ -349,11 +381,11 @@ function liveOfLoads(recs: readonly LoadRec[], input: SalesDayInput, rel: DayRel
     let lateBy = 0;
     for (const [n, rec] of list.entries()) {
       const L = rec.load;
-      const live: LoadLive = { rec, liveClass: null, shiftMin: 0, notMarkedLeft: false, stop: new Map(), behindMin: null };
+      const live: LoadLive = { rec, stop: new Map() };
       out.set(L.id, live);
       const etaGps: EtaGps | null = input.gps && fact ? { fact, settings: input.gps.settings } : null;
       if (L.status === 'COMPLETED') {
-        for (const [i, s] of rec.stops.entries()) live.stop.set(s.sequence, finishedStop(rec.visits[i]!, date, tz, false));
+        for (const [i, s] of rec.stops.entries()) live.stop.set(s.sequence, finishedStop(rec.visits[i]!));
         const backMin = rec.back ? minutesOnDate(rec.back, date, tz) : null;
         lateBy = backMin !== null ? Math.max(0, backMin - L.returnMin) : 0;
         continue;
@@ -361,8 +393,7 @@ function liveOfLoads(recs: readonly LoadRec[], input: SalesDayInput, rel: DayRel
       if (L.status === 'DISPATCHED') {
         if (rec.back) {
           // Back at depot tapped, the trip not closed (a stop without a result): finished, never "on the road".
-          live.liveClass = 'BACK';
-          for (const [i, s] of rec.stops.entries()) live.stop.set(s.sequence, finishedStop(rec.visits[i]!, date, tz, false));
+          for (const [i, s] of rec.stops.entries()) live.stop.set(s.sequence, finishedStop(rec.visits[i]!));
           lateBy = Math.max(0, minutesOnDate(rec.back, date, tz) - L.returnMin);
           continue;
         }
@@ -371,22 +402,20 @@ function liveOfLoads(recs: readonly LoadRec[], input: SalesDayInput, rel: DayRel
       }
       // Not left: PLANNED, LOCKED, LOADING.
       if (rel === 'PAST') {
-        for (const s of rec.stops) live.stop.set(s.sequence, plain('TRUCK_DID_NOT_GO', 'The truck did not go out with this trip'));
+        for (const s of rec.stops) live.stop.set(s.sequence, plain('TRUCK_DID_NOT_GO'));
         lateBy = 0;
         continue;
       }
       const kind: StopKind = L.status === 'LOADING' ? 'LOADING' : 'PLANNED';
       if (rel === 'FUTURE') {
-        for (const s of rec.stops) live.stop.set(s.sequence, plain(kind, null));
+        for (const s of rec.stops) live.stop.set(s.sequence, plain(kind));
         continue;
       }
       // Today: from the later of now and the (moved) planned departure.
-      live.shiftMin = lateBy;
       const leaveMin = L.departMin + lateBy;
       if (nowMin > leaveMin + NOT_LEFT_AFTER_MIN) {
-        live.notMarkedLeft = true;
-        const why = `Trip should have left at ${hhmm(leaveMin)} - not marked as left yet`;
-        for (const s of rec.stops) live.stop.set(s.sequence, { ...plain(kind, null), noLive: why });
+        // Should have left by now and not marked as left: no time to give (critique 14).
+        for (const s of rec.stops) live.stop.set(s.sequence, { ...plain(kind), noLive: true });
         lateBy = Math.max(0, nowMin - L.departMin);
         continue;
       }
@@ -396,7 +425,7 @@ function liveOfLoads(recs: readonly LoadRec[], input: SalesDayInput, rel: DayRel
         const s = rec.stops.find((x) => x.sequence === p.sequence);
         const expected = p.arrMin;
         const source: EtaSource = expected !== null && s?.etaMin !== null && s?.etaMin !== undefined && expected === s.etaMin ? 'PLAN' : 'TRIP';
-        live.stop.set(p.sequence, { ...plain(kind, null), expectedMin: expected, source: expected === null ? null : source });
+        live.stop.set(p.sequence, { ...plain(kind), expectedMin: expected, source: expected === null ? null : source });
       }
       lateBy = Math.max(0, proj.returnMin - L.returnMin);
     }
@@ -404,16 +433,13 @@ function liveOfLoads(recs: readonly LoadRec[], input: SalesDayInput, rel: DayRel
   return out;
 }
 
-function plain(kind: StopKind, detail: string | null): StopLive {
-  return { kind, detail, expectedMin: null, source: null, dueNow: false, noLive: null, notBefore: null, stopsBefore: null };
+function plain(kind: StopKind): StopLive {
+  return { kind, expectedMin: null, source: null, dueNow: false, noLive: false, notBefore: null };
 }
 
-/** A stop of a trip that is over: its result, else "no result recorded" (with the times the truck was seen there). */
-function finishedStop(v: SalesVisitIn | null, date: string, tz: string, probably: boolean): StopLive {
-  if (v?.outcome) return plain('RESULT', null);
-  const seen = thereText(v, date, tz, 'Truck stopped there');
-  const detail = seen ? `${seen} - result not recorded` : probably ? 'Trip probably finished - result not recorded' : 'Trip finished - no result recorded';
-  return plain('NO_RESULT', detail);
+/** A stop of a trip that is over: its result, else no result recorded. */
+function finishedStop(v: SalesVisitIn | null): StopLive {
+  return plain(v?.outcome ? 'RESULT' : 'NO_RESULT');
 }
 
 /** The live GPS ETA's stop with a delivery photo of the driver's phone as its arrival when none was recorded (M3, as the projection reads it). */
@@ -492,17 +518,16 @@ function dispatchedLive(
   if (gpsBack || laterLeft || (pastReturn && (!recent || backIn))) cls = 'OVER';
   else if (!anyActivity && !o.phoneSeenAt && !gpsFollows) cls = 'NONE';
   else cls = liveEtas.length ? 'GPS' : 'PHONE';
-  live.liveClass = cls;
 
   if (cls === 'OVER') {
-    for (const [i, s] of rec.stops.entries()) live.stop.set(s.sequence, finishedStop(rec.visits[i]!, date, tz, true));
+    for (const [i, s] of rec.stops.entries()) live.stop.set(s.sequence, finishedStop(rec.visits[i]!));
     const backMove = gpsBack ?? backIn;
     return backMove ? Math.max(0, minutesOnDate(backMove.at, date, tz) - L.returnMin) : 0;
   }
 
   // The first stop whose time the clock decides (critique 4): a pending stop the clock pushed or a phone heard since
-  // held, or a stop being unloaded past its planned end (it ends "now"). The projected times after it only say
-  // "not before" (with GPS the live ETA gives them).
+  // held, or a stop being unloaded past its planned end (it ends "now"). The projected times after it are lower
+  // bounds only (with GPS the live ETA gives them).
   const pushed =
     cls === 'GPS'
       ? null
@@ -512,7 +537,6 @@ function dispatchedLive(
   const atStopSeq = liveEtas[0]?.atStop ? liveEtas[0].sequence : null;
   const gpsNext = liveEtas.find((e) => !e.atStop)?.sequence ?? null;
   const nextSeq = gpsGate ? gpsNext : (proj.next?.sequence ?? null);
-  const phoneText = o.phoneSeenAt ? ` (last update ${clockText(o.phoneSeenAt, date, tz)})` : '';
 
   const kinds = new Map<number, StopKind>();
   for (const [i, s] of rec.stops.entries()) {
@@ -537,8 +561,6 @@ function dispatchedLive(
     }
     kinds.set(s.sequence, s.sequence === nextSeq ? 'NEXT' : 'ON_THE_WAY');
   }
-  const ahead = (seq: number) => rec.stops.filter((x) => x.sequence < seq && ['AT_CUSTOMER', 'NEXT', 'ON_THE_WAY'].includes(kinds.get(x.sequence)!)).length;
-  const pendingAll = rec.stops.filter((x) => ['AT_CUSTOMER', 'NEXT', 'ON_THE_WAY'].includes(kinds.get(x.sequence)!)).length;
 
   // Still-due stops (PASSED) come after the stops still ahead (critique 13): from the last one's projected end.
   const pendingEnds = proj.stops.filter((p) => p.state === 'PENDING' || p.state === 'IN_PROGRESS').map((p) => p.depMin).filter(has);
@@ -548,24 +570,14 @@ function dispatchedLive(
 
   for (const [i, s] of rec.stops.entries()) {
     const kind = kinds.get(s.sequence)!;
-    const v = rec.visits[i]!;
     const p: ProjectedStop | undefined = projOf.get(s.sequence);
-    if (kind === 'RESULT') {
-      live.stop.set(s.sequence, plain('RESULT', null));
-      continue;
-    }
-    if (kind === 'AT_CUSTOMER') {
-      const arr = v?.arrivedAt ?? firstPhotoAt(v);
-      live.stop.set(s.sequence, plain('AT_CUSTOMER', arr ? `Truck there since ${clockText(arr, date, tz)}${v?.arrivedAt ? '' : ' (delivery photo)'}` : null));
-      continue;
-    }
-    if (kind === 'VISITED') {
-      const seen = thereText(v, date, tz, 'Truck was there');
-      live.stop.set(s.sequence, plain('VISITED', seen ? `${seen} - result not sent yet` : 'Result not sent yet'));
+    if (kind === 'RESULT' || kind === 'AT_CUSTOMER' || kind === 'VISITED') {
+      live.stop.set(s.sequence, plain(kind));
       continue;
     }
     if (cls === 'NONE') {
-      live.stop.set(s.sequence, { ...plain(kind, null), noLive: NO_LIVE_TEXT, stopsBefore: kind === 'PASSED' ? pendingAll : ahead(s.sequence) });
+      // No live source at all (critique 4): no time.
+      live.stop.set(s.sequence, { ...plain(kind), noLive: true });
       continue;
     }
     if (kind === 'PASSED') {
@@ -575,10 +587,9 @@ function dispatchedLive(
       const arr = passedFrom + leg;
       passedFrom = arr + service;
       passedPrevPlanDep = has(s.etaMin) ? s.etaMin + service : passedPrevPlanDep;
-      const stopsBefore = pendingAll + rec.stops.filter((x) => x.sequence < s.sequence && kinds.get(x.sequence) === 'PASSED').length;
       // After the stops the clock decides: a lower bound only.
-      if (pushed) live.stop.set(s.sequence, { ...plain('PASSED', null), source: 'TRIP', notBefore: arr, noLive: notBeforeText(arr, o.nowMin, phoneText), stopsBefore });
-      else live.stop.set(s.sequence, { ...plain('PASSED', null), expectedMin: arr, source: 'TRIP', stopsBefore });
+      if (pushed) live.stop.set(s.sequence, { ...plain('PASSED'), source: 'TRIP', notBefore: arr, noLive: true });
+      else live.stop.set(s.sequence, { ...plain('PASSED'), expectedMin: arr, source: 'TRIP' });
       continue;
     }
     // NEXT / ON_THE_WAY.
@@ -594,17 +605,12 @@ function dispatchedLive(
       source = 'TRIP';
       dueNow = !!p && (p.clockBound || p.phoneHeld);
       if (!dueNow && afterPushed(s.sequence) && has(expectedMin)) {
-        live.stop.set(s.sequence, { ...plain(kind, null), source, notBefore: expectedMin, noLive: notBeforeText(expectedMin, o.nowMin, phoneText), stopsBefore: ahead(s.sequence) });
+        live.stop.set(s.sequence, { ...plain(kind), source, notBefore: expectedMin, noLive: true });
         continue;
       }
     }
-    live.stop.set(s.sequence, { ...plain(kind, null), expectedMin, source, dueNow, detail: dueNow ? `Due now - no update from the truck yet${phoneText}` : null, stopsBefore: ahead(s.sequence) });
+    live.stop.set(s.sequence, { ...plain(kind), expectedMin, source, dueNow });
   }
-
-  // How far behind its plan the trip is now (its next stop ahead, real times only: never one the clock decides).
-  const first = rec.stops.find((s) => ['NEXT', 'ON_THE_WAY'].includes(kinds.get(s.sequence)!) && !live.stop.get(s.sequence)!.dueNow);
-  const fl = first ? live.stop.get(first.sequence)! : null;
-  if (first && fl && has(fl.expectedMin) && has(first.etaMin)) live.behindMin = fl.expectedMin - first.etaMin;
   if (cls === 'NONE') return 0;
 
   // How late the truck will be back (critique 6): the projected return, ...
@@ -626,11 +632,6 @@ function dispatchedLive(
   return Math.max(0, end - L.returnMin);
 }
 
-/** A stop after one the clock decides: "Not before 11:00 - no update from the truck yet (last update 08:25)". */
-function notBeforeText(min: number, nowMin: number, phoneText: string): string {
-  return min > nowMin ? `Not before ${hhmm(round5(min))} - no update from the truck yet${phoneText}` : `No update from the truck yet${phoneText}`;
-}
-
 /** The planned departure of the stop before index i (its departure, else arrival + unloading), else the trip's. */
 function planDepBefore(stops: readonly DetailStop[], i: number, departMin: number): number {
   for (let j = i - 1; j >= 0; j--) {
@@ -645,31 +646,22 @@ function planDepBefore(stops: readonly DetailStop[], i: number, departMin: numbe
 // The expected time against the printed window
 // ---------------------------------------------------------------------------------------------
 
-/** The live expected time of a delivery still to come (null: done, or nothing live to say). */
-export function etaView(
-  l: Pick<StopLive, 'expectedMin' | 'source' | 'dueNow' | 'noLive' | 'detail'>,
-  slot: { from: number; to: number } | null,
-  nowMin: number,
-): SalesEta | null {
-  const win = slot ? hhmmRange(slot.from, slot.to) : null;
-  if (l.noLive) return { expected: null, source: null, timing: 'NO_UPDATES', lateMin: null, earlyMin: null, text: win ? `${l.noLive} - window ${win}` : l.noLive };
-  if (l.dueNow || (has(l.expectedMin) && l.expectedMin < nowMin)) {
-    return { expected: null, source: l.source, timing: 'DUE_NOW', lateMin: null, earlyMin: null, text: l.detail ?? 'Due now - no update from the truck yet' };
+/**
+ * The expected arrival of a delivery still to come (null: nothing to say): the real time rounded to 5 and never
+ * before now, LATE when it is after the printed window (critique 5); DUE_NOW when the clock pushed it (or the phone
+ * was heard since) or it is behind the clock; NO_UPDATES without a live time, with the lower bound while it is still
+ * ahead (never LATE by itself: it grows with the clock).
+ */
+export function etaView(l: Pick<StopLive, 'expectedMin' | 'source' | 'dueNow' | 'noLive' | 'notBefore'>, slot: { from: number; to: number } | null, nowMin: number): DayEta | null {
+  if (l.noLive) {
+    const notBeforeMin = has(l.notBefore) && l.notBefore > nowMin ? Math.max(round5(l.notBefore), ceil5(nowMin)) : null;
+    return { min: null, notBeforeMin, source: null, timing: 'NO_UPDATES' };
   }
+  if (l.dueNow || (has(l.expectedMin) && l.expectedMin < nowMin)) return { min: null, notBeforeMin: null, source: l.source, timing: 'DUE_NOW' };
   if (!has(l.expectedMin) || !l.source) return null;
   const e = l.expectedMin;
-  const shown = Math.max(round5(e), ceil5(nowMin));
-  const expected = hhmm(shown);
-  const src = l.source === 'GPS' ? ' (GPS)' : l.source === 'PLAN' ? ' (as planned)' : '';
-  if (slot && e - slot.to >= LATE_TOLERANCE_MIN) {
-    const late = Math.max(5, round5(e - slot.to));
-    return { expected, source: l.source, timing: 'LATE', lateMin: late, earlyMin: null, text: `Expected about ${expected}${src} - about ${late} min after the window ${win}` };
-  }
-  if (slot && l.source === 'GPS' && slot.from - e >= EARLY_MIN) {
-    const early = Math.max(5, round5(slot.from - e));
-    return { expected, source: l.source, timing: 'EARLY', lateMin: null, earlyMin: early, text: `Expected about ${expected}${src} - earlier than the window ${win}` };
-  }
-  return { expected, source: l.source, timing: 'ON_TIME', lateMin: null, earlyMin: null, text: win ? `Expected about ${expected}${src} - within ${win}` : `Expected about ${expected}${src}` };
+  const late = !!slot && e - slot.to >= LATE_TOLERANCE_MIN;
+  return { min: Math.max(round5(e), ceil5(nowMin)), notBeforeMin: null, source: l.source, timing: late ? 'LATE' : 'ON_TIME' };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -677,14 +669,10 @@ export function etaView(
 // ---------------------------------------------------------------------------------------------
 
 interface DeliveryAcc {
-  /** The sales routes of its lines (a route's delivery: that route). */
-  routes: Set<string>;
   rec: LoadRec;
   stopIndex: number;
   stop: DetailStop;
   lineIds: Set<string>;
-  orderIds: Set<string>;
-  invoices: string[];
   cases: number;
 }
 
@@ -693,22 +681,18 @@ interface OffAcc {
   customerCode: string;
   branchCode: string | null;
   customerName: string;
-  invoices: string[];
   cases: number;
-  why: string;
+  movedTo: string | null;
 }
 
 const OFF_ORDER: Record<OffTruckKind, number> = { CANCELLED: 0, NOT_PLANNED: 1, PART_NOT_PLANNED: 2, ADDED_AFTER_PLAN: 3, NOT_PLANNED_YET: 4, MOVED: 5 };
 const PENDING: ReadonlySet<DeliveryStatus> = new Set(['AT_CUSTOMER', 'NEXT', 'ON_THE_WAY', 'PASSED']);
-const DONE: ReadonlySet<DeliveryStatus> = new Set(['DELIVERED', 'PARTLY_DELIVERED', 'NOT_DELIVERED', 'NO_RESULT', 'VISITED']);
 
 /** Every route's and every truck's view of the day (see the file comment). */
 export function buildSalesDay(input: SalesDayInput): SalesDay {
   const { date, tz, now } = input;
-  const today = todayIso(tz, now);
-  const rel: DayRel = date < today ? 'PAST' : date === today ? 'TODAY' : 'FUTURE';
+  const rel = dayRelOf(date, tz, now);
   const nowMin = minutesOnDate(now, date, tz);
-  const dayShort = shortDayText(date);
 
   const visitOf = new Map(input.visits.map((v) => [visitKeyOf(v.depotId, v.date, v.truckId, v.loadNo, v.sequence), v]));
   const extraOf = new Map(input.extraOrders.map((o) => [o.id, o]));
@@ -738,7 +722,6 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
   // Gather each route's deliveries and orders not on a truck.
   const deliveries = new Map<string, DeliveryAcc[]>();
   const off = new Map<string, Map<string, OffAcc>>();
-  const restKeys = new Set<string>();
   const leftOrders = new Set<string>();
   const movedOrders = new Set<string>();
   const onStopOrders = new Set<string>();
@@ -748,13 +731,11 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
     kind: OffTruckKind,
     orderId: string,
     who: { customerCode: string; branchCode: string | null; customerName: string },
-    ln: { salesOrderNo: string | null; cases: number },
-    why: string,
+    ln: { cases: number },
+    movedTo: string | null = null,
   ) => {
-    const key = `${kind}|${orderId}|${why}`;
-    const e = m.get(key) ?? { kind, customerCode: who.customerCode, branchCode: who.branchCode, customerName: who.customerName, invoices: [], cases: 0, why };
-    const inv = invoiceText(ln.salesOrderNo);
-    if (!e.invoices.includes(inv)) e.invoices.push(inv);
+    const key = `${kind}|${orderId}|${movedTo ?? ''}`;
+    const e = m.get(key) ?? { kind, customerCode: who.customerCode, branchCode: who.branchCode, customerName: who.customerName, cases: 0, movedTo };
     e.cases += ln.cases;
     m.set(key, e);
   };
@@ -762,22 +743,18 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
     kind: OffTruckKind,
     orderId: string,
     who: { customerCode: string; branchCode: string | null; customerName: string },
-    lines: readonly { salesRoute: string | null; salesOrderNo: string | null; cases: number }[],
-    why: string,
+    lines: readonly { salesRoute: string | null; cases: number }[],
+    movedTo: string | null = null,
   ) => {
     for (const ln of lines) {
       if (!ln.salesRoute) continue;
       let m = off.get(ln.salesRoute);
       if (!m) off.set(ln.salesRoute, (m = new Map()));
-      offAdd(m, kind, orderId, who, ln, why);
+      offAdd(m, kind, orderId, who, ln, movedTo);
     }
   };
-  const addTo = (a: DeliveryAcc, ln: { lineId: string; orderId: string; salesOrderNo: string | null; cases: number }, route: string | null) => {
-    if (route) a.routes.add(route);
+  const addTo = (a: DeliveryAcc, ln: { lineId: string; cases: number }) => {
     a.lineIds.add(ln.lineId);
-    a.orderIds.add(ln.orderId);
-    const inv = invoiceText(ln.salesOrderNo);
-    if (!a.invoices.includes(inv)) a.invoices.push(inv);
     a.cases += ln.cases;
   };
   // Each truck's deliveries (one per stop: all its lines left) and the orders taken off its trips.
@@ -795,29 +772,28 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
     for (const [i, stop] of rec.stops.entries()) {
       const cancelled = new Set(stop.cancelledOrderIds ?? []);
       const byRoute = new Map<string, DeliveryAcc>();
-      const whole: DeliveryAcc = { routes: new Set(), rec, stopIndex: i, stop, lineIds: new Set(), orderIds: new Set(), invoices: [], cases: 0 };
-      const moved = new Map<string, { salesRoute: string | null; salesOrderNo: string | null; cases: number }[]>();
+      const whole: DeliveryAcc = { rec, stopIndex: i, stop, lineIds: new Set(), cases: 0 };
+      const moved = new Map<string, { salesRoute: string | null; cases: number }[]>();
       for (const ln of stop.orderLines) {
         onStopOrders.add(ln.orderId);
         const order = facts.orders.get(ln.orderId);
         // Cancelled as the plan read it, or since; only a trip that never left can hold one (listed from the day's cancelled orders).
         if (cancelled.has(ln.orderId) || (order?.cancelled && carriedLoadShows(rec.load.status))) {
-          // The truck's list: taken off it (when the order is cancelled now: the day's cancelled orders say why).
-          const x = extraOf.get(ln.orderId);
-          if (x?.cancelled) offAdd(truckOffOf(truckId), 'CANCELLED', ln.orderId, stop, ln, cancelledWhy(x.cancelReason));
+          // The truck's list: taken off it (when the order is cancelled now).
+          if (extraOf.get(ln.orderId)?.cancelled) offAdd(truckOffOf(truckId), 'CANCELLED', ln.orderId, stop, ln);
           continue;
         }
         const route = facts.lines.get(ln.lineId)?.salesRoute ?? null;
         if (order?.carriedTo && carriedLoadShows(rec.load.status)) {
-          moved.set(ln.orderId, [...(moved.get(ln.orderId) ?? []), { salesRoute: route, salesOrderNo: ln.salesOrderNo, cases: ln.cases }]);
+          moved.set(ln.orderId, [...(moved.get(ln.orderId) ?? []), { salesRoute: route, cases: ln.cases }]);
           continue;
         }
         if (!carriedLoadShows(rec.load.status)) leftOrders.add(ln.orderId);
-        addTo(whole, ln, route);
+        addTo(whole, ln);
         if (!route) continue;
         let a = byRoute.get(route);
-        if (!a) byRoute.set(route, (a = { routes: new Set(), rec, stopIndex: i, stop, lineIds: new Set(), orderIds: new Set(), invoices: [], cases: 0 }));
-        addTo(a, ln, route);
+        if (!a) byRoute.set(route, (a = { rec, stopIndex: i, stop, lineIds: new Set(), cases: 0 }));
+        addTo(a, ln);
       }
       for (const [route, a] of byRoute) {
         const list = deliveries.get(route);
@@ -831,9 +807,9 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
       }
       for (const [orderId, lines] of moved) {
         movedOrders.add(orderId);
-        const why = movedWhy(facts.orders.get(orderId)!.carriedTo!);
-        listOff('MOVED', orderId, stop, lines, why);
-        for (const ln of lines) offAdd(truckOffOf(truckId), 'MOVED', orderId, stop, ln, why);
+        const to = facts.orders.get(orderId)!.carriedTo!;
+        listOff('MOVED', orderId, stop, lines, to);
+        for (const ln of lines) offAdd(truckOffOf(truckId), 'MOVED', orderId, stop, ln, to);
       }
     }
   }
@@ -842,10 +818,10 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
   for (const plan of input.plans) {
     const d = plan.detail;
     const { facts } = plan;
-    const linesByOrder = new Map<string, { lineId: string; salesRoute: string | null; salesOrderNo: string | null; cases: number }[]>();
+    const linesByOrder = new Map<string, { lineId: string; salesRoute: string | null; cases: number }[]>();
     for (const [lineId, l] of facts.lines) {
       const list = linesByOrder.get(l.orderId);
-      const x = { lineId, salesRoute: l.salesRoute, salesOrderNo: l.salesOrderNo, cases: l.cases };
+      const x = { lineId, salesRoute: l.salesRoute, cases: l.cases };
       if (list) list.push(x);
       else linesByOrder.set(l.orderId, [x]);
     }
@@ -863,20 +839,19 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
       if (!stopOrders.has(u.orderId)) {
         if (carriedTo) {
           movedOrders.add(u.orderId);
-          listOff('MOVED', u.orderId, u, lines, movedWhy(carriedTo));
-        } else listOff('NOT_PLANNED', u.orderId, u, lines, NOT_PLANNED_WHY(u.reasonCode));
+          listOff('MOVED', u.orderId, u, lines, carriedTo);
+        } else listOff('NOT_PLANNED', u.orderId, u, lines);
         continue;
       }
       const rest = lines.map((ln) => ({ ...ln, cases: ln.cases - (onTruck.get(ln.lineId) ?? 0) })).filter((ln) => ln.cases > 0);
       if (carriedTo) {
         movedOrders.add(u.orderId);
-        listOff('MOVED', u.orderId, u, rest, movedWhy(carriedTo));
-      } else listOff('PART_NOT_PLANNED', u.orderId, u, rest, PART_NOT_PLANNED_WHY);
-      for (const ln of rest) if (ln.salesRoute) restKeys.add(`${u.customerId}|${ln.salesRoute}`);
+        listOff('MOVED', u.orderId, u, rest, carriedTo);
+      } else listOff('PART_NOT_PLANNED', u.orderId, u, rest);
     }
     for (const p of facts.pending) {
       if (facts.orders.get(p.orderId)?.cancelled || extraOf.get(p.orderId)?.cancelled) continue;
-      listOff('ADDED_AFTER_PLAN', p.orderId, p, linesByOrder.get(p.orderId) ?? [], ADDED_AFTER_PLAN_WHY);
+      listOff('ADDED_AFTER_PLAN', p.orderId, p, linesByOrder.get(p.orderId) ?? []);
     }
   }
 
@@ -884,33 +859,33 @@ export function buildSalesDay(input: SalesDayInput): SalesDay {
   const plannedDepots = new Set(input.plans.map((p) => p.detail.run.depot.id));
   for (const o of input.extraOrders) {
     if (o.cancelled) {
-      if (!leftOrders.has(o.id)) listOff('CANCELLED', o.id, o, o.lines, cancelledWhy(o.cancelReason));
+      if (!leftOrders.has(o.id)) listOff('CANCELLED', o.id, o, o.lines);
       continue;
     }
     if (o.carriedTo) {
       if (!movedOrders.has(o.id) && !onStopOrders.has(o.id) && !unservedOrders.has(o.id)) {
         movedOrders.add(o.id);
-        listOff('MOVED', o.id, o, o.lines, movedWhy(o.carriedTo));
+        listOff('MOVED', o.id, o, o.lines, o.carriedTo);
       }
       continue;
     }
-    if (!plannedDepots.has(o.depotId)) listOff('NOT_PLANNED_YET', o.id, o, o.lines, NOT_PLANNED_YET_WHY);
+    if (!plannedDepots.has(o.depotId)) listOff('NOT_PLANNED_YET', o.id, o, o.lines);
   }
 
-  const ctx: RouteCtx = { input, lives, extraOf, restKeys, rel, nowMin, dayShort };
-  const routes = new Map<string, SalesRouteView>();
+  const ctx: RouteCtx = { input, lives, rel, nowMin };
+  const routes = new Map<string, DayView>();
   const codes = [...new Set([...deliveries.keys(), ...off.keys()])].sort(compareSalesRoutes);
   for (const route of codes) {
-    routes.set(route, routeView('ROUTE', route, deliveries.get(route) ?? [], [...(off.get(route)?.values() ?? [])], ctx));
+    routes.set(route, dayView('ROUTE', route, deliveries.get(route) ?? [], [...(off.get(route)?.values() ?? [])], ctx));
   }
   // Each truck by the code of its first trip of the day (the plan's shownTruckCode: a day-hired truck's plate).
-  const trucks = new Map<string, SalesRouteView>();
+  const trucks = new Map<string, DayView>();
   const truckRefs: DayTruckRef[] = [];
   for (const [truckId, accs] of truckDeliveries) {
     const first = [...accs].sort((x, y) => x.rec.load.departMin - y.rec.load.departMin || x.rec.load.loadNo - y.rec.load.loadNo)[0]!;
     const code = first.rec.load.truckCode;
     truckRefs.push({ id: truckId, code });
-    trucks.set(truckId, routeView('TRUCK', code, accs, [...(truckOff.get(truckId)?.values() ?? [])], ctx));
+    trucks.set(truckId, dayView('TRUCK', code, accs, [...(truckOff.get(truckId)?.values() ?? [])], ctx));
   }
   return { builtAt: now, date, routes, trucks, truckRefs };
 }
@@ -947,11 +922,8 @@ function etaStopOf(s: DetailStop, v: SalesVisitIn | null, siteRadius: ReadonlyMa
 interface RouteCtx {
   input: SalesDayInput;
   lives: Map<string, LoadLive>;
-  extraOf: Map<string, SalesExtraOrderIn>;
-  restKeys: Set<string>;
   rel: DayRel;
   nowMin: number;
-  dayShort: string;
 }
 
 /** Route R's result at a stop from its own lines of the visit (the deliveredOf rule of lib/delivery/visit.ts). */
@@ -969,10 +941,10 @@ function routeResult(a: DeliveryAcc, v: SalesVisitIn): { status: DeliveryStatus;
   return { status, delivered: { cases, of } };
 }
 
-/** One route's view (kind ROUTE: its deliveries and orders not on a truck) or one truck's (kind TRUCK: its stops, the orders taken off it). */
-function routeView(kind: SalesViewKind, code: string, accs: DeliveryAcc[], offs: OffAcc[], c: RouteCtx): SalesRouteView {
+/** One route's day (kind ROUTE: its deliveries and orders not on a truck) or one truck's (kind TRUCK: its stops, the orders taken off it). */
+function dayView(kind: SalesViewKind, code: string, accs: DeliveryAcc[], offs: OffAcc[], c: RouteCtx): DayView {
   const { input, lives, rel, nowMin } = c;
-  const { date, tz, now } = input;
+  const { date, tz } = input;
   accs.sort(
     (x, y) =>
       (x.stop.etaMin ?? Number.POSITIVE_INFINITY) - (y.stop.etaMin ?? Number.POSITIVE_INFINITY) ||
@@ -980,261 +952,48 @@ function routeView(kind: SalesViewKind, code: string, accs: DeliveryAcc[], offs:
       x.rec.load.loadNo - y.rec.load.loadNo ||
       x.stop.sequence - y.stop.sequence,
   );
-  // "part i of n" per customer, in that order.
-  const partsOf = new Map<string, number>();
-  for (const a of accs) partsOf.set(a.stop.customerId, (partsOf.get(a.stop.customerId) ?? 0) + 1);
-  const partNo = new Map<string, number>();
-  const truckKeys = new Map<string, string>();
-  const deliveries: SalesDelivery[] = [];
-  for (const [n, a] of accs.entries()) {
+  const deliveries: DayDelivery[] = accs.map((a) => {
     const L = a.rec.load;
-    const live = lives.get(L.id)!;
-    const sl = live.stop.get(a.stop.sequence) ?? plain('PLANNED', null);
+    const sl = lives.get(L.id)!.stop.get(a.stop.sequence) ?? plain('PLANNED');
     const v = a.rec.visits[a.stopIndex] ?? null;
-    if (!truckKeys.has(L.truckId)) truckKeys.set(L.truckId, `t${truckKeys.size + 1}`);
-    const k = (partNo.get(a.stop.customerId) ?? 0) + 1;
-    partNo.set(a.stop.customerId, k);
-    const parts = partsOf.get(a.stop.customerId)!;
     const slot = has(a.stop.etaMin) ? etaSlot(a.stop.etaMin, stopWindow(a.stop)) : null;
-    const window = slot ? hhmmRange(slot.from, slot.to) : null;
 
     let status: DeliveryStatus;
-    let detailText: string | null = sl.detail;
     let at: string | null = null;
-    let delivered: SalesDelivery['delivered'] = null;
-    let reason: string | null = null;
+    let atMin: number | null = null;
+    let delivered: DayDelivery['delivered'] = null;
     if (sl.kind === 'RESULT' && v) {
       const r = routeResult(a, v);
       status = r.status;
       delivered = r.delivered;
       const when = v.outcomeAt ?? v.departedAt;
-      at = when ? clockText(when, date, tz) : null;
-      if (status !== 'DELIVERED') reason = resultReason(v.reason, v.outcomeSource);
-      detailText =
-        status === 'DELIVERED'
-          ? `Delivered${at ? ` ${at}` : ''}`
-          : status === 'PARTLY_DELIVERED'
-            ? `${delivered ? `Delivered ${delivered.cases} of ${delivered.of} cases` : 'Partly delivered'}${at ? ` at ${at}` : ''}`
-            : `Not delivered${at ? ` (${at})` : ''}`;
+      if (when) {
+        at = clockText(when, date, tz);
+        atMin = minutesOnDate(when, date, tz);
+      }
     } else status = sl.kind === 'RESULT' ? 'NO_RESULT' : (sl.kind as DeliveryStatus);
 
-    // A live time only on the delivery day (or a trip still out after midnight): before it, the printed window.
+    // A live time only on the delivery day (or a trip still out after midnight): before it, the plan.
     const pending = rel !== 'FUTURE' && (PENDING.has(status) || ((status === 'PLANNED' || status === 'LOADING') && rel === 'TODAY'));
-    const eta = pending ? etaView(sl, slot, nowMin) : null;
-    if (eta && !sl.detail && !sl.noLive) detailText = eta.text;
-    else if (eta && sl.noLive) detailText = eta.text;
-    // Still due (critique 13): its expected time first (as Send to customer and the truck card say it), then why.
-    if (status === 'PASSED') detailText = eta ? `${eta.text} · ${STILL_DUE_NOTE}` : `Still due - ${STILL_DUE_NOTE}`;
-    if (eta && sl.stopsBefore && (status === 'NEXT' || status === 'ON_THE_WAY' || status === 'PASSED')) detailText = `${detailText ?? eta.text} · ${sl.stopsBefore} stop${sl.stopsBefore === 1 ? '' : 's'} before`;
-    else if (!eta && sl.noLive && sl.stopsBefore) detailText = `${sl.noLive} · ${sl.stopsBefore} stop${sl.stopsBefore === 1 ? '' : 's'} before`;
-    // May arrive after the customer's receiving hours (the live time is never clipped).
-    const closes = a.stop.promisedWindow?.endMin ?? a.stop.plannedHours?.hardEnd ?? null;
-    const arrivesBy = !eta ? null : eta.timing === 'DUE_NOW' ? nowMin : has(sl.notBefore) ? sl.notBefore : has(sl.expectedMin) && eta.timing !== 'NO_UPDATES' ? sl.expectedMin : null;
-    // The customer's text never gives a window that is over (or that the truck can no longer make) as the time.
-    const windowOver = !!slot && (nowMin > slot.to || (has(sl.notBefore) && sl.notBefore - slot.to >= LATE_TOLERANCE_MIN));
-    const afterHours = has(closes) && has(arrivesBy) && arrivesBy > closes ? `May arrive after the customer's receiving hours (until ${hhmm(closes)})` : null;
-
-    const notes: string[] = [];
-    if (L.status === 'PLANNED') notes.push(NOT_LOCKED_NOTE);
-    if ([...a.routes].some((r) => c.restKeys.has(`${a.stop.customerId}|${r}`))) notes.push(REST_NOT_PLANNED_NOTE);
-    const from = [...a.orderIds].map((id) => c.extraOf.get(id)?.carriedFromDate).filter((x): x is string => !!x).sort()[0];
-    if (from) notes.push(movedHereNote(from));
-    if (!carriedLoadShows(L.status)) {
-      const to = [...a.orderIds].map((id) => a.rec.plan.facts.orders.get(id)?.carriedTo).filter((x): x is string => !!x).sort().at(-1);
-      if (to) notes.push(restMovedNote(to));
-    }
-    const hard = a.stop.plannedHours && (a.stop.plannedHours.hardStart !== null || a.stop.plannedHours.hardEnd !== null) ? hhmmRange(a.stop.plannedHours.hardStart, a.stop.plannedHours.hardEnd) : null;
-    const promised = a.stop.promisedWindow && (a.stop.promisedWindow.startMin !== null || a.stop.promisedWindow.endMin !== null) ? hhmmRange(a.stop.promisedWindow.startMin, a.stop.promisedWindow.endMin) : null;
-    const stopNo = a.rec.stops.findIndex((s) => s.sequence === a.stop.sequence) + 1;
-    deliveries.push({
-      no: n + 1,
-      key: `d${n + 1}`,
+    return {
       customerName: a.stop.customerName,
       customerCode: a.stop.customerCode,
       branchCode: a.stop.branchCode,
-      invoices: a.invoices,
       cases: a.cases,
-      routes: [...a.routes].sort(compareSalesRoutes),
-      truckKey: truckKeys.get(L.truckId)!,
       truckCode: L.truckCode,
       loadNo: L.loadNo,
-      stopNo,
-      stopsOnTrip: a.rec.stops.length,
-      part: parts > 1 ? `part ${k} of ${parts}` : null,
       status,
-      statusText: STATUS_TEXT[status],
-      detailText,
-      window,
-      planned: has(a.stop.etaMin) ? hhmm(a.stop.etaMin) : null,
-      eta,
-      stopsBefore: PENDING.has(status) ? sl.stopsBefore : null,
-      afterHours,
+      window: slot ? hhmmRange(slot.from, slot.to) : null,
+      slot,
+      plannedMin: has(a.stop.etaMin) ? a.stop.etaMin : null,
       at,
+      atMin,
       delivered,
-      reason,
-      hours: hard && hard !== promised ? hard : promised ? null : 'any time',
-      orderTime: promised ? `this order: ${promised}` : null,
-      notes,
-      pin: a.stop.lat !== null && a.stop.lng !== null && Number.isFinite(a.stop.lat) && Number.isFinite(a.stop.lng) ? { lat: r4(a.stop.lat), lng: r4(a.stop.lng) } : null,
-      shareText: shareTextOf({
-        customerName: a.stop.customerName,
-        invoices: a.invoices,
-        status,
-        dayShort: c.dayShort,
-        window,
-        expected: eta?.expected ?? null,
-        windowOver,
-        seen: !!thereText(v, date, tz, 'seen'),
-        at,
-        delivered,
-      }),
-    });
-  }
-
-  const trucks = [...truckKeys.entries()].map(([truckId, key]) => truckView(truckId, key, deliveries, accs, c));
-  const offTruck: SalesOffTruck[] = offs
-    .sort((x, y) => OFF_ORDER[x.kind] - OFF_ORDER[y.kind] || byText(x.customerCode, y.customerCode) || byText(x.branchCode ?? '', y.branchCode ?? '') || byText(x.why, y.why))
-    .map((o) => ({ kind: o.kind, kindText: OFF_KIND_TEXT[o.kind], customerName: o.customerName, customerCode: o.customerCode, branchCode: o.branchCode, invoices: o.invoices, cases: o.cases, why: o.why }));
-  const count = (...s: DeliveryStatus[]) => deliveries.filter((d) => s.includes(d.status)).length;
-  const offCount = (...k: OffTruckKind[]) => offTruck.filter((o) => k.includes(o.kind)).length;
-  const counts: SalesCounts = {
-    delivered: count('DELIVERED'),
-    partly: count('PARTLY_DELIVERED'),
-    notDelivered: count('NOT_DELIVERED'),
-    noResult: count('NO_RESULT'),
-    now: count('AT_CUSTOMER', 'NEXT'),
-    onTheWay: count('ON_THE_WAY', 'VISITED', 'PASSED'),
-    planned: count('PLANNED', 'LOADING'),
-    didNotGo: count('TRUCK_DID_NOT_GO'),
-    delayed: deliveries.filter((d) => !DONE.has(d.status) && d.eta?.timing === 'LATE').length,
-    cancelled: offCount('CANCELLED'),
-    moved: offCount('MOVED'),
-    notPlanned: offCount('NOT_PLANNED', 'PART_NOT_PLANNED', 'ADDED_AFTER_PLAN', 'NOT_PLANNED_YET'),
-  };
-  const updatedText = `Updated ${hhmm(localMinutes(now, tz))}`;
-  return {
-    kind,
-    code,
-    query: kind === 'TRUCK' ? truckQuery(code) : code,
-    heading: `${kind === 'TRUCK' ? 'Truck' : 'Route'} ${code} · ${longDayText(date)}`,
-    updatedAt: now.toISOString(),
-    updatedText,
-    notLocked: accs.some((a) => !FIXED_STATUSES.has(a.rec.load.status)),
-    counts,
-    summaryText: summaryOf(counts, kind),
-    trucks,
-    deliveries,
-    offTruck,
-  };
-}
-
-function summaryOf(c: SalesCounts, kind: SalesViewKind): string {
-  const parts: [number, string][] = [
-    [c.delivered, 'delivered'],
-    [c.partly, 'partly delivered'],
-    [c.notDelivered, 'not delivered'],
-    [c.noResult, 'no result'],
-    [c.now, 'at the customer or next'],
-    [c.onTheWay, 'on the way'],
-    [c.planned, 'planned'],
-    [c.didNotGo, 'truck did not go'],
-    [c.delayed, 'delayed'],
-    [c.cancelled, 'cancelled'],
-    [c.moved, 'moved'],
-    [c.notPlanned, 'not on a truck'],
-  ];
-  const text = parts.filter(([n]) => n > 0).map(([n, w]) => `${n} ${w}`).join(' · ');
-  return text || (kind === 'TRUCK' ? 'Nothing for this truck yet' : 'Nothing for this route yet');
-}
-
-const TRIP_STATUSES: ReadonlySet<string> = new Set(['PLANNED', 'LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED']);
-
-/** One truck of the route's (or the truck's own) deliveries (`deliveries[i]` is `accs[i]`'s). */
-function truckView(truckId: string, key: string, deliveries: SalesDelivery[], accs: DeliveryAcc[], c: RouteCtx): SalesTruck {
-  const { input, lives, rel } = c;
-  const { date, tz, now } = input;
-  // Every trip of the truck that day (the card says where the truck is, whichever route the trip carries).
-  const trips = [...lives.values()].filter((l) => l.rec.load.truckId === truckId).sort((a, b) => a.rec.load.departMin - b.rec.load.departMin || a.rec.load.loadNo - b.rec.load.loadNo);
-  const mine = accs.filter((a) => a.rec.load.truckId === truckId);
-  const truckCode = mine[0]?.rec.load.truckCode ?? '';
-  // The trip on the road: the first Dispatched trip that is not over (Back at depot tapped, or probably finished - a
-  // later trip that left ends it), so a trip pressed early with the one before is not "on the road" before it.
-  const onRoad = trips.find((t) => t.rec.load.status === 'DISPATCHED' && !isOver(t.liveClass)) ?? null;
-  // Else the next trip that has not left (the one being loaded first), else the latest trip (over).
-  const current =
-    onRoad ??
-    trips.find((t) => t.rec.load.status === 'LOADING') ??
-    trips.find((t) => t.rec.load.status === 'PLANNED' || t.rec.load.status === 'LOCKED') ??
-    trips.at(-1) ??
-    null;
-  let trip: SalesTruck['trip'] = null;
-  if (current) {
-    const L = current.rec.load;
-    const status = (TRIP_STATUSES.has(L.status) ? L.status : 'PLANNED') as TripStatus;
-    let text: string;
-    if (L.status === 'DISPATCHED') {
-      const since = current.rec.statusChangedAt ? ` since ${clockText(current.rec.statusChangedAt, date, tz)}` : '';
-      text =
-        current.liveClass === 'BACK'
-          ? `Trip ${L.loadNo} back at the depot`
-          : current.liveClass === 'OVER'
-            ? `Trip ${L.loadNo} probably finished - not closed yet`
-            : `On the road (trip ${L.loadNo})${since}${current.liveClass === 'NONE' ? ` - ${NO_LIVE_TEXT.toLowerCase()}` : ''}`;
-    } else if (L.status === 'COMPLETED') text = 'All trips finished';
-    else if (rel === 'PAST') text = `Trip ${L.loadNo} did not go out`;
-    else if (current.notMarkedLeft) text = `Trip ${L.loadNo} should have left at ${hhmm(L.departMin + current.shiftMin)} - not marked as left yet`;
-    else if (L.status === 'LOADING') text = `Being loaded (trip ${L.loadNo}), planned to leave ${hhmm(L.departMin)}`;
-    else text = `Trip ${L.loadNo} planned to leave ${hhmm(L.departMin)}`;
-    trip = { loadNo: L.loadNo, status, text };
-  }
-  const behind = onRoad?.behindMin ?? null;
-  const lateText = onRoad && has(behind) && behind >= BEHIND_SHOWN_MIN ? `Running about ${round5(behind)} min behind plan` : null;
-
-  // The route's next customer on this truck: on the trip on the road first, else the next trip.
-  const ours = deliveries.filter((d) => d.truckKey === key);
-  const nextD =
-    ours.find((d) => d.status === 'AT_CUSTOMER') ??
-    ours.filter((d) => d.status === 'NEXT' || d.status === 'ON_THE_WAY' || d.status === 'PASSED').sort((a, b) => (a.stopsBefore ?? 0) - (b.stopsBefore ?? 0) || a.no - b.no)[0] ??
-    ours.find((d) => d.status === 'PLANNED' || d.status === 'LOADING') ??
-    null;
-  let nextYours: string | null = null;
-  if (nextD) {
-    const when = nextD.status === 'AT_CUSTOMER' ? 'truck there now' : nextD.eta?.expected ? `about ${nextD.eta.expected}` : nextD.window ? `window ${nextD.window}` : null;
-    const before = nextD.stopsBefore ? `${nextD.stopsBefore} stop${nextD.stopsBefore === 1 ? '' : 's'} before it` : null;
-    nextYours = [nextD.customerName, when, before].filter(Boolean).join(' · ');
-  }
-
-  // The position: only on the delivery day itself, while the trip on the road (never one over) still has this
-  // route's deliveries to make (critique 10).
-  let position: SalesTruckPosition | null = null;
-  let gpsText: string | null = null;
-  const gps = input.gps;
-  if (gps) {
-    const p = gps.positions.get(truckId) ?? null;
-    if (!gps.tracked.has(truckId)) gpsText = GPS_NONE_TEXT;
-    // A truck not on the road: nothing to say about its GPS (no position is shown before it leaves).
-    else if (!onRoad) gpsText = null;
-    else if (!p) gpsText = 'GPS: no position yet';
-    else {
-      const ageMin = Math.max(0, Math.floor((now.getTime() - p.fixAt.getTime()) / 60_000));
-      const stale = fixStale({ fixAt: p.fixAt, flags: p.flags }, now);
-      const at = hhmm(localMinutes(p.fixAt, tz));
-      const updatedText = stale ? `Last GPS position ${at} (${ageMin} min ago)` : `Updated ${at}`;
-      gpsText = stale ? `GPS: last position ${at}` : `GPS: updated ${at}`;
-      const pendingOnRoad = !!onRoad && accs.some((a, i) => a.rec.load.id === onRoad.rec.load.id && PENDING.has(deliveries[i]!.status));
-      if (pendingOnRoad && ageMin <= POSITION_MAX_AGE_MIN && rel === 'TODAY' && Number.isFinite(p.lat) && Number.isFinite(p.lng)) {
-        position = { lat: r3(p.lat), lng: r3(p.lng), fixAt: p.fixAt.toISOString(), updatedText, ageMin, stale, moving: !stale && (p.speedKmh ?? 0) >= MOVING_KMH };
-      }
-    }
-  }
-  return {
-    key,
-    truckCode,
-    trip,
-    trips: new Set(mine.map((a) => a.rec.load.id)).size,
-    lateText,
-    nextYours,
-    position,
-    gpsText,
-  };
+      eta: pending ? etaView(sl, slot, nowMin) : null,
+    };
+  });
+  const offTruck: DayOffTruck[] = offs
+    .sort((x, y) => OFF_ORDER[x.kind] - OFF_ORDER[y.kind] || byText(x.customerCode, y.customerCode) || byText(x.branchCode ?? '', y.branchCode ?? '') || byText(x.movedTo ?? '', y.movedTo ?? ''))
+    .map((o) => ({ kind: o.kind, customerName: o.customerName, customerCode: o.customerCode, branchCode: o.branchCode, cases: o.cases, movedTo: o.movedTo }));
+  return { kind, code, query: kind === 'TRUCK' ? truckQuery(code) : code, deliveries, offTruck };
 }
