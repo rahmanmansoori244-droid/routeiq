@@ -136,6 +136,10 @@ describe('runAlertSweep', () => {
   });
 
   it('review M2: each company\'s last good sweep is kept ("Checked"); a failure or 10 min without one says so; /api/health gets counts only', async () => {
+    // This process started following the sweep at 08:00, 15 min before NOW (fixed, never the real clock:
+    // with the real start the test failed once the real date passed NOW).
+    const start = at(8 * 60);
+    resetAlertSweepClock(start);
     state.facts.set('tA', lateFacts());
     state.fail.add('tB');
     const { db } = stubDb([cfg('tA'), cfg('tB')]);
@@ -144,9 +148,9 @@ describe('runAlertSweep', () => {
     expect(alertSweepStatus('tB', NOW)).toMatchObject({ checkedAt: null, failed: true });
     expect(alertSweepStatus('tA', new Date(NOW.getTime() + 10 * 60_000 + 1))).toMatchObject({ stale: true });
     // A company never swept yet: stale only 10 min after its switch-on (or this process's start).
-    const later = new Date(Date.now() + 5 * 60_000);
+    const later = new Date(start.getTime() + 5 * 60_000);
     expect(alertSweepStatus('tC', later, later).stale).toBe(false);
-    expect(alertSweepStatus('tC', new Date(Date.now() + 11 * 60_000), null).stale).toBe(true);
+    expect(alertSweepStatus('tC', new Date(start.getTime() + 11 * 60_000), null).stale).toBe(true);
     const h = alertSweepHealth(NOW);
     // tB never had a good sweep and this process started more than 10 min before NOW: failing and overdue.
     expect(h).toEqual({ lastRunAt: NOW.toISOString(), companies: 2, failing: 1, stale: 1 });

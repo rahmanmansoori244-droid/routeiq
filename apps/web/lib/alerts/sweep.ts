@@ -102,13 +102,13 @@ function noteHealth(tenantId: string, ok: boolean, at: number): void {
   healthOf().set(tenantId, h);
 }
 
-/** Back to "never ran" (tests). */
-export function resetAlertSweepClock(): void {
+/** Back to "never ran" (tests); `since` is when this process started following the sweep (default now). */
+export function resetAlertSweepClock(since: Date = new Date()): void {
   g.__routeiqAlertSweepAt = undefined;
   g.__routeiqAlertSweepRunning = false;
   g.__routeiqAlertHealth = new Map();
   g.__routeiqAlertLastRunAt = undefined;
-  g.__routeiqAlertSince = Date.now();
+  g.__routeiqAlertSince = since.getTime();
 }
 
 /**
