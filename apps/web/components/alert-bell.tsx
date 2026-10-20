@@ -11,7 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSepar
 import { api } from '@/app/t/[slug]/dispatch/client-api';
 import { ALERT_POLL_MS } from '@/lib/alerts/catalog';
 import type { AlertSummary, OpsAlertRow } from '@/lib/alerts/types';
-import { alertDayGroups, alertWhen, alertWhere, bellTone, newAlertToasts, ruleLabel, SEVERITY_BADGE, sweepCheckText } from '@/lib/alerts/view';
+import { alertDayGroups, alertWhen, alertWhere, bellTone, newAlertToasts, reviewCauseText, ruleLabel, SEVERITY_BADGE, sweepCheckText } from '@/lib/alerts/view';
 import { todayIso } from '@/lib/dispatch/time';
 import { acknowledgeAlerts } from './alerts-api';
 
@@ -151,10 +151,25 @@ export function AlertBell({ slug, enabled, canAck, timezone }: { slug: string; e
                     </div>
                     <p className="mt-0.5 text-xs text-muted-foreground">{ruleLabel(r.rule)}</p>
                     <p className="mt-0.5 break-words text-xs">{r.text}</p>
+                    {r.review ? (
+                      // Owner request 20 Oct 2026: who already recorded a cause & action, so two dispatchers do not both call the driver.
+                      <p className="mt-0.5 break-words text-xs text-muted-foreground" data-testid="alert-bell-review-line">
+                        Cause &amp; action saved by {r.review.byName ?? 'someone'}: {reviewCauseText(r.review)}
+                      </p>
+                    ) : null}
                     {canAck ? (
-                      <Button size="sm" variant="outline" className="mt-1 h-6 px-2 text-xs" disabled={busy} onClick={() => void ack([r])} data-testid="alert-bell-ack">
-                        Acknowledge
-                      </Button>
+                      <div className="mt-1 flex items-center gap-2">
+                        <Button size="sm" variant="outline" className="h-6 px-2 text-xs" disabled={busy} onClick={() => void ack([r])} data-testid="alert-bell-ack">
+                          Acknowledge
+                        </Button>
+                        <Link
+                          href={`/t/${slug}/alerts?date=${encodeURIComponent(r.deliveryDate)}&reviewId=${encodeURIComponent(r.id)}`}
+                          className="text-xs text-primary underline"
+                          data-testid="alert-bell-review"
+                        >
+                          {r.review ? 'Edit cause & action' : 'Cause & action'}
+                        </Link>
+                      </div>
                     ) : null}
                   </div>
                 ))}

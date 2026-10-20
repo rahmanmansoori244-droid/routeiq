@@ -13,6 +13,11 @@
  *   ALERTS_ACKNOWLEDGED per request that changed something, its user taken from the session.
  * - POST /api/alerts/test-email (TENANT_ADMIN, 3 per 10 min): to the SAVED recipients only; 409 without
  *   e-mail on the server or without recipients; 502 with the provider's status when it refuses.
+ * - PATCH /api/alerts (PLANNER+; cause & action, owner request 20 Oct 2026): any state and day; codes of the
+ *   rule's lists, Other with its text; guarded by the last save the editor saw (409 REVIEW_CHANGED with the row),
+ *   a lock wait (409 ALERT_BUSY); never the alert's own columns; one audit row per alert with the codes, never
+ *   the texts; a no-op writes nothing; the other alerts of the incident; remove; read-only after 90 days. GET's
+ *   cause & action filter (follow-up: the last 92 days) and its server-side counts.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -33,7 +38,43 @@ const state = vi.hoisted(() => ({
   emailOn: true,
   sends: [] as Record<string, any>[],
   sendResult: { ok: true } as Record<string, unknown>,
+  // Cause & action (owner request 20 Oct 2026): the guarded UPDATEs of a save and what they changed.
+  updates: [] as Record<string, any>[],
+  raw: [] as string[],
+  firstFinds: [] as Record<string, any>[],
+  updateError: null as null | Error,
+  /** Rows the next guarded UPDATE matches no matter what (a save that lost the race). */
+  updateMisses: false,
+  /** What the save's transaction did, in order: each advisory lock (its key) and each guarded UPDATE (its id). */
+  order: [] as string[],
+  /** The error an advisory lock throws (another holds it past the lock wait). */
+  lockError: null as null | Error,
 }));
+
+/**
+ * Does a row match a Prisma where of the shapes these routes use: equality, null, Date, { not }, { in },
+ * { gte, lte, gt, lt } and OR (review of the branch, 20 Oct 2026, finding 15: the counts are checked against
+ * what they really select, so two counts swapped no longer pass).
+ */
+function matchesWhere(r: Record<string, any>, where: Record<string, any> = {}): boolean {
+  const t = (d: unknown) => (d instanceof Date ? d.getTime() : d);
+  return Object.entries(where).every(([k, v]) => {
+    if (k === 'OR') return (v as Record<string, any>[]).some((w) => matchesWhere(r, w));
+    const x = r[k];
+    if (v === null) return x == null;
+    if (v instanceof Date) return x instanceof Date && x.getTime() === v.getTime();
+    if (v && typeof v === 'object') {
+      if ('not' in v) return v.not === null ? x != null : t(x) !== t(v.not);
+      if ('in' in v) return (v.in as unknown[]).includes(x);
+      const n = t(x) as number;
+      return x != null && (v.gte === undefined || n >= (t(v.gte) as number)) && (v.lte === undefined || n <= (t(v.lte) as number)) && (v.gt === undefined || n > (t(v.gt) as number)) && (v.lt === undefined || n < (t(v.lt) as number));
+    }
+    return x === v;
+  });
+}
+
+/** The users' names a row is read with (the fake joins them by id). */
+const NAMES: Record<string, string> = { u1: 'Sam Example', u2: 'Lee Example' };
 
 vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: state.user, tenantId: 'tA', role: state.role, name: 'Sam Example', email: 'sam@company.example' } })) }));
 vi.mock('@/lib/audit', () => ({ audit: vi.fn(async (input: Record<string, any>) => void state.audits.push(input)) }));
@@ -44,23 +85,58 @@ vi.mock('@/lib/tenant', () => ({
     opsAlert: {
       findMany: async (args: Record<string, any>) => {
         state.finds.push(args);
+        const ids = args.where?.id?.in as string[] | undefined;
+        if (ids) return state.rows.filter((r) => ids.includes(r.id as string)).map((r) => ({ ...r }));
         const sev = args.where?.severity;
         return state.rows.filter((r) => (sev === 'HIGH' ? r.severity === 'HIGH' : sev ? r.severity !== 'HIGH' : true));
       },
+      // The tenant-scoped client adds the company: a row of another company is never found.
+      findFirst: async (args: Record<string, any>) => {
+        state.firstFinds.push(args);
+        const r = state.rows.find((x) => x.id === args.where?.id && x.tenantId === 'tA');
+        if (!r) return null;
+        const name = (id: unknown) => (typeof id === 'string' && NAMES[id] ? { name: NAMES[id]! } : null);
+        return { ...r, ackedBy: r.ackedBy ?? null, reviewedBy: name(r.reviewedById), reviewFirstBy: name(r.reviewFirstById) };
+      },
+      // The tenant-scoped client adds the company; the where is honoured (finding 15).
       count: async (args: Record<string, any>) => {
         state.counts.push(args);
-        return state.rows.filter((r) => (args.where?.severity === 'HIGH' ? r.severity === 'HIGH' : true)).length;
+        return state.rows.filter((r) => r.tenantId === 'tA' && matchesWhere(r, args.where)).length;
       },
     },
     opsAlertDigest: { count: async () => state.digests },
   }),
 }));
 vi.mock('@/lib/db', () => {
+  /** Does a row match a guarded UPDATE's where (equality, null, dates by their time)? */
+  const matches = (r: Record<string, unknown>, where: Record<string, unknown>) =>
+    Object.entries(where).every(([k, v]) => (v === null ? r[k] == null : v instanceof Date ? r[k] instanceof Date && (r[k] as Date).getTime() === v.getTime() : r[k] === v));
   const tx = {
-    opsAlert: { count: async () => state.known },
+    opsAlert: {
+      count: async () => state.known,
+      updateMany: async (args: { where: Record<string, unknown>; data: Record<string, any> }) => {
+        state.updates.push(args);
+        state.order.push(`update:${String(args.where.id)}`);
+        if (state.updateError) throw state.updateError;
+        if (state.updateMisses) return { count: 0 };
+        const hit = state.rows.filter((r) => matches(r, args.where));
+        for (const r of hit) {
+          for (const [k, v] of Object.entries(args.data)) r[k] = v && typeof v === 'object' && 'increment' in v ? ((r[k] as number) ?? 0) + (v.increment as number) : v;
+        }
+        return { count: hit.length };
+      },
+    },
     $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
       state.sql.push({ text: strings.join('?'), values });
+      if (/pg_advisory_xact_lock/.test(strings.join('?'))) {
+        state.order.push(`lock:${String(values[0])}`);
+        if (state.lockError) throw state.lockError;
+      }
       return state.acked;
+    },
+    $executeRawUnsafe: async (sql: string) => {
+      state.raw.push(sql);
+      return 0;
     },
   };
   return { prisma: { ...tx, $transaction: async (fn: (t: typeof tx) => unknown) => fn(tx) } };
@@ -73,12 +149,12 @@ vi.mock('@/lib/email', () => ({
   },
 }));
 
-import { GET as LIST } from '@/app/api/alerts/route';
+import { GET as LIST, PATCH } from '@/app/api/alerts/route';
 import { GET as SUMMARY } from '@/app/api/alerts/summary/route';
 import { POST as ACK } from '@/app/api/alerts/ack/route';
 import { POST as TEST_EMAIL } from '@/app/api/alerts/test-email/route';
-import { todayIso, zonedDayStart } from '@/lib/dispatch/time';
-import { bellOpenWhere, bellWindow } from '@/lib/alerts/inbox';
+import { addDaysIso, todayIso, zonedDayStart } from '@/lib/dispatch/time';
+import { bellOpenWhere, bellWindow, readAlertListQuery, reviewAuditValue, reviewSaveTime } from '@/lib/alerts/inbox';
 
 const cfg = (extra: Record<string, unknown> = {}) => ({
   alertsEnabled: true,
@@ -127,6 +203,23 @@ const alert = (extra: Record<string, unknown> = {}) => ({
   digestId: null,
   emailAttempts: 0,
   emailError: null,
+  // Cause & action (owner request 20 Oct 2026): none recorded.
+  reviewCause: null,
+  reviewCauseOther: null,
+  reviewAction: null,
+  reviewActionOther: null,
+  reviewNote: null,
+  reviewFollowUp: false,
+  reviewFirstAt: null,
+  reviewFirstById: null,
+  reviewedAt: null,
+  reviewedById: null,
+  reviewSaves: 0,
+  reviewGroupId: null,
+  reviewTier: null,
+  reviewOccurrences: null,
+  reviewCustomerId: null,
+  detailsRemovedAt: null,
   ...extra,
 });
 
@@ -154,6 +247,13 @@ beforeEach(() => {
   state.emailOn = true;
   state.sends = [];
   state.sendResult = { ok: true };
+  state.updates = [];
+  state.raw = [];
+  state.firstFinds = [];
+  state.updateError = null;
+  state.updateMisses = false;
+  state.order = [];
+  state.lockError = null;
 });
 
 describe('GET /api/alerts', () => {
@@ -213,9 +313,11 @@ describe('GET /api/alerts/summary (the bell)', () => {
 
   it("on: the open rows of today and tomorrow (owner request 19 Oct 2026: no longer yesterday's), the HIGH count, the newest HIGH first, the company's today", async () => {
     state.role = 'VIEWER';
-    state.rows = [alert({ id: 'w1' }), alert({ id: 'h1', severity: 'HIGH', tier: 2 }), alert({ id: 'w2', lastSeenAt: new Date('2026-10-16T05:50:00Z') })];
-    const { body } = await get(SUMMARY, '/api/alerts/summary');
     const today = todayIso('Asia/Muscat');
+    // Rows of the company's today (the fake count honours the where).
+    const deliveryDate = new Date(`${today}T00:00:00.000Z`);
+    state.rows = [alert({ id: 'w1', deliveryDate }), alert({ id: 'h1', severity: 'HIGH', tier: 2, deliveryDate }), alert({ id: 'w2', deliveryDate, lastSeenAt: new Date('2026-10-16T05:50:00Z') })];
+    const { body } = await get(SUMMARY, '/api/alerts/summary');
     expect(body.data).toMatchObject({ enabled: true, today, open: 3, high: 1, emailCapReached: false });
     expect(body.data.latest.map((r: any) => r.id)).toEqual(['h1', 'w2', 'w1']);
     const day = (d: number) => new Date(Date.parse(`${today}T00:00:00.000Z`) + d * 86_400_000);
@@ -394,5 +496,340 @@ describe('POST /api/alerts/test-email', () => {
   it('is limited to 3 per 10 min per user (the limiter is off under NODE_ENV=test, so the options are read)', () => {
     const src = readFileSync(path.resolve(__dirname, '../../app/api/alerts/test-email/route.ts'), 'utf8');
     expect(src).toMatch(/\{ role: 'TENANT_ADMIN', rateLimitKey: 'alerts-test-email', rateLimitLimit: 3, rateLimitWindowMs: 10 \* 60_000 \}/);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Cause & action (owner request 20 Oct 2026: "a place where a note / reason for the alert to have happened and
+// the solution"): PATCH /api/alerts (PLANNER+), and GET's filter and counts.
+// ---------------------------------------------------------------------------------------------
+
+const patch = async (body: unknown) => {
+  const res = await PATCH(new Request('http://localhost/api/alerts', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+  return { status: res.status, body: (await res.json()) as { data: any; error: any } };
+};
+const save = (id: string, extra: Record<string, unknown> = {}) => ({ id, baseReviewedAt: null, cause: 'TRAFFIC', action: 'CALLED_DRIVER', ...extra });
+/** A row whose cause & action was saved by u2 at 07:00 (first at 06:30). */
+const reviewed = (extra: Record<string, unknown> = {}) =>
+  alert({
+    reviewCause: 'TRAFFIC',
+    reviewCauseOther: null,
+    reviewAction: 'CALLED_DRIVER',
+    reviewActionOther: null,
+    reviewNote: 'Road works near the roundabout',
+    reviewFollowUp: false,
+    reviewFirstAt: new Date('2026-10-16T06:30:00.000Z'),
+    reviewFirstById: 'u2',
+    reviewedAt: new Date('2026-10-16T07:00:00.000Z'),
+    reviewedById: 'u2',
+    reviewSaves: 1,
+    reviewGroupId: null,
+    reviewTier: 1,
+    reviewOccurrences: 1,
+    reviewCustomerId: null,
+    ...extra,
+  });
+
+describe('PATCH /api/alerts: the cause & action of an alert', () => {
+  it('a VIEWER may not record one (403); an unknown id or another company\'s is 404; nothing is written', async () => {
+    state.rows = [alert({ id: 'a1' }), alert({ id: 'b1', tenantId: 'tB' })];
+    state.role = 'VIEWER';
+    expect((await patch(save('a1'))).status).toBe(403);
+    state.role = 'PLANNER';
+    expect((await patch(save('nope'))).status).toBe(404);
+    expect((await patch(save('b1'))).status).toBe(404);
+    expect([state.updates, state.audits]).toEqual([[], []]);
+  });
+
+  it('refuses a malformed body (400): a code that is no code, extra fields, a missing base, a long note', async () => {
+    state.rows = [alert({ id: 'a1' })];
+    for (const body of [save('a1', { cause: 'traffic' }), save('a1', { userId: 'u2' }), { id: 'a1', cause: 'TRAFFIC', action: 'CALLED_DRIVER' }, save('a1', { note: 'x'.repeat(2001) }), save('a1', { alsoIds: Array.from({ length: 51 }, (_, i) => `x${i}`) })]) {
+      expect((await patch(body)).status, JSON.stringify(body).slice(0, 80)).toBe(400);
+    }
+    expect(state.updates).toEqual([]);
+  });
+
+  it('refuses Other without its text and a code not offered for the rule (400 with the code and the field)', async () => {
+    state.rows = [alert({ id: 'a1' }), alert({ id: 'p1', rule: 'PROOF_FAR', kind: 'EVENT' })];
+    const other = await patch(save('a1', { cause: 'OTHER', causeOther: ' a ' }));
+    expect([other.status, other.body.error.code, other.body.error.field]).toEqual([400, 'REVIEW_OTHER_REQUIRED', 'cause']);
+    const notForRule = await patch(save('p1', { cause: 'TRAFFIC', action: 'FIXED_PIN' }));
+    expect([notForRule.status, notForRule.body.error.code, notForRule.body.error.field]).toEqual([400, 'REVIEW_CODE_NOT_FOR_RULE', 'cause']);
+    expect(state.updates).toEqual([]);
+  });
+
+  it('the first save, on an alert of a day that ended: the company locks first, then one guarded UPDATE of the cause & action only, with a lock wait; one audit row with the codes and the texts', async () => {
+    state.rows = [alert({ id: 'a1', resolvedAt: new Date('2026-10-16T20:01:00Z'), resolvedReason: 'DAY_ENDED', tier: 2, occurrences: 2, customerId: 'cust1' })];
+    const { status, body } = await patch(save('a1', { cause: 'OTHER', causeOther: 'Road closed by police', note: 'Call 9123 4567 next time', followUp: true }));
+    expect(status).toBe(200);
+    expect(state.raw).toEqual([`SET LOCAL lock_timeout = '5000ms'`]);
+    // Review of the branch (20 Oct 2026), finding 1: the company's alert lock (the sweep's) and then its e-mail
+    // lock (the claim's) BEFORE any row is written, so a claim never skips a row this save holds.
+    expect(state.sql.map((q) => [q.text, q.values])).toEqual([
+      ['SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(?, 0))', ['ops-alerts:tA']],
+      ['SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(?))', ['ops-alerts-mail:tA']],
+    ]);
+    expect(state.order).toEqual(['lock:ops-alerts:tA', 'lock:ops-alerts-mail:tA', 'update:a1']);
+    expect(state.updates).toHaveLength(1);
+    const u = state.updates[0]!;
+    expect(u.where).toEqual({ tenantId: 'tA', id: 'a1', reviewedAt: null, detailsRemovedAt: null });
+    expect(u.data).toMatchObject({
+      reviewCause: 'OTHER',
+      reviewCauseOther: 'Road closed by police',
+      reviewAction: 'CALLED_DRIVER',
+      reviewActionOther: null,
+      reviewNote: 'Call [number] next time',
+      reviewFollowUp: true,
+      reviewedById: 'u1',
+      reviewFirstById: 'u1',
+      reviewSaves: { increment: 1 },
+      reviewGroupId: null,
+      reviewTier: 2,
+      reviewOccurrences: 2,
+      reviewCustomerId: 'cust1',
+    });
+    expect(u.data.reviewFirstAt).toEqual(u.data.reviewedAt);
+    // Never the alert itself: its state, acknowledgement and e-mail stay as the sweep left them.
+    expect(Object.keys(u.data).filter((k) => !k.startsWith('review'))).toEqual([]);
+    expect(body.data).toMatchObject({ changed: true, also: [], skipped: [] });
+    expect(body.data.row).toMatchObject({ state: 'RESOLVED', resolvedReason: 'DAY_ENDED', review: { cause: 'OTHER', causeOther: 'Road closed by police', byName: 'Sam Example', firstByName: 'Sam Example', saves: 1, followUp: true } });
+    expect(state.audits).toHaveLength(1);
+    expect(state.audits[0]).toMatchObject({
+      tenantId: 'tA',
+      userId: 'u1',
+      action: 'ALERT_REVIEW_SAVED',
+      entity: 'OpsAlert',
+      entityId: 'a1',
+      beforeJson: null,
+      afterJson: {
+        rule: 'ETA_LATE',
+        deliveryDate: '2026-10-16',
+        truckCode: 'T05',
+        loadNo: 1,
+        cause: 'OTHER',
+        action: 'CALLED_DRIVER',
+        followUp: true,
+        // Finding 2: the texts too (the history of an edit), as cleaned: never a phone number.
+        causeOther: 'Road closed by police',
+        actionOther: null,
+        note: 'Call [number] next time',
+        causeOtherChars: 21,
+        noteChars: 23,
+        noteChanged: true,
+        groupId: null,
+      },
+    });
+    expect(JSON.stringify(state.audits)).not.toContain('9123');
+  });
+
+  it('an edit names the last save it saw: the first save stays, the time only grows, the audit row has before and after', async () => {
+    state.rows = [reviewed({ id: 'a1' })];
+    const { status, body } = await patch(save('a1', { baseReviewedAt: '2026-10-16T07:00:00.000Z', action: 'NONE_YET' }));
+    expect(status).toBe(200);
+    const u = state.updates[0]!;
+    expect(u.where).toEqual({ tenantId: 'tA', id: 'a1', reviewedAt: new Date('2026-10-16T07:00:00.000Z'), detailsRemovedAt: null });
+    expect(u.data).not.toHaveProperty('reviewFirstAt');
+    expect(u.data).not.toHaveProperty('reviewFirstById');
+    expect((u.data.reviewedAt as Date).getTime()).toBeGreaterThan(new Date('2026-10-16T07:00:00.000Z').getTime());
+    // "Nothing yet" always needs follow-up; the note was not sent: it is removed.
+    expect(u.data).toMatchObject({ reviewAction: 'NONE_YET', reviewFollowUp: true, reviewNote: null });
+    expect(body.data.row.review).toMatchObject({ byName: 'Sam Example', firstByName: 'Lee Example', saves: 2, firstAt: '2026-10-16T06:30:00.000Z' });
+    // Finding 2: the earlier note is in the audit row (the edit removed it from the alert).
+    expect(state.audits[0]).toMatchObject({
+      action: 'ALERT_REVIEW_SAVED',
+      beforeJson: { cause: 'TRAFFIC', action: 'CALLED_DRIVER', followUp: false, note: 'Road works near the roundabout', noteChars: 30, savedAt: '2026-10-16T07:00:00.000Z', byId: 'u2' },
+      afterJson: { action: 'NONE_YET', followUp: true, note: null, noteChars: null, noteChanged: true },
+    });
+  });
+
+  it('finding 2: two versions with different texts audit differently (an edit keeps the earlier note and Other texts, not only their lengths)', () => {
+    const a = reviewAuditValue({ cause: 'OTHER', causeOther: 'Gate closed', action: 'OTHER', actionOther: 'New slot tomorrow', note: 'Gate closed, sales agreed new slot tomorrow', followUp: false });
+    const b = reviewAuditValue({ cause: 'OTHER', causeOther: 'Driver late', action: 'OTHER', actionOther: 'Spoke with him ok', note: 'Driver was late, spoke with him, all fine..', followUp: false });
+    expect([a!.causeOtherChars, a!.actionOtherChars, a!.noteChars]).toEqual([b!.causeOtherChars, b!.actionOtherChars, b!.noteChars]);
+    expect(a).not.toEqual(b);
+    expect(a).toMatchObject({ causeOther: 'Gate closed', actionOther: 'New slot tomorrow', note: 'Gate closed, sales agreed new slot tomorrow' });
+    expect(reviewAuditValue(null)).toBeNull();
+  });
+
+  it("finding 16: the time of a save only grows - after the last save even when this server's clock is behind (another web process saved it)", async () => {
+    const now = new Date('2026-10-16T08:00:00.000Z');
+    expect(reviewSaveTime(null, now)).toEqual(now);
+    expect(reviewSaveTime(new Date('2026-10-16T07:00:00.000Z'), now)).toEqual(now);
+    expect(reviewSaveTime(now, now)).toEqual(new Date('2026-10-16T08:00:00.001Z'));
+    expect(reviewSaveTime(new Date('2026-10-16T08:01:00.000Z'), now)).toEqual(new Date('2026-10-16T08:01:00.001Z'));
+    // Through the route: the stored save is an hour after the clock of this process.
+    const later = new Date(Date.now() + 3_600_000);
+    state.rows = [reviewed({ id: 'a1', reviewedAt: later })];
+    const r = await patch(save('a1', { baseReviewedAt: later.toISOString(), action: 'CALLED_CUSTOMER' }));
+    expect(r.status).toBe(200);
+    expect(state.updates[0]!.where.reviewedAt).toEqual(later);
+    expect(state.updates[0]!.data.reviewedAt).toEqual(new Date(later.getTime() + 1));
+  });
+
+  it('someone saved meanwhile: 409 REVIEW_CHANGED with the alert as it is now, nothing written', async () => {
+    state.rows = [reviewed({ id: 'a1' })];
+    const stale = await patch(save('a1', { baseReviewedAt: null }));
+    expect([stale.status, stale.body.error.code]).toEqual([409, 'REVIEW_CHANGED']);
+    expect(stale.body.error.row.review).toMatchObject({ cause: 'TRAFFIC', byName: 'Lee Example', savedAt: '2026-10-16T07:00:00.000Z' });
+    expect(state.updates).toEqual([]);
+    // ... and when the save loses the race between the read and the UPDATE.
+    state.rows = [alert({ id: 'a2' })];
+    state.updateMisses = true;
+    const race = await patch(save('a2'));
+    expect([race.status, race.body.error.code]).toEqual([409, 'REVIEW_CHANGED']);
+    expect(state.audits).toEqual([]);
+  });
+
+  it('the sweep holds the alert rows longer than the lock wait: 409 ALERT_BUSY, the dialog keeps the draft', async () => {
+    state.rows = [alert({ id: 'a1' })];
+    state.updateError = Object.assign(new Error('canceling statement due to lock timeout'), { code: 'P2010', meta: { code: '55P03' } });
+    const r = await patch(save('a1'));
+    expect([r.status, r.body.error.code]).toEqual([409, 'ALERT_BUSY']);
+    expect(state.audits).toEqual([]);
+  });
+
+  it('finding 1: a sweep or an e-mail claim holding the company lock past the lock wait: 409 ALERT_BUSY before any row is written; a removal waits for the same locks', async () => {
+    state.rows = [reviewed({ id: 'a1' })];
+    state.lockError = Object.assign(new Error('canceling statement due to lock timeout'), { code: 'P2010', meta: { code: '55P03' } });
+    const r = await patch(save('a1', { baseReviewedAt: '2026-10-16T07:00:00.000Z', cause: 'WRONG_PIN' }));
+    expect([r.status, r.body.error.code]).toEqual([409, 'ALERT_BUSY']);
+    const gone = await patch({ id: 'a1', baseReviewedAt: '2026-10-16T07:00:00.000Z', remove: true });
+    expect([gone.status, gone.body.error.code]).toEqual([409, 'ALERT_BUSY']);
+    expect([state.updates, state.audits]).toEqual([[], []]);
+    expect(state.order).toEqual(['lock:ops-alerts:tA', 'lock:ops-alerts:tA']);
+    state.lockError = null;
+    state.order = [];
+    expect((await patch({ id: 'a1', baseReviewedAt: '2026-10-16T07:00:00.000Z', remove: true })).status).toBe(200);
+    expect(state.order).toEqual(['lock:ops-alerts:tA', 'lock:ops-alerts-mail:tA', 'update:a1']);
+  });
+
+  it('a save that changes nothing writes and audits nothing', async () => {
+    state.rows = [reviewed({ id: 'a1' })];
+    const r = await patch(save('a1', { baseReviewedAt: '2026-10-16T07:00:00.000Z', note: 'Road works near the roundabout' }));
+    expect(r.status).toBe(200);
+    expect(r.body.data.changed).toBe(false);
+    expect([state.updates, state.audits, state.raw, state.order]).toEqual([[], [], [], []]);
+  });
+
+  it('one incident (critique item 1): the other alerts of the same truck and day without one get the same cause & action, one audit row each; the rest is skipped and said', async () => {
+    state.rows = [
+      alert({ id: 'a1', rule: 'ETA_LATE' }),
+      alert({ id: 'a2', rule: 'DRIVER_SILENT' }),
+      reviewed({ id: 'a3', rule: 'AFTER_CLOSING' }),
+      alert({ id: 'a4', truckId: 'tr2', truckCode: 'T07' }),
+      alert({ id: 'a5', rule: 'PROOF_FAR', kind: 'EVENT' }),
+    ];
+    const r = await patch(save('a1', { cause: 'TRUCK_BREAKDOWN', action: 'SENT_HELP', alsoIds: ['a2', 'a3', 'a4', 'a5', 'gone', 'a1'] }));
+    expect(r.status).toBe(200);
+    expect(r.body.data.also).toEqual(['a2']);
+    expect(r.body.data.skipped).toEqual([
+      { id: 'a3', reason: 'ALREADY_SAVED' },
+      { id: 'a4', reason: 'OTHER_TRUCK_OR_DAY' },
+      { id: 'a5', reason: 'NOT_FOR_RULE' },
+      { id: 'gone', reason: 'NOT_FOUND' },
+    ]);
+    expect(state.updates.map((u) => [u.where.id, u.where.reviewedAt, u.data.reviewGroupId])).toEqual([
+      ['a1', null, 'a1'],
+      ['a2', null, 'a1'],
+    ]);
+    expect(state.audits.map((a) => [a.entityId, a.afterJson.groupId, a.afterJson.savedWith ?? null])).toEqual([
+      ['a1', 'a1', null],
+      ['a2', 'a1', 'a1'],
+    ]);
+    // a3 kept its own cause & action.
+    expect(state.rows.find((x) => x.id === 'a3')).toMatchObject({ reviewCause: 'TRAFFIC' });
+  });
+
+  it('remove (saved on the wrong alert): every column back to none with the last save named; audited; a stale one is 409', async () => {
+    state.rows = [reviewed({ id: 'a1' })];
+    const stale = await patch({ id: 'a1', baseReviewedAt: '2026-10-16T06:00:00.000Z', remove: true });
+    expect([stale.status, stale.body.error.code]).toEqual([409, 'REVIEW_CHANGED']);
+    const r = await patch({ id: 'a1', baseReviewedAt: '2026-10-16T07:00:00.000Z', remove: true });
+    expect(r.status).toBe(200);
+    expect(r.body.data.row.review).toBeNull();
+    expect(state.updates[0]!.data).toEqual({
+      reviewCause: null, reviewCauseOther: null, reviewAction: null, reviewActionOther: null, reviewNote: null, reviewFollowUp: false, reviewFirstAt: null,
+      reviewFirstById: null, reviewedAt: null, reviewedById: null, reviewSaves: 0, reviewGroupId: null, reviewTier: null, reviewOccurrences: null, reviewCustomerId: null,
+    });
+    expect(state.audits).toEqual([
+      // Finding 2: the version removed is kept in the audit row, its note too.
+      expect.objectContaining({ action: 'ALERT_REVIEW_REMOVED', entityId: 'a1', beforeJson: expect.objectContaining({ cause: 'TRAFFIC', note: 'Road works near the roundabout', byId: 'u2' }), afterJson: expect.objectContaining({ rule: 'ETA_LATE', truckCode: 'T05' }) }),
+    ]);
+  });
+
+  it('an alert older than 90 days (details removed) is read-only: 409 REVIEW_LOCKED', async () => {
+    state.rows = [alert({ id: 'a1', text: '', detailsRemovedAt: new Date('2026-10-16T00:00:00Z') })];
+    const r = await patch(save('a1'));
+    expect([r.status, r.body.error.code]).toEqual([409, 'REVIEW_LOCKED']);
+    expect(state.updates).toEqual([]);
+  });
+});
+
+describe('GET /api/alerts: the cause & action filter and counts', () => {
+  const today = () => todayIso('Asia/Muscat');
+  const dayOf = (d: number) => new Date(`${addDaysIso(today(), d)}T00:00:00.000Z`);
+
+  it('missing, saved and follow-up filter the rows; follow-up LISTS the last 92 days whatever the dates, which stay the dates chosen; an unknown filter is 400', async () => {
+    await get(LIST, '/api/alerts?date=2026-10-15&review=missing');
+    expect(state.finds[0].where).toMatchObject({ reviewedAt: null });
+    await get(LIST, '/api/alerts?date=2026-10-15&review=saved');
+    expect(state.finds[1].where).toMatchObject({ reviewedAt: { not: null } });
+    const { body } = await get(LIST, '/api/alerts?date=2026-10-15&review=followup');
+    expect(state.finds[2].where).toMatchObject({ reviewFollowUp: true, deliveryDate: { gte: dayOf(-91), lte: dayOf(1) } });
+    // Findings 3 and 9: the dates chosen are kept (the count line counts them); the list's own dates are listFrom / listTo.
+    expect(body.data).toMatchObject({ review: 'followup', from: '2026-10-15', to: '2026-10-15', listFrom: addDaysIso(today(), -91), listTo: addDaysIso(today(), 1) });
+    expect((await get(LIST, '/api/alerts?review=bad')).status).toBe(400);
+  });
+
+  it('finding 3: with Follow-up the dates chosen only feed the count line, so a range over 31 days is not refused (it still is without Follow-up)', () => {
+    const t = '2026-10-20';
+    const q = readAlertListQuery(new URLSearchParams('from=2026-09-01&to=2026-10-10&review=followup'), t);
+    expect(q).toEqual({ ok: true, query: { from: '2026-09-01', to: '2026-10-10', listFrom: '2026-07-21', listTo: '2026-10-21', depotId: null, state: 'all', rule: null, review: 'followup' } });
+    expect(readAlertListQuery(new URLSearchParams('from=2026-09-01&to=2026-10-10'), t)).toEqual({ ok: false, error: 'At most 31 days at once.' });
+    expect(readAlertListQuery(new URLSearchParams('from=2026-10-10&to=2026-09-01&review=followup'), t)).toEqual({ ok: false, error: 'The end date is before the start date.' });
+    expect(readAlertListQuery(new URLSearchParams('date=2026-10-15'), t)).toMatchObject({ ok: true, query: { from: '2026-10-15', to: '2026-10-15', listFrom: '2026-10-15', listTo: '2026-10-15' } });
+  });
+
+  /** Four alerts of the dates chosen (two with a cause & action, one saying Other), follow-ups outside them, another depot, an old one. */
+  const countRows = () => [
+    reviewed({ id: 'r1', deliveryDate: dayOf(-5) }),
+    reviewed({ id: 'o1', deliveryDate: dayOf(-5), reviewCause: 'OTHER', reviewCauseOther: 'Gate locked', reviewFollowUp: true }),
+    alert({ id: 'n1', deliveryDate: dayOf(-5) }),
+    alert({ id: 'n2', deliveryDate: dayOf(-4), rule: 'UNLOAD_OVER' }),
+    reviewed({ id: 'f1', deliveryDate: dayOf(-10), reviewCause: 'NOT_KNOWN', reviewAction: 'NONE_YET', reviewFollowUp: true }),
+    reviewed({ id: 'f2', deliveryDate: dayOf(-30), reviewAction: 'NONE_YET', reviewFollowUp: true, resolvedAt: new Date(), resolvedReason: 'ENDED' }),
+    reviewed({ id: 'x1', deliveryDate: dayOf(-5), depotId: 'dep2', reviewFollowUp: true }),
+    reviewed({ id: 'old', deliveryDate: dayOf(-100), reviewFollowUp: true }),
+    alert({ id: 'b1', tenantId: 'tB', deliveryDate: dayOf(-5) }),
+  ];
+
+  it('finding 15: the count line counts what it says - the alerts of the dates chosen, those with one, those saying Other, the follow-ups of the last 92 days - each a different number', async () => {
+    state.rows = countRows();
+    const range = `from=${addDaysIso(today(), -6)}&to=${addDaysIso(today(), -4)}&depotId=dep1`;
+    const { body } = await get(LIST, `/api/alerts?${range}&review=missing`);
+    expect(body.data.reviewCounts).toEqual({ alerts: 4, saved: 2, other: 1, followUp: 3 });
+    const dates = { gte: dayOf(-6), lte: dayOf(-4) };
+    expect(state.counts.map((c) => c.where)).toEqual([
+      { deliveryDate: dates, depotId: 'dep1' },
+      { deliveryDate: dates, depotId: 'dep1', reviewedAt: { not: null } },
+      { deliveryDate: dates, depotId: 'dep1', OR: [{ reviewCause: 'OTHER' }, { reviewAction: 'OTHER' }] },
+      { deliveryDate: { gte: dayOf(-91), lte: dayOf(1) }, depotId: 'dep1', reviewFollowUp: true },
+    ]);
+    expect(body.data.rows.find((r: any) => r.id === 'r1').review).toMatchObject({ cause: 'TRAFFIC', note: 'Road works near the roundabout' });
+    expect(body.data.rows.find((r: any) => r.id === 'n1').review).toBeNull();
+  });
+
+  it('findings 3 and 9: with Follow-up the line still counts the dates chosen (not the 92 days), and the follow-up count takes the rule and state chosen, like the list', async () => {
+    state.rows = countRows();
+    const range = `from=${addDaysIso(today(), -6)}&to=${addDaysIso(today(), -4)}&depotId=dep1`;
+    const follow = await get(LIST, `/api/alerts?${range}&review=followup`);
+    // The same numbers as with any other filter: the 92 days never leak into "of these dates".
+    expect(follow.body.data.reviewCounts).toEqual({ alerts: 4, saved: 2, other: 1, followUp: 3 });
+    state.counts = [];
+    const ruled = await get(LIST, `/api/alerts?${range}&review=followup&rule=ETA_LATE&state=open`);
+    // Open ETA_LATE alerts of the dates: r1, o1, n1; open ETA_LATE follow-ups of the 92 days at dep1: o1 and f1 (f2 is over).
+    expect(ruled.body.data.reviewCounts).toEqual({ alerts: 3, saved: 2, other: 1, followUp: 2 });
+    expect(state.counts[3].where).toEqual({ deliveryDate: { gte: dayOf(-91), lte: dayOf(1) }, depotId: 'dep1', rule: 'ETA_LATE', resolvedAt: null, ackedAt: null, reviewFollowUp: true });
+    expect(state.finds.at(-1)!.where).toEqual({ deliveryDate: { gte: dayOf(-91), lte: dayOf(1) }, depotId: 'dep1', rule: 'ETA_LATE', resolvedAt: null, ackedAt: null, reviewFollowUp: true });
   });
 });

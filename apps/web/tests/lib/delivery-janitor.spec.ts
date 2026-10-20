@@ -15,7 +15,7 @@ vi.mock('@/lib/audit', async () => {
   return { audit: vi.fn(async (input: Record<string, unknown>) => m.fakePrisma.auditLog.create({ data: { ...input } })) };
 });
 
-import { clearIdleCasualDrivers, JANITOR_BATCH, JANITOR_MAX_BATCHES, purgeOldAlerts, purgeOldLocations, purgeOldPhotos, runDeliveryJanitor } from '@/lib/jobs/delivery-janitor';
+import { alertRowsKeptForAnalysis, clearIdleCasualDrivers, JANITOR_BATCH, JANITOR_MAX_BATCHES, purgeOldAlerts, purgeOldLocations, purgeOldPhotos, runDeliveryJanitor } from '@/lib/jobs/delivery-janitor';
 import { readDevices, touchUpdate } from '@/lib/driver-link/service';
 
 const NOW = new Date('2026-10-04T08:00:00Z');
@@ -147,27 +147,170 @@ describe('idle daily drivers (spec 12.4)', () => {
   });
 });
 
-describe('operations alerts retention (owner request 16 Oct 2026)', () => {
-  it('rows of a delivery date older than 90 days and e-mail records older than 90 days are deleted; newer ones and other companies stay', async () => {
+describe('operations alerts retention (owner request 16 Oct 2026; cause & action, owner request 20 Oct 2026)', () => {
+  /**
+   * The in-memory database logs raw SQL only: apply the details removal (store.ts purgeOldAlertRows) to the alert
+   * rows and the free-text removal (inbox.ts scrubReviewAuditTexts) to the audit rows, and keep each call's values.
+   */
+  const rawCalls: { sql: string; values: unknown[] }[] = [];
+  function applyRaw() {
+    const orig = fakePrisma.$executeRaw;
+    rawCalls.length = 0;
+    fakePrisma.$executeRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      await orig(strings, ...values);
+      const sql = strings.join('?').replace(/\s+/g, ' ').trim();
+      rawCalls.push({ sql, values });
+      let n = 0;
+      if (sql.startsWith('UPDATE "OpsAlert"')) {
+        const [now, tenantId, cutoffIso] = values as [Date, string, string];
+        for (const r of tables.opsAlert ?? []) {
+          if (r.tenantId !== tenantId || !(r.deliveryDate < day(cutoffIso)) || r.detailsRemovedAt) continue;
+          Object.assign(r, { text: '', factsJson: r.factsJson?.gps === true ? { gps: true } : null, emailError: null, reviewNote: null, reviewCauseOther: null, reviewActionOther: null, detailsRemovedAt: now });
+          n++;
+        }
+      }
+      if (sql.startsWith('UPDATE "AuditLog"')) {
+        const [keys, , tenantId, actions, cutoffIso] = values as [string[], string[], string, string[], string];
+        const has = (j: any) => !!j && typeof j === 'object' && keys.some((k) => k in j);
+        const drop = (j: any) => (j && typeof j === 'object' ? Object.fromEntries(Object.entries(j).filter(([k]) => !keys.includes(k))) : j);
+        for (const a of tables.auditLog ?? []) {
+          if (a.tenantId !== tenantId || a.entity !== 'OpsAlert' || !actions.includes(a.action) || !(a.afterJson?.deliveryDate < cutoffIso)) continue;
+          if (!has(a.afterJson) && !has(a.beforeJson)) continue;
+          Object.assign(a, { beforeJson: drop(a.beforeJson), afterJson: drop(a.afterJson) });
+          n++;
+        }
+      }
+      return n;
+    };
+    return () => void (fakePrisma.$executeRaw = orig);
+  }
+  const reviewAudit = (id: string, tenantId: string, deliveryDate: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    tenantId,
+    action: 'ALERT_REVIEW_SAVED',
+    entity: 'OpsAlert',
+    entityId: `alert-${id}`,
+    beforeJson: { cause: 'TRAFFIC', action: 'CALLED_DRIVER', followUp: false, causeOther: null, actionOther: null, note: 'Gate closed, sales agreed a new slot', noteChars: 35 },
+    afterJson: { rule: 'ETA_LATE', deliveryDate, cause: 'OTHER', causeOther: 'Road closed', causeOtherChars: 11, action: 'CALLED_DRIVER', actionOther: null, note: 'Driver late', noteChars: 11 },
+    ...extra,
+  });
+
+  it('owner decision pending (finding 4): by default every alert row older than 90 days is deleted as before, with or without a cause & action; no row is kept or changed', async () => {
+    const restore = applyRaw();
+    try {
+      tables.opsAlert = [
+        { id: 'reviewed-old', tenantId: 'tA', deliveryDate: day('2026-07-05'), resolvedAt: day('2026-07-05'), text: 'T05 L1', reviewedAt: new Date('2026-07-05T08:00:00Z'), reviewCause: 'TRAFFIC' },
+        // The review's case: an alert nobody reviewed, 100 days old, still open (alerts were off).
+        { id: 'plain-old', tenantId: 'tA', deliveryDate: day('2026-06-26'), resolvedAt: null, text: 'T07 L1 is running late' },
+        { id: 'edge', tenantId: 'tA', deliveryDate: day('2026-07-06'), resolvedAt: null, text: 'kept as it is' },
+        { id: 'new', tenantId: 'tA', deliveryDate: day('2026-10-03'), text: 'today' },
+        { id: 'other', tenantId: 'tB', deliveryDate: day('2024-01-01'), text: 'another company' },
+      ];
+      tables.opsAlertDigest = [
+        { id: 'd-old', tenantId: 'tA', createdAt: daysAgo(91) },
+        { id: 'd-new', tenantId: 'tA', createdAt: daysAgo(10) },
+      ];
+      // Today in Muscat is 4 Oct 2026: the cutoff is 6 Jul.
+      expect(await purgeOldAlerts(NOW, undefined, {} as NodeJS.ProcessEnv)).toEqual({ alerts: 2, reviewed: 1, closed: 0, detailsRemoved: 0, digests: 1, auditTexts: 0 });
+      expect(tables.opsAlert.map((a) => a.id)).toEqual(['edge', 'new', 'other']);
+      expect(tables.opsAlert.find((a) => a.id === 'edge')).toMatchObject({ text: 'kept as it is', resolvedAt: null });
+      expect(tables.opsAlertDigest.map((a) => a.id)).toEqual(['d-new']);
+      expect(rawLog.filter((s) => s.startsWith('UPDATE "OpsAlert"'))).toEqual([]);
+      expect(tables.auditLog.map((a) => [a.action, a.afterJson])).toEqual([
+        ['OPS_ALERTS_PURGED', { deleted: 2, deletedWithCauseAndAction: 1, closedAsExpired: 0, detailsRemoved: 0, auditTextsRemoved: 0, detailsAfterDays: 90, rowsAfterDays: 90 }],
+      ]);
+    } finally {
+      restore();
+    }
+    // The switch: only ALERT_KEEP_FOR_ANALYSIS=1 keeps rows past 90 days.
+    const env = (v?: string) => (v === undefined ? {} : { ALERT_KEEP_FOR_ANALYSIS: v }) as unknown as NodeJS.ProcessEnv;
+    expect([alertRowsKeptForAnalysis(env()), alertRowsKeptForAnalysis(env('1')), alertRowsKeptForAnalysis(env('true')), alertRowsKeptForAnalysis(env('0'))]).toEqual([false, true, false, false]);
+  });
+
+  it('finding 2: the cause & action audit rows of alerts older than 90 days lose their free texts (note, Other texts), keeping the codes and lengths; newer ones, other companies and other audit rows stay', async () => {
+    const restore = applyRaw();
+    try {
+      tables.opsAlert = [];
+      tables.auditLog = [
+        reviewAudit('old', 'tA', '2026-07-05'),
+        reviewAudit('removed', 'tA', '2026-07-01', { action: 'ALERT_REVIEW_REMOVED', afterJson: { rule: 'ETA_LATE', deliveryDate: '2026-07-01' } }),
+        reviewAudit('edge', 'tA', '2026-07-06'),
+        reviewAudit('foreign', 'tB', '2026-01-01'),
+        { id: 'unrelated', tenantId: 'tA', action: 'ORDER_CANCELLED', entity: 'OpsAlert', beforeJson: null, afterJson: { deliveryDate: '2026-01-01', note: 'kept' } },
+      ];
+      const r = await purgeOldAlerts(NOW, undefined, {} as NodeJS.ProcessEnv);
+      expect(r.auditTexts).toBe(2);
+      const scrub = rawCalls.find((c) => c.sql.startsWith('UPDATE "AuditLog"'))!;
+      expect(scrub.sql).toMatch(/"beforeJson" = CASE WHEN jsonb_typeof\("beforeJson"\) = 'object' THEN "beforeJson" - \?::text\[\]/);
+      expect(scrub.sql).toMatch(/"action" = ANY\(\?::text\[\]\) .*\("afterJson"->>'deliveryDate'\) < \?/);
+      const keys = ['causeOther', 'actionOther', 'note'];
+      // By the company's own today (4 Oct in Muscat) - 90 days.
+      expect(scrub.values).toEqual([keys, keys, 'tA', ['ALERT_REVIEW_SAVED', 'ALERT_REVIEW_REMOVED'], '2026-07-06', keys, keys]);
+      const a = (id: string) => tables.auditLog.find((x) => x.id === id)!;
+      expect(a('old').beforeJson).toEqual({ cause: 'TRAFFIC', action: 'CALLED_DRIVER', followUp: false, noteChars: 35 });
+      expect(a('old').afterJson).toEqual({ rule: 'ETA_LATE', deliveryDate: '2026-07-05', cause: 'OTHER', causeOtherChars: 11, action: 'CALLED_DRIVER', noteChars: 11 });
+      expect(a('removed').beforeJson).not.toHaveProperty('note');
+      expect(a('edge').afterJson).toMatchObject({ note: 'Driver late', causeOther: 'Road closed' });
+      expect(a('foreign').afterJson).toMatchObject({ note: 'Driver late' });
+      expect(a('unrelated').afterJson).toEqual({ deliveryDate: '2026-01-01', note: 'kept' });
+      expect(tables.auditLog.filter((x) => x.action === 'OPS_ALERTS_PURGED').map((x) => x.afterJson)).toEqual([
+        { deleted: 0, deletedWithCauseAndAction: 0, closedAsExpired: 0, detailsRemoved: 0, auditTextsRemoved: 2, detailsAfterDays: 90, rowsAfterDays: 90 },
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('with ALERT_KEEP_FOR_ANALYSIS=1: after 90 days a row loses its text, facts and free texts (a row still open is closed first); it is deleted after the analysis retention; e-mail records after 90 days; one audit row of counts', async () => {
+    const restore = applyRaw();
+    vi.stubEnv('ALERT_KEEP_FOR_ANALYSIS', '1');
+    try {
+      const saved = new Date('2024-10-01T08:00:00Z');
+      tables.opsAlert = [
+        { id: 'ancient', tenantId: 'tA', deliveryDate: day('2024-10-03'), resolvedAt: saved, text: 'T05 L1', reviewedAt: saved, reviewCause: 'TRAFFIC' },
+        { id: 'old', tenantId: 'tA', deliveryDate: day('2026-07-05'), resolvedAt: day('2026-07-05'), text: 'T05 L1 stop 2 Shop Example (TST0001)', factsJson: { gps: true, awayMin: 4 }, reviewedAt: saved, reviewCause: 'OTHER', reviewCauseOther: 'Gate locked', reviewNote: 'Waited', emailError: 'HTTP 500' },
+        { id: 'open-old', tenantId: 'tA', deliveryDate: day('2026-07-01'), resolvedAt: null, resolvedReason: null, text: 'T05 L1 is running late', factsJson: { delayMin: 40 } },
+        { id: 'edge', tenantId: 'tA', deliveryDate: day('2026-07-06'), resolvedAt: null, text: 'kept as it is' },
+        { id: 'new', tenantId: 'tA', deliveryDate: day('2026-10-03'), text: 'today' },
+        { id: 'other', tenantId: 'tB', deliveryDate: day('2024-01-01'), text: 'another company' },
+      ];
+      tables.opsAlertDigest = [
+        { id: 'd-old', tenantId: 'tA', createdAt: daysAgo(91) },
+        { id: 'd-new', tenantId: 'tA', createdAt: daysAgo(10) },
+      ];
+      // Today in Muscat is 4 Oct 2026: details go before 6 Jul 2026, rows before 4 Oct 2024 (730 days, the default).
+      expect(await purgeOldAlerts(NOW)).toEqual({ alerts: 1, reviewed: 1, closed: 1, detailsRemoved: 2, digests: 1, auditTexts: 0 });
+      expect(tables.opsAlert.map((a) => a.id)).toEqual(['old', 'open-old', 'edge', 'new', 'other']);
+      const byId = (id: string) => tables.opsAlert.find((a) => a.id === id)!;
+      expect(byId('old')).toMatchObject({ text: '', factsJson: { gps: true }, reviewCause: 'OTHER', reviewCauseOther: null, reviewNote: null, emailError: null, detailsRemovedAt: NOW });
+      expect(byId('open-old')).toMatchObject({ resolvedAt: NOW, resolvedReason: 'EXPIRED', text: '', factsJson: null, detailsRemovedAt: NOW });
+      expect(byId('edge')).toMatchObject({ text: 'kept as it is', resolvedAt: null });
+      expect(byId('other').text).toBe('another company');
+      expect(tables.opsAlertDigest.map((a) => a.id)).toEqual(['d-new']);
+      expect(rawLog.find((s) => s.startsWith('UPDATE "OpsAlert"'))).toMatch(/"text" = '', "factsJson" = CASE .* "reviewNote" = NULL, "reviewCauseOther" = NULL, "reviewActionOther" = NULL, "detailsRemovedAt" = \?/);
+      // The rows now hold the office's own input: one audit row of counts (no text).
+      expect(tables.auditLog.map((a) => [a.action, a.entity, a.afterJson])).toEqual([
+        ['OPS_ALERTS_PURGED', 'Tenant', { deleted: 1, deletedWithCauseAndAction: 1, closedAsExpired: 1, detailsRemoved: 2, auditTextsRemoved: 0, detailsAfterDays: 90, rowsAfterDays: 730 }],
+      ]);
+      // The janitor runs it once a day with the daily drivers; nothing more to do: no second audit row.
+      const r = await runDeliveryJanitor(new Date(NOW.getTime() + 60 * 60_000), { force: true });
+      expect(r).toMatchObject({ alerts: { alerts: 0, detailsRemoved: 0, digests: 0 } });
+      expect(tables.auditLog.filter((a) => a.action === 'OPS_ALERTS_PURGED')).toHaveLength(1);
+    } finally {
+      vi.unstubAllEnvs();
+      restore();
+    }
+  });
+
+  it('with ALERT_KEEP_FOR_ANALYSIS=1, a company that keeps its analysis data less than 90 days: the alert rows still go at 90 days, as before (never sooner)', async () => {
+    tables.tenantConfig = [{ tenantId: 'tA', photoRetentionDays: 365, locationRetentionDays: 90, analysisRetentionDays: 30, timezone: 'Asia/Muscat' }];
     tables.opsAlert = [
-      { id: 'old', tenantId: 'tA', deliveryDate: day('2026-07-05') },
+      { id: 'old', tenantId: 'tA', deliveryDate: day('2026-07-05'), reviewedAt: new Date('2026-07-05T08:00:00Z') },
       { id: 'edge', tenantId: 'tA', deliveryDate: day('2026-07-06') },
-      { id: 'new', tenantId: 'tA', deliveryDate: day('2026-10-03') },
-      { id: 'other', tenantId: 'tB', deliveryDate: day('2026-01-01') },
     ];
-    tables.opsAlertDigest = [
-      { id: 'd-old', tenantId: 'tA', createdAt: daysAgo(91) },
-      { id: 'd-new', tenantId: 'tA', createdAt: daysAgo(10) },
-    ];
-    // Today in Muscat is 4 Oct: the cutoff is 6 Jul.
-    expect(await purgeOldAlerts(NOW)).toEqual({ alerts: 1, digests: 1 });
-    expect(tables.opsAlert.map((a) => a.id)).toEqual(['edge', 'new', 'other']);
-    expect(tables.opsAlertDigest.map((a) => a.id)).toEqual(['d-new']);
-    // No audit row: the rows are derived.
-    expect(tables.auditLog).toEqual([]);
-    // The janitor runs it once a day with the daily drivers.
-    const r = await runDeliveryJanitor(new Date(NOW.getTime() + 60 * 60_000), { force: true });
-    expect(r).toMatchObject({ alerts: { alerts: 0, digests: 0 } });
+    expect(await purgeOldAlerts(NOW, undefined, { ALERT_KEEP_FOR_ANALYSIS: '1' } as unknown as NodeJS.ProcessEnv)).toMatchObject({ alerts: 1, reviewed: 1, closed: 0, detailsRemoved: 0 });
+    expect(tables.opsAlert.map((a) => a.id)).toEqual(['edge']);
+    expect(rawLog.filter((s) => s.startsWith('UPDATE "OpsAlert"'))).toEqual([]);
   });
 
   it('review L3: a failing alert purge is logged under its own name and stops nothing after it', async () => {

@@ -40,7 +40,7 @@
  * plain link to the provider's site (AYUN_WEB_URL) in a new tab: Ayun has no link to one vehicle, and
  * RouteIQ never passes a key, a user name or a password to it.
  */
-import { alertStateText, ruleLabel } from '../alerts/view';
+import { alertReviewFlags, alertReviewText, alertStateText, alertText, ruleLabel } from '../alerts/view';
 import { SEVERITY_LABEL } from '../alerts/catalog';
 import type { OpsAlertRow } from '../alerts/types';
 import { awayText, countOf, GPS_WORD, OUTCOME_LABEL, reasonText, sourceWord } from '../delivery/office-text';
@@ -706,7 +706,12 @@ export function buildTruckDay(i: TruckDayInput): TruckDayModel {
       sequence: a.sequence,
       title: `Alert: ${ruleLabel(a.rule)}`,
       source: null,
-      lines: [a.text, `${SEVERITY_LABEL[a.severity] ?? a.severity} · ${alertStateText(a, tz)}`],
+      lines: [
+        alertText(a),
+        `${SEVERITY_LABEL[a.severity] ?? a.severity} · ${alertStateText(a, tz)}`,
+        // The cause & action the office recorded (owner request 20 Oct 2026): shown, never edited here.
+        ...(a.review ? [alertReviewText(a, tz), ...(a.review.note ? [`Note: ${a.review.note}`] : []), ...alertReviewFlags(a).map((f) => `(${f})`)] : []),
+      ],
       tone: a.state === 'RESOLVED' ? 'muted' : a.severity === 'HIGH' ? 'bad' : 'warn',
     });
   }

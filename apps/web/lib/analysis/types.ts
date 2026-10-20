@@ -29,6 +29,11 @@ export const DEFAULT_ANALYSIS_RETENTION_DAYS = 730;
 
 /** The export covers at most this many delivery dates at a time (owner request: "a date range up to 92 days"). */
 export const ANALYSIS_MAX_DAYS = 92;
+/**
+ * The alerts-only download (`only=alerts`: the "Alert causes & actions" sheet, owner request 20 Oct 2026) covers
+ * up to a year at a time (critique of the design, item 14): one row per alert, a few thousand a year.
+ */
+export const ALERT_EXPORT_MAX_DAYS = 366;
 
 /**
  * The nightly schedule (lib/analysis/job.ts), in company time: from 03:00 the day before is built in full

@@ -1,17 +1,22 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { RefreshCw } from 'lucide-react';
+import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { acknowledgeAlerts } from '@/components/alerts-api';
+import { AlertReviewDialog, reviewNoteNode } from '@/components/alert-review-dialog';
 import { api } from '@/app/t/[slug]/dispatch/client-api';
 import { ALERT_POLL_MS, ALERT_RULE_LIST } from '@/lib/alerts/catalog';
+import { ALERT_FOLLOWUP_DAYS } from '@/lib/alerts/review';
 import type { OpsAlertRow, SweepCheck } from '@/lib/alerts/types';
-import { alertStateText, alertWhen, alertWhere, ruleLabel, SEVERITY_BADGE, sweepCheckText } from '@/lib/alerts/view';
+import { alertReviewFlags, alertReviewText, alertStateText, alertText, alertWhen, alertWhere, ruleLabel, SEVERITY_BADGE, sweepCheckText } from '@/lib/alerts/view';
+import { analysisExportUrl } from '@/lib/analysis/view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 
 interface Filters {
@@ -20,6 +25,16 @@ interface Filters {
   depotId: string;
   state: string;
   rule: string;
+  /** Cause & action: all, missing, saved, followup (owner request 20 Oct 2026). */
+  review: string;
+}
+
+/** GET /api/alerts reviewCounts (lib/alerts/inbox.ts alertReviewCounts). */
+interface ReviewCounts {
+  alerts: number;
+  saved: number;
+  other: number;
+  followUp: number;
 }
 
 interface ListAnswer extends Partial<SweepCheck> {
@@ -28,7 +43,16 @@ interface ListAnswer extends Partial<SweepCheck> {
   today?: string;
   rows: OpsAlertRow[];
   truncated: boolean;
+  reviewCounts?: ReviewCounts;
+  /** Set by the page: the query this answer was read for (alertsQuery) and the read's number (a deep link waits for a newer read of its filters). */
+  forQuery?: string;
+  readNo?: number;
 }
+
+type Initial = { from: string; to: string; depotId: string; state: string; review?: string };
+
+/** The filters a link (the page's URL) asks for: its dates, depot, state and cause & action, every rule. */
+const filtersOf = (initial: Initial): Filters => ({ ...initial, rule: '', review: initial.review ?? 'all' });
 
 const STATES = [
   { value: 'all', label: 'All' },
@@ -37,12 +61,31 @@ const STATES = [
   { value: 'resolved', label: 'Over' },
 ];
 
+const REVIEWS = [
+  { value: 'all', label: 'All' },
+  { value: 'missing', label: 'Missing' },
+  { value: 'saved', label: 'Saved' },
+  { value: 'followup', label: `Follow-up (last ${ALERT_FOLLOWUP_DAYS} days)` },
+];
+
 /** The query of GET /api/alerts for these filters. */
 export function alertsQuery(f: Filters): string {
   const q = new URLSearchParams({ from: f.from, to: f.to, state: f.state });
   if (f.depotId) q.set('depotId', f.depotId);
   if (f.rule) q.set('rule', f.rule);
+  if (f.review && f.review !== 'all') q.set('review', f.review);
   return q.toString();
+}
+
+/**
+ * "12 of 40 alerts of these dates have a cause & action (2 say Other) · 3 to follow up (last 92 days)": the dates
+ * chosen, whatever the cause & action filter (Follow-up too), and the follow-ups of the last 92 days, both with the
+ * depot, rule and state chosen (lib/alerts/inbox.ts alertReviewCounts).
+ */
+export function reviewCountText(c: ReviewCounts | undefined): string | null {
+  if (!c) return null;
+  const other = c.other ? ` (${c.other} say Other)` : '';
+  return `${c.saved} of ${c.alerts} alert${c.alerts === 1 ? '' : 's'} of these dates ${c.saved === 1 ? 'has' : 'have'} a cause & action${other} · ${c.followUp} to follow up (last ${ALERT_FOLLOWUP_DAYS} days)`;
 }
 
 /**
@@ -52,6 +95,10 @@ export function alertsQuery(f: Filters): string {
  * Dates (owner request 19 Oct 2026): an alert of another day than today says its day in Since and State
  * ("Yesterday 17:20", "18 Oct 17:20"; today's keep the time only), from the company's today in the last
  * answer (the page's until then); a row closed at the end of its day says "Day ended".
+ * Cause & action (owner request 20 Oct 2026, lib/alerts/review.ts): under each alert, what the office found and
+ * decided (every role sees it); the dispatcher and up record or edit it on any alert ("Cause & action" under
+ * the text, so it is in view on a phone), filter by it, and download the alerts with it (Excel). `reviewId` in
+ * the URL (the bell's link) opens the dialog of that alert.
  */
 export function AlertsClient({
   enabled,
@@ -62,6 +109,7 @@ export function AlertsClient({
   today,
   depots,
   initial,
+  initialReviewId = null,
 }: {
   enabled: boolean;
   canAck: boolean;
@@ -70,24 +118,37 @@ export function AlertsClient({
   timezone: string;
   today: string;
   depots: { id: string; code: string; name: string }[];
-  initial: { from: string; to: string; depotId: string; state: string };
+  initial: Initial;
+  initialReviewId?: string | null;
 }) {
-  const [f, setF] = useState<Filters>({ ...initial, rule: '' });
+  const router = useRouter();
+  const [f, setF] = useState<Filters>(() => filtersOf(initial));
   const [answer, setAnswer] = useState<ListAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // A snapshot of the alert whose cause & action is being edited: the poll never resets the dialog.
+  const [reviewing, setReviewing] = useState<OpsAlertRow | null>(null);
+  // The bell's link (reviewId): the last one taken in hand, and the one waiting for a read of its filters made after it.
+  const linkTaken = useRef<string | null>(null);
+  const linkWaiting = useRef<{ id: string; query: string; afterRead: number } | null>(null);
+  const reads = useRef(0);
+  const filters = useRef(f);
+  filters.current = f;
 
   const read = useCallback(async () => {
-    const r = await api<ListAnswer>(`/api/alerts?${alertsQuery(f)}`);
+    const query = alertsQuery(f);
+    const readNo = ++reads.current;
+    const r = await api<ListAnswer>(`/api/alerts?${query}`);
     if (!r.ok || !r.data) {
       setError(r.error ?? 'Could not read the alerts.');
       return;
     }
     setError(null);
-    setAnswer(r.data);
+    setAnswer({ ...r.data, forQuery: query, readNo });
   }, [f]);
 
-  const live = f.from <= today && today <= f.to;
+  // Follow-up lists the last 92 days up to tomorrow, whatever the dates: it reaches today.
+  const live = f.review === 'followup' || (f.from <= today && today <= f.to);
   useEffect(() => {
     void read();
     if (!live || !enabled) return;
@@ -96,6 +157,46 @@ export function AlertsClient({
     }, ALERT_POLL_MS);
     return () => clearInterval(t);
   }, [read, live, enabled]);
+
+  // The bell's "Cause & action" link (review of the branch, 20 Oct 2026, finding 5). Next keeps this page mounted
+  // when only its search changes, so a link followed while the page is open comes as new props: each new reviewId
+  // puts the filters back to the link's (its date, every depot, state and rule) and waits for that list.
+  const linkFilters = alertsQuery(filtersOf(initial));
+  useEffect(() => {
+    if (!initialReviewId) {
+      // The link left the address (below): the same alert's link works again.
+      linkTaken.current = null;
+      return;
+    }
+    if (linkTaken.current === initialReviewId) return;
+    linkTaken.current = initialReviewId;
+    const next = filtersOf(initial);
+    const query = alertsQuery(next);
+    // A read of these filters made from now on (an answer read before the link may miss a new alert).
+    linkWaiting.current = { id: initialReviewId, query, afterRead: reads.current };
+    if (alertsQuery(filters.current) === query) void read();
+    else setF(next);
+    // `initial` is new on every server render; its filters are in linkFilters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialReviewId, linkFilters]);
+
+  // Once that list is read: open the alert's dialog, or say why not; then take reviewId out of the address, so a
+  // refresh does not open the dialog again and the same alert's link works again.
+  useEffect(() => {
+    const w = linkWaiting.current;
+    if (!w || !answer || answer.forQuery !== w.query || (answer.readNo ?? 0) <= w.afterRead) return;
+    linkWaiting.current = null;
+    if (canAck) {
+      const row = answer.rows.find((r) => r.id === w.id);
+      if (row) setReviewing(row);
+      else toast.warning('This alert is not in the list of its day: it may have been removed. Check the filters.');
+    }
+    if (typeof window !== 'undefined' && window.location) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('reviewId');
+      router.replace(`${url.pathname}${url.search}`, { scroll: false });
+    }
+  }, [answer, canAck, router]);
 
   async function ack(rows: OpsAlertRow[]) {
     setBusy(true);
@@ -112,6 +213,7 @@ export function AlertsClient({
   const dayNow = answer?.today ?? today;
   const check = enabled && answer ? sweepCheckText({ checkedAt: answer.checkedAt ?? null, checkStale: !!answer.checkStale, checkFailed: !!answer.checkFailed }, timezone) : null;
   const depotCode = (id: string) => depots.find((d) => d.id === id)?.code ?? '';
+  const counts = reviewCountText(answer?.reviewCounts);
   return (
     <div className="space-y-4">
       {!enabled ? (
@@ -173,6 +275,16 @@ export function AlertsClient({
             ))}
           </select>
         </div>
+        <div className="space-y-1">
+          <Label htmlFor="al-review">Cause &amp; action</Label>
+          <select id="al-review" className="h-9 rounded-md border bg-background px-2 text-sm" value={f.review} onChange={(e) => setF({ ...f, review: e.target.value })} data-testid="alerts-review-filter">
+            {REVIEWS.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <Button size="sm" variant="outline" className="h-9" onClick={() => void read()} disabled={busy}>
           <RefreshCw className="mr-1 h-3.5 w-3.5" />
           Refresh
@@ -182,7 +294,22 @@ export function AlertsClient({
             Acknowledge {open.length > 200 ? 'the first 200' : `all ${open.length}`} open
           </Button>
         ) : null}
+        {canAck ? (
+          <a className="self-center text-sm text-primary underline" href={analysisExportUrl(f.from, f.to, f.depotId || null, { only: 'alerts' })} data-testid="alerts-excel">
+            Excel (alerts with their cause &amp; action)
+          </a>
+        ) : null}
       </div>
+      {f.review === 'followup' ? (
+        <p className="text-xs text-muted-foreground" data-testid="alerts-followup-note">
+          Follow-up lists the alerts that need it from the last {ALERT_FOLLOWUP_DAYS} days, whatever the dates above (the count below is of the dates above).
+        </p>
+      ) : null}
+      {counts ? (
+        <p className="text-xs text-muted-foreground" data-testid="alerts-review-count">
+          {counts}
+        </p>
+      ) : null}
       {error ? (
         <p className="text-sm text-destructive" role="alert">
           {error}
@@ -205,41 +332,70 @@ export function AlertsClient({
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.id} className={`border-t align-top ${r.state === 'RESOLVED' ? 'text-muted-foreground' : ''}`} data-testid="alerts-row" data-state={r.state}>
-                  <td className="p-2">
-                    <Badge variant={r.state === 'RESOLVED' ? 'outline' : SEVERITY_BADGE[r.severity]}>{r.severity}</Badge>
-                  </td>
-                  <td className="whitespace-nowrap p-2">
-                    {fmtDayMonth(r.deliveryDate)}
-                    {depots.length > 1 ? <span className="ms-1 text-xs text-muted-foreground">{depotCode(r.depotId)}</span> : null}
-                  </td>
-                  <td className="whitespace-nowrap p-2" data-testid="alerts-when">
-                    {alertWhen(r.occurredAt, r.deliveryDate, timezone, dayNow)}
-                  </td>
-                  <td className="whitespace-nowrap p-2 font-medium">{alertWhere(r)}</td>
-                  <td className="p-2">{ruleLabel(r.rule)}</td>
-                  <td className="min-w-[16rem] break-words p-2">
-                    {r.text}
-                    {r.occurrences > 1 ? <span className="ms-1 text-xs text-muted-foreground">(came back {r.occurrences - 1}×)</span> : null}
-                  </td>
-                  <td className="whitespace-nowrap p-2 text-xs" data-testid="alerts-state">
-                    {alertStateText(r, timezone, dayNow)}
-                  </td>
-                  <td className="p-2">
-                    {canAck && r.state === 'OPEN' ? (
-                      <Button size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={busy} onClick={() => void ack([r])} data-testid="alerts-ack">
-                        Acknowledge
-                      </Button>
-                    ) : null}
-                  </td>
-                </tr>
-              ))}
+              {rows.map((r) => {
+                const flags = alertReviewFlags(r);
+                return (
+                  <tr key={r.id} className={`border-t align-top ${r.state === 'RESOLVED' ? 'text-muted-foreground' : ''}`} data-testid="alerts-row" data-state={r.state}>
+                    <td className="p-2">
+                      <Badge variant={r.state === 'RESOLVED' ? 'outline' : SEVERITY_BADGE[r.severity]}>{r.severity}</Badge>
+                    </td>
+                    <td className="whitespace-nowrap p-2">
+                      {fmtDayMonth(r.deliveryDate)}
+                      {depots.length > 1 ? <span className="ms-1 text-xs text-muted-foreground">{depotCode(r.depotId)}</span> : null}
+                    </td>
+                    <td className="whitespace-nowrap p-2" data-testid="alerts-when">
+                      {alertWhen(r.occurredAt, r.deliveryDate, timezone, dayNow)}
+                    </td>
+                    <td className="whitespace-nowrap p-2 font-medium">{alertWhere(r)}</td>
+                    <td className="p-2">{ruleLabel(r.rule)}</td>
+                    <td className="min-w-[16rem] break-words p-2">
+                      {alertText(r)}
+                      {r.occurrences > 1 ? <span className="ms-1 text-xs text-muted-foreground">(came back {r.occurrences - 1}×)</span> : null}
+                      {r.review ? (
+                        <div className="mt-1 text-xs text-muted-foreground" data-testid="alerts-review-line">
+                          <span className="text-foreground">{alertReviewText(r, timezone, dayNow)}</span>
+                          {r.review.followUp ? (
+                            <Badge variant="warning" className="ms-1" data-testid="alerts-review-followup">
+                              Follow-up
+                            </Badge>
+                          ) : null}
+                          {r.review.note ? reviewNoteNode(r.review.note, 'alerts-review-note') : null}
+                          {flags.length ? <span className="block text-amber-700">({flags.join(', ')})</span> : null}
+                        </div>
+                      ) : null}
+                      {canAck ? (
+                        <Button
+                          size="sm"
+                          variant="link"
+                          className="h-6 whitespace-nowrap px-0 text-xs"
+                          onClick={() => setReviewing(r)}
+                          data-testid="alerts-review"
+                        >
+                          {r.detailsRemoved ? 'Cause & action (read only)' : r.review ? 'Edit cause & action' : 'Cause & action'}
+                        </Button>
+                      ) : null}
+                    </td>
+                    <td className="whitespace-nowrap p-2 text-xs" data-testid="alerts-state">
+                      {alertStateText(r, timezone, dayNow)}
+                    </td>
+                    <td className="p-2">
+                      {canAck && r.state === 'OPEN' ? (
+                        <Button size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={busy} onClick={() => void ack([r])} data-testid="alerts-ack">
+                          Acknowledge
+                        </Button>
+                      ) : null}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
       ) : null}
       {answer?.truncated ? <p className="text-xs text-muted-foreground">Only 500 alerts are shown: narrow the dates, the depot or the rule.</p> : null}
+      {canAck ? (
+        <AlertReviewDialog target={reviewing} related={rows} timezone={timezone} today={dayNow} canAck={canAck} onClose={() => setReviewing(null)} onSaved={() => void read()} />
+      ) : null}
     </div>
   );
 }

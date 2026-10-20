@@ -10,7 +10,48 @@
  */
 import { daysBetween, fmtDayMonth, fmtHhmm, localDateIso, localMinutes } from '../dispatch/time';
 import { ALERT_RULE_SPECS, ALERT_TOAST_MAX, RESOLVED_REASON_TEXT, SEVERITY_RANK, isAlertRule, type AlertSeverity } from './catalog';
-import type { OpsAlertRow, SweepCheck } from './types';
+import { actionLabel, causeLabel, reviewCameBack, reviewGotWorse, reviewOtherStop } from './review';
+import type { AlertReviewView, OpsAlertRow, SweepCheck } from './types';
+
+/** An alert's words; the 90-day clean-up removed them from an older alert (its cause & action codes stay). */
+export function alertText(r: Pick<OpsAlertRow, 'text'>): string {
+  return r.text || 'Details removed after 90 days';
+}
+
+/** "Traffic or road delay", "Other - <its text>". */
+export function reviewCauseText(v: Pick<AlertReviewView, 'cause' | 'causeOther'>): string {
+  return v.cause === 'OTHER' && v.causeOther ? `Other - ${v.causeOther}` : causeLabel(v.cause);
+}
+
+export function reviewActionText(v: Pick<AlertReviewView, 'action' | 'actionOther'>): string {
+  return v.action === 'OTHER' && v.actionOther ? `Other - ${v.actionOther}` : actionLabel(v.action);
+}
+
+/**
+ * The cause & action line under an alert (owner request 20 Oct 2026): "Cause: Traffic or road delay · Action:
+ * Called the driver · Sam Example 11:02" (with the company's `today`, a save of another day says its day, as
+ * the Alerts page shows times). '' without one. The note and the flags come separately (alertReviewFlags).
+ */
+export function alertReviewText(r: Pick<OpsAlertRow, 'review' | 'deliveryDate'>, timezone: string, today?: string): string {
+  const v = r.review;
+  if (!v) return '';
+  const when = today ? alertWhen(v.savedAt, r.deliveryDate, timezone, today) : alertTime(v.savedAt, timezone);
+  const by = [v.byName, when].filter(Boolean).join(' ');
+  return [`Cause: ${reviewCauseText(v)}`, `Action: ${reviewActionText(v)}`, by].filter(Boolean).join(' · ');
+}
+
+/**
+ * What changed since the cause & action was saved (critique of the design, items 5 and 6): the alert came back,
+ * got worse, or its stop now names another customer. Check it still fits.
+ */
+export function alertReviewFlags(r: Pick<OpsAlertRow, 'review' | 'tier' | 'occurrences' | 'customerId'>): string[] {
+  if (!r.review) return [];
+  return [
+    reviewCameBack(r) ? 'came back after it was saved' : null,
+    reviewGotWorse(r) ? 'got worse after it was saved' : null,
+    reviewOtherStop(r) ? 'now about another customer at this stop' : null,
+  ].filter((x): x is string => !!x);
+}
 
 /** "T05 L1 stop 3", "T05 L1", "T05". */
 export function alertWhere(r: Pick<OpsAlertRow, 'truckCode' | 'loadNo' | 'sequence'>): string {

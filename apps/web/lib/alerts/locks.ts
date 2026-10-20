@@ -10,6 +10,10 @@
  *
  * The holder of this lock takes no other lock in that transaction (the sweep only reads and writes
  * OpsAlert; Start fresh takes it last), so it never closes a cycle with the plan, outcome or link locks.
+ * One exception (cause & action, review of the branch of 20 Oct 2026, finding 1): a save or removal of a
+ * cause & action waits for this lock, then for the company's e-mail lock (notify.ts lockTenantDigest), then
+ * writes OpsAlert rows and its audit rows (inbox.ts lockForReview). Nothing takes the e-mail lock before this
+ * one, so that order closes no cycle either.
  */
 import type { Prisma } from '@prisma/client';
 

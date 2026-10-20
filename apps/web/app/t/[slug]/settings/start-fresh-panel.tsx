@@ -15,6 +15,7 @@ import {
   START_FRESH_KEPT,
   START_FRESH_LIVE_TICK,
   START_FRESH_PREVIEW_MAX_AGE_MS,
+  START_FRESH_ALERT_REVIEWS_LABEL,
   START_FRESH_GPS_LABEL,
   START_FRESH_SALES_LINK_LABEL,
   START_FRESH_REMOVED,
@@ -277,11 +278,15 @@ export function StartFreshPanel({ slug }: { slug: string }) {
   );
 }
 
-/** The removed counts as the panel lists them; the GPS tracking and salesman link lines only when the report has them. */
+/**
+ * The removed counts as the panel lists them; the GPS tracking and salesman link lines only when the report has
+ * them, and the alerts with a cause & action only when there are some (owner request 20 Oct 2026).
+ */
 function removedRows(removed: StartFreshRemoved): { label: string; value: number; sub?: boolean }[] {
   const rows: { label: string; value: number; sub?: boolean }[] = START_FRESH_REMOVED.map((r) => ({ label: r.label, value: removed[r.key], sub: 'sub' in r && r.sub }));
-  if (removed.gpsTracking !== undefined) rows.push({ label: START_FRESH_GPS_LABEL, value: removed.gpsTracking });
-  if (removed.salesLinks !== undefined) rows.push({ label: START_FRESH_SALES_LINK_LABEL, value: removed.salesLinks });
+  if (removed.gpsTracking !== undefined) rows.push({ label: START_FRESH_GPS_LABEL, value: removed.gpsTracking, sub: false });
+  if (removed.salesLinks !== undefined) rows.push({ label: START_FRESH_SALES_LINK_LABEL, value: removed.salesLinks, sub: false });
+  if (removed.alertReviews !== undefined) rows.push({ label: START_FRESH_ALERT_REVIEWS_LABEL, value: removed.alertReviews, sub: false });
   return rows;
 }
 

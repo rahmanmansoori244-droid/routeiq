@@ -39,6 +39,9 @@ import { prismaDigestStore } from '@/lib/alerts/notify';
 import { tenantDb } from '@/lib/tenant';
 import { recordDriverActions } from '@/lib/delivery/event-service';
 import { zonedDayStart } from '@/lib/dispatch/time';
+import { ALERT_RULES } from '@/lib/alerts/catalog';
+import { STORED_SELECT, applyPlan, planApply, storedOf, type PlanContext } from '@/lib/alerts/store';
+import type { Candidate, Evaluation } from '@/lib/alerts/types';
 
 const TZ = 'Asia/Muscat';
 const D = '2026-03-10';
@@ -330,5 +333,39 @@ describe('operations alerts on the real database', () => {
     // Sent: the next e-mail finds nothing new (nothing goes twice).
     await store.finish(A.tenantId, digestId, claimed as never, at('30:05'), { ok: true });
     expect(await store.claim(A.tenantId, at('30:25'), opts)).toEqual({ ok: false, skip: 'NOTHING_NEW' });
+  });
+});
+
+describe('cause & action (owner request 20 Oct 2026): the sweep never touches it', () => {
+  it('8. what the office saved stays through an update, an escalation, a close and a reopen by the store', async () => {
+    const subjectKey = `rv|${D}|y|1`;
+    const base = { tenantId: A.tenantId, depotId: 'D1', deliveryDate: day, rule: 'ETA_LATE', subjectKey, truckId: 'y', truckCode: 'T98', loadNo: 1, kind: 'CONDITION', severity: 'WARN', tier: 1, value: 35, threshold: 30, text: 'T98 L1 is running about 35 min late.', occurredAt: at('09:00') };
+    const review = {
+      reviewCause: 'TRAFFIC', reviewAction: 'OTHER', reviewActionOther: 'Sent a van', reviewNote: 'Road works', reviewFollowUp: true, reviewFirstAt: at('09:10'), reviewFirstById: A.userId,
+      reviewedAt: at('09:10'), reviewedById: A.userId, reviewSaves: 1, reviewTier: 1, reviewOccurrences: 1,
+    };
+    const created = await prisma.opsAlert.create({ data: { ...base, ...review } });
+    const ctx: PlanContext = { now: at('10:00'), alertsEnabledAt: at('06:00'), windowFrom: '2026-03-09', today: D, todayStart: zonedDayStart(D, TZ), rulesOn: [...ALERT_RULES] };
+    const cand = (over: Partial<Candidate>): Candidate => ({
+      rule: 'ETA_LATE', kind: 'CONDITION', subjectKey, depotId: 'D1', deliveryDate: D, truckId: 'y', truckCode: 'T98', loadNo: 1, sequence: null, customerId: null, tier: 1, value: 35, threshold: 30, text: base.text, occurredAt: at('09:00'), ...over,
+    });
+    const step = async (ev: Partial<Evaluation>, now: Date) => {
+      const stored = (await prisma.opsAlert.findMany({ where: { id: created.id }, select: STORED_SELECT })).map(storedOf);
+      const plan = planApply(stored, { active: [], ended: [], scopes: [], ...ev }, { ...ctx, now });
+      await prisma.$transaction((tx) => applyPlan(tx, A.tenantId, plan, now));
+      return prisma.opsAlert.findUniqueOrThrow({ where: { id: created.id } });
+    };
+    const kept = (r: Record<string, unknown>) => expect(r).toMatchObject(review);
+    kept(await step({ active: [cand({ value: 50, text: 'T98 L1 is running about 50 min late.' })] }, at('10:00')));
+    const worse = await step({ active: [cand({ tier: 2, value: 70, text: 'T98 L1 is running about 70 min late.' })] }, at('10:10'));
+    expect(worse.tier).toBe(2);
+    kept(worse);
+    const over = await step({ ended: [{ rule: 'ETA_LATE', subjectKey, reason: 'ENDED', text: 'T98 L1 back on time.' }] }, at('10:20'));
+    expect(over.resolvedReason).toBe('ENDED');
+    kept(over);
+    const back = await step({ active: [cand({ value: 40, occurredAt: at('10:25'), text: 'T98 L1 is running about 40 min late.' })] }, at('10:30'));
+    expect([back.resolvedAt, back.occurrences]).toEqual([null, 2]);
+    kept(back);
+    await prisma.opsAlert.delete({ where: { id: created.id } });
   });
 });
