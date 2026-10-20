@@ -72,7 +72,10 @@ export interface SalesRouteView {
   query: string;
   /** When the data was read: "10:32" (company time). */
   updated: string;
-  /** The deliveries by time (delivered at, else expected, else planned), then the orders cancelled or not on a truck. */
+  /**
+   * The deliveries by time (delivered at, else expected, else planned), then the orders cancelled or not on a truck;
+   * one row per customer (and branch) and status: a customer's two deliveries with one status are one row.
+   */
   rows: SalesRow[];
 }
 

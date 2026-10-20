@@ -12,16 +12,18 @@ import { st, type SalesLang } from '@/lib/sales-page/i18n';
  * page's language (no number, no link); an order not on a truck has none.
  */
 export function RowCard({ lang, r, rowKey, future, date }: { lang: SalesLang; r: SalesRow; rowKey: string; future: boolean; date: string }) {
-  const line = rowLine(lang, r);
+  const line = rowLine(lang, r, { future, date });
   const share = shareText(lang, r, { future, date });
   return (
     <li className={`rounded-lg border-s-4 bg-white p-3 shadow-sm ring-1 ring-slate-200 ${STATUS_EDGE[r.status]}`} data-testid={`row-${rowKey}`} data-status={r.status}>
       <div className="flex items-start justify-between gap-2">
-        <p className="min-w-0 text-base font-semibold leading-snug" dir="auto" data-testid="row-customer">
+        {/* No dir on the paragraph: it follows the page (a long name wraps on the page's start side, review of 20 Oct
+            2026); <bdi> keeps the name itself in its own direction. */}
+        <p className="min-w-0 text-base font-semibold leading-snug" data-testid="row-customer">
           <bdi>{customerText(r)}</bdi>
         </p>
         <span className={`shrink-0 rounded px-2 py-0.5 text-sm font-semibold ${STATUS_CHIP[r.status]}`} data-testid="row-status">
-          {statusLabel(lang, r.status)}
+          {statusLabel(lang, r.status, future)}
         </span>
       </div>
       {line ? (

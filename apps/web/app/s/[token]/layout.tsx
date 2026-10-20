@@ -6,7 +6,8 @@ import type { ReactNode } from 'react';
  * and no preview tags (a link previewer that fetches the link from the WhatsApp group learns nothing), never
  * indexed, and no Referer (the token is in this page's path, critique item 16; the page has no map since 20 Oct
  * 2026). next.config.js sends the same as headers for /s/ and /api/s/, with no-store. The page itself sets its
- * language and direction (English, Arabic, Urdu: sales-page.tsx).
+ * language and direction (English, Arabic, Urdu: sales-page.tsx), and its title in that language in the browser
+ * (a previewer runs no script and keeps this generic one).
  */
 export const metadata: Metadata = {
   title: 'RouteIQ - deliveries',

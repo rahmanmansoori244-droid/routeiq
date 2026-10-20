@@ -6,8 +6,8 @@
  */
 import type { SalesChoice, SalesLookup, SalesMeta, SalesRouteView, SalesRow, SalesStatus, SalesViewKind } from '../sales-link/view-types';
 import { fmtDayMonth } from '../dispatch/time';
-import { MAX_CODES, normTypedRoute } from '../sales-link/route-code';
-import { aboutText, dayText, st, zonedParts, type SalesKey, type SalesLang } from './i18n';
+import { explicitTruck, MAX_CODES, normTypedRoute } from '../sales-link/route-code';
+import { aboutText, dayText, isRtl, st, zonedParts, type SalesKey, type SalesLang } from './i18n';
 
 const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -66,16 +66,25 @@ export const STATUS_EDGE: Record<SalesStatus, string> = {
   NOT_IN_PLAN: 'border-s-violet-500',
 };
 
-export const statusLabel = (lang: SalesLang, s: SalesStatus): string => st(lang, `st.${s}` as SalesKey);
+/**
+ * A status's words on its button, chip and list heading. On a later delivery date (tomorrow's link opened the
+ * evening before: `future`) nothing has left yet, so "On the way" reads "Planned" (review of 20 Oct 2026: the same
+ * button and count, never "on the way" the night before).
+ */
+export const statusLabel = (lang: SalesLang, s: SalesStatus, future = false): string => st(lang, future && s === 'ON_THE_WAY' ? 'st.PLANNED' : (`st.${s}` as SalesKey));
 
 export interface StatusButton {
   status: SalesStatus;
   n: number;
 }
 
-/** The buttons of a result: the six always (a 0 is shown, not hidden), the other two only when they count something. */
-export function statusButtons(rows: readonly Pick<SalesRow, 'status'>[]): StatusButton[] {
-  return STATUS_ORDER.map((status) => ({ status, n: rows.filter((r) => r.status === status).length })).filter((b) => ALWAYS.has(b.status) || b.n > 0);
+/**
+ * The buttons of a result: the six always (a 0 is shown, not hidden), the other two only when they count something
+ * - or when it is the one picked (`active`): a refresh that empties it keeps it there, pressed, with 0 (review of
+ * 20 Oct 2026: else no button was pressed under "Not confirmed yet · 0").
+ */
+export function statusButtons(rows: readonly Pick<SalesRow, 'status'>[], active: SalesStatus | null = null): StatusButton[] {
+  return STATUS_ORDER.map((status) => ({ status, n: rows.filter((r) => r.status === status).length })).filter((b) => ALWAYS.has(b.status) || b.n > 0 || b.status === active);
 }
 
 /** The rows a button shows (all of them for "All"). */
@@ -98,12 +107,20 @@ export function isFutureDay(meta: Pick<SalesMeta, 'date' | 'serverNow' | 'tz'>):
   return !!today && meta.date > today;
 }
 
+/** The delivery date of the page, and whether it is after the company's today (isFutureDay). */
+export interface DayOf {
+  future: boolean;
+  date: string;
+}
+
 /**
  * The one line under a customer: "at 10:31" (delivered), "18 of 24 cases" (partly), "about 16:30 · in about 1 h 20
  * min" (on the way or delayed; "any minute" when it is close), "Being delivered now", "Moved to Tue 21 Oct", "Not
- * planned yet"; null when the status says it all (not delivered, not confirmed, cancelled, or no time to give).
+ * planned yet"; null when the status says it all (not delivered, not confirmed, cancelled, or no time to give). On a
+ * later delivery date (`o.future`: tomorrow's link the evening before) a delivery still to come says its day:
+ * "Wed 21 Oct, about 09:30" (review of 20 Oct 2026: a bare time read as today).
  */
-export function rowLine(lang: SalesLang, r: SalesRow): string | null {
+export function rowLine(lang: SalesLang, r: SalesRow, o: DayOf | null = null): string | null {
   switch (r.status) {
     case 'DELIVERED':
       return r.at ? st(lang, 'deliveredAt', { time: r.at }) : null;
@@ -112,6 +129,10 @@ export function rowLine(lang: SalesLang, r: SalesRow): string | null {
     case 'ON_THE_WAY':
     case 'DELAYED':
       if (r.atCustomer) return st(lang, 'beingDelivered');
+      if (o?.future) {
+        const day = dayText(lang, o.date);
+        return r.eta ? st(lang, 'plannedAt', { day, time: r.eta }) : st(lang, 'plannedOn', { day });
+      }
       if (!r.eta) return null;
       return r.inMin === null ? st(lang, 'expectedAbout', { time: r.eta }) : `${st(lang, 'expectedAbout', { time: r.eta })} · ${aboutText(lang, r.inMin)}`;
     case 'NOT_IN_PLAN':
@@ -127,10 +148,12 @@ export const customerText = (r: Pick<SalesRow, 'customer' | 'branch'>): string =
 
 /**
  * The WhatsApp text for the customer, in the page's language: the customer, the status and the approximate time,
- * nothing else (no link, no invoice, no truck); null for an order not on a truck (no button).
+ * nothing else (no link, no invoice, no truck); null for an order not on a truck (no button). The customer's name is
+ * always isolated (U+2068 ... U+2069; i18n.ts does it in Arabic and Urdu): an English text that starts with a name
+ * stored in Arabic would else read right to left in WhatsApp, its direction taken from the name (review of 20 Oct 2026).
  */
-export function shareText(lang: SalesLang, r: SalesRow, o: { future: boolean; date: string }): string | null {
-  const customer = customerText(r);
+export function shareText(lang: SalesLang, r: SalesRow, o: DayOf): string | null {
+  const customer = isRtl(lang) ? customerText(r) : `⁨${customerText(r)}⁩`;
   switch (r.status) {
     case 'DELIVERED':
       return r.at ? st(lang, 'msg.DELIVERED', { customer, time: r.at }) : st(lang, 'msg.DELIVERED_NO_TIME', { customer });
@@ -162,6 +185,13 @@ export function shareUrl(text: string): string {
 // The header, the route form and the notices
 // ---------------------------------------------------------------------------------------
 
+/**
+ * The page's title in its language ("RouteIQ - Deliveries", "RouteIQ - التوصيلات"): WhatsApp's in-app browser and
+ * Chrome Custom Tabs show it above the page (review of 20 Oct 2026). Set by the page in the browser only: a link
+ * previewer runs no script and gets layout.tsx's generic English one.
+ */
+export const pageTitle = (lang: SalesLang): string => `RouteIQ - ${st(lang, 'appTitle')}`;
+
 /** The heading and tab of a result: "Route R1", "Truck 1234-AB" (the code the salesman typed, as the day names it). */
 export function viewTitle(lang: SalesLang, v: { kind: SalesViewKind; code: string }): string {
   return st(lang, v.kind === 'TRUCK' ? 'truckTitle' : 'routeTitle', { code: v.code });
@@ -180,15 +210,26 @@ export type FormProblem =
   | { kind: 'OFFLINE' }
   | { kind: 'SERVER' };
 
-/** The codes as a list in the page's language ("R9, TRUCK 9999"). */
-const codesText = (codes: readonly string[]) => codes.join(', ');
+/**
+ * A code of the server's lookup lists in the page's language: a route code as it is ("R9"); a truck asked for
+ * explicitly - the server's "TRUCK 1234-AB", which the page itself sends for a truck it follows - as the page's own
+ * words for a truck ("Truck 1234-AB", "الشاحنة 1234-AB", "ٹرک 1234-AB"; review of 20 Oct 2026: the English word
+ * "TRUCK" showed inside Arabic and Urdu messages).
+ */
+export function codeText(lang: SalesLang, code: string): string {
+  const truck = explicitTruck(code);
+  return truck ? st(lang, 'truckTitle', { code: truck }) : code;
+}
+
+/** The codes as a list in the page's language ("R9, Truck 9999"). */
+const codesText = (lang: SalesLang, codes: readonly string[]) => codes.map((c) => codeText(lang, c)).join(', ');
 
 export function problemText(lang: SalesLang, p: FormProblem, date: string | null): string {
   switch (p.kind) {
     case 'CODE':
       return st(lang, p.code === 'ROUTE_CODE_MISSING' ? 'codeMissing' : p.code === 'TOO_MANY_CODES' ? 'tooManyCodes' : 'codeTooLong');
     case 'NOT_FOUND':
-      return st(lang, 'notFound', { codes: p.codes.length ? codesText(p.codes) : '?', day: date ? dayText(lang, date) : '' });
+      return st(lang, 'notFound', { codes: p.codes.length ? codesText(lang, p.codes) : '?', day: date ? dayText(lang, date) : '' });
     case 'OFFLINE':
       return st(lang, 'offline');
     default:
@@ -203,14 +244,14 @@ export interface LookupNotice {
 }
 
 export function noticeText(lang: SalesLang, n: LookupNotice, date: string | null): string | null {
-  const parts = [n.notFound.length ? problemText(lang, { kind: 'NOT_FOUND', codes: n.notFound }, date) : null, n.ambiguous.length ? st(lang, 'ambiguous', { codes: codesText(n.ambiguous) }) : null];
+  const parts = [n.notFound.length ? problemText(lang, { kind: 'NOT_FOUND', codes: n.notFound }, date) : null, n.ambiguous.length ? st(lang, 'ambiguous', { codes: codesText(lang, n.ambiguous) }) : null];
   const text = parts.filter(Boolean).join(' ');
   return text || null;
 }
 
 /** The line above the trucks offered for a code. */
 export function choiceText(lang: SalesLang, c: Pick<SalesChoice, 'kind' | 'asked'>): string {
-  return st(lang, c.kind === 'SEVERAL_TRUCKS' ? 'severalTrucks' : 'alsoTruck', { code: c.asked });
+  return st(lang, c.kind === 'SEVERAL_TRUCKS' ? 'severalTrucks' : 'alsoTruck', { code: codeText(lang, c.asked) });
 }
 
 /** "Too many requests. Trying again in 30 s." */

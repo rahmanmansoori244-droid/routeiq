@@ -172,6 +172,72 @@ describe('one time: the approximate expected time and how far it is', () => {
   });
 });
 
+describe('the same customer twice (review of 20 Oct 2026: a split delivery or two trips were two rows alike)', () => {
+  const mart = { customerName: 'Example Mart', customerCode: 'TST0007', branchCode: 'B2' } as const;
+  const pending = (h: number, m: number) => dd({ ...mart, status: 'PLANNED', plannedMin: hm(h, m), slot: { from: hm(h, m) - 25, to: hm(h, m) + 50 } });
+
+  it('two deliveries still to come are ONE row with the earliest time (one customer on the On the way button)', () => {
+    const v = one([pending(14, 10), pending(9, 40)], { now: at('09:10') });
+    expect(v.rows.map(line)).toEqual(['Example Mart ON_THE_WAY 09:40 30']);
+    expect(v.rows[0]).toMatchObject({ key: 'd2', branch: 'B2' });
+    // The same with the truck at the customer for the first: "being delivered now" (the later one waits its turn).
+    const here = one([dd({ ...mart, status: 'AT_CUSTOMER', plannedMin: hm(9, 40) }), pending(14, 10)], { now: at('09:45') });
+    expect(here.rows.map(line)).toEqual(['Example Mart ON_THE_WAY - - here']);
+  });
+
+  it('delivered twice: one row at the last time; partly twice: the cases added up; not delivered or not confirmed twice: one row', () => {
+    const b = { customerName: 'Customer B', customerCode: 'TST0002', branchCode: null };
+    const v = one(
+      [
+        dd({ ...mart, status: 'DELIVERED', at: '13:40', atMin: hm(13, 40) }),
+        dd({ ...mart, status: 'DELIVERED', at: '09:20', atMin: hm(9, 20) }),
+        dd({ ...b, status: 'PARTLY_DELIVERED', delivered: { cases: 6, of: 10 }, at: '10:00', atMin: hm(10) }),
+        dd({ ...b, status: 'PARTLY_DELIVERED', delivered: { cases: 3, of: 8 }, at: '12:00', atMin: hm(12) }),
+        dd({ customerName: 'Customer C', customerCode: 'TST0003', status: 'NOT_DELIVERED', at: '11:00', atMin: hm(11) }),
+        dd({ customerName: 'Customer C', customerCode: 'TST0003', status: 'TRUCK_DID_NOT_GO', plannedMin: hm(11, 30) }),
+        dd({ customerName: 'Customer D', customerCode: 'TST0004', status: 'NO_RESULT', plannedMin: hm(8) }),
+        dd({ customerName: 'Customer D', customerCode: 'TST0004', status: 'VISITED', plannedMin: hm(8, 30) }),
+      ],
+      { now: at('14:00') },
+    );
+    expect(v.rows.map((r) => `${r.customer} ${r.status} ${r.at ?? '-'} ${r.cases ? `${r.cases.delivered}/${r.cases.of}` : '-'}`)).toEqual([
+      'Customer D NOT_CONFIRMED - -',
+      'Customer C NOT_DELIVERED - -',
+      'Customer B PARTLY_DELIVERED - 9/18',
+      'Example Mart DELIVERED 13:40 -',
+    ]);
+    // One partial delivery without its cases: the sum is not known, so none is said.
+    const unknown = one([dd({ ...b, status: 'PARTLY_DELIVERED', delivered: { cases: 6, of: 10 } }), dd({ ...b, status: 'PARTLY_DELIVERED', delivered: null })]);
+    expect(unknown.rows).toHaveLength(1);
+    expect(unknown.rows[0]!.cases).toBeNull();
+  });
+
+  it('different statuses, or another branch of the same name, stay apart: each says something the other does not', () => {
+    const v = one(
+      [
+        dd({ ...mart, status: 'DELIVERED', at: '09:45', atMin: hm(9, 45) }),
+        pending(14, 10),
+        dd({ ...mart, branchCode: 'B3', status: 'PLANNED', plannedMin: hm(15), slot: { from: hm(14, 45), to: hm(15, 45) } }),
+      ],
+      { now: at('13:50') },
+    );
+    expect(v.rows.map((r) => `${r.customer} ${r.branch} ${r.status} ${r.at ?? r.eta}`)).toEqual(['Example Mart B2 DELIVERED 09:45', 'Example Mart B2 ON_THE_WAY 14:10', 'Example Mart B3 ON_THE_WAY 15:00']);
+  });
+
+  it('on the real day: one customer on two trips of the route is one row (and one in the truck\'s view)', () => {
+    const mk = (id: string, loadNo: number, departMin: number, eta: number, lineId: string, cases: number) =>
+      load({ id, loadNo, status: 'LOCKED', departMin, returnMin: departMin + 180, stops: [stop({ seq: 1, customerId: 'c7', code: 'TST0007', name: 'Example Mart', eta, lines: [ln('o7', lineId, 'INV-7', cases, 'R1')] })] });
+    const loads = [mk('L1', 1, hm(7), hm(9, 40), 'o7-l1', 20), mk('L2', 2, hm(13), hm(14, 10), 'o7-l2', 10)];
+    const input = dayInput({ plans: [{ detail: planDetail({ loads }), facts: factsOf([ln('o7', 'o7-l1', 'INV-7', 20, 'R1'), ln('o7', 'o7-l2', 'INV-7', 10, 'R1')]) }], now: at('06:00') });
+    const day = buildSalesDay(input);
+    expect(day.routes.get('R1')!.deliveries).toHaveLength(2);
+    const at0 = { date: DAY, tz: TZ, now: input.now, builtAt: input.now };
+    for (const v of [salesRouteView(day.routes.get('R1')!, at0), salesRouteView([...day.trucks.values()][0]!, at0)]) {
+      expect(v.rows.map(line)).toEqual(['Example Mart ON_THE_WAY 09:40 220']);
+    }
+  });
+});
+
 describe('the order and what is never sent', () => {
   it('by time (delivered at, else expected, else planned), then the cancelled, then the orders not on a truck', () => {
     const v = one(

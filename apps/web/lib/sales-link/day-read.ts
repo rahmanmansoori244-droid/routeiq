@@ -44,6 +44,7 @@ import { matchLookup, MAX_CODES, parseRouteQuery, truckQuery, type LookupChoice 
 import { consumeMisses, salesFail, salesOk, type SalesLinkContext } from './guard';
 import { touchSalesLink, TRUCK_SEEN_PREFIX } from './service';
 import { salesRouteView } from './simple-view';
+import { SALES_PAGE_HEADER, salesPageCurrent } from './page-version';
 import type { SalesChoice, SalesMeta, SalesRouteView, SalesViewAnswer } from './view-types';
 
 /** One build of a company's day serves every request for this long. */
@@ -289,8 +290,14 @@ export function salesMeta(o: { date: string; company: string; tz: string; expire
  * ("R1", "R1, R2X", "C1, 5678", "Truck 1234-AB") the routes and trucks they name (route-code.ts matchLookup), each
  * as simple-view.ts says it (one status and one time per customer), and the trucks to pick from. Codes that matched no route and no truck that day count against the link and client
  * (429 over the limit). A salesman's phone (never the office) is then recorded: the phone, the routes and trucks found.
+ * A page of an older version (no `X-Sales-Page` header, or an older one: page-version.ts) is answered 410
+ * LINK_REPLACED with the link's date before anything is read: an older page open since before a deploy then asks the
+ * salesman to open the link again instead of failing on an answer it cannot read (review of 20 Oct 2026).
  */
 export async function salesView(req: Request, ctx: SalesLinkContext): Promise<Response> {
+  if (!salesPageCurrent(req.headers.get(SALES_PAGE_HEADER))) {
+    return salesFail({ code: 'LINK_REPLACED', message: 'This page was updated. Open the link again from your group.', date: ctx.date }, 410);
+  }
   const raw = new URL(req.url).searchParams.get('route');
   if (raw === null) {
     const [cfg, tenant] = await Promise.all([

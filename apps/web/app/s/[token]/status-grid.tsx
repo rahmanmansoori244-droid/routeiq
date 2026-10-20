@@ -8,7 +8,8 @@ import { st, type SalesLang } from '@/lib/sales-page/i18n';
  * The status buttons at the top of a route (owner feedback of 20 Oct 2026: "first a list - delivered, on the way,
  * delayed, not delivered, cancelled, partly delivered - and when he clicks on one he sees those"): "All" with every
  * customer, then one big button per status with its count. One is selected at a time; a second tap on it shows all
- * again. A status with none is shown with 0 (not hidden), and cannot be picked.
+ * again. A status with none is shown with 0 (not hidden), and cannot be picked (the one picked stays pressed). On a
+ * later delivery date (`future`) "On the way" reads "Planned".
  */
 export function StatusGrid({
   lang,
@@ -16,12 +17,14 @@ export function StatusGrid({
   total,
   active,
   onPick,
+  future = false,
 }: {
   lang: SalesLang;
   buttons: readonly StatusButton[];
   total: number;
   active: SalesStatus | null;
   onPick: (status: SalesStatus | null) => void;
+  future?: boolean;
 }) {
   return (
     <div className="space-y-2" data-testid="status-grid">
@@ -49,7 +52,7 @@ export function StatusGrid({
               data-testid={`status-${b.status}`}
             >
               <span className="text-2xl font-bold leading-none">{b.n}</span>
-              <span className="mt-1 text-sm font-semibold leading-tight">{statusLabel(lang, b.status)}</span>
+              <span className="mt-1 text-sm font-semibold leading-tight">{statusLabel(lang, b.status, future)}</span>
             </button>
           );
         })}

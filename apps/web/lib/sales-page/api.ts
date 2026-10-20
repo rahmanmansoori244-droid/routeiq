@@ -13,6 +13,7 @@
  */
 import type { SalesLinkStateCode, SalesQueryErrorCode, SalesViewAnswer } from '../sales-link/view-types';
 import { MAX_QUERY_CHARS } from '../sales-link/route-code';
+import { SALES_PAGE_HEADER, SALES_PAGE_VERSION } from '../sales-link/page-version';
 
 export const ROUTE_KEY = 'riq.s.route';
 export const DEVICE_KEY = 'riq.s.device';
@@ -122,8 +123,9 @@ export function saveLang(lang: string, storage: KeyStore | null = safeLocalStora
   }
 }
 
+/** The request's headers: the token, the random id, and this page's version (an older page is told to reopen the link: page-version.ts). */
 export function salesHeaders(token: string, device: string): Record<string, string> {
-  return { Authorization: `SalesLink ${token}`, 'X-Sales-Device': device, Accept: 'application/json' };
+  return { Authorization: `SalesLink ${token}`, 'X-Sales-Device': device, [SALES_PAGE_HEADER]: String(SALES_PAGE_VERSION), Accept: 'application/json' };
 }
 
 /** GET /api/s/view, or with the codes typed: GET /api/s/view?route=R1%2C%20R2X. The token is never in it. */

@@ -27,6 +27,13 @@
  *    arrival. Nothing better than a planned time already past: no time (and never a "no update" line). `inMin`
  *    (minutes from now) only on the delivery day itself.
  *
+ * THE SAME CUSTOMER TWICE (a split delivery, two trips, a truck's two stops at one customer; review of 20 Oct 2026:
+ * two rows with the same name and status and nothing to tell them apart): the deliveries of one customer (code and
+ * branch) with the same status are ONE row - still to come, not delivered or not confirmed: the first one (the
+ * earliest time); delivered: the last one (when the last of it was delivered); partly delivered: the cases added up
+ * (none when one of them has none), placed by the last one. Different statuses stay apart ("Delivered at 09:45"
+ * and "On the way, about 14:10"): each says something the other does not.
+ *
  * THE ORDER: the deliveries by their time (delivered at, else expected, else planned; the planned order between
  * equals), then the orders cancelled, then those not on a truck.
  */
@@ -121,12 +128,49 @@ function offRows(offs: readonly DayOffTruck[]): SalesRow[] {
   return [...rows.values()].sort((a, b) => rank(a) - rank(b)).map((r, i) => ({ ...r, key: `o${i + 1}` }));
 }
 
+/** A delivery's row with its place in the order (`sortMin`, then the day's order `i`) and its customer (code and branch: never sent). */
+interface Placed {
+  row: SalesRow;
+  sortMin: number;
+  i: number;
+  who: string;
+}
+
+const before = (a: Placed, b: Placed) => a.sortMin - b.sortMin || a.i - b.i;
+
+/** One customer's deliveries with one status, as one row (see the file comment). */
+function mergeSame(group: readonly Placed[]): Placed {
+  if (group.length === 1) return group[0]!;
+  const sorted = [...group].sort(before);
+  const first = sorted[0]!;
+  const last = sorted[sorted.length - 1]!;
+  switch (first.row.status) {
+    case 'DELIVERED':
+      return last;
+    case 'PARTLY_DELIVERED': {
+      const all = sorted.map((p) => p.row.cases);
+      const cases = all.every((x) => x !== null) ? { delivered: all.reduce((t, x) => t + x!.delivered, 0), of: all.reduce((t, x) => t + x!.of, 0) } : null;
+      return { ...last, row: { ...last.row, cases } };
+    }
+    default:
+      return first;
+  }
+}
+
 /** One result as the page is sent it (see the file comment). `builtAt`: when the day was read ("updated"). */
 export function salesRouteView(v: DayView, o: { date: string; tz: string; now: Date; builtAt: Date }): SalesRouteView {
   const c: Ctx = { rel: dayRelOf(o.date, o.tz, o.now), nowMin: minutesOnDate(o.now, o.date, o.tz) };
-  const rows = v.deliveries
-    .map((d, i) => ({ ...deliveryRow(d, `d${i + 1}`, c), i }))
-    .sort((a, b) => a.sortMin - b.sortMin || a.i - b.i)
+  const groups = new Map<string, Placed[]>();
+  v.deliveries.forEach((d, i) => {
+    const p: Placed = { ...deliveryRow(d, `d${i + 1}`, c), i, who: `${d.customerCode}|${d.branchCode ?? ''}` };
+    const id = `${p.who}|${p.row.status}`;
+    const g = groups.get(id);
+    if (g) g.push(p);
+    else groups.set(id, [p]);
+  });
+  const rows = [...groups.values()]
+    .map(mergeSame)
+    .sort(before)
     .map((x) => x.row);
   return { kind: v.kind, code: v.code, query: v.query, updated: hhmm(localMinutes(o.builtAt, o.tz)), rows: [...rows, ...offRows(v.offTruck)] };
 }

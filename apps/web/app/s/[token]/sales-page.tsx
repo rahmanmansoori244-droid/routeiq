@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { AlertTriangle, RefreshCw, WifiOff } from 'lucide-react';
 import type { SalesMeta, SalesRouteView } from '@/lib/sales-link/view-types';
-import { busyText, isFutureDay, noticeText, staleText, tabText, untilText, viewTitle } from '@/lib/sales-page/format';
+import { busyText, isFutureDay, noticeText, pageTitle, staleText, tabText, untilText, viewTitle } from '@/lib/sales-page/format';
 import { dayText, dirOf, pickSalesLang, st, type SalesLang } from '@/lib/sales-page/i18n';
 import { saveLang, savedLang } from '@/lib/sales-page/api';
 import { ChoiceList } from './choice-list';
@@ -29,6 +29,14 @@ export function SalesPage() {
   useEffect(() => {
     setLang(pickSalesLang(savedLang(), typeof navigator !== 'undefined' ? navigator.language : null));
   }, []);
+  // The title above the page (WhatsApp's in-app browser shows it) in the language picked; layout.tsx's stays for previewers.
+  useEffect(() => {
+    try {
+      document.title = pageTitle(lang);
+    } catch {
+      // no document (never in a browser)
+    }
+  }, [lang]);
   const choose = (l: SalesLang) => {
     setLang(l);
     saveLang(l);
@@ -112,7 +120,13 @@ export function SalesPage() {
   );
 }
 
-function Header({
+/**
+ * The sticky header: the company and the language switch, then the route (or truck), the day and "Updated", Refresh
+ * and Change route. Its first row is left to right in every language, so the switch stays at the top right when the
+ * page turns right to left (review of 20 Oct 2026: a salesman who tapped the wrong language found it in the other
+ * corner); the company's name keeps its own direction (dir="auto").
+ */
+export function Header({
   lang,
   onLang,
   meta,
@@ -132,7 +146,7 @@ function Header({
   return (
     <header className="sticky top-0 z-10 bg-slate-900 text-white shadow">
       <div className="mx-auto w-full max-w-xl space-y-2 px-4 py-3">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center justify-between gap-2" dir="ltr" data-testid="header-top">
           <p className="min-w-0 truncate text-xs text-slate-300" dir="auto">
             {meta?.company || 'RouteIQ'}
           </p>

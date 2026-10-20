@@ -10,7 +10,8 @@
  * WHICH DELIVERIES BELONG TO ROUTE R: per order LINE (OrderLine.salesRoute), as the printed Salesman ETA
  * (lib/exports/salesman-eta.ts salesmanEtaModel; a parity test keeps them together): one delivery = one stop
  * of one trip carrying a line of R that is neither cancelled nor moved to another day; its invoices and cases
- * are R's only. A customer with several deliveries gets "part i of n". Lines without a route are on no route's page.
+ * are R's only. A customer with several deliveries (a split delivery, two trips) has each here; the page gets one
+ * row per customer and status (simple-view.ts). Lines without a route are on no route's page.
  *
  * WHICH DELIVERIES BELONG TO TRUCK T (owner decision of 20 Oct 2026: a lookup by truck code): every stop of every
  * trip of T on the day's plans in use (every depot), with all its lines that are neither cancelled nor moved to

@@ -26,10 +26,12 @@ import {
   allNotPlannedYet,
   busyText,
   choiceText,
+  codeText,
   customerText,
   followQuery,
   isFutureDay,
   noticeText,
+  pageTitle,
   problemText,
   rowLine,
   rowsOf,
@@ -42,6 +44,7 @@ import {
   STATUS_EDGE,
   STATUS_ORDER,
   statusButtons,
+  statusLabel,
   tabText,
   untilText,
   viewTitle,
@@ -49,6 +52,7 @@ import {
 import { aboutText, SALES_DICT, st, type SalesKey } from '@/lib/sales-page/i18n';
 import { SALES_STATE_TEXT } from '@/lib/sales-link/service';
 import { MAX_CODES, parseRouteQuery } from '@/lib/sales-link/route-code';
+import { SALES_PAGE_HEADER, SALES_PAGE_VERSION } from '@/lib/sales-link/page-version';
 import { shortDayText as serverShortDay } from '@/lib/sales-link/text';
 import type { SalesLinkStateCode, SalesStatus } from '@/lib/sales-link/view-types';
 import { RowCard } from '@/app/s/[token]/row-card';
@@ -145,7 +149,9 @@ describe('the token, the fragment and what the browser keeps', () => {
   it('asks a token-free path; the token travels only in the header', () => {
     expect(viewUrl(null)).toBe('/api/s/view');
     expect(viewUrl('R1, R2X')).toBe('/api/s/view?route=R1%2C%20R2X');
-    expect(salesHeaders(TOKEN, 'ab'.repeat(16))).toEqual({ Authorization: `SalesLink ${TOKEN}`, 'X-Sales-Device': 'ab'.repeat(16), Accept: 'application/json' });
+    expect(salesHeaders(TOKEN, 'ab'.repeat(16))).toEqual({ Authorization: `SalesLink ${TOKEN}`, 'X-Sales-Device': 'ab'.repeat(16), 'X-Sales-Page': '2', Accept: 'application/json' });
+    // The page's version (review of 20 Oct 2026): an older page open since before a deploy is told to reopen the link.
+    expect([SALES_PAGE_HEADER, SALES_PAGE_VERSION]).toEqual(['X-Sales-Page', 2]);
   });
 
   it('fetches no-store, same-origin, without a Referer; a network failure or a stall is "no answer"', async () => {
@@ -257,6 +263,21 @@ describe('the status buttons and their colours', () => {
     expect(buttons.reduce((t, b) => t + b.n, 0)).toBe(more.length);
   });
 
+  it('the one picked stays even at 0 (review of 20 Oct 2026: a refresh emptied "Not confirmed yet" and no button was pressed)', () => {
+    const v = routeView();
+    expect(statusButtons(v.rows, 'NOT_CONFIRMED').map((b) => `${b.status}:${b.n}`)).toEqual(['DELIVERED:1', 'ON_THE_WAY:2', 'DELAYED:1', 'PARTLY_DELIVERED:1', 'NOT_DELIVERED:0', 'CANCELLED:1', 'NOT_CONFIRMED:0']);
+    expect(statusButtons(v.rows, 'NOT_IN_PLAN').map((b) => b.status)).toContain('NOT_IN_PLAN');
+    expect(statusButtons(v.rows, 'DELAYED')).toEqual(statusButtons(v.rows));
+    expect(statusButtons(v.rows, null)).toEqual(statusButtons(v.rows));
+  });
+
+  it("tomorrow's link (the evening before): the On the way button and chip read Planned, in every language; nothing else changes", () => {
+    expect(statusLabel('en', 'ON_THE_WAY', true)).toBe('Planned');
+    expect(statusLabel('en', 'ON_THE_WAY')).toBe('On the way');
+    expect([statusLabel('ar', 'ON_THE_WAY', true), statusLabel('ur', 'ON_THE_WAY', true)]).toEqual(['مجدول', 'پلان شدہ']);
+    for (const s of ALL.filter((x) => x !== 'ON_THE_WAY')) for (const lang of ['en', 'ar', 'ur'] as const) expect(statusLabel(lang, s, true)).toBe(statusLabel(lang, s));
+  });
+
   it('a route only "not planned yet" (its depot plans the evening before) says so calmly', () => {
     const notYet = row({ key: 'o1', status: 'NOT_IN_PLAN', off: 'NOT_PLANNED_YET' });
     expect(allNotPlannedYet([notYet, { ...notYet, key: 'o2' }])).toBe(true);
@@ -285,6 +306,20 @@ describe('one line per customer, in the page\'s language', () => {
     expect(rowLine('en', row({ key: 'x', status: 'NOT_IN_PLAN', off: 'NOT_PLANNED_YET' }))).toBe('Not planned yet');
     expect(rowLine('en', row({ key: 'x', status: 'NOT_IN_PLAN', off: 'NOT_IN_PLAN' }))).toBeNull();
     expect(customerText(r('d4'))).toBe('Customer D (B2)');
+  });
+
+  it("tomorrow's link (the evening before): a delivery still to come says its day with the time (review of 20 Oct 2026: a bare time read as today)", () => {
+    const tomorrow = { future: true, date: '2026-10-21' };
+    const planned = row({ key: 'x', eta: '09:30' });
+    expect(rowLine('en', planned, tomorrow)).toBe('Wed 21 Oct, about 09:30');
+    expect(rowLine('en', row({ key: 'x' }), tomorrow)).toBe('On Wed 21 Oct');
+    expect(plain(rowLine('ar', planned, tomorrow))).toBe('يوم الأربعاء، 21 أكتوبر حوالي الساعة 09:30');
+    expect(plain(rowLine('ur', planned, tomorrow))).toBe('بدھ، 21 اکتوبر کو تقریباً 09:30 بجے');
+    for (const lang of ['ar', 'ur'] as const) expect(rowLine(lang, planned, tomorrow), lang).toContain('⁨09:30⁩');
+    // On the delivery day: the time (and how far) as before; results never change with the day.
+    expect(rowLine('en', planned, { future: false, date: '2026-10-21' })).toBe('about 09:30');
+    expect(rowLine('en', r('d1'), tomorrow)).toBe('at 08:10');
+    expect(rowLine('en', r('d3'), tomorrow)).toBe('Being delivered now');
   });
 
   it('how far: "any minute" under 10 min, to 5 min under an hour, then to 10 min', () => {
@@ -323,15 +358,16 @@ describe('"Send to customer": the customer, the status and the approximate time'
   const today = { future: false, date: '2026-10-19' };
 
   it('one short text per status; never a link, an invoice, a truck or a reason; none for an order not on a truck', () => {
-    expect(shareText('en', r('d1'), today)).toBe('Customer A: your order was delivered at 08:10.');
-    expect(shareText('en', r('d2'), today)).toBe('Customer B: part of your order was delivered (18 of 24 cases). We will contact you about the rest.');
-    expect(shareText('en', r('d3'), today)).toBe('Customer C: your order is being delivered now.');
+    const en = (x: Parameters<typeof shareText>[1], o = today) => plain(shareText('en', x, o));
+    expect(en(r('d1'))).toBe('Customer A: your order was delivered at 08:10.');
+    expect(en(r('d2'))).toBe('Customer B: part of your order was delivered (18 of 24 cases). We will contact you about the rest.');
+    expect(en(r('d3'))).toBe('Customer C: your order is being delivered now.');
     // Delayed or not, the customer is told the approximate time only (the owner: no reason).
-    expect(shareText('en', r('d4'), today)).toBe('Customer D (B2): your order is on the way, expected at about 11:50.');
-    expect(shareText('en', r('d5'), { future: true, date: '2026-10-19' })).toBe('Customer E: your order is planned for Mon 19 Oct, at about 12:30.');
-    expect(shareText('en', row({ key: 'x', customer: 'Customer X', status: 'NOT_DELIVERED' }), today)).toBe('Customer X: your order could not be delivered. We will contact you.');
-    expect(shareText('en', row({ key: 'x', customer: 'Customer X', status: 'NOT_CONFIRMED' }), today)).toBe('Customer X: we are checking your delivery and will contact you.');
-    expect(shareText('en', row({ key: 'x', customer: 'Customer X', status: 'DELAYED' }), today)).toBe('Customer X: your order is on the way.');
+    expect(en(r('d4'))).toBe('Customer D (B2): your order is on the way, expected at about 11:50.');
+    expect(en(r('d5'), { future: true, date: '2026-10-19' })).toBe('Customer E: your order is planned for Mon 19 Oct, at about 12:30.');
+    expect(en(row({ key: 'x', customer: 'Customer X', status: 'NOT_DELIVERED' }))).toBe('Customer X: your order could not be delivered. We will contact you.');
+    expect(en(row({ key: 'x', customer: 'Customer X', status: 'NOT_CONFIRMED' }))).toBe('Customer X: we are checking your delivery and will contact you.');
+    expect(en(row({ key: 'x', customer: 'Customer X', status: 'DELAYED' }))).toBe('Customer X: your order is on the way.');
     expect(shareText('en', r('o1'), today)).toBeNull();
     expect(shareText('en', row({ key: 'o2', status: 'NOT_IN_PLAN', off: 'MOVED', movedTo: '2026-10-21' }), today)).toBeNull();
     for (const x of v.rows) for (const lang of ['en', 'ar', 'ur'] as const) expect(shareText(lang, x, today) ?? '').not.toMatch(/https?:|wa\.me|\/s\/|invoice|INV-|truck|late|delay/i);
@@ -343,6 +379,18 @@ describe('"Send to customer": the customer, the status and the approximate time'
     expect(ar).toContain('⁨Customer D (B2)⁩');
     expect(ar).toContain('⁨11:50⁩');
     expect(plain(shareText('ur', r('d1'), today))).toBe('Customer A: آپ کا آرڈر 08:10 بجے ڈیلیور ہو گیا۔');
+  });
+
+  it('in English the name is isolated too: a name stored in Arabic never turns the message right to left (review of 20 Oct 2026)', () => {
+    const arabicName = row({ key: 'x', customer: 'مؤسسة النور', status: 'ON_THE_WAY', eta: '13:05', inMin: 30 });
+    const text = shareText('en', arabicName, today)!;
+    expect(text).toBe('⁨مؤسسة النور⁩: your order is on the way, expected at about 13:05.');
+    // The paragraph's direction is its first strong letter outside an isolate (Unicode bidi P2): Latin, so left to right.
+    const firstStrong = text.replace(/⁨[^⁩]*⁩/g, '').match(/[A-Za-z\u0590-\u08FF]/)?.[0];
+    expect(firstStrong).toMatch(/[A-Za-z]/);
+    for (const x of v.rows) expect(shareText('en', x, today) ?? '⁨', x.key).toMatch(/^⁨/);
+    // Arabic and Urdu isolate it once (i18n.ts), not twice.
+    expect(shareText('ar', arabicName, today)).toMatch(/^⁨مؤسسة النور⁩:/);
   });
 
   it('opens WhatsApp with the text and no number', () => {
@@ -373,7 +421,7 @@ describe('the header, the form and the notices', () => {
     expect(problemText('en', { kind: 'CODE', code: 'ROUTE_CODE_MISSING' }, null)).toBe('Type your route code.');
     expect(problemText('en', { kind: 'CODE', code: 'TOO_MANY_CODES' }, null)).toBe('At most 5 codes at once.');
     expect(problemText('en', { kind: 'CODE', code: 'ROUTE_CODE_TOO_LONG' }, null)).toBe('That code is too long.');
-    expect(problemText('en', { kind: 'NOT_FOUND', codes: ['R9', 'TRUCK 9999'] }, '2026-10-19')).toBe('No deliveries for R9, TRUCK 9999 on Mon 19 Oct. Check the code on your Salesman ETA page.');
+    expect(problemText('en', { kind: 'NOT_FOUND', codes: ['R9', 'TRUCK 9999'] }, '2026-10-19')).toBe('No deliveries for R9, Truck 9999 on Mon 19 Oct. Check the code on your Salesman ETA page.');
     expect(problemText('en', { kind: 'OFFLINE' }, null)).toBe('No connection. Check your signal and try again.');
     expect(problemText('en', { kind: 'SERVER' }, null)).toBe('The server could not answer just now. Try again in a minute.');
     expect(noticeText('en', { notFound: ['R9'], ambiguous: ['R-10'] }, '2026-10-19')).toBe('No deliveries for R9 on Mon 19 Oct. Check the code on your Salesman ETA page. R-10: more than one route or truck has this code - each is shown.');
@@ -381,6 +429,31 @@ describe('the header, the form and the notices', () => {
     expect(choiceText('en', { kind: 'SEVERAL_TRUCKS', asked: '1234' })).toBe('1234: more than one truck has this code. Pick one:');
     expect(choiceText('en', { kind: 'ALSO_TRUCK', asked: 'C1' })).toBe('C1 is also a truck code. Show the truck instead:');
     expect(plain(problemText('ur', { kind: 'NOT_FOUND', codes: ['R9'] }, '2026-10-19'))).toMatch(/^پیر، 19 اکتوبر کو R9 کی/);
+  });
+
+  it('a truck asked for explicitly is said in the page\'s words, never the server\'s English "TRUCK" (review of 20 Oct 2026)', () => {
+    expect(codeText('en', 'TRUCK 1234-AB')).toBe('Truck 1234-AB');
+    expect(plain(codeText('ar', 'TRUCK 1234-AB'))).toBe('الشاحنة 1234-AB');
+    expect(plain(codeText('ur', 'TRUCK 1234-AB'))).toBe('ٹرک 1234-AB');
+    expect(codeText('ar', 'R9')).toBe('R9');
+    for (const lang of ['ar', 'ur'] as const) {
+      const texts = [
+        problemText(lang, { kind: 'NOT_FOUND', codes: ['TRUCK 1234-AB'] }, '2026-10-19'),
+        noticeText(lang, { notFound: ['R9', 'TRUCK 1234-AB'], ambiguous: ['TRUCK AB-1'] }, '2026-10-19')!,
+        choiceText(lang, { kind: 'SEVERAL_TRUCKS', asked: 'TRUCK 56' }),
+      ];
+      for (const t of texts) {
+        expect(t, lang).not.toMatch(/TRUCK/i);
+        expect(t, lang).toContain(lang === 'ar' ? 'الشاحنة' : 'ٹرک');
+      }
+      expect(plain(texts[0]!), lang).toContain('1234-AB');
+    }
+    expect(plain(problemText('ar', { kind: 'NOT_FOUND', codes: ['TRUCK 1234-AB'] }, '2026-10-19'))).toBe('لا توجد توصيلات لـ الشاحنة 1234-AB يوم الاثنين، 19 أكتوبر. تحقق من الرمز في ورقة Salesman ETA.');
+    expect(choiceText('en', { kind: 'SEVERAL_TRUCKS', asked: 'TRUCK 56' })).toBe('Truck 56: more than one truck has this code. Pick one:');
+  });
+
+  it('the title above the page in its language (WhatsApp\'s in-app browser shows it)', () => {
+    expect(['en', 'ar', 'ur'].map((l) => pageTitle(l as 'en'))).toEqual(['RouteIQ - Deliveries', 'RouteIQ - التوصيلات', 'RouteIQ - ڈیلیوریاں']);
   });
 });
 
@@ -421,7 +494,12 @@ describe('the cards', () => {
     expect(textOf(tree)).toBe('Customer D (B2)Delayedabout 11:50 · in about 1 h 20 min Send to customer');
     expect(tree.props['data-status']).toBe('DELAYED');
     const share = elements(tree).find((e) => e.props?.['data-testid'] === 'row-share');
-    expect(share?.props.href).toBe(shareUrl('Customer D (B2): your order is on the way, expected at about 11:50.'));
+    expect(share?.props.href).toBe(shareUrl('⁨Customer D (B2)⁩: your order is on the way, expected at about 11:50.'));
+    // The name: no direction of its own on the paragraph (a long name wraps on the page's start side, review of 20
+    // Oct 2026); <bdi> keeps the name in its own direction.
+    const name = elements(tree).find((e) => e.props?.['data-testid'] === 'row-customer')!;
+    expect(name.props.dir).toBeUndefined();
+    expect(elements(name).map((e) => e.type)).toEqual(['p', 'bdi']);
     expect(share?.props.target).toBe('_blank');
     expect(share?.props.rel).toMatch(/noreferrer/);
     // A cancelled order: its status only, nothing to send.
@@ -490,6 +568,9 @@ describe('the cards', () => {
     ]);
     for (const b of buttons) b.props.onClick();
     expect(picked).toEqual(['en', 'ar', 'ur']);
-    for (const b of buttons) expect(b.props.className).toMatch(/min-h-10/);
+    // 44 px at least, like every button of the page (review of 20 Oct 2026), and apart enough for a thumb.
+    for (const b of buttons) expect(String(b.props.className).split(/\s+/)).toEqual(expect.arrayContaining(['min-h-11', 'min-w-11']));
+    expect(String(tree.props.className).split(/\s+/)).toContain('gap-1.5');
+    expect(tree.props.dir).toBe('ltr');
   });
 });

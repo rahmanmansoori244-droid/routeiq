@@ -7,7 +7,8 @@
  *  - the guard: the token only in the header; 404 for a bad shape or an unknown token, counted against a public
  *    IP only (the 31st from one IP gets 429 with Retry-After; an internal IP is never counted); 410 replaced,
  *    turned off, expired; 503 without a secret; 403 signed in to another company; the office's own session is
- *    never counted as a salesman's phone; no-store, no-referrer, noindex on every answer;
+ *    never counted as a salesman's phone; no-store, no-referrer, noindex on every answer; a page of an older version
+ *    (no X-Sales-Page: the page of 19 Oct 2026 still open after a deploy) gets 410 LINK_REPLACED before anything is read;
  *  - the limits (critique item 9): per link AND client IP, never the page's device id (rotating it changes
  *    nothing), never the whole link (one holder cannot lock the group out); route codes with no deliveries;
  *  - the answer: meta without a route, the route's customers with one (owner feedback of 20 Oct 2026: one status
@@ -61,6 +62,7 @@ import { addDaysIso, dateOnly, todayIso } from '@/lib/dispatch/time';
 import type { SalesViewAnswer } from '@/lib/sales-link/view-types';
 import { MAX_CODES, parseRouteQuery } from '@/lib/sales-link/route-code';
 import { followQuery } from '@/lib/sales-page/format';
+import { SALES_PAGE_VERSION, salesPageCurrent } from '@/lib/sales-link/page-version';
 
 const TZ = 'Asia/Muscat';
 const D = todayIso(TZ);
@@ -173,10 +175,12 @@ let ipSeq = 0;
 /** A fresh public test address per test (the limiter is shared by the file). */
 const freshIp = () => `198.51.100.${(++ipSeq % 250) + 1}`;
 
-function view(token: string | null, o: { route?: string; ip?: string; device?: string; auth?: string } = {}) {
+function view(token: string | null, o: { route?: string; ip?: string; device?: string; auth?: string; page?: string | null } = {}) {
   const url = new URL(`${BASE}/api/s/view`);
   if (o.route !== undefined) url.searchParams.set('route', o.route);
   const headers: Record<string, string> = { 'x-forwarded-for': o.ip ?? freshIp() };
+  // The current page sends its version (page-version.ts); `page: null` is a page from before it.
+  if (o.page !== null) headers['x-sales-page'] = o.page ?? String(SALES_PAGE_VERSION);
   if (token !== null) headers.authorization = o.auth ?? `SalesLink ${token}`;
   if (o.device) headers['x-sales-device'] = o.device;
   return viewGET(new Request(url, { headers }));
@@ -242,6 +246,28 @@ describe('the guard', () => {
     expect((await view(token, { device: 'a'.repeat(32), route: 'R1' })).status).toBe(200);
     expect(rawLog.filter((s) => s.includes('"SalesLink"'))).toEqual([]);
     expect(tables.salesLink![0]!.lastSeenAt).toBeNull();
+  });
+
+  it("a page of an older version (review of 20 Oct 2026): 410 LINK_REPLACED with the link's date, before anything is read or recorded", async () => {
+    const token = makeLink();
+    rawLog.length = 0;
+    const builds = salesDayBuilds();
+    for (const page of [null, '1', '', 'two', '2.5']) {
+      const r = await view(token, { route: 'R1', device: 'ab'.repeat(16), page });
+      expect(r.status, String(page)).toBe(410);
+      const b = await body(r);
+      // The page of 19 Oct 2026 shows its own "This link was replaced by a newer one. Use the newest link in your group" and stops asking.
+      expect(b, String(page)).toMatchObject({ data: null, error: { code: 'LINK_REPLACED', date: D } });
+      expect(r.headers.get('cache-control')).toBe('no-store');
+    }
+    expect((await view(token, { page: null })).status).toBe(410);
+    expect(salesDayBuilds()).toBe(builds);
+    expect(rawLog.filter((x) => x.includes('"SalesLink"'))).toEqual([]);
+    expect(tables.salesLink![0]!.lastSeenAt).toBeNull();
+    // This page's version, or a newer one: answered.
+    expect((await view(token, { route: 'R1' })).status).toBe(200);
+    expect((await view(token, { route: 'R1', page: '3' })).status).toBe(200);
+    expect([salesPageCurrent('2'), salesPageCurrent(' 2 '), salesPageCurrent('12'), salesPageCurrent('1'), salesPageCurrent(null), salesPageCurrent('2e0'), salesPageCurrent('99999')]).toEqual([true, true, true, false, false, false, false]);
   });
 
   it('every answer: no-store, no-referrer, noindex', async () => {

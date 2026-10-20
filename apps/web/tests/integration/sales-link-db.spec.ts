@@ -12,7 +12,8 @@
  *     same stop not delivered (no reason: the owner asked for none); the order cancelled before planning as
  *     "Cancelled", never the office's note; an unknown code answers "no deliveries"; nothing of the other company,
  *     which has a plan of the same day too: its own truck T05 carrying its order TSTB01 of route R1 (the relation
- *     filters, real here). A truck code ("t05", "T-05", its digits "05", "Truck T05"; owner decision of 20 Oct 2026)
+ *     filters, real here); a page of an older version (no X-Sales-Page, review of 20 Oct 2026) is told to open the
+ *     link again (410 LINK_REPLACED). A truck code ("t05", "T-05", its digits "05", "Truck T05"; owner decision of 20 Oct 2026)
  *     shows the customers of both trips of T05 (the shared stop partly delivered: 20 of 30) and nothing of the truck;
  *     never the other company's T05.
  *  3. Tenant scoping: the other company's planner changing this link: 404; signed in to the other company on
@@ -101,6 +102,7 @@ import { PATCH as linkPATCH } from '@/app/api/dispatch/sales-links/[id]/route';
 import { _resetSalesDayMemo } from '@/lib/sales-link/day-read';
 import { eraseSalesLinkDevices } from '@/lib/sales-link/service';
 import { tokenHash } from '@/lib/sales-link/token';
+import { SALES_PAGE_VERSION } from '@/lib/sales-link/page-version';
 import type { SalesViewAnswer } from '@/lib/sales-link/view-types';
 import { cleanupTenant, prisma, uniqueSuffix, withDriver } from './helpers';
 
@@ -120,10 +122,12 @@ const as = (who: 'A' | 'B' | null, role = 'PLANNER') => {
 const post = (json: unknown) => linksPOST(new Request(`${BASE}/api/dispatch/sales-links`, { method: 'POST', body: JSON.stringify(json), headers: { 'content-type': 'application/json' } }));
 const patch = (id: string, json: unknown) => linkPATCH(new Request(`${BASE}/api/dispatch/sales-links/${id}`, { method: 'PATCH', body: JSON.stringify(json), headers: { 'content-type': 'application/json' } }), { params: { id } });
 let ipNo = 0;
-function view(token: string, o: { route?: string; device?: string } = {}) {
+function view(token: string, o: { route?: string; device?: string; oldPage?: boolean } = {}) {
   const url = new URL(`${BASE}/api/s/view`);
   if (o.route !== undefined) url.searchParams.set('route', o.route);
   const headers: Record<string, string> = { authorization: `SalesLink ${token}`, 'x-forwarded-for': `198.51.100.${(++ipNo % 250) + 1}` };
+  // The current page sends its version (page-version.ts); `oldPage`: the page of 19 Oct 2026, from before it.
+  if (!o.oldPage) headers['x-sales-page'] = String(SALES_PAGE_VERSION);
   if (o.device) headers['x-sales-device'] = o.device;
   return viewGET(new Request(url, { headers }));
 }
@@ -305,6 +309,10 @@ describe("2. the salesman's page", () => {
     for (const s of ['TSTB01', 'INV-', 'OFFICE-NOTE-SENTINEL', 'DRIVER-NOTE-SENTINEL', 'ORDER-NOTE-SENTINEL', 'CUSTOMER-PHONE-SENTINEL', 'Rule 20 Driver', 'Shop closed', 'T05', ids.truckA, ids.depotA, ids.runA, ids.truckB, ids.runB]) expect(text).not.toContain(s);
     const unknown = (await answer(await view(tokenOf(url), { route: 'R9' }))).data!.lookup!;
     expect(unknown).toMatchObject({ results: [], notFound: ['R9'] });
+    // A page of an older version still open (review of 20 Oct 2026): told to open the link again, nothing read.
+    const old = await view(tokenOf(url), { route: 'R1', oldPage: true });
+    expect(old.status).toBe(410);
+    expect((await answer(old)).error).toMatchObject({ code: 'LINK_REPLACED', date: T });
   });
 
   it('a truck code (owner decision of 20 Oct 2026): the customers of both trips of T05, the shared stop partly delivered, nothing of the truck', async () => {

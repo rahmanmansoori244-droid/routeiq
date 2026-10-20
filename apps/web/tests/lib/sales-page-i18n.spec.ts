@@ -40,6 +40,14 @@ describe('the dictionary', () => {
       for (const c of LINK_STATES) expect(SALES_DICT[lang][`link.${c}` as SalesKey], `${lang} link.${c}`).toBeTruthy();
     }
     expect(STATUSES.map((s) => st('en', `st.${s}` as SalesKey))).toEqual(['Delivered', 'Partly delivered', 'Not delivered', 'Not confirmed yet', 'On the way', 'Delayed', 'Cancelled', 'Not in the plan']);
+    // "On the way" on tomorrow's link the evening before (review of 20 Oct 2026).
+    expect(SALES_LANGS.map((l) => SALES_DICT[l]['st.PLANNED'])).toEqual(['Planned', 'مجدول', 'پلان شدہ']);
+  });
+
+  it('review of 20 Oct 2026: the Arabic footer says the page is updated every minute (not "the page talks"); "not confirmed yet" as a status', () => {
+    expect(SALES_DICT.ar.footerTimes).toBe('الأوقات تقريبية وبتوقيت الشركة. يتم تحديث الصفحة كل دقيقة.');
+    expect(Object.values(SALES_DICT.ar).join(' ')).not.toMatch(/تتحدث/);
+    expect(SALES_DICT.ar['st.NOT_CONFIRMED']).toBe('لم يُؤكَّد بعد');
   });
 
   it('the page never says "no update", "not before" or a reason, in any language', () => {
