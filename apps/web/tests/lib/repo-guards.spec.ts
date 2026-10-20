@@ -669,6 +669,6 @@ describe('the salesman link and its page (owner request 19 Oct 2026)', () => {
     const cfg = readFileSync(path.join(WEB, 'next.config.js'), 'utf8');
     const rule = cfg.slice(cfg.indexOf("'/s/:path*'"));
     expect(rule.length).toBeGreaterThan(0);
-    for (const h of ["{ key: 'Referrer-Policy', value: 'strict-origin' }", "{ key: 'X-Robots-Tag', value: 'noindex, nofollow, noarchive' }", "{ key: 'Cache-Control', value: 'no-store' }"]) expect(rule).toContain(h);
+    for (const h of ["{ key: 'Referrer-Policy', value: 'no-referrer' }", "{ key: 'X-Robots-Tag', value: 'noindex, nofollow, noarchive' }", "{ key: 'Cache-Control', value: 'no-store' }"]) expect(rule).toContain(h);
   });
 });

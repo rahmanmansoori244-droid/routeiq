@@ -45,3 +45,20 @@
     font-feature-settings: 'rlig' 1, 'calt' 1;
   }
 }
+
+/*
+ * The salesman page (app/s, owner feedback of 20 Oct 2026) in Arabic and Urdu: the phone's own fonts (nothing to
+ * download on a weak signal). Android and iPhone carry Noto Naskh Arabic / Geeza Pro and Noto Nastaliq Urdu; the
+ * lang attribute lets them pick the Urdu shapes. They come before the app's font on purpose: its fallback face is a
+ * local Arial, which has Arabic letters and would draw Urdu in Naskh. Nastaliq is tall: its lines get more room
+ * (after the utilities, so Tailwind's text-* line heights do not squeeze it).
+ */
+[data-sales-lang='ar'] {
+  font-family: 'Noto Naskh Arabic', 'Noto Sans Arabic', 'Geeza Pro', 'Segoe UI', Tahoma, var(--font-sans), sans-serif;
+}
+[data-sales-lang='ur'] {
+  font-family: 'Noto Nastaliq Urdu', 'Jameel Noori Nastaleeq', 'Urdu Typesetting', 'Noto Naskh Arabic', 'Noto Sans Arabic', Tahoma, var(--font-sans), sans-serif;
+}
+[data-sales-lang='ur'] :where(h1, h2, p, span, a, label, button, li) {
+  line-height: 1.9;
+}

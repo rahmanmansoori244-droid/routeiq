@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SalesChoice, SalesLinkStateCode, SalesLookup, SalesMeta } from '@/lib/sales-link/view-types';
 import { parseRouteQuery } from '@/lib/sales-link/route-code';
 import { deviceId, fetchSalesView, forgetRoute, routeFromHash, safeLocalStorage, saveRoute, savedRoute, tokenFromPath, type KeyStore, type SalesAnswer } from '@/lib/sales-page/api';
-import { followQuery, UI } from '@/lib/sales-page/format';
+import { followQuery, type FormProblem, type LookupNotice } from '@/lib/sales-page/format';
 
 /**
  * The salesman link page's state (owner request 19 Oct 2026): which route codes it follows, the last answer, and
@@ -19,7 +19,8 @@ import { followQuery, UI } from '@/lib/sales-page/format';
  * - Trucks the server offers for a code (several trucks with the digits or compact key typed; a route code that is also a
  *   truck's) are kept as `choices` until the codes change; picking one sends its whole lookup (`submit`).
  * - A code that matched nothing is never asked again by itself (each one counts against the link's limit): the
- *   form shows the server's "No deliveries for route R9 ..." and the saved code is forgotten.
+ *   form says "No deliveries for R9 ..." and the saved code is forgotten.
+ * - The state is language-neutral (codes, problems by kind): the page says it in the language picked.
  * - The newest request wins (a refresh answered after a route change is dropped); a 429 waits Retry-After; a
  *   failed refresh keeps what is shown with "Could not refresh"; a link that does not work stops everything.
  * - A first request that failed (no signal, or the server's error - said as such) is asked again by itself every
@@ -35,13 +36,13 @@ export interface SalesViewState {
   linkDate: string | null;
   /** The last answer with at least one route found. */
   lookup: SalesLookup | null;
-  /** "No deliveries for route or truck R9 ..." when some of the codes typed matched nothing (the others are shown). */
-  notice: string | null;
+  /** Codes typed that matched nothing (the others are shown), or several routes or trucks. */
+  notice: LookupNotice | null;
   /** Trucks offered for a code typed (on the form when nothing else was found, else above the results). */
   choices: SalesChoice[];
-  /** The route form's text and its error. */
+  /** The route form's text and its problem. */
   formText: string;
-  formError: string | null;
+  formError: FormProblem | null;
   /** A request the user asked for is on its way. */
   working: boolean;
   /** 429: the page waits this many seconds. */
@@ -125,10 +126,8 @@ export const INITIAL_SALES_STATE: SalesViewState = {
 
 type Why = 'start' | 'submit' | 'poll' | 'refresh';
 
-/** The form's message for a code the page itself refuses (the server's rule, lib/sales-link/route-code.ts). */
-function codeProblem(code: 'ROUTE_CODE_MISSING' | 'ROUTE_CODE_TOO_LONG' | 'TOO_MANY_CODES'): string {
-  return code === 'ROUTE_CODE_MISSING' ? UI.codeMissing : code === 'TOO_MANY_CODES' ? UI.tooManyCodes : UI.codeTooLong;
-}
+/** The form's problem for a code refused (by the page itself with the server's rule, lib/sales-link/route-code.ts, or by the server). */
+const codeProblem = (code: 'ROUTE_CODE_MISSING' | 'ROUTE_CODE_TOO_LONG' | 'TOO_MANY_CODES'): FormProblem => ({ kind: 'CODE', code });
 
 export function useSalesView(deps?: SalesViewDeps) {
   const [state, setState] = useState<SalesViewState>(INITIAL_SALES_STATE);
@@ -183,7 +182,7 @@ export function useSalesView(deps?: SalesViewDeps) {
             notice: null,
             choices,
             formText: route ?? '',
-            formError: lookup.notFoundText ?? (choices.length ? null : 'No deliveries for that code. Check the route code on your Salesman ETA page, or the truck code.'),
+            formError: lookup.notFound.length ? { kind: 'NOT_FOUND', codes: lookup.notFound } : choices.length ? null : { kind: 'NOT_FOUND', codes: lookup.asked },
             working: false,
             waitSec: null,
             staleSince: null,
@@ -193,7 +192,7 @@ export function useSalesView(deps?: SalesViewDeps) {
         const q = followQuery(lookup)!;
         follow.current = q;
         saveRoute(q, d.storage);
-        const notice = [lookup.notFoundText, lookup.ambiguous.length ? UI.ambiguous(lookup.ambiguous) : null].filter(Boolean).join(' ') || null;
+        const notice: LookupNotice | null = lookup.notFound.length || lookup.ambiguous.length ? { notFound: lookup.notFound, ambiguous: lookup.ambiguous } : null;
         setState((prev) => ({
           ...prev,
           phase: 'ready',
@@ -218,7 +217,7 @@ export function useSalesView(deps?: SalesViewDeps) {
       if (a.kind === 'badCode') {
         follow.current = null;
         forgetRoute(d.storage);
-        patch({ phase: 'form', choices: [], formText: route ?? '', formError: a.message, working: false, waitSec: null });
+        patch({ phase: 'form', choices: [], formText: route ?? '', formError: codeProblem(a.code), working: false, waitSec: null });
         return;
       }
       if (a.kind === 'busy') {
@@ -238,7 +237,7 @@ export function useSalesView(deps?: SalesViewDeps) {
       const server = a.status !== 0;
       setState((prev) => {
         if (prev.phase === 'ready') return { ...prev, staleSince: prev.staleSince ?? d.now(), working: false };
-        if (why === 'submit') return { ...prev, phase: 'form', formText: route ?? prev.formText, formError: server ? UI.serverErrorForm : UI.offline, working: false };
+        if (why === 'submit') return { ...prev, phase: 'form', formText: route ?? prev.formText, formError: server ? { kind: 'SERVER' } : { kind: 'OFFLINE' }, working: false };
         return { ...prev, phase: 'offline', serverError: server, working: false };
       });
     },

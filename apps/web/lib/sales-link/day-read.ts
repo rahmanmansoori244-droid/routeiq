@@ -20,9 +20,9 @@
  *     depot not planned yet (one query);
  *  5. the day's visits (without their GPS times below GPS tracking TIMES, as the truck's day page), their photos;
  *  6. the loads' Dispatch press (statusChangedAt), Back at depot taps, when each truck's phone was last heard;
- *  7. GPS (tracking MAP or higher, the link on): the trucks' latest positions, their history pull (trailTo) and
- *     their trail-confirmed depot moves (TIMES and up), which trucks have a tracker (never the IMEI itself),
- *     and the customers' GPS site radius.
+ *  7. GPS (tracking MAP or higher, the link on), for the expected times only: the trucks' latest positions, their
+ *     history pull (trailTo) and their trail-confirmed depot moves (TIMES and up), and the customers' GPS site
+ *     radius. No position, truck or trip is sent (owner feedback of 20 Oct 2026: simple-view.ts).
  */
 import { prisma } from '../db';
 import { tenantDb } from '../tenant';
@@ -32,7 +32,7 @@ import { liveRuns } from '../driver-link/service';
 import { memoPlanDetail } from '../driver-link/manifest';
 import { backAtDepot } from '../delivery/day-results';
 import { withoutGpsTimes } from '../delivery/visit';
-import { loadSalesmanEtaFacts, longDayText } from '../exports/salesman-eta';
+import { loadSalesmanEtaFacts } from '../exports/salesman-eta';
 import { gpsReadConfigOf, moveObserved } from '../alerts/gps';
 import { trailToOf } from '../alerts/facts';
 import { readIvmsEnv } from '../ivms/env';
@@ -43,8 +43,8 @@ import { buildSalesDay, salesLateDispatchMin, type SalesDay, type SalesDayInput,
 import { matchLookup, MAX_CODES, parseRouteQuery, truckQuery, type LookupChoice } from './route-code';
 import { consumeMisses, salesFail, salesOk, type SalesLinkContext } from './guard';
 import { touchSalesLink, TRUCK_SEEN_PREFIX } from './service';
-import { SALES_LINK_END_HOUR } from './token';
-import { choiceText, expiryText, notFoundText, ROUTE_HINT, shortDayText } from './text';
+import { salesRouteView } from './simple-view';
+import { SALES_PAGE_HEADER, salesPageCurrent } from './page-version';
 import type { SalesChoice, SalesMeta, SalesRouteView, SalesViewAnswer } from './view-types';
 
 /** One build of a company's day serves every request for this long. */
@@ -218,11 +218,9 @@ export async function readSalesDayInput(tenantId: string, date: string, now: Dat
   const today = todayIso(tz, now);
   const onRoad = plans.flatMap((p) => p.detail.loads.filter((l) => l.status === 'DISPATCHED').map((l) => l.truckId));
   if (ivmsModeAtLeast(mode, 'MAP') && date <= today && date >= addDaysIso(today, -1)) {
-    const allTrucks = [...new Set(plans.flatMap((p) => p.detail.loads.map((l) => l.truckId)))];
     const truckIds = [...new Set(onRoad)];
     const dayStart = zonedDayStart(date, tz);
-    const [tracked, positions, days, moves, sites] = await Promise.all([
-      allTrucks.length ? prisma.truck.findMany({ where: { tenantId, id: { in: allTrucks }, ivmsImei: { not: null } }, select: { id: true } }) : [],
+    const [positions, days, moves, sites] = await Promise.all([
       truckIds.length ? prisma.truckPosition.findMany({ where: { tenantId, truckId: { in: truckIds } }, select: { truckId: true, fixAt: true, lat: true, lng: true, speedKmh: true, flags: true, movedAt: true } }) : [],
       truckIds.length ? prisma.ivmsTruckDay.findMany({ where: { tenantId, truckId: { in: truckIds }, deliveryDate: dateOnly(date) }, select: { truckId: true, pulledTo: true, processedAt: true, suppressedAt: true } }) : [],
       truckIds.length && ivmsModeAtLeast(mode, 'TIMES')
@@ -253,7 +251,6 @@ export async function readSalesDayInput(tenantId: string, date: string, now: Dat
       positions: positionOf,
       trailTo,
       moves: movesOf,
-      tracked: new Set(tracked.map((t) => t.id).filter((id) => !suppressed.has(id))),
     };
   }
 
@@ -276,29 +273,31 @@ export async function readSalesDayInput(tenantId: string, date: string, now: Dat
   };
 }
 
-/** The header of every answer: the day, the company, the link's end. */
+/** The header of every answer: the day, the company, the link's end (the page says them in its language). */
 export function salesMeta(o: { date: string; company: string; tz: string; expiresAt: Date; now: Date }): SalesMeta {
   return {
     date: o.date,
-    dayText: longDayText(o.date),
-    dayShort: shortDayText(o.date),
     company: o.company,
     expiresAt: o.expiresAt.toISOString(),
-    expiryText: expiryText(o.date, addDaysIso(o.date, 1), SALES_LINK_END_HOUR),
     tz: o.tz,
     serverNow: o.now.toISOString(),
     refreshSec: SALES_REFRESH_SEC,
-    routeHint: ROUTE_HINT,
   };
 }
 
 /**
  * GET /api/s/view: without `route` the header only (the page asks for a route code); with `route=<codes>`
- * ("R1", "R1, R2X", "C1, 5678", "Truck 1234-AB") the routes and trucks they name (route-code.ts matchLookup), and
- * the trucks to pick from. Codes that matched no route and no truck that day count against the link and client
+ * ("R1", "R1, R2X", "C1, 5678", "Truck 1234-AB") the routes and trucks they name (route-code.ts matchLookup), each
+ * as simple-view.ts says it (one status and one time per customer), and the trucks to pick from. Codes that matched no route and no truck that day count against the link and client
  * (429 over the limit). A salesman's phone (never the office) is then recorded: the phone, the routes and trucks found.
+ * A page of an older version (no `X-Sales-Page` header, or an older one: page-version.ts) is answered 410
+ * LINK_REPLACED with the link's date before anything is read: an older page open since before a deploy then asks the
+ * salesman to open the link again instead of failing on an answer it cannot read (review of 20 Oct 2026).
  */
 export async function salesView(req: Request, ctx: SalesLinkContext): Promise<Response> {
+  if (!salesPageCurrent(req.headers.get(SALES_PAGE_HEADER))) {
+    return salesFail({ code: 'LINK_REPLACED', message: 'This page was updated. Open the link again from your group.', date: ctx.date }, 410);
+  }
   const raw = new URL(req.url).searchParams.get('route');
   if (raw === null) {
     const [cfg, tenant] = await Promise.all([
@@ -322,7 +321,8 @@ export async function salesView(req: Request, ctx: SalesLinkContext): Promise<Re
     const used = consumeMisses(ctx, match.notFound.length);
     if (!used.ok) return used.response;
   }
-  const results = [...match.routes.map((r) => m.day.routes.get(r)!), ...match.trucks.map((id) => m.day.trucks.get(id)!)];
+  const at = { date: ctx.date, tz: m.tz, now: ctx.now, builtAt: m.day.builtAt };
+  const results = [...match.routes.map((r) => m.day.routes.get(r)!), ...match.trucks.map((id) => m.day.trucks.get(id)!)].map((v) => salesRouteView(v, at));
   // "Routes looked up": the route codes found, and the trucks found as "T:<code>" (owner decision of 20 Oct 2026).
   if (!ctx.session) await touchSalesLink(ctx.link, ctx.deviceId, [...match.routes, ...match.trucks.map((id) => `${TRUCK_SEEN_PREFIX}${m.day.trucks.get(id)!.code}`)], ctx.now);
   const answer: SalesViewAnswer = {
@@ -333,7 +333,6 @@ export async function salesView(req: Request, ctx: SalesLinkContext): Promise<Re
       notFound: match.notFound,
       ambiguous: match.ambiguous,
       choices: salesChoices(match.choices, results, m.day),
-      notFoundText: notFoundText(match.notFound, shortDayText(ctx.date)),
     },
   };
   return salesOk(answer);
@@ -344,7 +343,7 @@ export async function salesView(req: Request, ctx: SalesLinkContext): Promise<Re
  * the whole lookup to send when picked: what is shown now (without the routes an ALSO_TRUCK code showed) and the
  * truck, at most MAX_CODES codes.
  */
-export function salesChoices(choices: readonly LookupChoice[], results: readonly SalesRouteView[], day: Pick<SalesDay, 'trucks'>): SalesChoice[] {
+export function salesChoices(choices: readonly LookupChoice[], results: readonly Pick<SalesRouteView, 'kind' | 'code' | 'query'>[], day: Pick<SalesDay, 'trucks'>): SalesChoice[] {
   return choices.map((ch) => {
     const kept = results.filter((v) => !(ch.why === 'ALSO_TRUCK' && v.kind === 'ROUTE' && ch.routes.includes(v.code))).map((v) => v.query);
     const options = ch.trucks.map((id) => {
@@ -353,6 +352,6 @@ export function salesChoices(choices: readonly LookupChoice[], results: readonly
       const rest = kept.filter((x) => x !== pick).slice(0, MAX_CODES - 1);
       return { code, query: [...rest, pick].join(', ') };
     });
-    return { asked: ch.asked, kind: ch.why, text: choiceText(ch.why, ch.asked, options.length), options };
+    return { asked: ch.asked, kind: ch.why, options };
   });
 }

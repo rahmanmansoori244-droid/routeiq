@@ -12,8 +12,8 @@
  *    chooses, and no limit for the whole link (one holder cannot lock the group out). Every 429 has Retry-After.
  * 4. A signed-in RouteIQ session of another company: 403 SIGNED_IN_OTHER_TENANT; of the link's company: the
  *    office looking, allowed, never counted in the link's use ("opened on N phones").
- * 5. Every answer: Cache-Control no-store, Referrer-Policy strict-origin (critique item 16: the map tiles still get
- *    an origin, never the token's path), X-Robots-Tag noindex. A 500 logs the message only.
+ * 5. Every answer: Cache-Control no-store, Referrer-Policy no-referrer (critique item 16; strict-origin while the page
+ *    had a map, until 20 Oct 2026), X-Robots-Tag noindex. A 500 logs the message only.
  */
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
@@ -47,7 +47,7 @@ export interface SalesLinkContext {
 /** Headers on every salesman answer (the token must not leak through Referer, caches or search engines). */
 export const SALES_HEADERS: Record<string, string> = {
   'Cache-Control': 'no-store',
-  'Referrer-Policy': 'strict-origin',
+  'Referrer-Policy': 'no-referrer',
   'X-Robots-Tag': 'noindex, nofollow, noarchive',
 };
 
