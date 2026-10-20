@@ -136,6 +136,10 @@ describe('runAlertSweep', () => {
   });
 
   it('review M2: each company\'s last good sweep is kept ("Checked"); a failure or 10 min without one says so; /api/health gets counts only', async () => {
+    // This process started following the sweep an hour before NOW (not at the real clock's time: once the wall clock
+    // passed NOW - 10 min, on 20 Oct 2026, the "never swept, overdue" count below came out 0).
+    vi.spyOn(Date, 'now').mockReturnValueOnce(NOW.getTime() - 60 * 60_000);
+    resetAlertSweepClock();
     state.facts.set('tA', lateFacts());
     state.fail.add('tB');
     const { db } = stubDb([cfg('tA'), cfg('tB')]);
