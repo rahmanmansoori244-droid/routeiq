@@ -274,6 +274,18 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
           <T style={s.line}>
             <T style={s.b}>Load check: </T>
             {sh.loadCheck.items.map((k) => `${k.productCode} ×${k.cases}`).join(' · ')}
+            {/* Owner request 20 Oct 2026: each special-loading block after the normal lines, with its tag and total (and its pallets on a load planned by pallets). */}
+            {sh.loadCheck.groups
+              ? sh.loadCheck.groups.map((g, i) => (
+                  <React.Fragment key={`${i}-${g.label}`}>
+                    {sh.loadCheck.items.length || i ? ' · ' : ''}
+                    <T style={s.b}>{g.label}: </T>
+                    {g.items.map((k) => `${k.productCode} ×${k.cases}`).join(' · ')}
+                    {/* A load planned by pallets: "(SPECIAL total: 70 cases - 1 mixed pallet (the loose cases of all SPECIAL products together))". */}
+                    {g.totalText ? ` (${g.totalText})` : ` (${g.label} total ${g.total})`}
+                  </React.Fragment>
+                ))
+              : null}
             <T style={s.b}> = {sh.loadCheck.total} cases{sh.pallets ? ` (${sh.pallets.total} pallets)` : ''}</T>
             {sh.loadCheck.matchesLoad ? '' : ` - the plan says ${sh.cases}: check with the dispatcher before loading`}
           </T>
