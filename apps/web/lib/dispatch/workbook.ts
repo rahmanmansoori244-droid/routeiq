@@ -35,11 +35,12 @@ import {
   NORMAL_LOADING_TOTAL,
   SPECIAL_LOADING_HEADING,
   specialLinesHeading,
+  specialLinesPalletTotal,
   specialLinesTotal,
   SPLIT_MISMATCH_TEXT,
   stopIsLoaded,
 } from './loading-instruction';
-import { loadingTags, splitByLoadingInstruction, type ManifestSplit, type SplitRow } from './loading-split';
+import { loadingTags, splitByLoadingInstruction, type BlockPallets, type ManifestSplit, type SplitRow } from './loading-split';
 
 /** The SUMMARY row with the invoices (distinct sales orders) of the day. */
 export const INVOICES_LABEL = 'Invoices (sales orders)';
@@ -753,6 +754,22 @@ function specialHeadRow(ws: ExcelJS.Worksheet, row: number, lastCol: number, tex
   ws.getRow(row).height = 18 * Math.max(1, Math.ceil(text.length / chars));
 }
 
+/**
+ * A special-loading block's pallet line on a load planned by pallets (owner, 20 Oct 2026): "SPECIAL total: 70
+ * cases - 2 full pallets + 1 mixed pallet (the loose cases of all SPECIAL products together)", one bold cell
+ * merged from column A to `lastCol`, wrapped, the bottom of the block's thick box.
+ */
+function specialPalletRow(ws: ExcelJS.Worksheet, row: number, lastCol: number, text: string, widths: readonly number[]) {
+  ws.mergeCells(row, 1, row, lastCol);
+  const c = put(ws, row, 1, text);
+  c.font = { bold: true };
+  c.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+  for (let col = 1; col <= lastCol; col++) edge(ws, row, col, { bottom: true, left: col === 1, right: col === lastCol });
+  // About 1.2 characters per width unit at 11 pt bold; one line is 15 pt tall.
+  const chars = Math.max(1, Math.floor(widths.slice(0, lastCol).reduce((a, w) => a + w, 0) * 1.2));
+  ws.getRow(row).height = 15 * Math.max(1, Math.ceil(text.length / chars));
+}
+
 /** A row inside a special-loading block: bold, the block's thick edge on its left and right (and bottom on its last row). */
 function specialBodyRow(ws: ExcelJS.Worksheet, row: number, lastCol: number, last = false) {
   for (let col = 1; col <= lastCol; col++) {
@@ -764,7 +781,8 @@ function specialBodyRow(ws: ExcelJS.Worksheet, row: number, lastCol: number, las
 /**
  * The LOADING MANIFEST of a load with special-loading lines (owner request 20 Oct 2026, loading-split.ts):
  * the normal lines with their total, then one boxed block per instruction (heading, its lines tagged in the
- * description, its total), numbered on from the normal lines. Returns the next free row.
+ * description, its total), numbered on from the normal lines. On a load planned by pallets each block ends
+ * with its pallets for the loader (specialPalletRow). Returns the next free row.
  */
 function splitManifestRows(
   ws: ExcelJS.Worksheet,
@@ -800,8 +818,10 @@ function splitManifestRows(
       r++;
     }
     subtotal(specialLinesTotal(g.tag), g.rows, g.cases, g.palletUnits, g.weightKg);
-    specialBodyRow(ws, r, o.lastCol, true);
+    const pallets = o.pallets ? g.pallets : undefined;
+    specialBodyRow(ws, r, o.lastCol, !pallets);
     r++;
+    if (pallets) specialPalletRow(ws, r++, o.lastCol, specialLinesPalletTotal(g.tag, g.cases, pallets), ROUTE_WIDTHS);
   }
   return r;
 }
@@ -1045,7 +1065,9 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
  * The SKU LOADING SUMMARY's lines on a day with special-loading customers (owner request 20 Oct 2026): the
  * normal lines (each load's normal cases, or its whole manifest when it has none) with their total, then one
  * boxed section per instruction text over the day (the label of its first load in plan order), with its
- * own total. Returns the next free row.
+ * own total and, when a load of it is planned by pallets, its pallets per load for the loader (owner, 20 Oct
+ * 2026: full pallets per product, then the loose cases of all its products together on mixed pallets; each
+ * load builds its own). Returns the next free row.
  */
 function splitSkuSummaryRows(
   ws: ExcelJS.Worksheet,
@@ -1082,11 +1104,12 @@ function splitSkuSummaryRows(
   }
 
   // One section per instruction text over the day, in the order first met (plan order, then stop order).
-  const day = new Map<string, { text: string; byCode: Map<string, Line> }>();
+  const day = new Map<string, { text: string; byCode: Map<string, Line>; pallets: (BlockPallets | null)[] }>();
   splits.forEach((s, i) => {
     for (const g of s?.groups ?? []) {
-      const e = day.get(g.key) ?? { text: g.text, byCode: new Map<string, Line>() };
+      const e = day.get(g.key) ?? { text: g.text, byCode: new Map<string, Line>(), pallets: new Array<BlockPallets | null>(nLoads).fill(null) };
       for (const x of g.rows) add(e.byCode, i, x);
+      if (g.pallets && palletsOf(d.loads[i]!)) e.pallets[i] = g.pallets;
       day.set(g.key, e);
     }
   });
@@ -1102,7 +1125,24 @@ function splitSkuSummaryRows(
     }
     const per = totalOf(rows);
     totalRow(ws, r, [specialLinesTotal(tag), `${rows.length} SKUs`, ...per, sum(per), kg1(sum(rows.map(([, e]) => e.kg)))], intFmts);
-    specialBodyRow(ws, r++, lastCol, true);
+    // Its pallets per load (blank for a load without it or planned by cases): full pallets, mixed pallets and,
+    // only when there are any, the cases of products without cases per pallet.
+    type PalletLine = [label: string, what: string, of: (p: BlockPallets) => number];
+    const palletLines: PalletLine[] = g.pallets.some(Boolean)
+      ? [
+          [`${tag} full pallets`, 'per product: its cases / its cases per pallet, whole pallets', (p) => p.full],
+          [`${tag} mixed pallets`, `the loose cases of all ${tag} products together`, (p) => p.mixed],
+          ...(g.pallets.some((p) => p?.casesWithoutFactor)
+            ? [[`${tag} cases without cases per pallet`, 'counted separately, on none of these pallets', (p: BlockPallets) => p.casesWithoutFactor] as PalletLine]
+            : []),
+        ]
+      : [];
+    specialBodyRow(ws, r++, lastCol, !palletLines.length);
+    palletLines.forEach(([label, what, of], li) => {
+      const vals = g.pallets.map((p) => (p ? of(p) : null));
+      tableRow(ws, r, [label, what, ...vals, sum(vals.map((v) => v ?? 0)), null], intFmts);
+      specialBodyRow(ws, r++, lastCol, li === palletLines.length - 1);
+    });
   });
   return r;
 }

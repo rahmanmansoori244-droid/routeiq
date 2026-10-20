@@ -4,14 +4,25 @@
  * - a mixed load, a product only for the block, two branches of one text (letter case ignored), two texts;
  * - a split order's part, a cancelled or brought-forward order (only loaded orders go to a block, as the box);
  * - normal + every block = the products, per product and in total, in cases, kg and pallet units;
- * - the mismatch answer, no instruction, the folding and the tags.
+ * - the mismatch answer, no instruction, the folding and the tags;
+ * - a block's pallets for the loader (owner, 20 Oct 2026): full pallets per product, the loose cases of all
+ *   its products together on mixed pallets, and their words.
  * Every customer here is invented (INSTRUCTED); the instruction texts are synthetic ("SPECIAL").
  */
 import { describe, expect, it } from 'vitest';
 import type { DetailLoad, DetailStop, PlanDetail } from '@/lib/dispatch/plan-detail';
 import { aggregateSkus } from '@/lib/dispatch/reconcile';
-import { fullAndLoose } from '@/lib/dispatch/pallets';
-import { LOADING_TAG_MAX, loadingTag, loadingTags, splitByLoadingInstruction, type ManifestSplit, type SplitInputRow } from '@/lib/dispatch/loading-split';
+import { fullAndLoose, palletUnits } from '@/lib/dispatch/pallets';
+import { blockPalletsText, specialLinesPalletTotal } from '@/lib/dispatch/loading-instruction';
+import {
+  blockPallets,
+  LOADING_TAG_MAX,
+  loadingTag,
+  loadingTags,
+  splitByLoadingInstruction,
+  type ManifestSplit,
+  type SplitInputRow,
+} from '@/lib/dispatch/loading-split';
 import { CPP, INSTRUCTED, instructionFixture, palletFixture } from './plan-detail-fixture';
 
 const SPECIAL = 'SPECIAL';
@@ -179,6 +190,8 @@ describe('splitByLoadingInstruction', () => {
     ]);
     expect([s!.groups[0]!.palletUnits, s!.normalPalletUnits]).toEqual([954, 608]);
     expect(954 + 608).toBe(l1(d).palletUnits);
+    // The block's pallets for the loader: 50 of 84 + 20 of 56 loose = 0.95 of a pallet = 1 mixed pallet.
+    expect(s!.groups[0]!.pallets).toEqual({ full: 0, mixed: 1, casesWithoutFactor: 0 });
     expectInvariant(l1(d).manifest, s!);
     // Without per-line units (an older plan detail): worked out from the cases and the row's factor.
     const older = { ...l1(d), stops: l1(d).stops.map((st) => ({ ...st, orderLines: st.orderLines.map(({ palletUnits: _u, weightKg: _k, ...rest }) => rest) })) };
@@ -191,6 +204,8 @@ describe('splitByLoadingInstruction', () => {
     const whole = split(big.loads[2]!).split!;
     expect(whole.normal).toEqual([]);
     expect(whole.groups[0]!.rows.find((x) => x.productCode === 'TAN-500-24')).toMatchObject({ cases: 100, fullPallets: 1, looseCases: 16 });
+    // 1 full pallet of TAN-500-24; 16 of 84 + 25 of 56 + 5 of 40 loose = 0.76 = 1 mixed pallet.
+    expect(whole.groups[0]!.pallets).toEqual({ full: 1, mixed: 1, casesWithoutFactor: 0 });
     expectInvariant(big.loads[2]!.manifest, whole);
   });
 
@@ -204,6 +219,9 @@ describe('splitByLoadingInstruction', () => {
     const casesOnly = l1(d).manifest.map(({ productCode, productName, cases }) => ({ productCode, productName, cases }));
     const c = splitByLoadingInstruction(casesOnly, l1(d).stops).split!;
     expect('weightKg' in c.groups[0]!).toBe(false);
+    // A load planned by cases: no pallets anywhere, the block's neither.
+    expect('pallets' in s.groups[0]!).toBe(false);
+    expect('pallets' in c.groups[0]!).toBe(false);
     expect('normalWeightKg' in c).toBe(false);
     expect('weightKg' in c.normal[0]!).toBe(false);
     expectInvariant(casesOnly, c);
@@ -248,5 +266,69 @@ describe('the tags', () => {
       [`${'Y'.repeat(23)}…`, a],
       [`${'Y'.repeat(23)}… (2)`, b],
     ]);
+  });
+});
+
+describe("a block's pallets (owner, 20 Oct 2026: separate from the normal lines, the same cases per pallet, loose cases on one pallet together)", () => {
+  const row = (cases: number, casesPerPallet: number | null) => ({ cases, casesPerPallet });
+
+  it("the owner's example: 40 normal + 30 special cases of one product at 56 a pallet - two lines, each at 56, the block 1 mixed pallet", () => {
+    const rows: SplitInputRow[] = [{ productCode: 'P1', productName: 'Product one', cases: 70, casesPerPallet: 56, palletUnits: palletUnits(40, 56) + palletUnits(30, 56) }];
+    const stops = [
+      { sequence: 1, orderLines: [{ orderId: 'a', productCode: 'P1', cases: 40 }] },
+      { sequence: 2, loadingInstruction: SPECIAL, orderLines: [{ orderId: 'b', productCode: 'P1', cases: 30 }] },
+    ];
+    const s = splitByLoadingInstruction(rows, stops).split!;
+    expect(s.normal.map((x) => [x.cases, x.casesPerPallet, x.fullPallets, x.looseCases])).toEqual([[40, 56, 0, 40]]);
+    expect(s.groups[0]!.rows.map((x) => [x.cases, x.casesPerPallet, x.fullPallets, x.looseCases])).toEqual([[30, 56, 0, 30]]);
+    expect(s.groups[0]!.pallets).toEqual({ full: 0, mixed: 1, casesWithoutFactor: 0 });
+    expectInvariant(rows, s);
+  });
+
+  it('two products with loose cases share one mixed pallet; full pallets per product', () => {
+    // 50 of 84 + 20 of 56 = 0.95 of a pallet.
+    expect(blockPallets([row(50, 84), row(20, 56)])).toEqual({ full: 0, mixed: 1, casesWithoutFactor: 0 });
+    // 100 at 84 = 1 full + 16 loose; 30 of 56 loose: 0.19 + 0.54 = 0.73 of a pallet.
+    expect(blockPallets([row(100, 84), row(30, 56)])).toEqual({ full: 1, mixed: 1, casesWithoutFactor: 0 });
+  });
+
+  it('loose cases over one pallet: 2 mixed pallets; exactly one pallet stays 1 (the fractions added exactly)', () => {
+    // 60 of 84 + 40 of 56 = 1.43 pallets.
+    expect(blockPallets([row(60, 84), row(40, 56)])).toEqual({ full: 0, mixed: 2, casesWithoutFactor: 0 });
+    // Half + half = 1.
+    expect(blockPallets([row(42, 84), row(28, 56)])).toEqual({ full: 0, mixed: 1, casesWithoutFactor: 0 });
+    // A third each = 1 (in 1/1000 pallets rounded up it would be 1.002, i.e. 2).
+    expect(blockPallets([row(28, 84), row(14, 42), row(7, 21)])).toEqual({ full: 0, mixed: 1, casesWithoutFactor: 0 });
+    expect(blockPallets([row(29, 84), row(14, 42), row(7, 21)])).toEqual({ full: 0, mixed: 2, casesWithoutFactor: 0 });
+    // Large coprime factors, no rounding anywhere: 9,999 of 9,999 is a full pallet; 1 of 9,973 + 9,966 of 9,967 + 1 of 9,949 is over 1.
+    expect(blockPallets([row(9999, 9999)])).toEqual({ full: 1, mixed: 0, casesWithoutFactor: 0 });
+    expect(blockPallets([row(1, 9973), row(9966, 9967), row(1, 9949)])).toEqual({ full: 0, mixed: 2, casesWithoutFactor: 0 });
+  });
+
+  it('a product without cases per pallet (none, 0 or not a whole number): its cases counted separately, on no pallet', () => {
+    expect(blockPallets([row(50, 84), row(12, null)])).toEqual({ full: 0, mixed: 1, casesWithoutFactor: 12 });
+    expect(blockPallets([row(168, 84), row(5, 0), row(7, 84.5)])).toEqual({ full: 2, mixed: 0, casesWithoutFactor: 12 });
+    expect(blockPallets([{ cases: 9 }])).toEqual({ full: 0, mixed: 0, casesWithoutFactor: 9 });
+  });
+
+  it('a block with only full pallets: no mixed pallet; nothing at all for no cases', () => {
+    expect(blockPallets([row(168, 84), row(112, 56)])).toEqual({ full: 4, mixed: 0, casesWithoutFactor: 0 });
+    expect(blockPallets([row(0, 84)])).toEqual({ full: 0, mixed: 0, casesWithoutFactor: 0 });
+    expect(blockPallets([])).toEqual({ full: 0, mixed: 0, casesWithoutFactor: 0 });
+  });
+
+  it('the words: full and mixed pallets, a 0 part left out, cases without cases per pallet said so', () => {
+    const p = (full: number, mixed: number, casesWithoutFactor = 0) => ({ full, mixed, casesWithoutFactor });
+    expect(specialLinesPalletTotal(SPECIAL, 70, p(2, 1))).toBe('SPECIAL total: 70 cases - 2 full pallets + 1 mixed pallet (the loose cases of all SPECIAL products together)');
+    expect(specialLinesPalletTotal(SPECIAL, 70, p(0, 1))).toBe('SPECIAL total: 70 cases - 1 mixed pallet (the loose cases of all SPECIAL products together)');
+    expect(specialLinesPalletTotal(SPECIAL, 1100, p(0, 2))).toBe('SPECIAL total: 1,100 cases - 2 mixed pallets (the loose cases of all SPECIAL products together)');
+    expect(specialLinesPalletTotal(SPECIAL, 280, p(4, 0))).toBe('SPECIAL total: 280 cases - 4 full pallets');
+    expect(specialLinesPalletTotal(SPECIAL, 85, p(1, 0))).toBe('SPECIAL total: 85 cases - 1 full pallet');
+    expect(specialLinesPalletTotal(SPECIAL, 62, p(0, 1, 12))).toBe(
+      'SPECIAL total: 62 cases - 1 mixed pallet (the loose cases of all SPECIAL products together) + 12 cases of products without cases per pallet (counted separately)',
+    );
+    expect(specialLinesPalletTotal(SPECIAL, 1, p(0, 0, 1))).toBe('SPECIAL total: 1 case - 1 case of products without cases per pallet (counted separately)');
+    expect(blockPalletsText(SPECIAL, p(0, 0))).toBe('');
+    expect(specialLinesPalletTotal(SPECIAL, 0, p(0, 0))).toBe('SPECIAL total: 0 cases');
   });
 });

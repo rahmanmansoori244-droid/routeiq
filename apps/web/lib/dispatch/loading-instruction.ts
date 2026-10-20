@@ -203,6 +203,36 @@ export function specialLinesTotal(tag: string): string {
   return `${tag} total`;
 }
 
+const count = (n: number, one: string) => `${n.toLocaleString('en-US')} ${one}${n === 1 ? '' : 's'}`;
+
+/**
+ * A special-loading block's pallets in words (loading-split.ts blockPallets; owner, 20 Oct 2026: the block's
+ * pallets stay apart from the normal lines, but its products' loose cases go on one pallet together): "2 full
+ * pallets + 1 mixed pallet (the loose cases of all SPECIAL products together)"; a part that is 0 is left out;
+ * the cases of a product without cases per pallet: "+ 12 cases of products without cases per pallet (counted
+ * separately)".
+ * '' when the block has no cases. `tag` as the paper prints it: the load sheet passes it escaped in <bdi>
+ * (the words around it have nothing to escape).
+ */
+export function blockPalletsText(tag: string, p: { full: number; mixed: number; casesWithoutFactor: number }): string {
+  return [
+    p.full ? count(p.full, 'full pallet') : '',
+    p.mixed ? `${count(p.mixed, 'mixed pallet')} (the loose cases of all ${tag} products together)` : '',
+    p.casesWithoutFactor ? `${count(p.casesWithoutFactor, 'case')} of products without cases per pallet (counted separately)` : '',
+  ]
+    .filter(Boolean)
+    .join(' + ');
+}
+
+/**
+ * A block's total line on a load planned by pallets: "SPECIAL total: 70 cases - 2 full pallets + 1 mixed pallet
+ * (the loose cases of all SPECIAL products together)". `tag` as in blockPalletsText.
+ */
+export function specialLinesPalletTotal(tag: string, cases: number, p: { full: number; mixed: number; casesWithoutFactor: number }): string {
+  const pallets = blockPalletsText(tag, p);
+  return `${specialLinesTotal(tag)}: ${count(cases, 'case')}${pallets ? ` - ${pallets}` : ''}`;
+}
+
 /** The load's grand total under the blocks: the whole truck, as before the split. */
 export const SPLIT_GRAND_TOTAL = 'Total on this truck (normal + special loading)';
 

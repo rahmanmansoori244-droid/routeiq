@@ -18,6 +18,7 @@ import {
   NORMAL_LOADING_HEADING,
   NORMAL_LOADING_TOTAL,
   SPECIAL_LINES_LEAD,
+  specialLinesPalletTotal,
   specialLinesTotal,
   stopIsLoaded,
   stopsText,
@@ -2213,6 +2214,14 @@ function LoadDetail({
                       </tr>
                     ))}
                     <tr className="border-b bg-amber-50">{splitTotal(specialLinesTotal(g.tag), g.cases, g.palletUnits, g.weightKg)}</tr>
+                    {/* A load planned by pallets: the block's pallets for the loader (owner, 20 Oct 2026), as on the sheets. */}
+                    {pallets && g.pallets ? (
+                      <tr className="border-b bg-amber-50" data-testid={`manifest-split-pallets-${l.truckCode}-${l.loadNo}`}>
+                        <td colSpan={cols} className="py-1 font-semibold text-amber-900">
+                          {specialLinesPalletTotal(g.tag, g.cases, g.pallets)}
+                        </td>
+                      </tr>
+                    ) : null}
                   </Fragment>
                 ))}
               </>

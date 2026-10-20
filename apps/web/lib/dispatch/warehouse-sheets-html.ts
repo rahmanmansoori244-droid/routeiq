@@ -17,6 +17,7 @@ import {
   SPECIAL_LINES_NOTE,
   SPECIAL_LOADING_HEADING,
   SPECIAL_LOADING_ROW_TAG,
+  specialLinesPalletTotal,
   specialLinesTotal,
   specialLoadingLead,
   SPLIT_GRAND_TOTAL,
@@ -153,7 +154,9 @@ const productRow = (p: ProductCases) => `<tr><td>${esc(p.productCode)}</td><td>$
 /**
  * "1. Products to load" of a load with special-loading lines (owner request 20 Oct 2026): the normal lines
  * with their total, then one framed block per instruction (its heading, its rows each with the tag, its
- * total), then the truck's total, as before the split. Every value escaped, tags and texts isolated.
+ * total), then the truck's total, as before the split. On a load planned by pallets a block's total line says
+ * its pallets (owner, 20 Oct 2026): "SPECIAL total: 70 cases - 2 full pallets + 1 mixed pallet (the loose cases
+ * of all SPECIAL products together)". Every value escaped, tags and texts isolated.
  */
 function splitProducts(s: LoadSheet, split: LoadingSplitSheet): string {
   const tag = (t: string) => `<span class="split-tag"><bdi>${esc(t)}</bdi></span>`;
@@ -167,7 +170,9 @@ function splitProducts(s: LoadSheet, split: LoadingSplitSheet): string {
           g.tag !== g.text ? ` - <bdi>${esc(g.text)}</bdi>` : ''
         }</td></tr>${g.products
           .map((p) => `<tr class="split-row"><td>${esc(p.productCode)}</td><td>${tag(g.tag)} ${esc(p.productName)}</td><td class="n">${p.cases}</td><td class="box"></td></tr>`)
-          .join('')}<tr class="sub split-total"><td colspan="2"><bdi>${esc(specialLinesTotal(g.tag))}</bdi></td><td class="n">${g.cases}</td><td></td></tr></tbody>\n`,
+          .join('')}<tr class="sub split-total"><td colspan="2">${
+          g.pallets ? specialLinesPalletTotal(`<bdi>${esc(g.tag)}</bdi>`, g.cases, g.pallets) : `<bdi>${esc(specialLinesTotal(g.tag))}</bdi>`
+        }</td><td class="n">${g.cases}</td><td></td></tr></tbody>\n`,
     )
     .join('');
   return `<p class="muted">${esc(SPLIT_LEAD)}</p>

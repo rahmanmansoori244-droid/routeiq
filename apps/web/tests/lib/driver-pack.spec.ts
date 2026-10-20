@@ -29,7 +29,7 @@ import {
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
 import type { DriverChangeNote } from '@/lib/dispatch/summary';
 import { pdfSafe, UNPRINTABLE } from '@/lib/dispatch/pdf-text';
-import { busyFixture, fixture, INSTRUCTED, instructionFixture, LONG_TRUCK, ORDERS, load, stop } from './plan-detail-fixture';
+import { busyFixture, fixture, INSTRUCTED, instructionFixture, LONG_TRUCK, ORDERS, load, palletFixture, stop } from './plan-detail-fixture';
 
 const OPTS = { tenantName: 'NMWC Test' };
 
@@ -823,5 +823,29 @@ describe('special-loading lines in the load check (owner request 20 Oct 2026, lo
     expect(only).toContain(
       sq('Load check: SPECIAL: TAN-500-24 ×50 · JAB-1500-6 ×20 (SPECIAL total 70) · Cartons on top only: TAN-500-24 ×30 · TAN-5G ×10 (Cartons on top only total 40) = 110 cases'),
     );
+  });
+
+  it("a load planned by pallets: each block's pallets for the loader (owner, 20 Oct 2026), in the model and the PDF; a load planned by cases as before", async () => {
+    const d = palletFixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], ...INSTRUCTED.a, loadingInstruction: 'SPECIAL' };
+    d.loads[1].stops[0] = { ...d.loads[1].stops[0], ...INSTRUCTED.b, loadingInstruction: 'SPECIAL' };
+    const [s1, s2] = driverPackModel(d, OPTS).sheets;
+    // 50 of 84 + 20 of 56 loose = 0.95 of a pallet: 1 mixed pallet.
+    expect(s1.loadCheck.groups![0]).toMatchObject({
+      label: 'SPECIAL',
+      total: 70,
+      totalText: 'SPECIAL total: 70 cases - 1 mixed pallet (the loose cases of all SPECIAL products together)',
+    });
+    // T01 load 2 is planned by cases: no pallets.
+    expect(s2.pallets).toBeNull();
+    expect('totalText' in s2.loadCheck.groups![0]!).toBe(false);
+    const [first] = pageTexts(await renderDriverPackPdf(driverPackModel(d, { ...OPTS, loadIds: ['L1'] })));
+    expect(first).toContain(
+      sq(
+        'Load check: TAN-500-24 ×30 · TAN-5G ×10 · SPECIAL: TAN-500-24 ×50 · JAB-1500-6 ×20 (SPECIAL total: 70 cases - 1 mixed pallet (the loose cases of all SPECIAL products together)) = 110 cases (1.6 pallets)',
+      ),
+    );
+    const [second] = pageTexts(await renderDriverPackPdf(driverPackModel(d, { ...OPTS, loadIds: ['L2'] })));
+    expect(second).toContain(sq('(SPECIAL total 60) = 100 cases'));
   });
 });

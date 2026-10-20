@@ -27,7 +27,7 @@ import { breakLine, breakTimes } from './break-text';
 import { loadPallets, palletsOverBays, palletText } from './pallets';
 import { SMALL_TRUCK_BADGE } from './small-truck';
 import { helpersText } from './load-helpers';
-import { instructionLine, loadInstructions, specialLoadingTitle, stopIsLoaded } from './loading-instruction';
+import { instructionLine, loadInstructions, specialLinesPalletTotal, specialLoadingTitle, stopIsLoaded } from './loading-instruction';
 import { splitByLoadingInstruction } from './loading-split';
 
 // ---------------------------------------------------------------------------------------
@@ -124,13 +124,15 @@ export interface DriverSheet {
    * From the load manifest: what the driver counts before leaving. On a load with special-loading customers
    * (owner request 20 Oct 2026, loading-split.ts) `items` are the normal lines and `groups` one block per
    * instruction, its tag (PDF-safe) as `label`, with its own lines and total; `total` stays the load's.
-   * Absent `groups`: none (the sheet prints as before).
+   * On a load planned by pallets a group's `totalText` says its pallets for the loader (owner, 20 Oct 2026):
+   * "SPECIAL total: 70 cases - 2 full pallets + 1 mixed pallet (the loose cases of all SPECIAL products
+   * together)". Absent `groups`: none (the sheet prints as before).
    */
   loadCheck: {
     items: { productCode: string; productName: string; cases: number }[];
     total: number;
     matchesLoad: boolean;
-    groups?: { label: string; items: { productCode: string; productName: string; cases: number }[]; total: number }[];
+    groups?: { label: string; items: { productCode: string; productName: string; cases: number }[]; total: number; totalText?: string }[];
   };
   route: RoutePlan;
   stops: SheetStop[];
@@ -314,6 +316,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
       const next = d.loads.filter((x) => x.truckId === l.truckId && x.loadNo > l.loadNo).sort((a, b) => a.loadNo - b.loadNo)[0];
       const stops = [...l.stops].sort((a, b) => a.sequence - b.sequence);
       const total = l.manifest.reduce((a, m) => a + m.cases, 0);
+      const loadP = loadPallets(l);
       // Owner request 20 Oct 2026: the special-loading customers' products on their own lines.
       const { split } = splitByLoadingInstruction(l.manifest, stops);
       const checkItems = (rows: readonly { productCode: string; productName: string; cases: number }[]) =>
@@ -352,17 +355,22 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
         breakBefore: l.break && (l.break.where === 'DEPOT' || (l.break.afterSequence ?? 0) === 0) ? breakLine(l.break, stops.length) : null,
         cases: l.cases,
         capacityCases: l.truckCapacityCases,
-        pallets: (() => {
-          const p = loadPallets(l);
-          return p ? { overBays: palletsOverBays(p), total: palletText(p.units) } : null;
-        })(),
+        pallets: loadP ? { overBays: palletsOverBays(loadP), total: palletText(loadP.units) } : null,
         kmLabel: l.distanceIsEstimated ? 'Estimated km' : 'Road km',
         km: Math.round(l.distanceKm),
         loadCheck: {
           items: checkItems(split ? split.normal : l.manifest),
           total,
           matchesLoad: total === l.cases,
-          ...(split ? { groups: split.groups.map((g) => ({ label: t.text(g.tag), items: checkItems(g.rows), total: g.cases })) } : {}),
+          ...(split
+            ? {
+                groups: split.groups.map((g) => {
+                  const label = t.text(g.tag);
+                  // A load planned by pallets: the block's pallets (the label is PDF-safe, the words are ASCII).
+                  return { label, items: checkItems(g.rows), total: g.cases, ...(loadP && g.pallets ? { totalText: specialLinesPalletTotal(label, g.cases, g.pallets) } : {}) };
+                }),
+              }
+            : {}),
         },
         route,
         ...sheetQrCodes(route, link),

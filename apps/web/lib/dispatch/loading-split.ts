@@ -22,7 +22,7 @@
  * sheet and the plan screen, so every paper splits a load the same way.
  */
 import { loadingInstructionText } from './loading-instruction';
-import { fullAndLoose, palletUnits as linePalletUnits } from './pallets';
+import { fullAndLoose, palletUnits as linePalletUnits, validPalletFactor } from './pallets';
 
 /** A block's tag on each of its rows: the instruction text, shortened past this many characters. */
 export const LOADING_TAG_MAX = 24;
@@ -84,6 +84,28 @@ export interface LoadingGroup {
   cases: number;
   weightKg?: number;
   palletUnits?: number;
+  /**
+   * The block's pallets for the loader (blockPallets): only when the rows have pallets (a load planned by
+   * pallets), as the other pallet figures.
+   */
+  pallets?: BlockPallets;
+}
+
+/**
+ * A special-loading block's pallets for the loader (owner, 20 Oct 2026, on "a block is built as its own
+ * pallets": "YES PALLETS SEPARATE IS CORRECT, but they still have the same cases per pallet and they can be
+ * put in one pallet together"). The block never shares a pallet with the normal lines, and:
+ *  - `full`: each product's full pallets, its cases div its own cases per pallet (the factor of every other
+ *    line of the product);
+ *  - `mixed`: the loose cases of ALL the block's products stacked together on shared mixed pallets,
+ *    ceil(sum over its products of loose cases / cases per pallet), the fractions added exactly;
+ *  - `casesWithoutFactor`: the cases of a product without a usable cases per pallet, on neither (the words
+ *    say they are counted separately).
+ */
+export interface BlockPallets {
+  full: number;
+  mixed: number;
+  casesWithoutFactor: number;
 }
 
 export interface ManifestSplit {
@@ -136,6 +158,38 @@ export function loadingTags(texts: readonly string[]): string[] {
   });
 }
 
+const gcd = (a: bigint, b: bigint): bigint => (b === BigInt(0) ? a : gcd(b, a % b));
+
+/**
+ * The pallets of one special-loading block (BlockPallets): full pallets per product, then the loose cases of
+ * all its products on shared mixed pallets. The loose fractions are added as exact fractions (BigInt
+ * numerator / denominator, each factor up to 10,000), so cases that fill a pallet exactly - 28 of 84 + 14 of
+ * 42 + 7 of 21 - make one mixed pallet, never two.
+ */
+export function blockPallets(rows: readonly { cases: number; casesPerPallet?: number | null }[]): BlockPallets {
+  let full = 0;
+  let casesWithoutFactor = 0;
+  let num = BigInt(0);
+  let den = BigInt(1);
+  for (const r of rows) {
+    if (!(r.cases > 0)) continue;
+    const f = validPalletFactor(r.casesPerPallet);
+    if (f === null) {
+      casesWithoutFactor += r.cases;
+      continue;
+    }
+    const { full: whole, loose } = fullAndLoose(Math.round(r.cases), f);
+    full += whole;
+    if (!loose) continue;
+    num = num * BigInt(f) + BigInt(loose) * den;
+    den *= BigInt(f);
+    const g = gcd(num, den);
+    num /= g;
+    den /= g;
+  }
+  return { full, mixed: Number((num + den - BigInt(1)) / den), casesWithoutFactor };
+}
+
 /** The key two stops share a block by: the folded text, upper-cased. */
 export function loadingGroupKey(text: string): string {
   return text.toUpperCase();
@@ -147,7 +201,9 @@ export function loadingGroupKey(text: string): string {
  * the split keeps it. Kg and pallets are split only when every row has them: a line's kg is its own
  * (else the row's kg shared by cases), its pallet units its own (else its cases over the row's cases per
  * pallet); the normal line takes the rest, so normal + every block = the row, exactly. Full pallets and
- * loose cases are worked out per line shown (each block is built as its own pallets).
+ * loose cases are worked out per line shown (each block is built as its own pallets), and each block has its
+ * pallets for the loader (blockPallets: full pallets per product + the loose cases of all its products on
+ * shared mixed pallets).
  */
 export function splitByLoadingInstruction<R extends SplitInputRow>(rows: readonly R[], stops: readonly SplitStop[]): SplitResult {
   type Acc = { key: string; text: string; stops: number[]; lines: Map<string, SplitLine[]> };
@@ -201,7 +257,16 @@ export function splitByLoadingInstruction<R extends SplitInputRow>(rows: readonl
       if (!lns || out.some((x) => x.productCode === r.productCode)) continue;
       out.push(rowOf(r, sum(lns.map((l) => l.cases)), round1(sum(lns.map((l) => lineKg(l, r)))), sum(lns.map((l) => lineUnits(l, r)))));
     }
-    return { key: g.key, text: g.text, tag: tags[i]!, stops: g.stops, rows: out, cases: sum(out.map((x) => x.cases)), ...totals(out) };
+    return {
+      key: g.key,
+      text: g.text,
+      tag: tags[i]!,
+      stops: g.stops,
+      rows: out,
+      cases: sum(out.map((x) => x.cases)),
+      ...totals(out),
+      ...(palletsOn ? { pallets: blockPallets(out) } : {}),
+    };
   });
 
   const normal: SplitRow[] = [];

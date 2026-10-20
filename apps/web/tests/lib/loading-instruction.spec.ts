@@ -22,7 +22,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetDb, row, tables } from './fake-plan-db';
 import { Host, elements, textOf, typeName } from './hook-host';
-import { fixture, INSTRUCTED, instructionFixture } from './plan-detail-fixture';
+import { fixture, INSTRUCTED, instructionFixture, palletFixture } from './plan-detail-fixture';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
@@ -460,6 +460,26 @@ describe('the day screen (plan-view.tsx)', () => {
     // Another load of the day: no block.
     const other = await stopRows(await mountPlan(d), 1);
     expect(byTestId(other, 'manifest-split-T01-2')).toEqual([]);
+    // A load planned by cases: no pallet line under the block.
+    expect(byTestId(sub, 'manifest-split-pallets-T01-1')).toEqual([]);
+  });
+
+  it("the loading manifest of a load planned by pallets: the block's pallets for the loader under its total (owner, 20 Oct 2026)", async () => {
+    const d = palletFixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], ...INSTRUCTED.a, loadingInstruction: 'SPECIAL' };
+    const sub = await stopRows(await mountPlan(d), 0);
+    const table = elements(sub.tree).find((e) => e.props?.['data-testid'] === 'manifest-T01-1');
+    const rows = elements(table.props.children).filter((e) => typeName(e) === 'tr').map((r) => textOf(r.props.children));
+    const at = rows.indexOf('SPECIAL total701.0 pallets790 kg');
+    expect(at, JSON.stringify(rows)).toBeGreaterThan(0);
+    expect(rows[at + 1]).toBe('SPECIAL total: 70 cases - 1 mixed pallet (the loose cases of all SPECIAL products together)');
+    expect(rows[at + 2]!.startsWith('TOTAL110')).toBe(true);
+    const line = byTestId(sub, 'manifest-split-pallets-T01-1');
+    expect(line).toHaveLength(1);
+    expect(String(line[0].props.className)).toContain('bg-amber-50');
+    // The normal lines keep their pallet figures as before, without such a line.
+    expect(rows).toContain('Normal loading total400.6 pallets560 kg');
+    expect(rows.filter((r) => r.includes('mixed pallet'))).toHaveLength(1);
   });
 
   it('a plan without instructions shows no such badge', async () => {

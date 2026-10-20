@@ -784,10 +784,10 @@ describe('special-loading lines in the workbook (owner request 20 Oct 2026, load
     for (const name of ['T01 - L2', loadSheetName(LONG_TRUCK, 1, new Set())]) expect(cells(sheet(wb, name))).toEqual(cells(sheet(plain, name)));
   });
 
-  it('a load planned by pallets: each line its own cases per pallet, full pallets, loose cases and pallets; the column and the TOTAL add up as before', async () => {
+  it('a load planned by pallets: each line its own cases per pallet, full pallets, loose cases and pallets; the column and the TOTAL add up as before; the block ends with its pallets', async () => {
     const d = special(palletFixture());
     const ws = sheet(await render(d), 'T01 - L1');
-    const { rows, total } = manifestRows(ws, 11);
+    const { rows, head, total } = manifestRows(ws, 11);
     // #, code, description (C:D), cases, cases per pallet, full, loose, pallets (exact; shown to 0.1), kg.
     expect(rows.map((r) => [r[0], r[1], r[4], r[5], r[6], r[7], r[8], r[9]])).toEqual([
       ['', 'NORMAL LOADING - every other customer', '', '', '', '', '', ''],
@@ -798,10 +798,20 @@ describe('special-loading lines in the workbook (owner request 20 Oct 2026, load
       ['3', 'TAN-500-24', '50', '84', '0', '50', '0.596', '600'],
       ['4', 'JAB-1500-6', '20', '56', '0', '20', '0.358', '190'],
       ['', 'SPECIAL total', '70', '', '0', '70', '0.954', '790'],
+      // Owner, 20 Oct 2026: the block's own pallets, the loose cases of all its products together.
+      Array(8).fill('SPECIAL total: 70 cases - 1 mixed pallet (the loose cases of all SPECIAL products together)'),
       ['', 'TOTAL', '110', '', '0', '110', '1.562', '1350'],
     ]);
+    // The pallet line: merged A:K, bold, the bottom of the block's thick box (the block total above it no longer is).
+    const pl = head + 9;
+    expect((ws.model as { merges?: string[] }).merges).toEqual(expect.arrayContaining([`A${pl}:K${pl}`]));
+    expect(ws.getCell(pl, 1).font).toMatchObject({ bold: true });
+    expect(ws.getCell(pl, 1).border).toMatchObject({ bottom: { style: 'thick' }, left: { style: 'thick' } });
+    expect(ws.getCell(pl, 11).border).toMatchObject({ bottom: { style: 'thick' }, right: { style: 'thick' } });
+    expect(ws.getCell(pl - 1, 5).border).not.toMatchObject({ bottom: { style: 'thick' } });
+    expect(ws.getCell(pl - 1, 1).border).toMatchObject({ left: { style: 'thick' } });
     // The cells hold exact pallets: the product lines add up to the load's pallets.
-    const pallets = [1, 2, 5, 6].map((i) => Number(ws.getCell(total - 8 + i, 9).value));
+    const pallets = [1, 2, 5, 6].map((i) => Number(ws.getCell(head + 1 + i, 9).value));
     expect(pallets.reduce((a, v) => a + v, 0)).toBeCloseTo(d.loads[0].palletUnits! / 1000, 6);
     expect(ws.getCell(total, 9).value).toBe(d.loads[0].palletUnits! / 1000);
     expect(text(ws.getCell(total + 1, 2))).toBe('110 cases = 1.6 pallets (110 loose cases on mixed pallets)');
@@ -814,6 +824,22 @@ describe('special-loading lines in the workbook (owner request 20 Oct 2026, load
     expect(b.rows.find((r) => r[1] === 'TAN-500-24')!.slice(4, 8)).toEqual(['100', '84', '1', '16']);
     expect([text(bw.getCell(b.total, 7)), text(bw.getCell(b.total, 8))]).toEqual(['1', '46']);
     expect(text(bw.getCell(b.total + 1, 2))).toBe('130 cases = 1.8 pallets (1 full pallet + 46 loose cases on mixed pallets)');
+    // Its pallets: 1 full pallet of TAN-500-24, and 16 of 84 + 25 of 56 + 5 of 40 loose = 0.76 on 1 mixed pallet.
+    expect(b.rows[b.rows.length - 2]![0]).toBe('SPECIAL total: 130 cases - 1 full pallet + 1 mixed pallet (the loose cases of all SPECIAL products together)');
+    // A product without cases per pallet on the block: its cases counted separately, said so.
+    const unset = special(palletFixture());
+    unset.loads[0].manifest = unset.loads[0].manifest.map((m) => (m.productCode === 'JAB-1500-6' ? { ...m, casesPerPallet: null } : m));
+    const uw = manifestRows(sheet(await render(unset), 'T01 - L1'), 11);
+    expect(uw.rows.find((r) => r[1] === 'JAB-1500-6')![5]).toBe('not set');
+    expect(uw.rows[uw.rows.length - 2]![0]).toBe(
+      'SPECIAL total: 70 cases - 1 mixed pallet (the loose cases of all SPECIAL products together) + 20 cases of products without cases per pallet (counted separately)',
+    );
+    // A load planned by cases with the block: no pallet line.
+    const byCases = palletFixture();
+    byCases.loads[1].stops[0] = { ...byCases.loads[1].stops[0], ...INSTRUCTED.b, loadingInstruction: SPECIAL };
+    const cw = manifestRows(sheet(await render(byCases), 'T01 - L2'), 7);
+    expect(cw.rows.some((r) => r[0].includes('mixed pallet'))).toBe(false);
+    expect(cw.rows[cw.rows.length - 2]![1]).toBe('SPECIAL total');
   });
 
   it('SKU LOADING SUMMARY: the normal lines and one boxed section per text over the day, each with its total; TOTAL and the checks as before', async () => {
@@ -843,6 +869,39 @@ describe('special-loading lines in the workbook (owner request 20 Oct 2026, load
     expect(ws.getCell(13, 7).border).toMatchObject({ bottom: { style: 'thick' }, right: { style: 'thick' } });
     // A day without such customers: the summary as before (pinned with the whole workbook above).
     expect(find(sheet(await render(instructionFixture()), SHEETS.skuSummary), (t) => t.startsWith('NORMAL LOADING'))).toBeUndefined();
+  });
+
+  it("SKU LOADING SUMMARY on a day planned by pallets: each section's pallets per load (full, mixed, and cases without cases per pallet only when any), blank for a load planned by cases", async () => {
+    const d = special(palletFixture());
+    // The same text on the long truck's load (12 bays) and on T01 load 2 (planned by cases).
+    d.loads[2].stops[0] = { ...d.loads[2].stops[0], ...INSTRUCTED.b, loadingInstruction: SPECIAL };
+    d.loads[1].stops[0] = { ...d.loads[1].stops[0], customerId: 'c300', customerCode: 'C300', branchCode: null, customerName: 'Store Example C', loadingInstruction: SPECIAL };
+    const ws = sheet(await render(d), SHEETS.skuSummary);
+    const sectionTotal = find(ws, (t) => t === 'SPECIAL total', 1)!;
+    const row = (r: number) => Array.from({ length: 7 }, (_, i) => text(ws.getCell(r, i + 1)));
+    expect(row(sectionTotal.row)).toEqual(['SPECIAL total', '3 SKUs', '70', '60', '130', '260', '2897.5']);
+    // L1: 1 mixed pallet; L2 planned by cases: blank; the long truck: 1 full + 1 mixed. Totals added up.
+    expect(row(sectionTotal.row + 1)).toEqual(['SPECIAL full pallets', 'per product: its cases / its cases per pallet, whole pallets', '0', '', '1', '1', '']);
+    expect(row(sectionTotal.row + 2)).toEqual(['SPECIAL mixed pallets', 'the loose cases of all SPECIAL products together', '1', '', '1', '2', '']);
+    expect(text(ws.getCell(sectionTotal.row + 3, 1))).toBe('TOTAL');
+    // The box: its bottom on the last pallet row, not on the section total.
+    expect(ws.getCell(sectionTotal.row + 2, 7).border).toMatchObject({ bottom: { style: 'thick' }, right: { style: 'thick' } });
+    expect(ws.getCell(sectionTotal.row, 7).border).not.toMatchObject({ bottom: { style: 'thick' } });
+    // Cases without cases per pallet: a third row.
+    d.loads[0].manifest = d.loads[0].manifest.map((m) => (m.productCode === 'JAB-1500-6' ? { ...m, casesPerPallet: null } : m));
+    const uw = sheet(await render(d), SHEETS.skuSummary);
+    const ut = find(uw, (t) => t === 'SPECIAL total', 1)!;
+    expect(Array.from({ length: 6 }, (_, i) => text(uw.getCell(ut.row + 3, i + 1)))).toEqual([
+      'SPECIAL cases without cases per pallet',
+      'counted separately, on none of these pallets',
+      '20',
+      '',
+      '0',
+      '20',
+    ]);
+    expect(uw.getCell(ut.row + 3, 1).border).toMatchObject({ bottom: { style: 'thick' } });
+    // A day planned by cases: no pallet rows (the test above).
+    expect(find(sheet(await render(special()), SHEETS.skuSummary), (t) => t.includes('mixed pallets'), 1)).toBeUndefined();
   });
 
   it('the same text on two loads is one section of the day, labelled as on its first load', async () => {

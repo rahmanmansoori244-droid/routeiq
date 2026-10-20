@@ -9,7 +9,7 @@ import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 import type { OutcomeOverlay, OverlayStop } from '@/lib/delivery/outcome-view';
 import { loadSheetModel, NO_INVOICE, returnNoteModel, stopInvoices } from '@/lib/dispatch/warehouse-sheets';
 import { esc, PRINT_SCRIPT_HASH, renderLoadSheetHtml, renderReturnNoteHtml, SHEET_CSP } from '@/lib/dispatch/warehouse-sheets-html';
-import { busyFixture, fixture, INSTRUCTED, instructionFixture, LONG_TRUCK } from './plan-detail-fixture';
+import { busyFixture, fixture, INSTRUCTED, instructionFixture, LONG_TRUCK, palletFixture } from './plan-detail-fixture';
 
 const OPTS = { tenantName: 'NMWC Test' };
 
@@ -564,5 +564,62 @@ describe('special-loading lines on the load sheet (owner request 20 Oct 2026)', 
     expect(html).toContain('<tr class="total"><td colspan="2">Total</td><td class="n">110</td>');
     expect(html).toContain('data-kind="loading-instruction"');
     expect(html).not.toContain('special-loading-lines');
+  });
+});
+
+describe("a special-loading block's pallets on the load sheet (owner, 20 Oct 2026: its own pallets, the loose cases of all its products together)", () => {
+  const SPECIAL = 'SPECIAL';
+  const sheet1 = (html: string) => html.slice(html.indexOf('<section class="sheet">'), html.indexOf('</section>'));
+  /** The pallet fixture (L1 on 2 bays, the long truck on 12, L2 by cases) with invented customers on the stops that get the instruction. */
+  function pallets(): PlanDetail {
+    const d = palletFixture();
+    d.loads[0].stops = [{ ...d.loads[0].stops[0], ...INSTRUCTED.a, loadingInstruction: SPECIAL }, { ...d.loads[0].stops[1], ...INSTRUCTED.b }];
+    return d;
+  }
+
+  it('a load planned by pallets: the block has its pallets (each product at its own cases per pallet), on its total line', () => {
+    const m = loadSheetModel(pallets(), OPTS);
+    const s = m.sheets[0]!;
+    // 50 of 84 + 20 of 56 loose = 0.95 of a pallet: 1 mixed pallet; the normal lines and the truck total as before.
+    expect(s.loadingSplit!.groups[0]).toMatchObject({ tag: SPECIAL, cases: 70, pallets: { full: 0, mixed: 1, casesWithoutFactor: 0 } });
+    expect(s.loadingSplit!.normal.map((p) => `${p.productCode}x${p.cases}`)).toEqual(['TAN-500-24x30', 'TAN-5Gx10']);
+    expect(s.totalCases).toBe(110);
+    const html = sheet1(renderLoadSheetHtml(m));
+    expect(html).toContain(
+      '<tr class="sub split-total"><td colspan="2"><bdi>SPECIAL</bdi> total: 70 cases - 1 mixed pallet (the loose cases of all <bdi>SPECIAL</bdi> products together)</td><td class="n">70</td><td></td></tr></tbody>',
+    );
+    // The normal lines and the truck total carry no such figure.
+    expect(html).toContain('<tr class="sub"><td colspan="2">Normal loading total</td><td class="n">40</td><td></td></tr>');
+    expect(html).toContain('<tr class="total"><td colspan="2">Total on this truck (normal + special loading)</td><td class="n">110</td>');
+    expect(html.match(/mixed pallet/g)).toHaveLength(1);
+  });
+
+  it('full pallets and a mixed pallet: a whole load of one customer (100 cases at 84 = 1 full pallet; the loose cases of three products together on 1)', () => {
+    const d = palletFixture();
+    d.loads[2].stops[0] = { ...d.loads[2].stops[0], ...INSTRUCTED.a, loadingInstruction: SPECIAL };
+    const s = loadSheetModel(d, OPTS).sheets.find((x) => x.truckCode === LONG_TRUCK)!;
+    expect(s.loadingSplit!.groups[0]!.pallets).toEqual({ full: 1, mixed: 1, casesWithoutFactor: 0 });
+    expect(renderLoadSheetHtml(loadSheetModel(d, OPTS))).toContain(
+      '<bdi>SPECIAL</bdi> total: 130 cases - 1 full pallet + 1 mixed pallet (the loose cases of all <bdi>SPECIAL</bdi> products together)</td><td class="n">130</td>',
+    );
+  });
+
+  it('a load planned by cases (no bays): the block total as before, no pallets', () => {
+    const d = palletFixture();
+    d.loads[1].stops[0] = { ...d.loads[1].stops[0], ...INSTRUCTED.b, loadingInstruction: SPECIAL };
+    const s = loadSheetModel(d, OPTS).sheets[1]!;
+    expect(s.pallets).toBeNull();
+    expect('pallets' in s.loadingSplit!.groups[0]!).toBe(false);
+    const html = renderLoadSheetHtml(loadSheetModel(d, OPTS));
+    expect(html).toContain('<tr class="sub split-total"><td colspan="2"><bdi>SPECIAL total</bdi></td>');
+    expect(html).not.toContain('mixed pallet');
+  });
+
+  it('the tag escaped and isolated in the pallet words too', () => {
+    const d = pallets();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], loadingInstruction: '<b>x</b> & y' };
+    const html = sheet1(renderLoadSheetHtml(loadSheetModel(d, OPTS)));
+    expect(html).not.toContain('<b>x</b>');
+    expect(html).toContain('<bdi>&lt;b&gt;x&lt;/b&gt; &amp; y</bdi> total: 70 cases - 1 mixed pallet (the loose cases of all <bdi>&lt;b&gt;x&lt;/b&gt; &amp; y</bdi> products together)');
   });
 });
