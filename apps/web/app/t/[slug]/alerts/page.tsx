@@ -2,28 +2,34 @@ import { getCurrentTenant } from '@/lib/tenant';
 import { prisma } from '@/lib/db';
 import { canPlan } from '@/lib/rbac';
 import { DEFAULT_TZ, todayIso } from '@/lib/dispatch/time';
+import { ALERT_REVIEW_FILTERS } from '@/lib/alerts/inbox';
 import { PageShell } from '@/components/page-shell';
 import { AlertsClient } from './alerts-client';
 
 export const metadata = { title: 'Alerts — RouteIQ' };
 export const dynamic = 'force-dynamic';
 
+type Search = { from?: string; to?: string; date?: string; depot?: string; state?: string; review?: string; reviewId?: string };
+
 /**
  * Operations alerts (owner request 16 Oct 2026: "notify me when a rule I set is broken ... so we can
- * track with ease"): every alert by date, depot, state and rule. Every role reads it; the dispatcher and
- * up acknowledge. The rules are set by a company admin under Settings > Operations alerts.
+ * track with ease"): every alert by date, depot, state, rule and cause & action. Every role reads it; the
+ * dispatcher and up acknowledge, and record the cause & action of any alert (owner request 20 Oct 2026). The
+ * rules are set by a company admin under Settings > Operations alerts. `reviewId` (the bell's link) opens that
+ * alert's Cause & action dialog.
  */
-export default async function AlertsPage({ params, searchParams }: { params: { slug: string }; searchParams: { from?: string; to?: string; date?: string; depot?: string; state?: string } }) {
+export default async function AlertsPage({ params, searchParams }: { params: { slug: string }; searchParams: Search }) {
   const { tenant, user, db } = await getCurrentTenant(params.slug);
   const own = user.tenantId === tenant.id;
   const cfg = await prisma.tenantConfig.findUnique({ where: { tenantId: tenant.id }, select: { alertsEnabled: true, timezone: true } });
   const timezone = cfg?.timezone ?? DEFAULT_TZ;
   const depots = own ? await db.depot.findMany({ where: { active: true }, select: { id: true, code: true, name: true }, orderBy: { code: 'asc' } }) : [];
   const today = todayIso(timezone);
+  const review = (ALERT_REVIEW_FILTERS as readonly string[]).includes(searchParams.review ?? '') ? searchParams.review! : 'all';
   return (
     <PageShell
       title="Operations alerts"
-      description="When a rule set under Settings > Operations alerts is broken: unloading longer than planned, loading too long, running late, not dispatched, driver silent, after the delivery window, priority stop not delivered, delivered with a note, proof far from the pin, load not closed, driver page not opened. Open alerts first, high before warnings."
+      description="When a rule set under Settings > Operations alerts is broken: unloading longer than planned, loading too long, running late, not dispatched, driver silent, after the delivery window, priority stop not delivered, delivered with a note, proof far from the pin, load not closed, driver page not opened. Open alerts first, high before warnings. After checking an alert, record its cause & action: what happened and what was decided, so the decisions can be counted later."
     >
       {own ? (
         <AlertsClient
@@ -39,7 +45,9 @@ export default async function AlertsPage({ params, searchParams }: { params: { s
             to: searchParams.to ?? searchParams.date ?? searchParams.from ?? today,
             depotId: searchParams.depot ?? '',
             state: searchParams.state ?? 'all',
+            review,
           }}
+          initialReviewId={searchParams.reviewId ?? null}
         />
       ) : (
         <p className="text-sm text-muted-foreground">Alerts are shown for your own company only.</p>

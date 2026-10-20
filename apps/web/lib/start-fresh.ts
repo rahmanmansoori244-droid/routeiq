@@ -45,7 +45,9 @@
  * UnservedOrder.orderId and the Bring forward links (NO ACTION) never refuse; delivery results,
  * driver links and the operations alerts of those days by the company and the date, so a row written
  * before those statements goes too. The alerts are derived from what is removed: they are counted in the
- * audit row (alertsRemoved), not on the panel. So are the analysis facts of those days (owner request 19 Oct
+ * audit row (alertsRemoved), not on the panel - but those with a cause & action the office recorded (owner
+ * request 20 Oct 2026) are a line of their own when there are some (`alertReviews`, compared for
+ * PREVIEW_STALE). So are the analysis facts of those days (owner request 19 Oct
  * 2026, lib/analysis/*: FactVisit, FactLeg, FactDepotTurn, FactTruckDay, frozen or not): test days must not
  * stay in the analysis data (analysisFactsRemoved in the audit row).
  * Every statement names the company (tenantId) or ids read for it. Lists are sent in parts
@@ -527,6 +529,8 @@ async function collect(db: Db, s: Scope): Promise<{ sets: Sets; report: StartFre
   const sets: Sets = { runIds, scenarioIds, orderIds, batchIds, shiftIds, baselineIds, casualIds: casual.removable, hiredTruckIds };
 
   const gps = await gpsRowsInScope(db, s);
+  // The days' alerts with a cause & action the office recorded (owner request 20 Oct 2026): a line of their own.
+  const alertReviews = await db.opsAlert.count({ where: { ...dayWhere, reviewedAt: { not: null } } });
   const salesLinks = await db.salesLink.count({ where: dayWhere });
   const removed: StartFreshRemoved = {
     uploadBatches: batchIds.length,
@@ -553,6 +557,7 @@ async function collect(db: Db, s: Scope): Promise<{ sets: Sets; report: StartFre
       (await countIn(shiftIds, (part) => db.truckLocation.count({ where: { tenantId: t, shiftId: { in: part } } }))) +
       (await countIn(shiftIds, (part) => db.deliveryProof.count({ where: { tenantId: t, shiftId: { in: part } } }))),
     ...(gps > 0 ? { gpsTracking: gps } : {}),
+    ...(alertReviews > 0 ? { alertReviews } : {}),
     ...(salesLinks > 0 ? { salesLinks } : {}),
   };
   const kept: StartFreshKept = {
@@ -652,7 +657,9 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<{ removed: Parti
     (await tx.ivmsEvent.deleteMany({ where: gw.event })).count +
     (await tx.ivmsTruckDay.deleteMany({ where: gw.day })).count;
   // The operations alerts of those days (16 Oct 2026), by the company and the date as well: the company's
-  // alert lock (taken last in runStartFresh) keeps a sweep from writing new ones until the run commits.
+  // alert lock (taken last in runStartFresh) keeps a sweep from writing new ones until the run commits. Those
+  // with a cause & action (owner request 20 Oct 2026: the office's own input) are counted first.
+  const alertReviews = await tx.opsAlert.count({ where: { ...dayWhere, reviewedAt: { not: null } } });
   const alerts = (await tx.opsAlert.deleteMany({ where: dayWhere })).count;
   // The analysis facts of those days (19 Oct 2026, lib/analysis/*), by the company and the date as well: test
   // days never stay in the analysis data. The nightly job builds only dates before today (company time) from
@@ -691,6 +698,7 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<{ removed: Parti
       baselines,
       oldDriverApp: shifts + positions + proofs,
       ...(gps > 0 ? { gpsTracking: gps } : {}),
+      ...(alertReviews > 0 ? { alertReviews } : {}),
       ...(salesLinks > 0 ? { salesLinks } : {}),
     },
     alerts,
@@ -750,6 +758,7 @@ export async function runStartFresh(
       const result: StartFreshReport = { ...report, removed: { ...report.removed, ...done } };
       // The preview counted GPS rows and the run found none left (the janitor's retention got there first).
       if (result.removed.gpsTracking !== undefined && done.gpsTracking === undefined) result.removed.gpsTracking = 0;
+      if (result.removed.alertReviews !== undefined && done.alertReviews === undefined) result.removed.alertReviews = 0;
       if (result.removed.salesLinks !== undefined && done.salesLinks === undefined) result.removed.salesLinks = 0;
       await audit(
         {

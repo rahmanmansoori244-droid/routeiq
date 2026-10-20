@@ -351,6 +351,18 @@ export function claimSql(tenantId: string, now: Date, minSeverity: string, ended
 /** The lock key of a company's e-mail claim (another key than the sweep's own lock). */
 export const digestLockKey = (tenantId: string) => `ops-alerts-mail:${tenantId}`;
 
+/**
+ * Waits for the company's e-mail lock (the transaction's lock timeout applies). A cause & action save takes it
+ * before it writes a row (lib/alerts/inbox.ts lockForReview; review of the branch, 20 Oct 2026, finding 1): a
+ * claim that starts meanwhile answers BUSY and creates no digest, so the next claim still reads what ended
+ * since the last e-mail. Without it the claim's FOR UPDATE SKIP LOCKED skipped the row the save held, and an
+ * alert over by itself (ENDED, news in one e-mail only) was never e-mailed once a digest of other rows moved
+ * the "ended since" time past it.
+ */
+export async function lockTenantDigest(tx: Tx, tenantId: string): Promise<void> {
+  await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${digestLockKey(tenantId)}))`;
+}
+
 /** Fail the digests a stopped process left SENDING: their rows are e-mailed again (emailedTier 0). */
 async function failStaleDigests(tx: Tx, tenantId: string, now: Date) {
   const stale = await tx.opsAlertDigest.findMany({

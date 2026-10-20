@@ -10,7 +10,9 @@
  * review (customers with a pin offset on 2 or more visits - the truck unloaded 120-500 m from the pin, longer
  * than it stood near it - with the median standing point: the GPS study found 7 such pins, an office data fix;
  * a big site's second drop point is never listed: review of 19 Oct 2026); Late result taps (the truck more than
- * 500 m from the pin when the driver saved the result). Never the raw trail, a driver, a phone or an IP address.
+ * 500 m from the pin when the driver saved the result); Alert causes & actions (owner request 20 Oct 2026: every
+ * operations alert of the range with the cause & action the office recorded after checking it; also alone,
+ * `only=alerts`, from the Alerts page, up to 366 days). Never the raw trail, a driver, a phone or an IP address.
  */
 import { PassThrough } from 'node:stream';
 import ExcelJS from 'exceljs';
@@ -18,8 +20,97 @@ import type { FactDepotTurn, FactLeg, FactTruckDay, FactVisit } from '@prisma/cl
 import { findInParts } from '../in-parts';
 import { dateOnly, DEFAULT_TZ, fmtHhmm, isoOf, localDateIso, localMinutes } from '../dispatch/time';
 import { distanceM } from '../dispatch/snapshots';
+import { ALERT_RULE_SPECS, RESOLVED_REASON_TEXT, SEVERITY_LABEL, isAlertRule, type ResolvedReason } from '../alerts/catalog';
+import { ALERT_FOLLOWUP_DAYS, REVIEW_FAMILY_LABEL, actionLabel, causeLabel, reviewFamilyOf } from '../alerts/review';
 import { destinationOf, median } from './gps';
 import type { AwayJson, SubstayJson } from './types';
+
+/**
+ * An operations alert as the "Alert causes & actions" sheet reads it (an explicit select: never the e-mail
+ * state, never a user id; the names of who acknowledged and who saved the cause & action).
+ */
+export interface AlertExportRow {
+  id: string;
+  depotId: string;
+  deliveryDate: Date;
+  rule: string;
+  truckCode: string;
+  loadNo: number | null;
+  sequence: number | null;
+  customerId: string | null;
+  severity: string;
+  tier: number;
+  value: number;
+  threshold: number;
+  text: string;
+  factsJson: unknown;
+  occurredAt: Date;
+  firstSeenAt: Date;
+  lastSeenAt: Date;
+  resolvedAt: Date | null;
+  resolvedReason: string | null;
+  occurrences: number;
+  ackedAt: Date | null;
+  ackedBy: { name: string } | null;
+  reviewCause: string | null;
+  reviewCauseOther: string | null;
+  reviewAction: string | null;
+  reviewActionOther: string | null;
+  reviewNote: string | null;
+  reviewFollowUp: boolean;
+  reviewFirstAt: Date | null;
+  reviewFirstBy: { name: string } | null;
+  reviewedAt: Date | null;
+  reviewedBy: { name: string } | null;
+  reviewSaves: number;
+  reviewGroupId: string | null;
+  reviewTier: number | null;
+  reviewOccurrences: number | null;
+  reviewCustomerId: string | null;
+  detailsRemovedAt: Date | null;
+}
+
+/** The select of AlertExportRow (lib/alerts: OpsAlert). */
+export const ALERT_EXPORT_SELECT = {
+  id: true,
+  depotId: true,
+  deliveryDate: true,
+  rule: true,
+  truckCode: true,
+  loadNo: true,
+  sequence: true,
+  customerId: true,
+  severity: true,
+  tier: true,
+  value: true,
+  threshold: true,
+  text: true,
+  factsJson: true,
+  occurredAt: true,
+  firstSeenAt: true,
+  lastSeenAt: true,
+  resolvedAt: true,
+  resolvedReason: true,
+  occurrences: true,
+  ackedAt: true,
+  ackedBy: { select: { name: true } },
+  reviewCause: true,
+  reviewCauseOther: true,
+  reviewAction: true,
+  reviewActionOther: true,
+  reviewNote: true,
+  reviewFollowUp: true,
+  reviewFirstAt: true,
+  reviewFirstBy: { select: { name: true } },
+  reviewedAt: true,
+  reviewedBy: { select: { name: true } },
+  reviewSaves: true,
+  reviewGroupId: true,
+  reviewTier: true,
+  reviewOccurrences: true,
+  reviewCustomerId: true,
+  detailsRemovedAt: true,
+} as const;
 
 /** The reads the export makes (tenantDb in the route; a fake in the tests). */
 export interface AnalysisDb {
@@ -27,6 +118,7 @@ export interface AnalysisDb {
   factVisit: { findMany(args: unknown): Promise<FactVisit[]> };
   factLeg: { findMany(args: unknown): Promise<FactLeg[]> };
   factDepotTurn: { findMany(args: unknown): Promise<FactDepotTurn[]> };
+  opsAlert: { findMany(args: unknown): Promise<AlertExportRow[]> };
   customer: { findMany(args: unknown): Promise<{ id: string; code: string; branchCode: string | null; name: string; lat: number | null; lng: number | null }[]> };
   depot: { findMany(args: unknown): Promise<{ id: string; code: string }[]> };
   stopVisit: { findMany(args: unknown): Promise<{ id: string; plannedLat: number | null; plannedLng: number | null }[]> };
@@ -39,24 +131,40 @@ export interface AnalysisData {
   visits: FactVisit[];
   legs: FactLeg[];
   turns: FactDepotTurn[];
+  /** The operations alerts of the range with their cause & action (owner request 20 Oct 2026). */
+  alerts: AlertExportRow[];
   customers: Map<string, { code: string; branchCode: string | null; name: string; lat: number | null; lng: number | null }>;
   depots: Map<string, string>;
   /** The pin each pin-offset visit was planned with (StopVisit.plannedLat/Lng), by visit id. */
   plannedPins: Map<string, { lat: number; lng: number }>;
 }
 
-/** The facts of [from, to], one depot or all; every read names the company (and the db is the company's). */
-export async function readAnalysis(db: AnalysisDb, tenantId: string, range: { from: string; to: string }, depotId: string | null): Promise<AnalysisData> {
+/**
+ * The facts of [from, to], one depot or all; every read names the company (and the db is the company's).
+ * `only: 'alerts'`: the alerts alone (no fact is read).
+ */
+export async function readAnalysis(
+  db: AnalysisDb,
+  tenantId: string,
+  range: { from: string; to: string },
+  depotId: string | null,
+  opts: { only?: 'alerts' } = {},
+): Promise<AnalysisData> {
   const where = { tenantId, deliveryDate: { gte: dateOnly(range.from), lte: dateOnly(range.to) }, ...(depotId ? { depotId } : {}) };
-  const [cfg, truckDays, visits, legs, turns, depots] = await Promise.all([
+  const facts = opts.only !== 'alerts';
+  const none = <T>() => Promise.resolve([] as T[]);
+  const [cfg, truckDays, visits, legs, turns, depots, alerts] = await Promise.all([
     db.tenantConfig.findFirst({ where: { tenantId }, select: { timezone: true } }),
-    db.factTruckDay.findMany({ where, orderBy: [{ deliveryDate: 'asc' }, { truckCode: 'asc' }] }),
-    db.factVisit.findMany({ where, orderBy: [{ deliveryDate: 'asc' }, { truckCode: 'asc' }, { loadNo: 'asc' }, { sequence: 'asc' }] }),
-    db.factLeg.findMany({ where, orderBy: [{ deliveryDate: 'asc' }, { truckCode: 'asc' }, { loadNo: 'asc' }, { legNo: 'asc' }] }),
-    db.factDepotTurn.findMany({ where, orderBy: [{ deliveryDate: 'asc' }, { truckCode: 'asc' }, { afterLoadNo: 'asc' }] }),
+    facts ? db.factTruckDay.findMany({ where, orderBy: [{ deliveryDate: 'asc' }, { truckCode: 'asc' }] }) : none<FactTruckDay>(),
+    facts ? db.factVisit.findMany({ where, orderBy: [{ deliveryDate: 'asc' }, { truckCode: 'asc' }, { loadNo: 'asc' }, { sequence: 'asc' }] }) : none<FactVisit>(),
+    facts ? db.factLeg.findMany({ where, orderBy: [{ deliveryDate: 'asc' }, { truckCode: 'asc' }, { loadNo: 'asc' }, { legNo: 'asc' }] }) : none<FactLeg>(),
+    facts ? db.factDepotTurn.findMany({ where, orderBy: [{ deliveryDate: 'asc' }, { truckCode: 'asc' }, { afterLoadNo: 'asc' }] }) : none<FactDepotTurn>(),
     db.depot.findMany({ where: { tenantId }, select: { id: true, code: true } }),
+    db.opsAlert.findMany({ where, select: ALERT_EXPORT_SELECT, orderBy: [{ deliveryDate: 'asc' }, { truckCode: 'asc' }, { occurredAt: 'asc' }, { id: 'asc' }] }),
   ]);
-  const customerIds = [...new Set(visits.map((v) => v.customerId))];
+  // The alerts' customers now and when their cause & action was saved (a re-plan can put another customer at the stop).
+  const alertCustomers = alerts.flatMap((a) => [a.customerId, a.reviewCustomerId]).filter((c): c is string => !!c);
+  const customerIds = [...new Set([...visits.map((v) => v.customerId), ...alertCustomers])];
   const offsetVisitIds = [...new Set(visits.filter((v) => v.pinOffset && v.visitId).map((v) => v.visitId!))];
   const [customers, pins] = await Promise.all([
     findInParts(customerIds, (part) => db.customer.findMany({ where: { tenantId, id: { in: part } }, select: { id: true, code: true, branchCode: true, name: true, lat: true, lng: true } })),
@@ -70,6 +178,7 @@ export async function readAnalysis(db: AnalysisDb, tenantId: string, range: { fr
     visits,
     legs,
     turns,
+    alerts,
     customers: new Map(customers.map((c) => [c.id, { code: c.code, branchCode: c.branchCode, name: c.name, lat: c.lat, lng: c.lng }])),
     depots: new Map(depots.map((d) => [d.id, d.code])),
     plannedPins,
@@ -198,9 +307,20 @@ export interface AnalysisMeta {
 const ROWS_PER_TURN = 200;
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-/** The workbook (rows in, bytes out), streamed sheet by sheet with a turn for the web process every 200 rows. */
-export async function buildAnalysisWorkbook(data: AnalysisData, meta: AnalysisMeta): Promise<Buffer> {
-  const tz = data.tz;
+/** The name of the alerts' sheet (owner request 20 Oct 2026); always the last sheet of the Analysis data. */
+export const ALERT_SHEET = 'Alert causes & actions';
+
+/** The ReadMe lines of the alerts' sheet (in both workbooks). */
+export const README_ALERTS_LINES: string[] = [
+  `${ALERT_SHEET} (owner request 20 Oct 2026): every operations alert of the range - one row per rule and subject (a stop, a load or a truck-day) per day - with the cause & action the office recorded after checking it (empty when nobody did), so the share of alerts with one, the causes per rule and the decisions taken can be counted. An alert that closed and came back keeps one cause & action ("Came back after the save").`,
+  'Incident: the alerts of one truck and day saved together with one cause & action share a number (count incidents, not alerts). Minutes from first seen to first save: from when the alert was first shown (empty when saved before, which happens when it came back). "Saved while the alert was open" tells live decisions from labelling after the fact.',
+  'Customer: the customer of the stop now; "Customer when saved" is the one the cause & action was saved for (a re-plan can put another customer at the same stop: count causes per customer with that column).',
+  'Retention: an alert is deleted with its cause & action 90 days after its date (keep this file to count older ones). Only where the company keeps alerts as long as the analysis data does the row stay, its text, facts (but "By GPS"), note and Other texts removed ("Details removed"). Today\'s alerts can still change after the download.',
+  'Other: read the Other causes and actions once a month; tell RouteIQ support when one comes back often: it can become a choice of its own.',
+];
+
+/** One workbook streamed sheet by sheet with a turn for the web process every 200 rows (rows in, bytes out). */
+function workbookWriter(meta: AnalysisMeta, tz: string) {
   const out = new PassThrough();
   const chunks: Buffer[] = [];
   out.on('data', (c: Buffer) => chunks.push(c));
@@ -213,8 +333,6 @@ export async function buildAnalysisWorkbook(data: AnalysisData, meta: AnalysisMe
   wb.creator = 'RouteIQ';
   wb.lastModifiedBy = 'RouteIQ';
   wb.created = meta.generatedAt;
-  const depotCode = (id: string) => data.depots.get(id) ?? '';
-  const cust = (id: string) => data.customers.get(id);
 
   const sheet = async <R>(name: string, cols: Col<R>[], rows: readonly R[]) => {
     const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 1 }] });
@@ -230,12 +348,120 @@ export async function buildAnalysisWorkbook(data: AnalysisData, meta: AnalysisMe
     ws.commit();
   };
 
-  const readme = wb.addWorksheet('ReadMe');
-  readme.columns = [{ header: 'Analysis data', key: 'a', width: 160 }];
-  readme.getRow(1).font = { bold: true };
-  readme.addRow({ a: `Company: ${meta.tenantName}. Days: ${meta.from === meta.to ? meta.from : `${meta.from} to ${meta.to}`}. Depot: ${meta.depot ?? 'all'}. Made ${localDateIso(meta.generatedAt, tz)} ${fmtHhmm(localMinutes(meta.generatedAt, tz))} by ${meta.generatedBy}.` }).commit();
-  for (const line of README_LINES) readme.addRow({ a: line }).commit();
-  readme.commit();
+  /** The ReadMe: its title, the company, days, depot and who made it, then `lines`. */
+  const readme = (title: string, lines: readonly string[]) => {
+    const ws = wb.addWorksheet('ReadMe');
+    ws.columns = [{ header: title, key: 'a', width: 160 }];
+    ws.getRow(1).font = { bold: true };
+    ws.addRow({ a: `Company: ${meta.tenantName}. Days: ${meta.from === meta.to ? meta.from : `${meta.from} to ${meta.to}`}. Depot: ${meta.depot ?? 'all'}. Made ${localDateIso(meta.generatedAt, tz)} ${fmtHhmm(localMinutes(meta.generatedAt, tz))} by ${meta.generatedBy}.` }).commit();
+    for (const line of lines) ws.addRow({ a: line }).commit();
+    ws.commit();
+  };
+
+  const finish = async () => {
+    await wb.commit();
+    await ended;
+    return Buffer.concat(chunks);
+  };
+  return { sheet, readme, finish };
+}
+
+const STATE_WORD = (r: Pick<AlertExportRow, 'resolvedAt' | 'ackedAt'>) => (r.resolvedAt ? 'Over' : r.ackedAt ? 'Acknowledged' : 'Open');
+const minutesBetween = (a: Date, b: Date) => Math.round(((b.getTime() - a.getTime()) / 60_000) * 10) / 10;
+
+/** The columns of the alerts' sheet (owner request 20 Oct 2026; critique of the design, items 1, 5, 6, 8 and 14). */
+export function alertSheetColumns(data: Pick<AnalysisData, 'tz' | 'depots' | 'customers' | 'alerts'>): Col<AlertExportRow>[] {
+  const tz = data.tz;
+  const d = (r: { deliveryDate: Date }) => isoOf(r.deliveryDate);
+  const cust = (id: string | null) => (id ? data.customers.get(id) : undefined);
+  const spec = (r: AlertExportRow) => (isAlertRule(r.rule) ? ALERT_RULE_SPECS[r.rule] : null);
+  const saved = (r: AlertExportRow) => !!r.reviewedAt;
+  const yes = (r: AlertExportRow, b: boolean) => (saved(r) ? yesNo(b) : null);
+  // One number per incident (the alerts saved together), in the order the sheet lists them.
+  const incident = new Map<string, number>();
+  for (const a of data.alerts) if (a.reviewGroupId && !incident.has(a.reviewGroupId)) incident.set(a.reviewGroupId, incident.size + 1);
+  return [
+    { header: 'Date', width: 11, value: d },
+    { header: 'Depot', width: 8, value: (r) => data.depots.get(r.depotId) ?? '' },
+    { header: 'Truck', width: 10, value: (r) => r.truckCode },
+    { header: 'Trip', width: 5, value: (r) => r.loadNo },
+    { header: 'Stop', width: 5, value: (r) => r.sequence },
+    { header: 'Customer code', width: 12, value: (r) => cust(r.customerId)?.code ?? null },
+    { header: 'Customer', width: 26, value: (r) => cust(r.customerId)?.name ?? null },
+    { header: 'Rule no', width: 6, value: (r) => (spec(r) ? `R${spec(r)!.no}` : null) },
+    { header: 'Rule', width: 24, value: (r) => spec(r)?.label ?? r.rule },
+    { header: 'Cause & action list', width: 16, value: (r) => (reviewFamilyOf(r.rule) ? REVIEW_FAMILY_LABEL[reviewFamilyOf(r.rule)!] : null) },
+    { header: 'By GPS', width: 6, value: (r) => yesNo(!!r.factsJson && typeof r.factsJson === 'object' && (r.factsJson as Record<string, unknown>).gps === true) },
+    { header: 'Severity', width: 8, value: (r) => SEVERITY_LABEL[r.severity as 'WARN' | 'HIGH'] ?? r.severity },
+    { header: 'Tier', width: 5, value: (r) => r.tier },
+    { header: 'Value', width: 7, value: (r) => r.value },
+    { header: 'Threshold', width: 8, value: (r) => r.threshold },
+    { header: 'Unit', width: 7, value: (r) => spec(r)?.unit ?? null },
+    { header: 'Started', width: 8, value: (r) => at(r.occurredAt, d(r), tz) },
+    { header: 'First seen', width: 8, value: (r) => at(r.firstSeenAt, d(r), tz) },
+    { header: 'Last seen', width: 8, value: (r) => at(r.lastSeenAt, d(r), tz) },
+    { header: 'Came back (times)', width: 7, value: (r) => r.occurrences - 1 },
+    { header: 'State', width: 12, value: STATE_WORD },
+    { header: 'Closed', width: 8, value: (r) => at(r.resolvedAt, d(r), tz) },
+    { header: 'Closed as', width: 16, value: (r) => (r.resolvedReason ? (RESOLVED_REASON_TEXT[r.resolvedReason as ResolvedReason] ?? r.resolvedReason) : null) },
+    { header: 'Acknowledged by', width: 16, value: (r) => (r.ackedAt ? (r.ackedBy?.name ?? null) : null) },
+    { header: 'Acknowledged', width: 8, value: (r) => at(r.ackedAt, d(r), tz) },
+    { header: 'What happened', width: 50, value: (r) => r.text || null },
+    { header: 'Details removed (90 days)', width: 8, value: (r) => yesNo(!!r.detailsRemovedAt) },
+    { header: 'Cause code', width: 16, value: (r) => r.reviewCause },
+    { header: 'Cause', width: 30, value: (r) => (r.reviewCause ? causeLabel(r.reviewCause) : null) },
+    { header: 'Cause (other)', width: 24, value: (r) => r.reviewCauseOther },
+    { header: 'Action code', width: 16, value: (r) => r.reviewAction },
+    { header: 'Action', width: 30, value: (r) => (r.reviewAction ? actionLabel(r.reviewAction) : null) },
+    { header: 'Action (other)', width: 24, value: (r) => r.reviewActionOther },
+    { header: 'Note', width: 40, value: (r) => r.reviewNote },
+    { header: 'Follow-up', width: 7, value: (r) => yes(r, r.reviewFollowUp) },
+    { header: 'First saved by', width: 16, value: (r) => (saved(r) ? (r.reviewFirstBy?.name ?? null) : null) },
+    { header: 'First saved', width: 8, value: (r) => at(r.reviewFirstAt, d(r), tz) },
+    { header: 'Last saved by', width: 16, value: (r) => (saved(r) ? (r.reviewedBy?.name ?? null) : null) },
+    { header: 'Last saved', width: 8, value: (r) => at(r.reviewedAt, d(r), tz) },
+    { header: 'Edited (times)', width: 6, value: (r) => (saved(r) ? Math.max(0, r.reviewSaves - 1) : null) },
+    {
+      header: 'Minutes from first seen to first save',
+      width: 9,
+      value: (r) => {
+        if (!r.reviewFirstAt) return null;
+        const m = minutesBetween(r.firstSeenAt, r.reviewFirstAt);
+        return m >= 0 ? m : null;
+      },
+    },
+    { header: 'Saved while the alert was open', width: 8, value: (r) => (r.reviewFirstAt ? yesNo(!r.resolvedAt || r.reviewFirstAt.getTime() < r.resolvedAt.getTime()) : null) },
+    { header: 'Came back after the save', width: 8, value: (r) => yes(r, r.reviewOccurrences !== null && r.occurrences > r.reviewOccurrences) },
+    { header: 'Got worse after the save', width: 8, value: (r) => yes(r, r.reviewTier !== null && r.tier > r.reviewTier) },
+    { header: 'Now about another customer', width: 8, value: (r) => yes(r, (r.customerId ?? null) !== (r.reviewCustomerId ?? null)) },
+    // The customer the cause & action was saved for (review of the branch, 20 Oct 2026, finding 10): the Customer
+    // columns name the stop's customer now, which a re-plan can change.
+    { header: 'Customer code when saved', width: 12, value: (r) => (saved(r) ? (cust(r.reviewCustomerId)?.code ?? null) : null) },
+    { header: 'Customer when saved', width: 26, value: (r) => (saved(r) ? (cust(r.reviewCustomerId)?.name ?? null) : null) },
+    { header: 'Incident', width: 7, value: (r) => (r.reviewGroupId ? (incident.get(r.reviewGroupId) ?? null) : null) },
+  ];
+}
+
+/**
+ * The alerts with their cause & action alone (`only=alerts`, the Alerts page's Excel link; critique of the
+ * design, item 18: its own small builder): the ReadMe and the alerts' sheet.
+ */
+export async function buildAlertCausesWorkbook(data: AnalysisData, meta: AnalysisMeta): Promise<Buffer> {
+  const w = workbookWriter(meta, data.tz);
+  w.readme(ALERT_SHEET, [...README_ALERTS_LINES, `The Follow-up filter of the Alerts page reads the last ${ALERT_FOLLOWUP_DAYS} days whatever the dates; this file holds the dates above only.`]);
+  await w.sheet(ALERT_SHEET, alertSheetColumns(data), data.alerts);
+  return w.finish();
+}
+
+/** The workbook (rows in, bytes out), streamed sheet by sheet with a turn for the web process every 200 rows. */
+export async function buildAnalysisWorkbook(data: AnalysisData, meta: AnalysisMeta): Promise<Buffer> {
+  const tz = data.tz;
+  const w = workbookWriter(meta, tz);
+  const sheet = w.sheet;
+  const depotCode = (id: string) => data.depots.get(id) ?? '';
+  const cust = (id: string) => data.customers.get(id);
+
+  w.readme('Analysis data', [...README_LINES, ...README_ALERTS_LINES]);
 
   type TD = FactTruckDay;
   const d = (r: { deliveryDate: Date }) => isoOf(r.deliveryDate);
@@ -485,7 +711,8 @@ export async function buildAnalysisWorkbook(data: AnalysisData, meta: AnalysisMe
     late,
   );
 
-  await wb.commit();
-  await ended;
-  return Buffer.concat(chunks);
+  // Last, so the sheets before keep their places (owner request 20 Oct 2026).
+  await sheet<AlertExportRow>(ALERT_SHEET, alertSheetColumns(data), data.alerts);
+
+  return w.finish();
 }

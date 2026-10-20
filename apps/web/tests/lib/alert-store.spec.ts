@@ -495,3 +495,39 @@ describe('the company\'s alert lock (M4)', () => {
     expect(alertsLockKey('tB')).toBe('ops-alerts:tB');
   });
 });
+
+describe('cause & action (owner request 20 Oct 2026): the sweep never touches it', () => {
+  const STOP2 = subjectKeyOf({ depotId: 'D1', date: D, truckId: 'TR1', loadNo: 1, sequence: 2 });
+  const stopCand = (over: Partial<Candidate> = {}) => cand({ rule: 'UNLOAD_OVER', subjectKey: STOP2, sequence: 2, customerId: 'cust-a', text: 'T05 L1 stop 2 Shop Example A (TST0001): unloading 65 min.', ...over });
+
+  it('no raise, escalation, update, reopen or close writes a review column', () => {
+    const rows = [
+      row({ id: 'esc', rule: 'UNLOAD_OVER', subjectKey: STOP2 }),
+      row({ id: 'reo', rule: 'ETA_LATE', subjectKey: KEY, resolvedAt: new Date('2026-10-20T04:00:00Z'), resolvedReason: 'ENDED' }),
+      row({ id: 'end', rule: 'DRIVER_SILENT', subjectKey: KEY }),
+    ];
+    const p = planApply(
+      rows,
+      ev({
+        active: [stopCand({ tier: 2 }), cand({ tier: 1 }), cand({ rule: 'LOADING_OVER', subjectKey: subjectKeyOf({ depotId: 'D1', date: D, truckId: 'TR1', loadNo: 2 }), loadNo: 2 })],
+        ended: [{ rule: 'DRIVER_SILENT', subjectKey: KEY, reason: 'ENDED', text: 'Heard from the driver.' }],
+      }),
+      CTX,
+    );
+    expect([p.creates.length, p.escalations.length, p.reopens.length, p.resolves.length]).toEqual([1, 1, 1, 1]);
+    const keys = [...p.creates.map((c) => Object.keys(c)), ...p.escalations.map((e) => Object.keys(e.data)), ...p.updates.map((u) => Object.keys(u.data)), ...p.reopens.map((r) => Object.keys(r.data))].flat();
+    expect(keys.filter((k) => /^review|^detailsRemoved/.test(k))).toEqual([]);
+  });
+
+  it("critique item 6: a stop's row follows the customer now at its sequence (a re-plan put another stop there); the same customer writes nothing", () => {
+    const stored = row({ id: 's1', rule: 'UNLOAD_OVER', subjectKey: STOP2, text: stopCand().text, value: 65, customerId: 'cust-a' });
+    expect(planApply([stored], ev({ active: [stopCand({ value: 65 })] }), CTX).updates).toEqual([]);
+    const moved = planApply([stored], ev({ active: [stopCand({ value: 65, customerId: 'cust-b', text: 'T05 L1 stop 2 Shop Example B (TST0002): unloading 65 min.' })] }), CTX);
+    expect(moved.updates).toEqual([{ id: 's1', data: expect.objectContaining({ customerId: 'cust-b' }) }]);
+    // A row read without its customer (the replay's older exports) is never updated for it.
+    const { customerId: _c, ...unread } = stored;
+    void _c;
+    expect(planApply([unread], ev({ active: [stopCand({ value: 65, customerId: 'cust-b' })] }), CTX).updates).toEqual([]);
+    expect(storedOf({ ...stored, deliveryDate: new Date(`${D}T00:00:00.000Z`) }).customerId).toBe('cust-a');
+  });
+});

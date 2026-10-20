@@ -52,11 +52,17 @@ export type StartFreshKeptKey = (typeof START_FRESH_KEPT)[number]['key'];
  * positions, the history trail, depot moves, how far the history was pulled). Present only when there are
  * some, so a company that never used the link sees exactly the preview, summary and audit row it saw
  * before. Never compared for PREVIEW_STALE: the trail grows every few minutes while a load is out.
+ * `alertReviews` (owner request 20 Oct 2026; critique of the cause & action design, item 16): the operations
+ * alerts of those days that have a cause & action the office recorded (they go with the days' alerts, which are
+ * derived data and no line of their own). Present only when there are some; not in the total (the alerts are
+ * not); compared for PREVIEW_STALE (human input: never more removed than shown).
  */
-export type StartFreshRemoved = Record<StartFreshRemovedKey, number> & { gpsTracking?: number; salesLinks?: number };
+export type StartFreshRemoved = Record<StartFreshRemovedKey, number> & { gpsTracking?: number; salesLinks?: number; alertReviews?: number };
 
 /** The panel's line for StartFreshRemoved.gpsTracking (shown only when present). */
 export const START_FRESH_GPS_LABEL = 'GPS tracking data of the trucks (live positions, trail, depot arrivals and departures)';
+/** The panel's line for StartFreshRemoved.alertReviews (shown only when present). */
+export const START_FRESH_ALERT_REVIEWS_LABEL = 'Alerts with a cause & action recorded by the office (removed with the alerts of these days)';
 /**
  * The panel's line for StartFreshRemoved.salesLinks (owner request 19 Oct 2026: the salesman link of a delivery
  * date), shown only when there are some, like the GPS line: a company that never made one sees the same panel.
@@ -127,7 +133,7 @@ export const START_FRESH_LIVE_TICK = 'These loads, orders and driver links are t
 
 /** What the admin was shown by the preview; the run is refused (PREVIEW_STALE) when it would remove more. */
 export interface StartFreshShown {
-  removed: Partial<Record<StartFreshRemovedKey, number>>;
+  removed: Partial<Record<StartFreshRemovedKey, number>> & { alertReviews?: number };
   orderDates: { from: string; to: string } | null;
   live: { frozenLoads: number; ordersFromToday: number; driverLinksFromToday: number };
 }
@@ -157,7 +163,11 @@ export function startFreshStale(shown: StartFreshShown, fresh: StartFreshReport)
     const now = fresh.removed[r.key];
     if (now > was) out.push(`${r.label}: ${was.toLocaleString('en-US')} shown, now ${now.toLocaleString('en-US')}`);
   }
-  const dates = (d: { from: string; to: string } | null) => (d ? `${d.from} to ${d.to}` : 'none');
+  // Alerts with a cause & action (owner request 20 Oct 2026): the office's own input, never more removed than shown.
+  const reviewsWas = shown.removed.alertReviews ?? 0;
+  const reviewsNow = fresh.removed.alertReviews ?? 0;
+  if (reviewsNow > reviewsWas) out.push(`${START_FRESH_ALERT_REVIEWS_LABEL}: ${reviewsWas.toLocaleString('en-US')} shown, now ${reviewsNow.toLocaleString('en-US')}`);
+  const dates =(d: { from: string; to: string } | null) => (d ? `${d.from} to ${d.to}` : 'none');
   if (dates(shown.orderDates) !== dates(fresh.orderDates)) out.push(`Order dates: ${dates(shown.orderDates)} shown, now ${dates(fresh.orderDates)}`);
   for (const k of Object.keys(LIVE_LABELS) as (keyof typeof LIVE_LABELS)[]) {
     if (fresh.live[k] > shown.live[k]) out.push(`${LIVE_LABELS[k]}: ${shown.live[k].toLocaleString('en-US')} shown, now ${fresh.live[k].toLocaleString('en-US')}`);
