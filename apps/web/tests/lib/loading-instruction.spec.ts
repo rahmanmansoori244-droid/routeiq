@@ -329,6 +329,29 @@ describe('read live by the plan, the load sheet and the driver sheet (fake datab
     expect(driverPackModel(d, { tenantName: 'Example Co' }).sheets[0]!.loadingInstructions).toEqual([`Stop 1 Hyper Example A (C100): ${WATER}`]);
   });
 
+  it('special-loading lines (owner request 20 Oct 2026): each order line carries its kg (and its pallet units on a load planned by pallets), and the load sheet splits by them', async () => {
+    seed({ loadingInstruction: 'SPECIAL' });
+    let d = (await getPlanDetail(T, 'P'))!;
+    expect(d.loads[0]!.stops[0]!.orderLines).toEqual([{ orderId: 'O1', lineId: 'O1-l1', salesOrderNo: 'INV-O1', productCode: 'W15', productName: 'Water 1.5L', cases: 40, weightKg: 400 }]);
+    // Hyper Example A (stops 1 and 3) under SPECIAL, Shop Example B (stop 2) normal: 40 + 80 = the 120 cases of W15.
+    expect(loadSheetModel(d, { tenantName: 'Example Co' }).sheets[0]!.loadingSplit).toEqual({
+      normal: [{ productCode: 'W15', productName: 'Water 1.5L', cases: 40 }],
+      normalCases: 40,
+      groups: [{ text: 'SPECIAL', tag: 'SPECIAL', stops: [1, 3], products: [{ productCode: 'W15', productName: 'Water 1.5L', cases: 80 }], cases: 80 }],
+    });
+    // Planned by pallets (6 bays, 40 cases a pallet): each line its own units, as the manifest counts them.
+    row('planLoad', 'L1').palletUnits = 3000;
+    row('planLoad', 'L1').truckSnapshotJson = { ...truckSnap('T05'), palletRoomUnits: 6000, palletFillPct: 100 };
+    for (const o of tables.order) for (const ln of o.lines) ln.product.casesPerPallet = 40;
+    d = (await getPlanDetail(T, 'P'))!;
+    expect(d.loads[0]!.stops.flatMap((s) => s.orderLines.map((l) => [l.lineId, l.weightKg, l.palletUnits]))).toEqual([
+      ['O1-l1', 400, 1000],
+      ['O2-l1', 400, 1000],
+      ['O3-l1', 400, 1000],
+    ]);
+    expect(d.loads[0]!.manifest[0]).toMatchObject({ productCode: 'W15', cases: 120, palletUnits: 3000 });
+  });
+
   it('a cancelled order: its invoice has no tag; a stop all of whose orders are cancelled is left out', async () => {
     seed({ loadingInstruction: WATER });
     row('planLoad', 'L1').status = 'LOCKED';
@@ -406,6 +429,37 @@ describe('the day screen (plan-view.tsx)', () => {
     d.loads[0].stops[0] = { ...d.loads[0].stops[0], orderIds: ['o1', 'o1b'] };
     const again = await stopRows(await mountPlan(d), 0);
     expect(elements(again.tree).filter((e) => e.props?.['data-testid'] === 'stop-loading-instruction-text').map((e) => textOf(e.props.children))).toEqual([WATER]);
+  });
+
+  it('the loading manifest (owner request 20 Oct 2026): the normal lines, then the block with its tag on every line and its total; TOTAL unchanged', async () => {
+    const d = instructionFixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], loadingInstruction: 'SPECIAL' };
+    const sub = await stopRows(await mountPlan(d), 0);
+    const table = elements(sub.tree).find((e) => e.props?.['data-testid'] === 'manifest-T01-1');
+    const rows = elements(table.props.children).filter((e) => typeName(e) === 'tr');
+    expect(rows.map((r) => textOf(r.props.children))).toEqual([
+      'NORMAL LOADING - every other customer',
+      'TAN-500-24Tanuf 500ml x2430360 kg',
+      'TAN-5GTanuf 5 gallon10200 kg',
+      'Normal loading total40560 kg',
+      'SPECIALload separately, as the SPECIAL LOADING box says · Stop 1',
+      'TAN-500-24SPECIALTanuf 500ml x2450600 kg',
+      'JAB-1500-6SPECIALJabal 1.5L x620190 kg',
+      'SPECIAL total70790 kg',
+      'TOTAL1101,350 kg',
+    ]);
+    const heads = byTestId(sub, 'manifest-split-T01-1');
+    expect(heads).toHaveLength(1);
+    expect(String(heads[0].props.className)).toContain('bg-amber-50');
+    const badges = elements(table.props.children).filter((e) => typeName(e) === 'Badge');
+    expect(badges.map((b) => [b.props.variant, textOf(b.props.children)])).toEqual([
+      ['warning', 'SPECIAL'],
+      ['warning', 'SPECIAL'],
+      ['warning', 'SPECIAL'],
+    ]);
+    // Another load of the day: no block.
+    const other = await stopRows(await mountPlan(d), 1);
+    expect(byTestId(other, 'manifest-split-T01-2')).toEqual([]);
   });
 
   it('a plan without instructions shows no such badge', async () => {

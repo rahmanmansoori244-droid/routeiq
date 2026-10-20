@@ -259,7 +259,7 @@ export function withManifestPallets<R extends { productCode: string; cases: numb
 }
 
 /** Full pallets and loose cases of a manifest, added up over its products. */
-export function manifestPalletTotals(rows: { fullPallets?: number; looseCases?: number; cases: number }[]): { full: number; loose: number } {
+export function manifestPalletTotals(rows: readonly { fullPallets?: number; looseCases?: number; cases: number }[]): { full: number; loose: number } {
   let full = 0;
   let loose = 0;
   for (const r of rows) {

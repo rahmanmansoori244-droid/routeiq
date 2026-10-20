@@ -28,6 +28,7 @@ import { loadPallets, palletsOverBays, palletText } from './pallets';
 import { SMALL_TRUCK_BADGE } from './small-truck';
 import { helpersText } from './load-helpers';
 import { instructionLine, loadInstructions, specialLoadingTitle, stopIsLoaded } from './loading-instruction';
+import { splitByLoadingInstruction } from './loading-split';
 
 // ---------------------------------------------------------------------------------------
 // Model (pure)
@@ -119,8 +120,18 @@ export interface DriverSheet {
   pallets: { overBays: string; total: string } | null;
   kmLabel: 'Estimated km' | 'Road km';
   km: number;
-  /** From the load manifest: what the driver counts before leaving. */
-  loadCheck: { items: { productCode: string; productName: string; cases: number }[]; total: number; matchesLoad: boolean };
+  /**
+   * From the load manifest: what the driver counts before leaving. On a load with special-loading customers
+   * (owner request 20 Oct 2026, loading-split.ts) `items` are the normal lines and `groups` one block per
+   * instruction, its tag (PDF-safe) as `label`, with its own lines and total; `total` stays the load's.
+   * Absent `groups`: none (the sheet prints as before).
+   */
+  loadCheck: {
+    items: { productCode: string; productName: string; cases: number }[];
+    total: number;
+    matchesLoad: boolean;
+    groups?: { label: string; items: { productCode: string; productName: string; cases: number }[]; total: number }[];
+  };
   route: RoutePlan;
   stops: SheetStop[];
   returnText: string;
@@ -303,6 +314,10 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
       const next = d.loads.filter((x) => x.truckId === l.truckId && x.loadNo > l.loadNo).sort((a, b) => a.loadNo - b.loadNo)[0];
       const stops = [...l.stops].sort((a, b) => a.sequence - b.sequence);
       const total = l.manifest.reduce((a, m) => a + m.cases, 0);
+      // Owner request 20 Oct 2026: the special-loading customers' products on their own lines.
+      const { split } = splitByLoadingInstruction(l.manifest, stops);
+      const checkItems = (rows: readonly { productCode: string; productName: string; cases: number }[]) =>
+        rows.map((m) => ({ productCode: t.text(m.productCode), productName: t.text(m.productName), cases: m.cases }));
       const route = routeLinks(l.origin ?? d.run.depot, stops);
       // Owner request 16 Oct 2026: the SPECIAL LOADING lines (one per customer), PDF-safe.
       const instructions = loadInstructions(stops).map((i) => t.text(instructionLine(i)));
@@ -344,9 +359,10 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
         kmLabel: l.distanceIsEstimated ? 'Estimated km' : 'Road km',
         km: Math.round(l.distanceKm),
         loadCheck: {
-          items: l.manifest.map((m) => ({ productCode: t.text(m.productCode), productName: t.text(m.productName), cases: m.cases })),
+          items: checkItems(split ? split.normal : l.manifest),
           total,
           matchesLoad: total === l.cases,
+          ...(split ? { groups: split.groups.map((g) => ({ label: t.text(g.tag), items: checkItems(g.rows), total: g.cases })) } : {}),
         },
         route,
         ...sheetQrCodes(route, link),

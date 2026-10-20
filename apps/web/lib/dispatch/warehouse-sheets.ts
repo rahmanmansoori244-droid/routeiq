@@ -26,6 +26,7 @@ import { carriedStopText, carriedToDays } from './carry-view';
 import { CANCELLED_STOP_TEXT } from './order-cancel-rules';
 import { SMALL_TRUCK_BADGE } from './small-truck';
 import { loadInstructions, type LoadInstruction } from './loading-instruction';
+import { splitByLoadingInstruction } from './loading-split';
 
 /** The loads that have left: only these have delivery results. */
 export const RETURN_NOTE_STATUSES: ReadonlySet<string> = new Set(['DISPATCHED', 'COMPLETED']);
@@ -84,6 +85,26 @@ export interface LoadSheetInvoice {
   cases: number;
 }
 
+/**
+ * The products of a load split into the normal lines and the special-loading blocks (owner request 20 Oct
+ * 2026, loading-split.ts): normal + every block = `products`, per product and in total.
+ */
+export interface LoadingSplitSheet {
+  /** Every product's cases for the other customers, product code order; a product with none left is not listed. */
+  normal: ProductCases[];
+  normalCases: number;
+  /** One block per instruction text, in the order of the box (first stop). */
+  groups: {
+    /** The instruction text (as the box prints it). */
+    text: string;
+    /** The short label on each of its rows. */
+    tag: string;
+    stops: number[];
+    products: ProductCases[];
+    cases: number;
+  }[];
+}
+
 export interface LoadSheet {
   loadId: string;
   truckCode: string;
@@ -127,6 +148,15 @@ export interface LoadSheet {
    * Absent when there is none: the sheet is then exactly what it was before.
    */
   loadingInstructions?: LoadInstruction[];
+  /**
+   * The products split into the normal lines and one block per loading instruction (owner request 20 Oct
+   * 2026: such a customer's products have their own barcodes and are loaded apart, and the warehouse must
+   * never subtract them itself). Absent when the load has no such customer: the sheet is then exactly what
+   * it was before. `products`, `totalCases` and `matches` do not change.
+   */
+  loadingSplit?: LoadingSplitSheet;
+  /** The special-loading lines could not be worked out (the invoices and the products differ): the sheet says so. */
+  loadingSplitMismatch?: true;
   footer: string;
 }
 
@@ -282,6 +312,9 @@ export function loadSheetModel(d: PlanDetail, opts: { tenantName: string; loadId
     const totalCases = products.reduce((a, p) => a + p.cases, 0);
     const p = loadPallets(l);
     const instructions = loadInstructions(stops);
+    // Owner request 20 Oct 2026: the special-loading customers' products on their own lines.
+    const { split, mismatch } = splitByLoadingInstruction(products, stops);
+    const productLines = (rows: readonly ProductCases[]): ProductCases[] => rows.map((r) => ({ productCode: r.productCode, productName: r.productName, cases: r.cases }));
     return {
       loadId: l.id,
       truckCode: l.truckCode,
@@ -303,6 +336,16 @@ export function loadSheetModel(d: PlanDetail, opts: { tenantName: string; loadId
       cancelledHere: l.cancelledHere ?? 0,
       carriedToDays: carriedToDays(stops.map((s) => s.carriedTo).filter((x): x is string => !!x)),
       ...(instructions.length ? { loadingInstructions: instructions } : {}),
+      ...(split
+        ? {
+            loadingSplit: {
+              normal: productLines(split.normal),
+              normalCases: split.normalCases,
+              groups: split.groups.map((g) => ({ text: g.text, tag: g.tag, stops: g.stops, products: productLines(g.rows), cases: g.cases })),
+            },
+          }
+        : {}),
+      ...(mismatch ? { loadingSplitMismatch: true as const } : {}),
       footer: footer(l, n, d, 'Load sheet'),
     };
   });

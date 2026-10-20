@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 import { buildDispatchWorkbook, kgCheck, loadSheetName, planRules, SHEETS, solverRules, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
-import { busyFixture, fixture, INSTRUCTED, instructionFixture, LONG_TRUCK } from './plan-detail-fixture';
+import { busyFixture, fixture, INSTRUCTED, instructionFixture, LONG_TRUCK, palletFixture } from './plan-detail-fixture';
 
 const META: WorkbookMeta = {
   tenantName: 'NMWC Test',
@@ -677,7 +677,7 @@ describe('the loading instruction on the Excel load sheet (owner request 16 Oct 
     expect(sha(await dump(busyFixture()))).toBe('d133ebe191e00e5a7cae772029152ba091087d6c8ae4a2bdd57a5ef1229b6a63');
   });
 
-  it('one boxed SPECIAL LOADING row above LOADING MANIFEST, and "Loading: ..." in the stop notes; the rest of the sheet moves down one row', async () => {
+  it('one boxed SPECIAL LOADING row above LOADING MANIFEST, and "Loading: ..." in the stop notes; the rest of the sheet as before, lower down', async () => {
     const d = instructionFixture();
     d.loads[0].stops[1] = { ...d.loads[0].stops[1], loadingInstruction: WATER };
     const ws = sheet(await render(d), 'T01 - L1');
@@ -702,9 +702,15 @@ describe('the loading instruction on the Excel load sheet (owner request 16 Oct 
     // Rows after the heading: the depot, stop 1, stop 2.
     expect(text(ws.getCell(route.row + 4, notesCol))).toContain(`Loading: ${WATER}`);
     expect(text(ws.getCell(route.row + 3, notesCol))).not.toContain('Loading:');
-    // Everything below the new row is the same as before, one row lower (the notes aside, checked above).
+    // The manifest now has the customer's special-loading block (owner request 20 Oct 2026; its own tests
+    // below): its TOTAL row reads as before. From DELIVERY ROUTE on, the sheet is the same as before, lower
+    // down (the notes aside, checked above).
+    const plainRoute = find(plainWs, (t) => t === 'DELIVERY ROUTE', 1)!;
+    expect(route.row).toBeGreaterThan(plainRoute.row);
+    const rowText = (w: ExcelJS.Worksheet, row: number) => cells(w).filter((c) => c.row === row).map((c) => [c.col, c.text]);
+    expect(rowText(ws, find(ws, (t) => t === 'TOTAL', 2, manifest.row)!.row)).toEqual(rowText(plainWs, find(plainWs, (t) => t === 'TOTAL', 2, plainManifest.row)!.row));
     const below = (w: ExcelJS.Worksheet, from: number) => cells(w).filter((c) => c.row >= from && c.col !== notesCol).map((c) => [c.row - from, c.col, c.text]);
-    expect(below(ws, manifest.row)).toEqual(below(plainWs, plainManifest.row));
+    expect(below(ws, route.row)).toEqual(below(plainWs, plainRoute.row));
     // The other load sheets have no such row.
     expect(find(sheet(await render(d), 'T01 - L2'), (t) => t === 'SPECIAL LOADING')).toBeUndefined();
   });
@@ -717,5 +723,134 @@ describe('the loading instruction on the Excel load sheet (owner request 16 Oct 
     d.loads[0].stops[0] = { ...d.loads[0].stops[0], cancelled: true, cancelledOrderIds: ['o1'] };
     ws = sheet(await render(d), 'T01 - L1');
     expect(find(ws, (t) => t.startsWith('Stop'), 4)!.text).toBe(`Stop 2 ${C2} (C200): ${WATER}`);
+  });
+});
+
+describe('special-loading lines in the workbook (owner request 20 Oct 2026, loading-split.ts)', () => {
+  const SPECIAL = 'SPECIAL';
+  /** The fixture's L1 with stop 1 (Hyper Example A) under SPECIAL. */
+  const special = (d: PlanDetail = instructionFixture()): PlanDetail => {
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], ...INSTRUCTED.a, loadingInstruction: SPECIAL };
+    return d;
+  };
+  /** The manifest rows of a load sheet: every row between the head row and the TOTAL, as [col 1..last] texts. */
+  function manifestRows(ws: ExcelJS.Worksheet, last: number) {
+    const title = find(ws, (t) => t === 'LOADING MANIFEST', 1)!;
+    const total = find(ws, (t) => t === 'TOTAL', 2, title.row)!;
+    const rows: string[][] = [];
+    for (let r = title.row + 2; r <= total.row; r++) rows.push(Array.from({ length: last }, (_, i) => text(ws.getCell(r, i + 1))));
+    return { rows, head: title.row + 1, total: total.row };
+  }
+
+  it('the load sheet: the normal lines and their total, the boxed block (heading, tagged bold lines numbered on, its total), then the TOTAL as before', async () => {
+    const d = special();
+    const wb = await render(d);
+    const ws = sheet(wb, 'T01 - L1');
+    const { rows, head, total } = manifestRows(ws, 7);
+    expect(rows).toEqual([
+      ['', 'NORMAL LOADING - every other customer', '', '', '', '', ''],
+      ['1', 'TAN-500-24', 'Tanuf 500ml x24', 'Tanuf 500ml x24', '30', '360', ''],
+      ['2', 'TAN-5G', 'Tanuf 5 gallon', 'Tanuf 5 gallon', '10', '200', ''],
+      ['', 'Normal loading total', '2 SKUs', '2 SKUs', '40', '560', ''],
+      Array(7).fill('SPECIAL: load separately, as the SPECIAL LOADING box says · Stop 1'),
+      ['3', 'TAN-500-24', 'SPECIAL - Tanuf 500ml x24', 'SPECIAL - Tanuf 500ml x24', '50', '600', ''],
+      ['4', 'JAB-1500-6', 'SPECIAL - Jabal 1.5L x6', 'SPECIAL - Jabal 1.5L x6', '20', '190', ''],
+      ['', 'SPECIAL total', '2 SKUs', '2 SKUs', '70', '790', ''],
+      ['', 'TOTAL', '3 SKUs', '3 SKUs', '110', '1350', ''],
+    ]);
+    // Numbers are numbers (cases and kg add up to the TOTAL); the TOTAL is the load's.
+    const at = (r: number, c: number) => Number(ws.getCell(head + r, c).value);
+    expect([at(2, 5), at(3, 5), at(6, 5), at(7, 5)].reduce((a, v) => a + v, 0)).toBe(110);
+    expect([at(2, 6), at(3, 6), at(6, 6), at(7, 6)].reduce((a, v) => a + v, 0)).toBe(1350);
+    expect(ws.getCell(total, 5).value).toBe(d.loads[0].cases);
+    expect(ws.getCell(total, 6).value).toBe(1350);
+    // The block: a thick box (heading merged A:G, edges on the left and right of every row, the bottom of its total), bold.
+    const h = head + 5;
+    expect((ws.model as { merges?: string[] }).merges).toEqual(expect.arrayContaining([`A${h}:G${h}`, `C${h + 1}:D${h + 1}`, `C${h + 3}:D${h + 3}`]));
+    expect(ws.getCell(h, 1).font).toMatchObject({ bold: true, size: 12 });
+    expect(ws.getCell(h, 1).border).toMatchObject({ top: { style: 'thick' }, left: { style: 'thick' } });
+    expect(ws.getCell(h, 7).border).toMatchObject({ top: { style: 'thick' }, right: { style: 'thick' } });
+    for (const r of [h + 1, h + 2, h + 3]) {
+      expect(ws.getCell(r, 1).border).toMatchObject({ left: { style: 'thick' } });
+      expect(ws.getCell(r, 7).border).toMatchObject({ right: { style: 'thick' } });
+      expect(ws.getCell(r, 5).font).toMatchObject({ bold: true });
+    }
+    expect(ws.getCell(h + 3, 5).border).toMatchObject({ bottom: { style: 'thick' } });
+    expect(ws.getCell(h + 1, 2).border).not.toMatchObject({ left: { style: 'thick' } });
+    // The normal lines are not in the box.
+    expect(ws.getCell(head + 2, 1).border).toMatchObject({ left: { style: 'thin' } });
+    // The other load sheets are as without the instruction.
+    const plain = await render(instructionFixture());
+    for (const name of ['T01 - L2', loadSheetName(LONG_TRUCK, 1, new Set())]) expect(cells(sheet(wb, name))).toEqual(cells(sheet(plain, name)));
+  });
+
+  it('a load planned by pallets: each line its own cases per pallet, full pallets, loose cases and pallets; the column and the TOTAL add up as before', async () => {
+    const d = special(palletFixture());
+    const ws = sheet(await render(d), 'T01 - L1');
+    const { rows, total } = manifestRows(ws, 11);
+    // #, code, description (C:D), cases, cases per pallet, full, loose, pallets (exact; shown to 0.1), kg.
+    expect(rows.map((r) => [r[0], r[1], r[4], r[5], r[6], r[7], r[8], r[9]])).toEqual([
+      ['', 'NORMAL LOADING - every other customer', '', '', '', '', '', ''],
+      ['1', 'TAN-500-24', '30', '84', '0', '30', '0.358', '360'],
+      ['2', 'TAN-5G', '10', '40', '0', '10', '0.25', '200'],
+      ['', 'Normal loading total', '40', '', '0', '40', '0.608', '560'],
+      Array(8).fill('SPECIAL: load separately, as the SPECIAL LOADING box says · Stop 1'),
+      ['3', 'TAN-500-24', '50', '84', '0', '50', '0.596', '600'],
+      ['4', 'JAB-1500-6', '20', '56', '0', '20', '0.358', '190'],
+      ['', 'SPECIAL total', '70', '', '0', '70', '0.954', '790'],
+      ['', 'TOTAL', '110', '', '0', '110', '1.562', '1350'],
+    ]);
+    // The cells hold exact pallets: the product lines add up to the load's pallets.
+    const pallets = [1, 2, 5, 6].map((i) => Number(ws.getCell(total - 8 + i, 9).value));
+    expect(pallets.reduce((a, v) => a + v, 0)).toBeCloseTo(d.loads[0].palletUnits! / 1000, 6);
+    expect(ws.getCell(total, 9).value).toBe(d.loads[0].palletUnits! / 1000);
+    expect(text(ws.getCell(total + 1, 2))).toBe('110 cases = 1.6 pallets (110 loose cases on mixed pallets)');
+    // A block of one customer's whole load: 100 cases at 84 = 1 full pallet + 16 loose, built as the block's own pallet.
+    const big = palletFixture();
+    big.loads[2].stops[0] = { ...big.loads[2].stops[0], ...INSTRUCTED.b, loadingInstruction: SPECIAL };
+    const bw = sheet(await render(big), loadSheetName(LONG_TRUCK, 1, new Set()));
+    const b = manifestRows(bw, 11);
+    expect(b.rows[0]![0]).toBe('SPECIAL: load separately, as the SPECIAL LOADING box says · Stop 1');
+    expect(b.rows.find((r) => r[1] === 'TAN-500-24')!.slice(4, 8)).toEqual(['100', '84', '1', '16']);
+    expect([text(bw.getCell(b.total, 7)), text(bw.getCell(b.total, 8))]).toEqual(['1', '46']);
+    expect(text(bw.getCell(b.total + 1, 2))).toBe('130 cases = 1.8 pallets (1 full pallet + 46 loose cases on mixed pallets)');
+  });
+
+  it('SKU LOADING SUMMARY: the normal lines and one boxed section per text over the day, each with its total; TOTAL and the checks as before', async () => {
+    const d = special();
+    const wb = await render(d);
+    const ws = sheet(wb, SHEETS.skuSummary);
+    const total = find(ws, (t) => t === 'TOTAL', 1)!;
+    const rows: string[][] = [];
+    for (let r = 5; r < total.row; r++) rows.push(Array.from({ length: 7 }, (_, i) => text(ws.getCell(r, i + 1))));
+    expect(rows).toEqual([
+      ['NORMAL LOADING - every other customer', '', '', '', '', '', ''],
+      ['JAB-1500-6', 'Jabal 1.5L x6', '', '60', '25', '85', '807.5'],
+      ['TAN-500-24', 'Tanuf 500ml x24', '30', '40', '100', '170', '2040'],
+      ['TAN-5G', 'Tanuf 5 gallon', '10', '', '5', '15', '300'],
+      ['Normal loading total', '3 SKUs', '40', '100', '130', '270', '3147.5'],
+      Array(7).fill('SPECIAL: load separately, as the SPECIAL LOADING box says'),
+      ['JAB-1500-6', 'SPECIAL - Jabal 1.5L x6', '20', '', '', '20', '190'],
+      ['TAN-500-24', 'SPECIAL - Tanuf 500ml x24', '50', '', '', '50', '600'],
+      ['SPECIAL total', '2 SKUs', '70', '0', '0', '70', '790'],
+    ]);
+    // Normal + every section = TOTAL, per load.
+    for (let c = 3; c <= 6; c++) expect(Number(ws.getCell(total.row, c).value)).toBe(Number(ws.getCell(9, c).value) + Number(ws.getCell(13, c).value));
+    expect([3, 4, 5].map((c) => ws.getCell(total.row, c).value)).toEqual(d.loads.map((l) => l.cases));
+    const check = find(ws, (t) => t === 'Check', 1)!;
+    for (let c = 3; c <= 7; c++) expect(text(ws.getCell(check.row, c))).toBe('OK');
+    expect(ws.getCell(10, 1).border).toMatchObject({ top: { style: 'thick' }, left: { style: 'thick' } });
+    expect(ws.getCell(13, 7).border).toMatchObject({ bottom: { style: 'thick' }, right: { style: 'thick' } });
+    // A day without such customers: the summary as before (pinned with the whole workbook above).
+    expect(find(sheet(await render(instructionFixture()), SHEETS.skuSummary), (t) => t.startsWith('NORMAL LOADING'))).toBeUndefined();
+  });
+
+  it('the same text on two loads is one section of the day, labelled as on its first load', async () => {
+    const d = special();
+    d.loads[2].stops[0] = { ...d.loads[2].stops[0], ...INSTRUCTED.b, loadingInstruction: 'Special' };
+    const ws = sheet(await render(d), SHEETS.skuSummary);
+    expect(cells(ws).filter((c) => c.col === 1 && c.text.includes('load separately')).map((c) => c.text)).toEqual(['SPECIAL: load separately, as the SPECIAL LOADING box says']);
+    const sectionTotal = find(ws, (t) => t === 'SPECIAL total', 1)!;
+    expect([3, 4, 5, 6].map((c) => ws.getCell(sectionTotal.row, c).value)).toEqual([70, 0, 130, 200]);
   });
 });

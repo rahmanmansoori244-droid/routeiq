@@ -156,8 +156,9 @@ export interface DetailStop {
   /**
    * The order lines of this stop as planned: one entry per order line (a split part's own cases), no
    * aggregation - from the same row lines as `skus` (rowLinesKg). The driver page lists them per
-   * order, and a partly-delivered result names their line ids (owner request 4 Oct 2026). The Excel
-   * workbook and the PDF do not read it.
+   * order, and a partly-delivered result names their line ids (owner request 4 Oct 2026). The sheets
+   * read it only to split a load's products into its normal and special-loading lines (owner request
+   * 20 Oct 2026, loading-split.ts).
    */
   orderLines: DetailOrderLine[];
   /**
@@ -184,6 +185,17 @@ export interface DetailOrderLine {
   productCode: string;
   productName: string;
   cases: number;
+  /**
+   * The line's kg as planned (its share of the row's planned kg, to 0.1 kg: rowLinesKg), the same figure
+   * the load's manifest adds up. The special-loading lines (owner request 20 Oct 2026, loading-split.ts)
+   * split a product's kg with it. Always set by getPlanDetail; optional for older fixtures.
+   */
+  weightKg?: number;
+  /**
+   * Only on a load planned by pallets: the line's pallet need in 1/1000 pallet, as the manifest counts it
+   * (each line rounded up with the factor it was planned with), so a product's pallets split exactly.
+   */
+  palletUnits?: number;
 }
 
 /** A helper on a load (owner request 13 Oct 2026). */
@@ -647,6 +659,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       const cases = a.portionCases ?? o.totalCases;
       const weightKg = roundKg(a.portionWeightKg ?? o.totalWeightKg);
       const lines = rowLinesKg(o.lines, a.portionLinesJson, weightKg, !orderUsesLineWeights(o));
+      // Each line's pallet units as the manifest counts them (the special-loading lines split them per line).
+      const lineUnits = new Map<string, number>();
       if (pallets) {
         // The factor a split part was cut with, else the one the option was planned with, else today's.
         const cut = readPortionPalletFactors(a.portionLinesJson);
@@ -654,7 +668,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
           const code = ln.product.code;
           const live = validPalletFactor(ln.product.casesPerPallet);
           const f = cut.get(ln.id) ?? validPalletFactor(plannedFactors[code]) ?? live;
-          unitsByCode.set(code, (unitsByCode.get(code) ?? 0) + palletUnits(ln.cases, f));
+          const units = palletUnits(ln.cases, f);
+          unitsByCode.set(code, (unitsByCode.get(code) ?? 0) + units);
+          lineUnits.set(ln.id, units);
           if (f !== null && !factorByCode.has(code)) factorByCode.set(code, f);
           liveFactorByCode.set(code, live);
         }
@@ -668,6 +684,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         productCode: ln.product.code,
         productName: ln.product.name,
         cases: ln.cases,
+        weightKg: ln.weightKg,
+        ...(pallets ? { palletUnits: lineUnits.get(ln.id) ?? 0 } : {}),
       }));
       const s = stops.get(a.sequenceInTruck);
       const snap = readStopSnapshot(a.stopSnapshotJson);

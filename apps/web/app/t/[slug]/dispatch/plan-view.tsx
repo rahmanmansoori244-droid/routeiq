@@ -11,7 +11,18 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { SMALL_TRUCK_BADGE } from '@/lib/dispatch/small-truck';
-import { instructionLine, LOADING_INSTRUCTION_BADGE, loadInstructions, stopIsLoaded } from '@/lib/dispatch/loading-instruction';
+import {
+  instructionLine,
+  LOADING_INSTRUCTION_BADGE,
+  loadInstructions,
+  NORMAL_LOADING_HEADING,
+  NORMAL_LOADING_TOTAL,
+  SPECIAL_LINES_LEAD,
+  specialLinesTotal,
+  stopIsLoaded,
+  stopsText,
+} from '@/lib/dispatch/loading-instruction';
+import { splitByLoadingInstruction, type SplitRow } from '@/lib/dispatch/loading-split';
 import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstText, type RemedyLoad } from '@/lib/dispatch/feasibility-view';
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
@@ -2122,6 +2133,42 @@ function LoadDetail({
   const span = results ? 15 : 9;
   // A load planned by pallets: each product's "3 pallets + 12 cases" and the TOTAL in pallets too.
   const pallets = loadPallets(l);
+  // Owner request 20 Oct 2026: the special-loading customers' products in their own block(s), as on the sheets.
+  const { split } = splitByLoadingInstruction(l.manifest, l.stops);
+  const cols = pallets ? 5 : 4;
+  // One product line: code, name (with the block's tag), cases, pallets, kg (a split line has its kg: every manifest row has).
+  const withKg = (m: SplitRow) => ({ ...m, weightKg: m.weightKg ?? 0 });
+  const manifestCells = (m: SplitRow & { weightKg: number }, tag?: string) => (
+    <>
+      <td className="py-1 pr-2 font-mono">{m.productCode}</td>
+      <td className="py-1 pr-2">
+        {tag ? (
+          <Badge variant="warning" className="mr-1 text-[10px]">
+            {tag}
+          </Badge>
+        ) : null}
+        {m.productName}
+      </td>
+      <td className="py-1 text-right font-semibold">{m.cases}</td>
+      {pallets ? (
+        <td className="py-1 pl-2 text-right" title={m.casesPerPallet ? `${m.casesPerPallet} cases per pallet` : 'No cases per pallet'}>
+          {fullAndLooseText(m.cases, m.casesPerPallet)}
+        </td>
+      ) : null}
+      {/* Audit E3 (A6 review): each product's kg, which add up to the load's kg (to 0.1 kg). */}
+      <td className="py-1 pl-2 text-right text-muted-foreground">{kgText(m.weightKg)} kg</td>
+    </>
+  );
+  const splitTotal = (label: string, cases: number, units: number | undefined, kg: number | undefined) => (
+    <>
+      <td colSpan={2} className="py-1 font-semibold">
+        {label}
+      </td>
+      <td className="py-1 text-right font-semibold">{cases}</td>
+      {pallets ? <td className="py-1 pl-2 text-right font-semibold">{palletText(units ?? 0)} pallets</td> : null}
+      <td className="py-1 pl-2 text-right font-semibold">{kgText(kg ?? 0)} kg</td>
+    </>
+  );
   return (
     <div className="grid gap-4 lg:grid-cols-3">
       <div>
@@ -2133,20 +2180,49 @@ function LoadDetail({
         ) : null}
         <table className="w-full text-xs" data-testid={`manifest-${l.truckCode}-${l.loadNo}`}>
           <tbody>
-            {l.manifest.map((m) => (
-              <tr key={m.productCode} className="border-b">
-                <td className="py-1 pr-2 font-mono">{m.productCode}</td>
-                <td className="py-1 pr-2">{m.productName}</td>
-                <td className="py-1 text-right font-semibold">{m.cases}</td>
-                {pallets ? (
-                  <td className="py-1 pl-2 text-right" title={m.casesPerPallet ? `${m.casesPerPallet} cases per pallet` : 'No cases per pallet'}>
-                    {fullAndLooseText(m.cases, m.casesPerPallet)}
-                  </td>
+            {split ? (
+              <>
+                {split.normalCases ? (
+                  <>
+                    <tr>
+                      <td colSpan={cols} className="pt-1 text-[10px] font-semibold uppercase text-muted-foreground">
+                        {NORMAL_LOADING_HEADING}
+                      </td>
+                    </tr>
+                    {split.normal.map((m) => (
+                      <tr key={`normal-${m.productCode}`} className="border-b">
+                        {manifestCells(withKg(m))}
+                      </tr>
+                    ))}
+                    <tr className="border-b">{splitTotal(NORMAL_LOADING_TOTAL, split.normalCases, split.normalPalletUnits, split.normalWeightKg)}</tr>
+                  </>
                 ) : null}
-                {/* Audit E3 (A6 review): each product's kg, which add up to the load's kg (to 0.1 kg). */}
-                <td className="py-1 pl-2 text-right text-muted-foreground">{kgText(m.weightKg)} kg</td>
-              </tr>
-            ))}
+                {split.groups.map((g) => (
+                  <Fragment key={g.key}>
+                    <tr className="bg-amber-50" data-testid={`manifest-split-${l.truckCode}-${l.loadNo}`}>
+                      <td colSpan={cols} className="py-1 font-semibold text-amber-900">
+                        <Badge variant="warning" className="mr-1 text-[10px]">
+                          {g.tag}
+                        </Badge>
+                        {`${SPECIAL_LINES_LEAD} · ${stopsText(g.stops)}${g.tag !== g.text ? ` - ${g.text}` : ''}`}
+                      </td>
+                    </tr>
+                    {g.rows.map((m) => (
+                      <tr key={`${g.key}-${m.productCode}`} className="border-b bg-amber-50">
+                        {manifestCells(withKg(m), g.tag)}
+                      </tr>
+                    ))}
+                    <tr className="border-b bg-amber-50">{splitTotal(specialLinesTotal(g.tag), g.cases, g.palletUnits, g.weightKg)}</tr>
+                  </Fragment>
+                ))}
+              </>
+            ) : (
+              l.manifest.map((m) => (
+                <tr key={m.productCode} className="border-b">
+                  {manifestCells(m)}
+                </tr>
+              ))
+            )}
             <tr>
               <td colSpan={2} className="py-1 font-semibold">
                 TOTAL
@@ -2159,7 +2235,7 @@ function LoadDetail({
         </table>
         {pallets ? (
           <p className="mt-1 text-xs text-muted-foreground" data-testid={`manifest-pallet-total-${l.truckCode}-${l.loadNo}`}>
-            {manifestTotalText(l.cases, pallets.units, manifestPalletTotals(l.manifest))}
+            {manifestTotalText(l.cases, pallets.units, manifestPalletTotals(split ? [...split.normal, ...split.groups.flatMap((g) => g.rows)] : l.manifest))}
           </p>
         ) : null}
         {(l.palletNotes ?? []).map((n) => (

@@ -781,3 +781,47 @@ describe('the loading instruction on the driver sheet (owner request 16 Oct 2026
     for (let i = 0; i < 12; i++) expect(short[0]).toContain(boxLine(i));
   });
 });
+
+describe('special-loading lines in the load check (owner request 20 Oct 2026, loading-split.ts)', () => {
+  const special = (text = 'SPECIAL'): PlanDetail => {
+    const d = instructionFixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], loadingInstruction: text };
+    return d;
+  };
+
+  it('the model: the normal lines as items, one group per instruction with its tag, lines and total; the load total unchanged', () => {
+    const [s1, s2] = driverPackModel(special(), OPTS).sheets;
+    expect(s1.loadCheck.items.map((k) => `${k.productCode}x${k.cases}`)).toEqual(['TAN-500-24x30', 'TAN-5Gx10']);
+    expect(s1.loadCheck.groups).toEqual([
+      {
+        label: 'SPECIAL',
+        items: [
+          { productCode: 'TAN-500-24', productName: 'Tanuf 500ml x24', cases: 50 },
+          { productCode: 'JAB-1500-6', productName: 'Jabal 1.5L x6', cases: 20 },
+        ],
+        total: 70,
+      },
+    ]);
+    expect(s1.loadCheck.total).toBe(110);
+    expect(s1.loadCheck.matchesLoad).toBe(true);
+    const all = [...s1.loadCheck.items, ...s1.loadCheck.groups!.flatMap((g) => g.items)].reduce((a, k) => a + k.cases, 0);
+    expect(all).toBe(s1.loadCheck.total);
+    expect('groups' in s2.loadCheck).toBe(false);
+    // The tag goes through pdfSafe like every text: Arabic prints [?] and the sheet says so.
+    const arabic = driverPackModel(special('الماء في الأسفل'), OPTS).sheets[0];
+    expect(arabic.loadCheck.groups![0]!.label).toBe(UNPRINTABLE);
+    expect(arabic.unprintable).toBe(true);
+  });
+
+  it('the PDF: "Load check: normal lines · TAG: its lines (TAG total N) = the load\'s cases"', async () => {
+    const [first] = pageTexts(await renderDriverPackPdf(driverPackModel(special(), { ...OPTS, loadIds: ['L1'] })));
+    expect(first).toContain(sq('Load check: TAN-500-24 ×30 · TAN-5G ×10 · SPECIAL: TAN-500-24 ×50 · JAB-1500-6 ×20 (SPECIAL total 70) = 110 cases'));
+    // Every customer with an instruction: no normal lines, the blocks only.
+    const d = special();
+    d.loads[0].stops[1] = { ...d.loads[0].stops[1], loadingInstruction: 'Cartons on top only' };
+    const [only] = pageTexts(await renderDriverPackPdf(driverPackModel(d, { ...OPTS, loadIds: ['L1'] })));
+    expect(only).toContain(
+      sq('Load check: SPECIAL: TAN-500-24 ×50 · JAB-1500-6 ×20 (SPECIAL total 70) · Cartons on top only: TAN-500-24 ×30 · TAN-5G ×10 (Cartons on top only total 40) = 110 cases'),
+    );
+  });
+});

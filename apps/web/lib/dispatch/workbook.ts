@@ -28,7 +28,18 @@ import { searchAssumptions, searchOptionOf, searchResultText, type SearchOption,
 import { loadPallets, manifestPalletTotals, manifestTotalText, palletLimitText, palletsExact, palletsOverBays, palletText, type LoadPallets } from './pallets';
 import { helpersText } from './load-helpers';
 import { windowRuleText, type WindowRule } from './window-rule';
-import { instructionLine, loadInstructions, SPECIAL_LOADING_HEADING, stopIsLoaded } from './loading-instruction';
+import {
+  instructionLine,
+  loadInstructions,
+  NORMAL_LOADING_HEADING,
+  NORMAL_LOADING_TOTAL,
+  SPECIAL_LOADING_HEADING,
+  specialLinesHeading,
+  specialLinesTotal,
+  SPLIT_MISMATCH_TEXT,
+  stopIsLoaded,
+} from './loading-instruction';
+import { loadingTags, splitByLoadingInstruction, type ManifestSplit, type SplitRow } from './loading-split';
 
 /** The SUMMARY row with the invoices (distinct sales orders) of the day. */
 export const INVOICES_LABEL = 'Invoices (sales orders)';
@@ -712,6 +723,89 @@ const ROUTE_HEADS = [
 ];
 const ROUTE_WIDTHS = [5, 13, 10, 30, 8, 12, 8, 12, 24, 8, 8, 10, 44, 20, 9, 10, 8, 16, 40, 30, 18];
 
+/** The thick black edge on the given sides of a cell, its other edges kept (its own style object: merged cells share one). */
+function edge(ws: ExcelJS.Worksheet, row: number, col: number, sides: { top?: boolean; bottom?: boolean; left?: boolean; right?: boolean }) {
+  const cell = ws.getCell(row, col);
+  cell.style = {
+    ...cell.style,
+    border: {
+      ...(cell.border ?? {}),
+      ...(sides.top ? { top: SPECIAL_EDGE } : {}),
+      ...(sides.bottom ? { bottom: SPECIAL_EDGE } : {}),
+      ...(sides.left ? { left: SPECIAL_EDGE } : {}),
+      ...(sides.right ? { right: SPECIAL_EDGE } : {}),
+    },
+  };
+}
+
+/**
+ * A special-loading block's heading row (owner request 20 Oct 2026): one bold cell merged from column A to
+ * `lastCol`, wrapped, the top of the block's thick box. `widths` are the sheet's column widths.
+ */
+function specialHeadRow(ws: ExcelJS.Worksheet, row: number, lastCol: number, text: string, widths: readonly number[]) {
+  ws.mergeCells(row, 1, row, lastCol);
+  const c = put(ws, row, 1, text);
+  c.font = { bold: true, size: 12 };
+  c.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+  for (let col = 1; col <= lastCol; col++) edge(ws, row, col, { top: true, left: col === 1, right: col === lastCol });
+  // About 1.1 characters per width unit at 12 pt bold; one line is 18 pt tall.
+  const chars = Math.max(1, Math.floor(widths.slice(0, lastCol).reduce((a, w) => a + w, 0) / 1.1));
+  ws.getRow(row).height = 18 * Math.max(1, Math.ceil(text.length / chars));
+}
+
+/** A row inside a special-loading block: bold, the block's thick edge on its left and right (and bottom on its last row). */
+function specialBodyRow(ws: ExcelJS.Worksheet, row: number, lastCol: number, last = false) {
+  for (let col = 1; col <= lastCol; col++) {
+    ws.getCell(row, col).font = { bold: true };
+    edge(ws, row, col, { bottom: last, left: col === 1, right: col === lastCol });
+  }
+}
+
+/**
+ * The LOADING MANIFEST of a load with special-loading lines (owner request 20 Oct 2026, loading-split.ts):
+ * the normal lines with their total, then one boxed block per instruction (heading, its lines tagged in the
+ * description, its total), numbered on from the normal lines. Returns the next free row.
+ */
+function splitManifestRows(
+  ws: ExcelJS.Worksheet,
+  start: number,
+  split: ManifestSplit,
+  o: { pallets: boolean; lastCol: number; rowFmts: (string | undefined)[]; productRow: (row: number, n: number, x: SplitRow, name?: string) => void },
+): number {
+  let r = start;
+  let n = 0;
+  const subtotal = (label: string, rows: readonly SplitRow[], cases: number, units: number | undefined, kg: number | undefined) => {
+    const t = manifestPalletTotals(rows);
+    totalRow(
+      ws,
+      r,
+      ['', label, `${rows.length} SKUs`, '', cases, ...(o.pallets ? ['', t.full, t.loose, palletsExact(units ?? 0)] : []), kg ?? 0, ''],
+      [undefined, undefined, undefined, undefined, ...o.rowFmts.slice(4)],
+    );
+    ws.mergeCells(r, 3, r, 4);
+  };
+  if (split.normalCases) {
+    put(ws, r, 2, NORMAL_LOADING_HEADING).font = { bold: true };
+    r++;
+    for (const x of split.normal) o.productRow(r++, ++n, x);
+    subtotal(NORMAL_LOADING_TOTAL, split.normal, split.normalCases, split.normalPalletUnits, split.normalWeightKg);
+    r++;
+  }
+  for (const g of split.groups) {
+    specialHeadRow(ws, r, o.lastCol, specialLinesHeading(g.tag, g.text, g.stops), ROUTE_WIDTHS);
+    r++;
+    for (const x of g.rows) {
+      o.productRow(r, ++n, x, `${g.tag} - ${x.productName}`);
+      specialBodyRow(ws, r, o.lastCol);
+      r++;
+    }
+    subtotal(specialLinesTotal(g.tag), g.rows, g.cases, g.palletUnits, g.weightKg);
+    specialBodyRow(ws, r, o.lastCol, true);
+    r++;
+  }
+  return r;
+}
+
 function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: DetailLoad, name: string) {
   const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 2 }], pageSetup: { ...LANDSCAPE } });
   ws.columns = ROUTE_WIDTHS.map((width) => ({ width }));
@@ -815,15 +909,27 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
   headRow(ws, r, ['#', 'SKU code', 'Description', '', 'Cases', ...palletHeads, 'Kg', 'Loaded']);
   ws.mergeCells(r, 3, r, 4);
   r++;
-  l.manifest.forEach((x, i) => {
-    const palletCells = pallets ? [x.casesPerPallet ?? 'not set', x.fullPallets ?? 0, x.looseCases ?? x.cases, palletsExact(x.palletUnits ?? 0)] : [];
-    tableRow(ws, r, [i + 1, x.productCode, x.productName, '', x.cases, ...palletCells, x.weightKg, ''], [FMT_INT, undefined, undefined, undefined, FMT_INT, ...palletFmts, FMT_KG]);
-    ws.mergeCells(r, 3, r, 4);
-    r++;
-  });
+  const rowFmts = [FMT_INT, undefined, undefined, undefined, FMT_INT, ...palletFmts, FMT_KG];
+  const palletCells = (x: SplitRow) => (pallets ? [x.casesPerPallet ?? 'not set', x.fullPallets ?? 0, x.looseCases ?? x.cases, palletsExact(x.palletUnits ?? 0)] : []);
+  const productRow = (row: number, n: number, x: SplitRow, name = x.productName) => {
+    tableRow(ws, row, [n, x.productCode, name, '', x.cases, ...palletCells(x), x.weightKg ?? 0, ''], rowFmts);
+    ws.mergeCells(row, 3, row, 4);
+  };
+  // Owner request 20 Oct 2026: a load with special-loading customers lists their products in their own
+  // block(s) (loading-split.ts); the TOTAL below stays the load's.
+  const { split, mismatch } = splitByLoadingInstruction(l.manifest, l.stops);
+  const shown: SplitRow[] = split ? [...split.normal, ...split.groups.flatMap((g) => g.rows)] : l.manifest;
+  if (!split) {
+    l.manifest.forEach((x, i) => {
+      productRow(r++, i + 1, x);
+    });
+  } else {
+    r = splitManifestRows(ws, r, split, { pallets: !!pallets, lastCol: kgCol + 1, rowFmts, productRow });
+  }
   const manifestCases = sum(l.manifest.map((x) => x.cases));
   const manifestKg = manifestKgOf(l.manifest);
-  const totals = manifestPalletTotals(l.manifest);
+  // The full pallets and loose cases of the lines shown (a special-loading block is built as its own pallets).
+  const totals = manifestPalletTotals(shown);
   totalRow(
     ws,
     r,
@@ -845,6 +951,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     put(ws, r, 2, manifestTotalText(manifestCases, pallets.units, totals)).font = { bold: true };
     for (const n of l.palletNotes ?? []) put(ws, ++r, 2, n).font = GREY;
   }
+  if (mismatch) put(ws, ++r, 2, SPLIT_MISMATCH_TEXT).font = { bold: true };
   r += 2;
 
   // DELIVERY ROUTE - driver's sequence.
@@ -934,6 +1041,72 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
   ws.headerFooter.oddFooter = `&L${hfSafe(`${name} · ${d.run.runDate} · v${d.run.version}`)}&RPage &P of &N`;
 }
 
+/**
+ * The SKU LOADING SUMMARY's lines on a day with special-loading customers (owner request 20 Oct 2026): the
+ * normal lines (each load's normal cases, or its whole manifest when it has none) with their total, then one
+ * boxed section per instruction text over the day (the label of its first load in plan order), with its
+ * own total. Returns the next free row.
+ */
+function splitSkuSummaryRows(
+  ws: ExcelJS.Worksheet,
+  start: number,
+  d: PlanDetail,
+  splits: (ManifestSplit | null)[],
+  intFmts: (string | undefined)[],
+): number {
+  const nLoads = d.loads.length;
+  const lastCol = nLoads + 4;
+  const widths = [24, 34, ...d.loads.map(() => 11), 12, 12];
+  type Line = { name: string; perLoad: number[]; kg: number };
+  const add = (m: Map<string, Line>, i: number, x: SplitRow) => {
+    const e = m.get(x.productCode) ?? { name: x.productName, perLoad: new Array<number>(nLoads).fill(0), kg: 0 };
+    e.perLoad[i] += x.cases;
+    e.kg += x.weightKg ?? 0;
+    m.set(x.productCode, e);
+  };
+  const lines = (m: Map<string, Line>) => [...m.entries()].filter(([, e]) => sum(e.perLoad) > 0).sort((a, b) => a[0].localeCompare(b[0]));
+  const kg1 = (x: number) => Math.round(x * 10) / 10;
+  const totalOf = (rows: [string, Line][]) => d.loads.map((_, i) => sum(rows.map(([, e]) => e.perLoad[i])));
+  let r = start;
+
+  const normal = new Map<string, Line>();
+  d.loads.forEach((l, i) => {
+    for (const x of splits[i]?.normal ?? l.manifest) add(normal, i, x);
+  });
+  const normalRows = lines(normal);
+  if (normalRows.length) {
+    put(ws, r++, 1, NORMAL_LOADING_HEADING).font = { bold: true };
+    for (const [code, e] of normalRows) tableRow(ws, r++, [code, e.name, ...e.perLoad.map((v) => (v ? v : null)), sum(e.perLoad), kg1(e.kg)], intFmts);
+    const per = totalOf(normalRows);
+    totalRow(ws, r++, [NORMAL_LOADING_TOTAL, `${normalRows.length} SKUs`, ...per, sum(per), kg1(sum(normalRows.map(([, e]) => e.kg)))], intFmts);
+  }
+
+  // One section per instruction text over the day, in the order first met (plan order, then stop order).
+  const day = new Map<string, { text: string; byCode: Map<string, Line> }>();
+  splits.forEach((s, i) => {
+    for (const g of s?.groups ?? []) {
+      const e = day.get(g.key) ?? { text: g.text, byCode: new Map<string, Line>() };
+      for (const x of g.rows) add(e.byCode, i, x);
+      day.set(g.key, e);
+    }
+  });
+  const sections = [...day.values()];
+  const tags = loadingTags(sections.map((g) => g.text));
+  sections.forEach((g, gi) => {
+    const tag = tags[gi]!;
+    specialHeadRow(ws, r++, lastCol, specialLinesHeading(tag, g.text), widths);
+    const rows = lines(g.byCode);
+    for (const [code, e] of rows) {
+      tableRow(ws, r, [code, `${tag} - ${e.name}`, ...e.perLoad.map((v) => (v ? v : null)), sum(e.perLoad), kg1(e.kg)], intFmts);
+      specialBodyRow(ws, r++, lastCol);
+    }
+    const per = totalOf(rows);
+    totalRow(ws, r, [specialLinesTotal(tag), `${rows.length} SKUs`, ...per, sum(per), kg1(sum(rows.map(([, e]) => e.kg)))], intFmts);
+    specialBodyRow(ws, r++, lastCol, true);
+  });
+  return r;
+}
+
 function addSkuSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail) {
   const nLoads = d.loads.length;
   const ws = wb.addWorksheet(SHEETS.skuSummary, { views: [{ state: 'frozen', ySplit: 4, xSplit: 2 }], pageSetup: LANDSCAPE });
@@ -954,9 +1127,16 @@ function addSkuSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail) {
   });
   const intFmts = [undefined, undefined, ...d.loads.map(() => FMT_INT), FMT_INT, FMT_KG];
   let r = 5;
-  for (const [code, e] of [...skus.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    // Blank instead of 0 keeps the matrix readable for pickers.
-    tableRow(ws, r++, [code, e.name, ...e.perLoad.map((v) => (v ? v : null)), sum(e.perLoad), e.kg], intFmts);
+  // Owner request 20 Oct 2026: a day with special-loading customers lists their products in their own
+  // section(s) (loading-split.ts), the normal lines first; TOTAL and the checks below stay the loads'.
+  const splits = d.loads.map((l) => splitByLoadingInstruction(l.manifest, l.stops).split);
+  if (splits.some(Boolean)) {
+    r = splitSkuSummaryRows(ws, r, d, splits, intFmts);
+  } else {
+    for (const [code, e] of [...skus.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      // Blank instead of 0 keeps the matrix readable for pickers.
+      tableRow(ws, r++, [code, e.name, ...e.perLoad.map((v) => (v ? v : null)), sum(e.perLoad), e.kg], intFmts);
+    }
   }
   const perLoad = d.loads.map((l) => sum(l.manifest.map((x) => x.cases)));
   const kgPerLoad = d.loads.map((l) => manifestKgOf(l.manifest));
