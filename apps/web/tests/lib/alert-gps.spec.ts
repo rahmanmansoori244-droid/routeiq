@@ -41,7 +41,7 @@ import { replayDay, type AlertDayExport, type ExportEvent } from '@/lib/alerts/r
 import { evaluate, openKey, type AlertFacts, type FactLoad, type FactStop, type FactTruckDay, type FactVisit, type OpenRowInfo } from '@/lib/alerts/rules';
 import { applyPlanInMemory, planApply, type MemAlert } from '@/lib/alerts/store';
 import type { Candidate, Evaluation } from '@/lib/alerts/types';
-import { withoutGpsTimes } from '@/lib/delivery/visit';
+import { NO_OWN_TIMES, withoutGpsTimes } from '@/lib/delivery/visit';
 import { addDaysIso, parseHhmm, zonedDayStart } from '@/lib/dispatch/time';
 import { IVMS_MODES, type GpsTruckDayFact } from '@/lib/ivms/types';
 
@@ -223,7 +223,7 @@ describe('golden: below GPS tracking ALERTS nothing changes', () => {
 
   it('the same day read as TIMES reads it (withoutGpsTimes, no GPS settings) evaluates exactly as the phone alone, whatever GPS the truck-day carries', () => {
     const now = at('09:20');
-    const withGps = (v: FactVisit) => withoutGpsTimes({ ...v, departureSource: v.departureSource ?? null });
+    const withGps = (v: FactVisit) => withoutGpsTimes({ ...NO_OWN_TIMES, ...v, departureSource: v.departureSource ?? null });
     const phoneOnly = load({ stops: [stop(1, 480, { visit: null }), stop(2, 540), stop(3, 600)] });
     const timesRead = load({ stops: [stop(1, 480, { visit: withGps(gpsVisit('08:00', '08:50')) }), stop(2, 540), stop(3, 600)] });
     // withoutGpsTimes leaves the row's other fields: a GPS-only visit is then a visit without any time.

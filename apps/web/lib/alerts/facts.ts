@@ -41,7 +41,7 @@ import { parseLoadBreak, readTruckSnapshot } from '../dispatch/snapshots';
 import { backAtDepot, backKey, keyOfVisit, leftDepotTaps, liveRunsInRange, loadOrigins, loadsOfRuns, stopsOfLoads, visitKey, visitsInRange } from '../delivery/day-results';
 import { previousTrip } from '../delivery/turnaround';
 import { PIN_FAR_M } from '../delivery/pin-check';
-import { withoutGpsTimes } from '../delivery/visit';
+import { afterResultOf, withoutGpsTimes } from '../delivery/visit';
 import { distanceM, PIN_MOVED_M } from '../dispatch/snapshots';
 import { pinCheckList } from '../delivery/customer-stats';
 import { ALERT_DAYS_AHEAD, ALERT_DAYS_BACK, type AlertRule } from './catalog';
@@ -392,6 +392,10 @@ function factVisit(v: StopVisit, photos: FactPhoto[], departureObserved?: boolea
     ...(departureObserved !== undefined ? { departureSource: v.departureSource, departureObserved } : {}),
     // The minutes away (owner request 19 Oct 2026): GPS facts, only with the GPS alerts (alertVisitRow clears them below ALERTS).
     ...(v.awayMinutes ? { awayMinutes: v.awayMinutes } : {}),
+    // Owner decision 21 Oct 2026: the minutes after the driver's result (F2, never unloading) and the driver's own tap a
+    // GPS arrival replaced (F1/F5: the arrival is not GPS alone). GPS facts too: withoutGpsTimes clears them below ALERTS.
+    ...(afterResultOf(v) ? { afterResultMinutes: afterResultOf(v) } : {}),
+    ...(v.arrivalSource === 'AYUN' && v.ownArrivedAt ? { ownArrivedAt: v.ownArrivedAt } : {}),
     arrivedAt: v.arrivedAt,
     arrivalSource: v.arrivalSource,
     arrivalObserved: v.arrivalObserved,

@@ -46,6 +46,7 @@ import { addDaysIso, dateOnly, DEFAULT_TZ, localDateIso, zonedDayStart } from '.
 import { dispatchedAt } from '../dispatch/dispatched-at';
 import { readLoadOrigin, readTruckSnapshot } from '../dispatch/snapshots';
 import { liveRunsInRange, loadsOfRuns, stopsOfLoads, type RoadLoad } from '../delivery/day-results';
+import { OWN_TIMES_SELECT } from '../delivery/visit';
 import { opsStartOf } from '../ivms/budget';
 import { IVMS_SETTING_DEFAULTS } from '../ivms/settings';
 import { detectorParams } from '../ivms/stops';
@@ -464,6 +465,8 @@ export async function readDay(db: Db, tenantId: string, date: string): Promise<M
       select: {
         id: true, depotId: true, truckId: true, loadNo: true, sequence: true, arrivedAt: true, arrivalSource: true, arrivalDistanceM: true, arrivalAccuracyM: true, arrivalObserved: true,
         departedAt: true, departureSource: true, departedAtOutcome: true, outcome: true, reason: true, outcomeAt: true, outcomeSource: true, casesDelivered: true, plannedLat: true, plannedLng: true,
+        // The own times a GPS time replaced (owner decision 21 Oct 2026): "Unloading by taps" stays the taps'.
+        ...OWN_TIMES_SELECT,
       },
     }),
     db.stopEvent.findMany({

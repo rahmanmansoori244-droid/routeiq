@@ -6,7 +6,9 @@
  * Invented data only: the vendor documentation's dummy IMEIs, made-up codes, an invented origin.
  *
  *  1. Who is out: only the company's own active trucks with a tracker, with their loads of yesterday and
- *     today on the plans in use; another company's truck (same IMEI) never.
+ *     today on the plans in use; another company's truck (same IMEI) never. A truck-day whose loads are all
+ *     back carries the truck's depot moves (F6, owner decision 21 Oct 2026: the final pull waits for the
+ *     return), never an unconfirmed or duplicate one.
  *  2. The allowance in the database: two ticks at once make one call and count one; the counters reset on
  *     the provider's next day; a class stops at its share; the admin's claim does not wait for the lease.
  *  3. Positions: only a newer fix moves the latest; trucks no longer out lose theirs. History: the same
@@ -24,7 +26,7 @@ import { _resetWebhookCache } from '@/lib/ivms/webhook';
 import { utcDay } from '@/lib/ivms/budget';
 import { todayIso } from '@/lib/dispatch/time';
 import { GET as webhookGet, POST as webhookPost } from '@/app/api/ivms/ayun/[secret]/route';
-import { fakeAyun, IMEI_A, IMEI_B, ivmsTestEnv, KEY, SECRET } from '../lib/ivms-fakes';
+import { fakeAyun, IMEI_A, IMEI_B, imeiOf, ivmsTestEnv, KEY, SECRET } from '../lib/ivms-fakes';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 
 const slug = `ivmsi-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
@@ -84,6 +86,44 @@ describe('1. who is out', () => {
     expect(await prismaIvmsStore.truckByImei(tenantId, IMEI_A)).toEqual({ truckId: truckA, depotId });
     expect(await prismaIvmsStore.truckByImei(otherId, IMEI_A)).toMatchObject({ truckId: otherTruck });
     expect(await prismaIvmsStore.depotZones(tenantId)).toEqual([{ depotId, zoneName: 'Example depot zone', lat: 10.5, lng: 20.5 }]);
+  });
+
+  it("F6: a truck-day whose loads are all back carries the truck's depot moves (webhook, backstop or trail), oldest first; never an unconfirmed or duplicate one, a zone move or another truck's", async () => {
+    const c = (await prismaIvmsStore.company(slug))!;
+    const run = (await prisma.runPlan.findFirst({ where: { tenantId }, select: { id: true } }))!;
+    const truckC = (await prisma.truck.create({ data: { tenantId, depotId, code: 'GT04', capacityCases: 500, ivmsImei: imeiOf(4) } })).id;
+    const load = { departMin: 360, returnMin: 600, distanceKm: 1, durationMin: 60, cases: 1, weightKg: 1, utilizationPct: 1 };
+    await prisma.planLoad.create({ data: { tenantId, runId: run.id, truckId: truckC, loadNo: 1, status: 'COMPLETED', statusChangedAt: new Date(), ...load } });
+    const now = new Date();
+    // Within 2.5 h before now: inside the date's window whatever the hour (it starts 3 h before the operating hours).
+    const ago = (min: number) => new Date(now.getTime() - min * 60_000);
+    let n = 0;
+    const ev = (kind: string, origin: string, min: number, outcome: string | null, truckId = truckC) => ({ tenantId, truckId, depotId, kind, origin, eventAt: ago(min), dedupeKey: `ayun:f6-test-${n++}-${slug}`, outcome });
+    try {
+      await prisma.ivmsEvent.createMany({
+        data: [
+          ev('DEPOT_OUT', 'TRAIL', 150, 'USED'),
+          ev('DEPOT_IN', 'WEBHOOK', 90, 'UNCONFIRMED'),
+          ev('DEPOT_IN', 'TRAIL', 30, 'DUPLICATE'),
+          ev('DEPOT_IN', 'BACKSTOP', 31, null),
+          ev('ZONE_IN', 'WEBHOOK', 20, null),
+          ev('DEPOT_OUT', 'WEBHOOK', 10, null, truckA),
+        ],
+      });
+      const fleet = await prismaIvmsStore.fleet(c, now);
+      const mine = fleet.find((t) => t.truckId === truckC)!;
+      expect(mine.days).toHaveLength(1);
+      expect(mine.days[0]!.depotMoves).toEqual([
+        { kind: 'DEPOT_OUT', at: ago(150) },
+        { kind: 'DEPOT_IN', at: ago(31) },
+      ]);
+      // A truck with a load out: no move read for it.
+      expect(fleet.find((t) => t.truckId === truckA)!.days.every((d) => d.depotMoves === undefined)).toBe(true);
+    } finally {
+      await prisma.ivmsEvent.deleteMany({ where: { tenantId, dedupeKey: { startsWith: 'ayun:f6-test-' } } });
+      await prisma.planLoad.deleteMany({ where: { tenantId, truckId: truckC } });
+      await prisma.truck.delete({ where: { id: truckC } });
+    }
   });
 });
 

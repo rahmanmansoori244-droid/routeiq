@@ -61,7 +61,7 @@ import {
   type RefusalCode,
   type WriteKind,
 } from './outcome-rules';
-import { deriveVisit, readVisitLines, resultEvent, type EventSource, type VisitEvent } from './visit';
+import { deriveVisit, readVisitLines, resultEvent, type EventSource, type VisitEvent, type VisitState } from './visit';
 
 type Tx = Prisma.TransactionClient;
 type Db = Tx | typeof prisma;
@@ -330,12 +330,43 @@ export async function ensureVisit(tx: Tx, k: VisitKey, planned: PlannedStop, fir
 
 type VisitRow = NonNullable<Awaited<ReturnType<typeof findVisit>>>;
 
-/** Rebuild the visit from all its events and photos (deriveVisit) and write it. */
-export async function rebuildVisit(tx: Tx, visit: VisitRow, ctx: { dayStart: Date; radiusM: number; breakMin: { startMin: number; endMin: number } | null }) {
+/**
+ * The times of the phone's arrivals and results at the truck-day's OTHER visits (deriveVisit's F2 neighbour
+ * guard, owner decision 21 Oct 2026): one indexed read (StopEvent tenantId, deliveryDate, truckId), only for a
+ * visit with GPS events.
+ */
+async function otherStopTimesOf(tx: Db, visit: VisitRow): Promise<Date[]> {
+  const rows = await tx.stopEvent.findMany({
+    where: {
+      tenantId: visit.tenantId,
+      deliveryDate: visit.deliveryDate,
+      truckId: visit.truckId,
+      kind: { in: ['ARRIVED', 'OUTCOME'] },
+      source: { in: ['PHONE_MANUAL', 'PHONE_AUTO'] },
+      visitId: { not: visit.id },
+    },
+    select: { at: true },
+  });
+  return rows.map((r) => r.at);
+}
+
+/** What rebuildVisit needs besides the row: the delivery date's start, the company's radius, the load's planned break. */
+export interface RebuildContext {
+  dayStart: Date;
+  radiusM: number;
+  breakMin: { startMin: number; endMin: number } | null;
+}
+
+/**
+ * The visit as deriveVisit rebuilds it from its stored events (what rebuildVisit writes), and its photo count.
+ * Reads only: scripts/rebuild-gps-visits.ts compares it with the stored row in a dry run.
+ */
+export async function derivedVisitOf(tx: Db, visit: VisitRow, ctx: RebuildContext): Promise<{ v: VisitState; photoCount: number }> {
   const [events, photoCount] = await Promise.all([
     tx.stopEvent.findMany({ where: { tenantId: visit.tenantId, visitId: visit.id } }),
     tx.deliveryPhoto.count({ where: { tenantId: visit.tenantId, visitId: visit.id } }),
   ]);
+  const otherStopTimes = events.some((e) => e.source === 'AYUN') ? await otherStopTimesOf(tx, visit) : undefined;
   const v = deriveVisit(
     events.map(
       (e): VisitEvent => ({
@@ -359,8 +390,15 @@ export async function rebuildVisit(tx: Tx, visit: VisitRow, ctx: { dayStart: Dat
       lines: readVisitLines(visit.linesJson),
       pin: visit.plannedLat !== null && visit.plannedLng !== null ? { lat: visit.plannedLat, lng: visit.plannedLng } : null,
       radiusM: ctx.radiusM,
+      ...(otherStopTimes ? { otherStopTimes } : {}),
     },
   );
+  return { v, photoCount };
+}
+
+/** Rebuild the visit from all its events and photos (deriveVisit) and write it. */
+export async function rebuildVisit(tx: Tx, visit: VisitRow, ctx: RebuildContext) {
+  const { v, photoCount } = await derivedVisitOf(tx, visit, ctx);
   return tx.stopVisit.update({
     where: { id: visit.id },
     data: {
@@ -379,6 +417,17 @@ export async function rebuildVisit(tx: Tx, visit: VisitRow, ctx: { dayStart: Dat
       autoServiceMinutes: v.autoServiceMinutes,
       // Owner request 19 Oct 2026: the minutes the GPS stays showed the truck away (never unloading); null: none.
       awayMinutes: v.awayMinutes ?? null,
+      // Owner decision 21 Oct 2026: the own times a GPS time replaced, and the minutes after the result. Always
+      // written (null, never undefined: Prisma would leave a value a GPS event deleted since made stale).
+      ownArrivedAt: v.ownArrivedAt ?? null,
+      ownArrivalSource: v.ownArrivalSource ?? null,
+      ownArrivalDistanceM: v.ownArrivalDistanceM ?? null,
+      ownArrivalAccuracyM: visit.locationPurgedAt ? null : (v.ownArrivalAccuracyM ?? null),
+      ownArrivalObserved: v.ownArrivalObserved ?? null,
+      ownDepartedAt: v.ownDepartedAt ?? null,
+      ownDepartureSource: v.ownDepartureSource ?? null,
+      ownDepartedAtOutcome: v.ownDepartedAtOutcome ?? null,
+      afterResultMinutes: v.afterResultMinutes ?? null,
       // After the location purge the positions the plausibility flags were read from are gone: a
       // visit flagged before keeps its flag (it must never start feeding measured times and KPIs).
       timingSuspect: visit.locationPurgedAt ? !!visit.timingSuspect || v.timingSuspect : v.timingSuspect,
@@ -1070,13 +1119,19 @@ export async function truckDayResults(db: Db, tenantId: string, truckId: string,
         continue;
       }
       const lines = readVisitLines(v.linesJson);
-      const minutes =
-        v.autoMinutes ?? (v.arrivedAt && v.departedAt && v.departedAt > v.arrivedAt ? Math.round((v.departedAt.getTime() - v.arrivedAt.getTime()) / 6000) / 10 : null);
+      // Owner decision 21 Oct 2026 (GPS times win over late taps): the driver sees his own taps, never a GPS time
+      // that replaced one he made (no timer jump, the phone's restore of a stop in progress unchanged, and "I
+      // arrived" never comes back). A GPS-only arrival stays as before (arrivalByGps below, review M4).
+      const arrivalReplaced = v.arrivalSource === 'AYUN' && !!v.ownArrivedAt;
+      const departureReplaced = v.departureSource === 'AYUN' && !!v.ownDepartedAt;
+      const arrivedAt = arrivalReplaced ? v.ownArrivedAt : v.arrivedAt;
+      const departedAt = departureReplaced ? v.ownDepartedAt : v.departedAt;
+      const minutes = v.autoMinutes ?? (arrivedAt && departedAt && departedAt > arrivedAt ? Math.round((departedAt.getTime() - arrivedAt.getTime()) / 6000) / 10 : null);
       stops[key] = {
-        state: v.outcome ? 'DONE' : v.arrivedAt && !v.departedAt ? 'ARRIVED' : 'PENDING',
-        arrivedAt: v.arrivedAt?.toISOString() ?? null,
-        arrivalObserved: v.arrivalObserved,
-        departedAt: v.departedAt?.toISOString() ?? null,
+        state: v.outcome ? 'DONE' : arrivedAt && !departedAt ? 'ARRIVED' : 'PENDING',
+        arrivedAt: arrivedAt?.toISOString() ?? null,
+        arrivalObserved: arrivalReplaced ? (v.ownArrivalObserved ?? true) : v.arrivalObserved,
+        departedAt: departedAt?.toISOString() ?? null,
         minutes,
         outcome: v.outcome,
         reason: v.reason,
@@ -1094,8 +1149,8 @@ export async function truckDayResults(db: Db, tenantId: string, truckId: string,
         late: v.outcomeLate,
         editable: (l.status === 'DISPATCHED' || (viewer === 'OFFICE' && l.status === 'COMPLETED')) && !inBasis,
         carriedTo,
-        // IVMS live link: only when the arrival is the truck's GPS (no change for any other stop).
-        ...(v.arrivalSource === 'AYUN' && v.arrivedAt ? { arrivalByGps: true as const } : {}),
+        // IVMS live link: only when the arrival is the truck's GPS alone (no change for any other stop).
+        ...(v.arrivalSource === 'AYUN' && v.arrivedAt && !arrivalReplaced ? { arrivalByGps: true as const } : {}),
       };
     }
   }

@@ -21,7 +21,7 @@
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
-import { isoOf, localDateIso, localMinutes } from '../dispatch/time';
+import { fmtHhmm, isoOf, localDateIso, localMinutes } from '../dispatch/time';
 import { readDevices } from '../driver-link/service';
 import { deliveryKpis, inOutcomeScope, type DeliveryKpis } from './kpis';
 import { cameraExceptionOf, cameraLinkAlerts, noPhotoKind, sortCameraExceptions, truckDayKey, type CameraException, type CameraLinkAlert } from './camera-exceptions';
@@ -49,7 +49,7 @@ import { firstSignOf, plannedDriveOf, previousTrip, turnaroundLine, turnaroundOf
 import { clockText } from '../alerts/text';
 import { actualMinutes, arrivalNote, departureNote, noPhotoText, OUTCOME_LABEL, reasonText, sourceWord } from './office-text';
 import { copyConflicts } from './carry-conflicts';
-import { readVisitLines, withoutGpsTimes, type VisitLine, type VisitTimes } from './visit';
+import { afterResultOf, readVisitLines, withoutGpsTimes, type VisitLine, type VisitTimes } from './visit';
 import type { KpiVisit } from './kpis';
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -78,13 +78,17 @@ export interface OverlayStop {
   arrivedAt: string | null;
   arrivalSource: string | null;
   arrivalObserved: boolean;
-  /** "manual", "set by office", "arrival not observed (page opened at the shop)". */
+  /** "manual", "set by office", "arrival not observed (page opened at the shop)"; "GPS (Ayun); driver tapped 10:15". */
   arrivalNote: string | null;
+  /** The driver's own arrival tap a GPS arrival replaced (owner decision 21 Oct 2026, StopVisit.ownArrivedAt), ISO; null: none. */
+  arrivalTapAt: string | null;
   departedAt: string | null;
   departureGap: boolean;
   departedAtOutcome: boolean;
-  /** "result time", "not observed". */
+  /** "result time", "not observed"; "GPS (Ayun), 30 min after the result". */
   departureNote: string | null;
+  /** F2 (owner decision 21 Oct 2026): minutes the truck still stood there after the driver's result (StopVisit.afterResultMinutes, not unloading); null: none. */
+  afterResultMin: number | null;
   /** Actual unloading minutes (on site: the minutes away taken off), and how they were measured. */
   actualMin: number | null;
   actualLabel: string | null;
@@ -297,10 +301,12 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
           arrivalSource: null,
           arrivalObserved: true,
           arrivalNote: null,
+          arrivalTapAt: null,
           departedAt: null,
           departureGap: false,
           departedAtOutcome: false,
           departureNote: null,
+          afterResultMin: null,
           actualMin: null,
           actualLabel: null,
           awayMin: null,
@@ -343,7 +349,9 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
         ? `${conflict.source === 'DISPATCHER' ? 'Office' : 'Driver'} says ${refused ? (OUTCOME_LABEL[String(refused)] ?? String(refused)) : 'no result'} after it was brought forward`
         : null;
       const keys = Array.isArray(v.photoKeysJson) ? (v.photoKeysJson as unknown[]).length : 0;
-      const actual = actualMinutes(v);
+      const afterResult = afterResultOf(v);
+      const actual = actualMinutes({ ...v, afterResultMinutes: afterResult });
+      const tapAt = v.arrivalSource === 'AYUN' && v.ownArrivedAt ? v.ownArrivedAt : null;
       // A departure found only after the page was away (dated at the last inside fix): not observed.
       const departureGap =
         !!v.departedAt &&
@@ -361,11 +369,14 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
         arrivedAt: iso(v.arrivedAt),
         arrivalSource: v.arrivalSource,
         arrivalObserved: v.arrivalObserved,
-        arrivalNote: arrivalNote(v.arrivalSource, v.arrivalObserved),
+        // Owner decision 21 Oct 2026: a GPS arrival that replaced the driver's later tap names the tap.
+        arrivalNote: arrivalNote(v.arrivalSource, v.arrivalObserved, tapAt ? fmtHhmm(localMinutes(tapAt, set.tz)) : null),
+        arrivalTapAt: iso(tapAt),
         departedAt: iso(v.departedAt),
         departureGap,
         departedAtOutcome: v.departedAtOutcome,
-        departureNote: departureNote(v.departedAtOutcome, departureGap, v.departureSource),
+        departureNote: departureNote(v.departedAtOutcome, departureGap, v.departureSource, afterResult),
+        afterResultMin: afterResult,
         actualMin: actual.min,
         actualLabel: actual.label,
         awayMin: v.awayMinutes ?? null,

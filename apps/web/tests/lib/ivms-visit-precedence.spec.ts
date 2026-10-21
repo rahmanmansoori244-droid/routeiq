@@ -3,7 +3,9 @@
  * with the binding review's H1/M1/M3/M4 and the second review's H-2/L-2/L-3): the visit is the driver's
  * and the office's exactly as with the link off; GPS only fills an arrival or a departure nothing else
  * gave, never writes a result, never touches the automatic (measured) timing, counts as on time only at
- * a stop where goods were handed over, and is never the driver page's arrival. Synthetic stop, invented
+ * a stop where goods were handed over, and is never the driver page's arrival. Since 21 Oct 2026 (owner
+ * decision, "GPS arrival should win of course") GPS also replaces late phone times (F1, F2, F4, F5:
+ * tests/lib/ivms-gps-wins.spec.ts), with the driver's own times kept on the visit. Synthetic stop, invented
  * pin.
  */
 import { describe, expect, it } from 'vitest';
@@ -86,24 +88,30 @@ describe("the phone's measured times are never touched by GPS (second review H-2
   });
 });
 
-describe('the driver and the office always win (design 6.4, owner decision D-3 recommendation)', () => {
+describe('the office always wins; GPS wins over late phone times (design 6.4; owner decision 21 Oct 2026)', () => {
   it('the office arrival beats everything', () => {
     const v = deriveVisit([gpsIn('09:50'), autoIn('10:00'), office('ARRIVED', '10:05'), result('10:20')], CTX);
     expect(v).toMatchObject({ arrivalSource: 'DISPATCHER' });
     expect(v.arrivedAt).toEqual(L('10:05'));
   });
 
-  it('a "when?" answer and a plain tap beat an earlier GPS arrival', () => {
-    expect(deriveVisit([gpsIn('09:50'), autoIn('10:00', false), tap('09:58', true), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'PHONE_MANUAL' });
+  it('an observed GPS arrival more than 2 min before a "when?" answer or a plain tap in the same stay wins; the tap is kept (owner decision 21 Oct 2026, F1)', () => {
+    const answered = deriveVisit([gpsIn('09:50'), autoIn('10:00', false), tap('09:58', true), result('10:20')], CTX);
+    expect(answered).toMatchObject({ arrivalSource: 'AYUN', arrivalObserved: true, ownArrivalSource: 'PHONE_MANUAL', ownArrivedAt: L('09:58') });
+    expect(answered.arrivedAt).toEqual(L('09:50'));
     const tapped = deriveVisit([gpsIn('09:50'), tap('10:01'), result('10:20')], CTX);
-    expect(tapped).toMatchObject({ arrivalSource: 'PHONE_MANUAL' });
-    expect(tapped.arrivedAt).toEqual(L('10:01'));
+    expect(tapped).toMatchObject({ arrivalSource: 'AYUN', ownArrivalSource: 'PHONE_MANUAL', ownArrivedAt: L('10:01') });
+    expect(tapped.arrivedAt).toEqual(L('09:50'));
+    // A tap at most 2 min after the GPS arrival keeps the tap (two measurements of the same moment).
+    expect(deriveVisit([gpsIn('09:59'), tap('10:01'), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'PHONE_MANUAL', arrivedAt: L('10:01'), ownArrivedAt: null });
   });
 
-  it("the phone's automatic arrival, observed or found later, beats any GPS arrival (H-2)", () => {
+  it("the phone's automatic arrival beats a GPS arrival at most 2 min before it, or an unobserved one (H-2); a later one loses to an observed GPS arrival (F1, its measured times stay the phone's)", () => {
     expect(deriveVisit([autoIn('10:00'), gpsIn('09:58'), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'PHONE_AUTO', arrivalObserved: true });
     expect(deriveVisit([autoIn('10:00'), gpsIn('09:40', false), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'PHONE_AUTO', arrivalObserved: true });
-    expect(deriveVisit([autoIn('10:05', false), gpsIn('10:00'), result('10:20')], CTX)).toMatchObject({ arrivalSource: 'PHONE_AUTO', arrivalObserved: false });
+    const late = deriveVisit([autoIn('10:05', false), gpsIn('10:00'), result('10:20')], CTX);
+    expect(late).toMatchObject({ arrivalSource: 'AYUN', arrivalObserved: true, ownArrivalSource: 'PHONE_AUTO', ownArrivalObserved: false, autoArrivedAt: null, autoBasis: null });
+    expect(late.arrivedAt).toEqual(L('10:00'));
   });
 
   it('departure: the office, else the phone, else the result time, else the GPS stay that began near the arrival', () => {
@@ -138,9 +146,16 @@ describe('the driver and the office always win (design 6.4, owner decision D-3 r
     expect(v.awayMinutes ?? null).toBeNull();
   });
 
-  it('the 15-minute rule after the result applies to a GPS departure too', () => {
+  it('the GPS stay holding the driver result gives its departure up to 60 min after the result (F2, owner decision 21 Oct 2026); over 60 the result time', () => {
     const parked = deriveVisit([gpsIn('10:00'), gpsOut('10:50'), result('10:20')], CTX);
-    expect(parked).toMatchObject({ departedAtOutcome: true, departureSource: 'PHONE_MANUAL', autoBasis: null });
+    expect(parked).toMatchObject({ departedAtOutcome: false, departureSource: 'AYUN', departedAt: L('10:50'), afterResultMinutes: 30, autoBasis: null });
+    const longer = deriveVisit([gpsIn('10:00'), gpsOut('11:21'), result('10:20')], CTX);
+    expect(longer).toMatchObject({ departedAtOutcome: true, departureSource: 'PHONE_MANUAL', afterResultMinutes: null, autoBasis: null });
+  });
+
+  it('the 15-minute rule after the result still applies to an office result', () => {
+    const parked = deriveVisit([gpsIn('10:00'), gpsOut('10:50'), result('10:20', 'DELIVERED', 'DISPATCHER')], CTX);
+    expect(parked).toMatchObject({ departedAt: null, departureSource: null, afterResultMinutes: null });
   });
 
   it('the GPS stay used is the one at the arrival shown, never an earlier stay nearby', () => {
@@ -350,10 +365,11 @@ describe('the operations alerts read the visit without its GPS times (merge revi
     const stored = deriveVisit([gpsIn('10:00'), gpsOut('10:28'), result('10:20')], CTX);
     expect(stored).toMatchObject({ arrivalSource: 'AYUN', departureSource: 'AYUN' });
     expect(withoutGpsTimes(stored)).toMatchObject({ arrivedAt: null, arrivalSource: null, departedAt: null, departureSource: null, departedAtOutcome: false, outcome: 'DELIVERED', outcomeAt: L('10:20') });
-    // The driver's arrival and a GPS departure: for the alerts the result ends the stop again.
+    // The driver's arrival 4 min into the GPS stay and a GPS departure: the GPS times are shown (F1), and for
+    // the alerts the driver's tap and the result ending the stop come back.
     const tapped = deriveVisit([tap('10:04'), gpsIn('10:00'), gpsOut('10:28'), result('10:20')], CTX);
-    expect(tapped).toMatchObject({ arrivalSource: 'PHONE_MANUAL', departureSource: 'AYUN', departedAt: L('10:28') });
-    expect(withoutGpsTimes(tapped)).toMatchObject({ arrivedAt: L('10:04'), departedAt: L('10:20'), departureSource: 'PHONE_MANUAL', departedAtOutcome: true });
+    expect(tapped).toMatchObject({ arrivalSource: 'AYUN', arrivedAt: L('10:00'), departureSource: 'AYUN', departedAt: L('10:28'), ownArrivedAt: L('10:04'), ownDepartedAt: L('10:20') });
+    expect(withoutGpsTimes(tapped)).toMatchObject({ arrivedAt: L('10:04'), arrivalSource: 'PHONE_MANUAL', departedAt: L('10:20'), departureSource: 'PHONE_MANUAL', departedAtOutcome: true, ownArrivedAt: null });
   });
 
   it('a visit without GPS times is returned as it is (the same object)', () => {

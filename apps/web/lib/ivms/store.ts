@@ -25,9 +25,10 @@ import { prisma } from '../db';
 import { addDaysIso, dateOnly, isoOf, todayIso } from '../dispatch/time';
 import { liveRunsInRange } from '../delivery/day-results';
 import type { LoadStatusName } from '../dispatch/load-state';
-import { utcDay, type SkewRecord } from './budget';
+import { nextOpsStartOf, opsStartOf, utcDay, type OperatingHours, type SkewRecord } from './budget';
 import { MAX_EVENTS_PER_TRUCK_DAY, type DepotZone, type NewZoneEvent } from './events';
 import { ivmsModeOf } from './settings';
+import type { DepotMove } from './poll';
 import type { GpsTimesSummary } from './stop-events';
 import { CALL_CLASS_COUNTER, MOVING_KMH, type AyunErrorKind, type IvmsCallClass, type IvmsMode, type LiveFix, type TrailPoint } from './types';
 
@@ -57,6 +58,13 @@ export interface FleetTruckDay {
   /** The delivery date, YYYY-MM-DD. */
   date: string;
   loads: FleetLoad[];
+  /**
+   * F6 (owner decision 21 Oct 2026): the truck's depot moves from 3 h before the date's operating hours to the
+   * next day's (IvmsEvent DEPOT_IN / DEPOT_OUT from a webhook, the backstop or the trail; not one the trail did
+   * not confirm or the twin of another), oldest first, read only for a day with no load out (poll.ts
+   * finalPullTarget: the final pull waits for the truck's return). Absent: none read.
+   */
+  depotMoves?: DepotMove[];
 }
 
 /** An active, own (not one-day) truck with a tracker, and its loads of yesterday and today. */
@@ -217,7 +225,8 @@ export const prismaIvmsStore: IvmsStore = {
           orderBy: [{ truckId: 'asc' }, { loadNo: 'asc' }],
         })
       : [];
-    return trucks.map((t) => {
+    const daysOf = new Map<string, Map<string, FleetLoad[]>>();
+    for (const t of trucks) {
       const days = new Map<string, FleetLoad[]>();
       for (const l of loads) {
         if (l.truckId !== t.id) continue;
@@ -226,11 +235,45 @@ export const prismaIvmsStore: IvmsStore = {
         if (!days.has(date)) days.set(date, []);
         days.get(date)!.push({ loadNo: l.loadNo, status: l.status as LoadStatusName, statusChangedAt: l.statusChangedAt ?? null });
       }
+      daysOf.set(t.id, days);
+    }
+    // F6: the depot moves of the trucks with a day whose loads are all back (one query, index tenantId, truckId,
+    // eventAt), for the final pull at the truck's return. UNCONFIRMED (the trail says no) and DUPLICATE (the trail's
+    // twin of a webhook) moves are left out; one not decided yet (a webhook after the trail's end) counts.
+    const hours: OperatingHours = { timezone: c.timezone, fromMin: c.fromMin, toMin: c.toMin };
+    const OUT_NOW = new Set(['LOCKED', 'LOADING', 'DISPATCHED']);
+    const waiting = trucks.filter((t) => [...(daysOf.get(t.id)?.values() ?? [])].some((ls) => ls.some((l) => l.status === 'COMPLETED') && !ls.some((l) => OUT_NOW.has(l.status))));
+    const windowOf = (date: string) => ({ from: opsStartOf(date, hours).getTime() - 3 * 3600_000, to: nextOpsStartOf(date, hours).getTime() });
+    const moves = waiting.length
+      ? await prisma.ivmsEvent.findMany({
+          where: {
+            tenantId: c.tenantId,
+            truckId: { in: waiting.map((t) => t.id) },
+            kind: { in: ['DEPOT_IN', 'DEPOT_OUT'] },
+            origin: { in: ['WEBHOOK', 'BACKSTOP', 'TRAIL'] },
+            eventAt: { gte: new Date(windowOf(addDaysIso(today, -1)).from) },
+            OR: [{ outcome: null }, { outcome: 'USED' }],
+          },
+          select: { truckId: true, kind: true, eventAt: true },
+          orderBy: [{ truckId: 'asc' }, { eventAt: 'asc' }],
+        })
+      : [];
+    const movesOf = (truckId: string, date: string): DepotMove[] => {
+      const w = windowOf(date);
+      return moves
+        .filter((m) => m.truckId === truckId && m.eventAt.getTime() >= w.from && m.eventAt.getTime() < w.to)
+        .map((m) => ({ kind: m.kind as DepotMove['kind'], at: m.eventAt }));
+    };
+    const waitingIds = new Set(waiting.map((t) => t.id));
+    return trucks.map((t) => {
+      const days = daysOf.get(t.id)!;
       return {
         truckId: t.id,
         imei: t.ivmsImei!,
         depotId: t.depotId,
-        days: [...days.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, ls]) => ({ date, loads: ls })),
+        days: [...days.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([date, ls]) => ({ date, loads: ls, ...(waitingIds.has(t.id) ? { depotMoves: movesOf(t.id, date) } : {}) })),
       };
     });
   },

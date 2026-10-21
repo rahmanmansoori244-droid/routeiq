@@ -70,7 +70,7 @@ describe('positions, IPs and browser ids (spec 12.4)', () => {
       { id: 'e3', tenantId: 'tA', receivedAt: daysAgo(10), lat: 23.6, lng: 58.4, accuracyM: 8, clientIp: '10.1.1.1', deviceId: 'abcd', distanceM: 9, payloadJson: null },
     ];
     tables.stopVisit = [
-      { id: 'v1', tenantId: 'tA', deliveryDate: day('2026-06-01'), locationPurgedAt: null, outcomeLat: 23.6, outcomeLng: 58.4, outcomeAccuracyM: 5, arrivalAccuracyM: 6, outcomeDistanceM: 20, arrivalDistanceM: 11 },
+      { id: 'v1', tenantId: 'tA', deliveryDate: day('2026-06-01'), locationPurgedAt: null, outcomeLat: 23.6, outcomeLng: 58.4, outcomeAccuracyM: 5, arrivalAccuracyM: 6, ownArrivalAccuracyM: 7, outcomeDistanceM: 20, arrivalDistanceM: 11, ownArrivalDistanceM: 12 },
       { id: 'v2', tenantId: 'tA', deliveryDate: day('2026-10-01'), locationPurgedAt: null, outcomeLat: 23.6, outcomeLng: 58.4, outcomeAccuracyM: 5, arrivalAccuracyM: 6 },
     ];
     tables.deliveryPhoto = [
@@ -81,7 +81,7 @@ describe('positions, IPs and browser ids (spec 12.4)', () => {
     expect(row('stopEvent', 'e1')).toMatchObject({ lat: null, lng: null, accuracyM: null, speedMps: null, clientIp: null, deviceId: null, distanceM: 12, payloadJson: { late: true } });
     expect(row('stopEvent', 'e2')).toMatchObject({ lat: null, distanceM: 15, payloadJson: { mode: 'AUTO' } });
     expect(row('stopEvent', 'e3')).toMatchObject({ lat: 23.6, clientIp: '10.1.1.1' });
-    expect(row('stopVisit', 'v1')).toMatchObject({ outcomeLat: null, outcomeLng: null, outcomeAccuracyM: null, arrivalAccuracyM: null, locationPurgedAt: NOW, outcomeDistanceM: 20, arrivalDistanceM: 11 });
+    expect(row('stopVisit', 'v1')).toMatchObject({ outcomeLat: null, outcomeLng: null, outcomeAccuracyM: null, arrivalAccuracyM: null, ownArrivalAccuracyM: null, locationPurgedAt: NOW, outcomeDistanceM: 20, arrivalDistanceM: 11, ownArrivalDistanceM: 12 });
     expect(row('stopVisit', 'v2').outcomeLat).toBe(23.6);
     expect(row('deliveryPhoto', 'p1')).toMatchObject({ lat: null, lng: null, accuracyM: null, exifLat: null, exifLng: null, clientIp: null, deviceId: null, distanceM: 30, exifDistanceM: 31, locationPurgedAt: NOW });
     expect(tables.auditLog.map((a) => [a.action, a.afterJson])).toEqual([['DELIVERY_LOCATIONS_PURGED', { count: 4, events: 2, visits: 1, photos: 1, links: 0, olderThanDays: 90 }]]);

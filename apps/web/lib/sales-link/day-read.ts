@@ -179,6 +179,7 @@ export async function readSalesDayInput(tenantId: string, date: string, now: Dat
       sequence: v.sequence,
       arrivedAt: v.arrivedAt,
       arrivalSource: v.arrivalSource,
+      ...(v.arrivalSource === 'AYUN' && v.ownArrivedAt ? { ownArrivedAt: v.ownArrivedAt } : {}),
       departedAt: v.departedAt,
       departureSource: v.departureSource,
       outcome: v.outcome,

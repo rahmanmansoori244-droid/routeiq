@@ -7,7 +7,9 @@
  * - MAP: live positions for the map only; a fix running ahead never moves the latest position; positions
  *   never reach the trail, the only source of GPS times (H5);
  * - TIMES: history pulls per truck-day from the hours' start, every ivmsRoutePullMin while a load is out
- *   (overlapping 10 min), and once over the whole day after the last load was completed;
+ *   (overlapping 10 min), and once over the whole day after the last load was completed - once the truck is
+ *   back in the depot (F6, owner decision 21 Oct 2026: regular pulls while it drives back, at most 3 h; a final
+ *   made before the return repeated once, over what came since; the overdue ones counted and logged once);
  * - the allowance (H2): a simulated day at 100, 1,000 and 3,000 calls with the backstop on - never over
  *   the allowance or a class's share, no class starved (the map keeps moving until the trucks are back,
  *   every truck-day gets its final pull), the backstop only from 1,000 a day;
@@ -17,7 +19,22 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { classShares } from '@/lib/ivms/budget';
-import { _resetIvmsProcessState, planTick, routeWindow, runIvmsTick, startIvmsTimer, stopIvms, type RouteDay } from '@/lib/ivms/poll';
+import {
+  _resetIvmsProcessState,
+  FINAL_OVERDUE_MS,
+  FINAL_RETURN_FALLBACK_MS,
+  FINAL_RETURN_HOLD_MS,
+  finalPullTarget,
+  finalsOf,
+  planTick,
+  routePullDue,
+  routeWindow,
+  runIvmsTick,
+  startIvmsTimer,
+  stopIvms,
+  type DepotMove,
+  type RouteDay,
+} from '@/lib/ivms/poll';
 import type { FleetTruck } from '@/lib/ivms/store';
 import { company, fakeAyun, IMEI_A, IMEI_B, imeiOf, ivmsTestEnv, MemoryIvmsStore, ORIGIN, providerTime } from './ivms-fakes';
 
@@ -421,4 +438,192 @@ describe('a simulated day with the backstop on (H2: no class starved, never over
       expect(store.positions.size).toBe(0);
     }, 60_000);
   }
+});
+
+describe("the final pull waits for the truck's return (F6, owner decision 21 Oct 2026)", () => {
+  // The GPS timing study of 19-20 Oct 2026: on 7 of 16 truck-days the last load was completed while the truck was
+  // still out; the final pull 10 min after the completion left the drive back (and the last stops' GPS departures)
+  // out of the trail. Invented truck, times and moves.
+  const HOURS = { timezone: 'Asia/Muscat', fromMin: 300, toMin: 1380 };
+  const C = muscat('16:00');
+  const T = (hhmm: string, day = DAY) => muscat(hhmm, day);
+  const mv = (kind: DepotMove['kind'], hhmm: string, day = DAY): DepotMove => ({ kind, at: muscat(hhmm, day) });
+  const target = (moves: DepotMove[] | undefined, now: Date, at: Date | null = C) => finalPullTarget({ lastCompletedAt: at, depotMoves: moves }, now);
+  const doneTruck = (moves: DepotMove[] | undefined, completedAt = C): FleetTruck => {
+    const t = truck(1, ['COMPLETED'], { imei: IMEI_A, completedAt });
+    if (moves) t.days[0]!.depotMoves = moves;
+    return t;
+  };
+
+  it('no depot move known, or the truck in the depot at the completion: due 10 min after it, reaching it (as before)', () => {
+    expect(target(undefined, T('16:05'))).toEqual({ reason: 'NO_ZONE_INFO', targetAt: C, dueAt: T('16:10'), awaiting: false });
+    expect(target([], T('16:05'))).toMatchObject({ reason: 'NO_ZONE_INFO', dueAt: T('16:10') });
+    expect(target([mv('DEPOT_OUT', '07:00'), mv('DEPOT_IN', '15:40')], T('16:05'))).toEqual({ reason: 'IN_AT_COMPLETION', targetAt: C, dueAt: T('16:10'), awaiting: false });
+    // Out again after the completion (the truck left for something else): it was in at the completion.
+    expect(target([mv('DEPOT_IN', '15:40'), mv('DEPOT_OUT', '16:30')], T('16:35')).reason).toBe('IN_AT_COMPLETION');
+    // No completion time: due at once, any final covers it.
+    expect(target([], T('16:05'), null)).toEqual({ reason: 'NO_ZONE_INFO', targetAt: null, dueAt: null, awaiting: false });
+  });
+
+  it('out at the completion and not back: a regular truck-day for 3 h, then the fallback final, reaching the completion + 3 h', () => {
+    const moves = [mv('DEPOT_OUT', '07:00')];
+    expect(target(moves, T('17:00'))).toEqual({ reason: 'AWAITING_RETURN', targetAt: null, dueAt: null, awaiting: true });
+    expect(target(moves, T('18:59'))).toMatchObject({ reason: 'AWAITING_RETURN', awaiting: true });
+    expect(target(moves, T('19:00'))).toEqual({ reason: 'FALLBACK', targetAt: T('19:00'), dueAt: T('19:00'), awaiting: false });
+    expect(FINAL_RETURN_FALLBACK_MS).toBe(3 * 3600_000);
+  });
+
+  it('the return: the first depot entry after the completion with no exit within 15 min; due 15 min after it, reaching it', () => {
+    const moves = [mv('DEPOT_OUT', '07:00'), mv('DEPOT_IN', '16:40')];
+    expect(target(moves, T('16:54'))).toMatchObject({ reason: 'AWAITING_RETURN', awaiting: true });
+    expect(target(moves, T('16:55'))).toEqual({ reason: 'RETURNED', targetAt: T('16:40'), dueAt: T('16:55'), awaiting: false });
+    // No move before the completion, an entry after it: the truck was out.
+    expect(target([mv('DEPOT_IN', '16:40')], T('17:00'))).toMatchObject({ reason: 'RETURNED', targetAt: T('16:40') });
+    // Back 5 h later: the fallback came first; the return still makes its own final (below: one repeat).
+    expect(target([mv('DEPOT_OUT', '07:00'), mv('DEPOT_IN', '21:00')], T('21:20'))).toMatchObject({ reason: 'RETURNED', targetAt: T('21:00'), dueAt: T('21:15') });
+    expect(FINAL_RETURN_HOLD_MS).toBe(15 * 60_000);
+  });
+
+  it('a flap at the gate (in, then out again within 15 min) is no return; the next entry is', () => {
+    const moves = [mv('DEPOT_OUT', '07:00'), mv('DEPOT_IN', '16:20'), mv('DEPOT_OUT', '16:30'), mv('DEPOT_IN', '17:10')];
+    expect(target(moves, T('16:40'))).toMatchObject({ reason: 'AWAITING_RETURN', awaiting: true });
+    expect(target(moves, T('17:30'))).toEqual({ reason: 'RETURNED', targetAt: T('17:10'), dueAt: T('17:25'), awaiting: false });
+    // The moves need not come sorted.
+    expect(target([...moves].reverse(), T('17:30'))).toMatchObject({ reason: 'RETURNED', targetAt: T('17:10') });
+  });
+
+  it('planTick: REGULAR while the truck drives back (it counts with the trucks out, so the final reserve is kept), FINAL once it is back', () => {
+    const c = company({ mode: 'TIMES' });
+    expect(planTick(c, [doneTruck([mv('DEPOT_OUT', '07:00')])], T('17:00')).routeDays).toEqual([
+      expect.objectContaining({ kind: 'REGULAR', awaitingReturn: true, finalReason: 'AWAITING_RETURN', lastCompletedAt: C }),
+    ]);
+    expect(planTick(c, [doneTruck([mv('DEPOT_OUT', '07:00'), mv('DEPOT_IN', '16:40')])], T('17:00')).routeDays).toEqual([
+      expect.objectContaining({ kind: 'FINAL', awaitingReturn: false, finalReason: 'RETURNED', finalTargetAt: T('16:40'), finalDueAt: T('16:55') }),
+    ]);
+    // Without the depot moves (none read): as before.
+    expect(planTick(c, [doneTruck(undefined)], T('17:00')).routeDays).toEqual([expect.objectContaining({ kind: 'FINAL', finalTargetAt: C, finalDueAt: T('16:10') })]);
+    // The live map is unchanged: no load out, no position asked for (M7).
+    expect(planTick(c, [doneTruck([mv('DEPOT_OUT', '07:00')])], T('17:00')).mapTrucks).toEqual([]);
+  });
+
+  it('after the hours: a truck still driving back is pulled, and its final after the return until 30 min after it was due; a day that was in at its completion is not', () => {
+    const c = company({ mode: 'TIMES' }); // hours 05:00-23:00
+    const late = T('22:30');
+    expect(planTick(c, [doneTruck([mv('DEPOT_OUT', '07:00')], late)], T('23:30')).routeDays.map((d) => [d.kind, d.finalReason])).toEqual([['REGULAR', 'AWAITING_RETURN']]);
+    const back = doneTruck([mv('DEPOT_OUT', '07:00'), mv('DEPOT_IN', '23:10')], late);
+    expect(planTick(c, [back], T('23:30')).routeDays.map((d) => [d.kind, d.finalReason])).toEqual([['FINAL', 'RETURNED']]);
+    expect(planTick(c, [back], T('23:54')).routeDays).toHaveLength(1);
+    expect(planTick(c, [back], T('23:56')).routeDays).toEqual([]);
+    expect(planTick(c, [doneTruck([mv('DEPOT_IN', '22:00')], late)], T('23:30')).routeDays).toEqual([]);
+    expect(planTick(c, [doneTruck([mv('DEPOT_OUT', '07:00')], late)], T('23:30')).mapTrucks).toEqual([]);
+  });
+
+  it("the target is never past the next day's operating hours (the window's hard end), so it can be covered", () => {
+    const c = company({ mode: 'TIMES' });
+    const NEXT = '2026-10-17';
+    // Completed at 03:00 the next morning (a load closed overnight), still out, never back: the fallback at 06:00.
+    const t = doneTruck([mv('DEPOT_OUT', '07:00')], T('03:00', NEXT));
+    const [d] = planTick(c, [t], T('06:00', NEXT)).routeDays;
+    expect(d).toMatchObject({ kind: 'FINAL', finalReason: 'FALLBACK', finalTargetAt: T('05:00', NEXT) });
+    expect(routeWindow(d!, undefined, HOURS, T('06:00', NEXT))).toEqual({ from: T('05:00'), to: T('05:00', NEXT) });
+    const pulled = { truckId: 't1', date: DAY, pulledTo: T('05:00', NEXT), lastPullAt: T('06:00', NEXT), pulls: 1, finalPullAt: T('06:00', NEXT), suppressedAt: null, trailFrom: null };
+    expect(routePullDue(d!, pulled, 60, 60, T('06:30', NEXT))).toBe(false);
+  });
+
+  it('a final made before the truck was back (one from before this change, or the fallback) is repeated once, over what came since; then never again', () => {
+    const day: RouteDay = { truckId: 't1', imei: IMEI_A, date: DAY, kind: 'FINAL', lastCompletedAt: C, finalTargetAt: T('17:10'), finalDueAt: T('17:25'), finalReason: 'RETURNED' };
+    const old = { truckId: 't1', date: DAY, pulledTo: T('16:30'), lastPullAt: T('16:10'), pulls: 5, finalPullAt: T('16:10'), suppressedAt: null, trailFrom: null };
+    expect(routePullDue(day, old, 60, 60, T('17:24'))).toBe(false);
+    expect(routePullDue(day, old, 60, 60, T('17:25'))).toBe(true);
+    expect(routeWindow(day, old, HOURS, T('17:25'))).toEqual({ from: T('16:20'), to: T('17:25') });
+    const after = { ...old, pulledTo: T('17:25'), lastPullAt: T('17:25'), pulls: 6, finalPullAt: T('17:25') };
+    expect(routePullDue(day, after, 60, 60, T('18:00'))).toBe(false);
+    expect(routePullDue(day, after, 60, 60, T('22:00'), true)).toBe(false);
+    // The first final of a day (the regular pulls while it drove back cleared none): the whole day, as before.
+    expect(routeWindow(day, { ...old, finalPullAt: null }, HOURS, T('17:25'))).toEqual({ from: T('05:00'), to: T('17:25') });
+    // The fallback's final, then the return: one repeat.
+    const fallback = { ...old, pulledTo: T('19:00'), lastPullAt: T('19:00'), finalPullAt: T('19:00') };
+    expect(routePullDue({ ...day, finalTargetAt: T('19:00'), finalDueAt: T('19:00'), finalReason: 'FALLBACK' }, fallback, 60, 60, T('19:30'))).toBe(false);
+    const ret: RouteDay = { ...day, finalTargetAt: T('21:00'), finalDueAt: T('21:15') };
+    expect(routePullDue(ret, fallback, 60, 60, T('21:15'))).toBe(true);
+    expect(routeWindow(ret, fallback, HOURS, T('21:15'))).toEqual({ from: T('18:50'), to: T('21:15') });
+    expect(routePullDue(ret, { ...fallback, pulledTo: T('21:15'), finalPullAt: T('21:15') }, 60, 60, T('21:30'))).toBe(false);
+    // A suppressed truck-day: never. No target known: any final covers it (as before).
+    expect(routePullDue(day, { ...old, suppressedAt: T('12:00') }, 60, 60, T('17:30'))).toBe(false);
+    expect(routePullDue({ ...day, finalTargetAt: null, finalDueAt: null }, old, 60, 60, T('17:30'))).toBe(false);
+  });
+
+  it('finalsOf: the final pulls due now, and those due more than 30 min ago and not made', () => {
+    const day = (finalDueAt: Date, over: Partial<RouteDay> = {}): RouteDay => ({ truckId: 't1', imei: IMEI_A, date: DAY, kind: 'FINAL', lastCompletedAt: C, finalTargetAt: finalDueAt, finalDueAt, ...over });
+    const none = () => undefined;
+    expect(finalsOf([day(T('17:00')), day(T('16:20')), day(T('18:00')), day(T('16:00'), { kind: 'REGULAR' })], none, T('17:00'))).toEqual({ due: 2, overdue: 1 });
+    const made = { truckId: 't1', date: DAY, pulledTo: T('17:00'), lastPullAt: T('17:00'), pulls: 1, finalPullAt: T('17:00'), suppressedAt: null, trailFrom: null };
+    expect(finalsOf([day(T('16:20'))], () => made, T('17:00'))).toEqual({ due: 0, overdue: 0 });
+    expect(FINAL_OVERDUE_MS).toBe(30 * 60_000);
+  });
+
+  it('a day completed while the truck is out: regular pulls while it drives back, the final 15 min after the depot entry over the whole day, then nothing', async () => {
+    const fleet = [truck(1, ['DISPATCHED'], { imei: IMEI_A })];
+    const { store, ayun, tick } = setup(company({ mode: 'TIMES', dailyBudget: 3000, routePullMin: 60 }), fleet);
+    store.depotMoves.set(`t1|${DAY}`, [mv('DEPOT_OUT', '07:00')]);
+    const routes = () => ayun.calls.filter((c) => c.cmd === 'OBJECT_GET_ROUTE').map((c) => c.args.slice(1, 3));
+    await tick(T('10:00')); // out: the first pull of the day (and a live position: the provider's clock)
+    fleet[0]!.days[0]!.loads[0] = { loadNo: 1, status: 'COMPLETED', statusChangedAt: T('11:00') };
+    const r = await tick(T('11:10'));
+    // Before F6 this was the final pull over the whole day, to 11:10. Now an hourly pull of a truck driving back.
+    expect(routes()).toEqual([
+      ['20261016010000', '20261016060000'],
+      ['20261016055000', '20261016071000'],
+    ]);
+    expect(store.days.get(`t1|${DAY}`)?.finalPullAt).toBeNull();
+    expect(r?.route?.finals).toBeUndefined();
+    await tick(T('11:30'));
+    expect(routes()).toHaveLength(2);
+    // The depot webhook at 11:40; no exit within 15 min: the final at 11:55, over the whole day.
+    store.depotMoves.set(`t1|${DAY}`, [mv('DEPOT_OUT', '07:00'), mv('DEPOT_IN', '11:40')]);
+    await tick(T('11:50'));
+    expect(routes()).toHaveLength(2);
+    const fin = await tick(T('11:55'));
+    expect(fin?.route?.finals).toEqual({ due: 1, overdue: 0 });
+    expect(routes()[2]).toEqual(['20261016010000', '20261016075500']);
+    expect(store.days.get(`t1|${DAY}`)).toMatchObject({ finalPullAt: T('11:55'), pulledTo: T('11:55') });
+    await tick(T('12:30'));
+    await tick(T('15:00'));
+    expect(routes()).toHaveLength(3);
+    expect(logs.filter((l) => l.includes('final pull overdue'))).toEqual([]);
+  });
+
+  it('a final pull due more than 30 min ago and not made (the ROUTE share used up) is counted and logged once; once made, nothing', async () => {
+    const fleet = [truck(1, ['DISPATCHED'], { imei: IMEI_A })];
+    const { store, ayun, tick } = setup(company({ mode: 'TIMES', dailyBudget: 3000, routePullMin: 60 }), fleet);
+    await tick(T('10:00'));
+    fleet[0]!.days[0]!.loads[0] = { loadNo: 1, status: 'COMPLETED', statusChangedAt: T('11:00') };
+    store.depotMoves.set(`t1|${DAY}`, [mv('DEPOT_OUT', '07:00'), mv('DEPOT_IN', '11:20')]);
+    store.state!.routeCalls = 1_000_000;
+    const a = await tick(T('12:10'));
+    expect(a?.route?.finals).toEqual({ due: 1, overdue: 1 });
+    await tick(T('12:11'));
+    expect(logs.filter((l) => l.includes('final pull overdue'))).toEqual(['ivms: final pull overdue (1)']);
+    store.state!.routeCalls = 0;
+    await tick(T('12:12'));
+    // Over the whole day to the return + 30 min (11:50).
+    expect(ayun.calls.filter((c) => c.cmd === 'OBJECT_GET_ROUTE').at(-1)!.args.slice(1, 3)).toEqual(['20261016010000', '20261016075000']);
+    const done = await tick(T('12:13'));
+    expect(done?.route?.finals).toBeUndefined();
+    expect(logs.filter((l) => l.includes('final pull overdue'))).toHaveLength(1);
+  });
+
+  it('a final whose tracker is not readable with the key (NO_PERMISSION) counts as made: never asked again in a loop', async () => {
+    const fleet = [truck(1, ['DISPATCHED'], { imei: IMEI_A })];
+    let noPermission = false;
+    const { store, ayun, tick } = setup(company({ mode: 'TIMES', dailyBudget: 3000 }), fleet, (cmd) => (cmd === 'OBJECT_GET_ROUTE' && noPermission ? { body: 'ERROR: no permission to access this IMEI' } : undefined));
+    await tick(T('10:00'));
+    fleet[0]!.days[0]!.loads[0] = { loadNo: 1, status: 'COMPLETED', statusChangedAt: T('11:00') };
+    store.depotMoves.set(`t1|${DAY}`, [mv('DEPOT_OUT', '07:00'), mv('DEPOT_IN', '11:20')]);
+    noPermission = true;
+    await tick(T('11:40'));
+    await tick(T('11:41'));
+    await tick(T('12:30'));
+    expect(ayun.calls.filter((c) => c.cmd === 'OBJECT_GET_ROUTE')).toHaveLength(2);
+  });
 });

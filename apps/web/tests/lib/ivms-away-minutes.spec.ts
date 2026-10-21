@@ -43,11 +43,13 @@ const result = (at: string, source: VisitEvent['source'] = 'PHONE_MANUAL') => ev
 const office = (kind: 'ARRIVED' | 'DEPARTED', at: string) => ev(kind, 'DISPATCHER', at, { mode: 'OFFICE' });
 
 describe('the visit rebuild: the GPS departure of the stay that holds the result (owner request 19 Oct 2026)', () => {
-  it('a long trip away and back: tapped 07:56, GPS stays 07:47-08:27 and 09:20-14:23, result 14:17: left 14:23, 53 min away, 5 h 34 min on site', () => {
+  it('a long trip away and back: tapped 07:56, GPS stays 07:47-08:27 and 09:20-14:23, result 14:17: arrived 07:47 (GPS, the tap kept), left 14:23, 53 min away, 5 h 43 min on site', () => {
     const v = deriveVisit([tap('07:56'), gpsIn('07:47'), gpsOut('08:27', '07:47'), gpsIn('09:20', 53), gpsOut('14:23', '09:20'), result('14:17')], CTX);
-    expect(v).toMatchObject({ arrivalSource: 'PHONE_MANUAL', departureSource: 'AYUN', departedAtOutcome: false, awayMinutes: 53 });
+    // Owner decision 21 Oct 2026 (F1): the truck stood at the pin from 07:47, the tap 9 min later is kept as the driver's own.
+    expect(v).toMatchObject({ arrivalSource: 'AYUN', ownArrivalSource: 'PHONE_MANUAL', ownArrivedAt: L('07:56'), departureSource: 'AYUN', departedAtOutcome: false, awayMinutes: 53, afterResultMinutes: null });
+    expect(v.arrivedAt).toEqual(L('07:47'));
     expect(v.departedAt).toEqual(L('14:23'));
-    expect(actualMinutes(v)).toEqual({ min: 387 - 53, label: 'arrival to departure, less 53 min away', auto: false });
+    expect(actualMinutes(v)).toEqual({ min: 396 - 53, label: 'arrival to departure, less 53 min away', auto: false });
   });
 
   it('before the change the first stay\'s departure was shown (08:27, 351 min before the result)', () => {
@@ -69,9 +71,15 @@ describe('the visit rebuild: the GPS departure of the stay that holds the result
     expect(v.awayMinutes ?? null).toBeNull();
   });
 
-  it('the result + 15 min cap still applies: the holding stay left 50 min after the result, so the result ends the stop (time away still taken off)', () => {
+  it('the holding stay left 54 min after the result: its GPS departure is shown (F2, owner decision 21 Oct 2026), the 54 min are after the result and the unloading still ends at the result (time away taken off)', () => {
     const v = deriveVisit([tap('07:59'), gpsIn('07:59'), gpsOut('08:11', '07:59'), gpsIn('09:47', 96), gpsOut('11:30', '09:47'), result('10:36')], CTX);
-    expect(v).toMatchObject({ departureSource: 'PHONE_MANUAL', departedAtOutcome: true, awayMinutes: 96 });
+    expect(v).toMatchObject({ departureSource: 'AYUN', departedAtOutcome: false, awayMinutes: 96, afterResultMinutes: 54, ownDepartedAt: L('10:36'), ownDepartedAtOutcome: true });
+    expect(actualMinutes(v)).toEqual({ min: 157 - 96, label: 'arrival to departure, less 96 min away and 54 min after the result', auto: false });
+  });
+
+  it('the result + 60 min cap: the holding stay left more than an hour after the result, so the result ends the stop (time away still taken off)', () => {
+    const v = deriveVisit([tap('07:59'), gpsIn('07:59'), gpsOut('08:11', '07:59'), gpsIn('09:47', 96), gpsOut('11:40', '09:47'), result('10:36')], CTX);
+    expect(v).toMatchObject({ departureSource: 'PHONE_MANUAL', departedAtOutcome: true, awayMinutes: 96, afterResultMinutes: null });
     expect(actualMinutes(v).min).toBe(157 - 96);
   });
 
@@ -226,9 +234,10 @@ describe('on-site minutes everywhere an unloading is measured', () => {
       cfg: { avgSpeedKmh: 40, distanceMultiplier: 1.3, stopRadiusM: 100 },
     };
     const m = buildTruckDay(i);
-    expect(m.stops[0]).toMatchObject({ onSiteMin: 334, awayMin: 53 });
+    // The arrival is the GPS one since 21 Oct 2026 (F1): 07:47, the driver's 07:56 tap shown beside it.
+    expect(m.stops[0]).toMatchObject({ onSiteMin: 343, awayMin: 53 });
     const item = m.timeline.find((x) => x.kind === 'STOP')!;
-    expect(item.lines.join(' | ')).toMatch(/On site 334 min \(planned unloading 40 min; away 53 min not counted/);
+    expect(item.lines.join(' | ')).toMatch(/On site 343 min \(planned unloading 40 min; away 53 min not counted/);
     // The 07:47 stay (before the tap, still there at it) and the 09:20 stay (before the departure shown) are the stop's own.
     expect(m.timeline.filter((x) => x.kind === 'GPS_VISIT')).toEqual([]);
     expect(otherGpsStays([gpsIn('07:47'), gpsOut('08:27', '07:47'), gpsIn('09:20', 53), gpsOut('14:23', '09:20')], { arrivedAt: L('07:56') }).map((s) => s.when)).toEqual(['LATER']);

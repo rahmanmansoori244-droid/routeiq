@@ -54,7 +54,7 @@ import type { FactDepotTurn, FactLeg, FactTruckDay, FactVisit, Prisma } from '@p
 import { distanceM } from '../dispatch/snapshots';
 import { dateOnly, localMinutes, zonedDayStart } from '../dispatch/time';
 import { countedLeaveTap } from '../delivery/turnaround';
-import { withoutGpsTimes } from '../delivery/visit';
+import { afterResultOf, withoutGpsTimes } from '../delivery/visit';
 import { detectTruckDay, prevIndexOf, type DetectedTrip, type DetectorLoad, type ZoneMove } from '../ivms/stops';
 import type { DetectorParams, TrailPoint } from '../ivms/types';
 import { closestOf, dayTrailFacts, distanceAt, firstMoveOf, frozenRunsOf, kmBetween, overlapMin, siteOf, spikesOf, type AwayPeriod } from './gps';
@@ -156,6 +156,20 @@ export interface VisitIn {
   /** The pin the visit was planned with (copied at its first write). */
   plannedLat: number | null;
   plannedLng: number | null;
+  /**
+   * The driver's own times a GPS time replaced and the minutes after the result (owner decision 21 Oct 2026;
+   * lib/delivery/visit.ts): "Unloading by taps" restores the own times (withoutGpsTimes), "Unloading as
+   * RouteIQ holds it" ends at the result (the departure less the minutes after it).
+   */
+  ownArrivedAt: Date | null;
+  ownArrivalSource: string | null;
+  ownArrivalDistanceM: number | null;
+  ownArrivalAccuracyM: number | null;
+  ownArrivalObserved: boolean | null;
+  ownDepartedAt: Date | null;
+  ownDepartureSource: string | null;
+  ownDepartedAtOutcome: boolean | null;
+  afterResultMinutes: number | null;
 }
 
 /** A stop event of the truck-day (StopEvent: sequence null = load level). */
@@ -652,7 +666,10 @@ export function buildTruckDayFacts(input: TruckDayIn, baseSettings: AnalysisSett
       const distAtResult = tapKept ? tapKept.truckDistAtResultM : null;
       // Unloading.
       const own = v ? withoutGpsTimes({ ...v }) : null;
-      const unloadVisit = v ? clippedMinutes(v.arrivedAt, v.departedAt, winStartAt) : null;
+      // The minutes the truck still stood there after the driver's result (F2, owner decision 21 Oct 2026) are not unloading.
+      const after = v ? afterResultOf(v) : null;
+      const visitEnd = v?.departedAt && after ? new Date(ms(v.departedAt) - after * MIN) : (v?.departedAt ?? null);
+      const unloadVisit = v ? clippedMinutes(v.arrivedAt, visitEnd, winStartAt) : null;
       const unloadTap = own ? clippedMinutes(own.arrivedAt, own.departedAt, winStartAt) : null;
       let unloadSite: number | null = null;
       let onSite: number | null = null;

@@ -26,9 +26,9 @@
  * its time is only an upper bound) is corrected in place when a later pull brings the missing points (the
  * poller's final pull of the day re-reads the whole day, buffered points included) and the same stay is
  * now observed, or still unobserved but earlier (correctGpsEvent). An observed GPS time is never moved
- * within its stay. At most 4 AYUN events per stop, and none once the stop holds 36 of the 40 events
- * shared with the driver and the office (event-service.ts MAX_EVENTS_PER_VISIT): the driver always keeps
- * room.
+ * within its stay. At most 8 AYUN events per stop (4 until 21 Oct 2026, owner decision F3: up to 4 stays,
+ * stops.ts MAX_STAYS_PER_STOP), and none once the stop holds 32 of the 40 events shared with the driver and
+ * the office (event-service.ts MAX_EVENTS_PER_VISIT): the driver always keeps room.
  *
  * Big sites (owner request 19 Oct 2026, "at big customers the truck moves between drop points and the
  * model thinks it left"; the GPS study of 18-19 Oct 2026): the detector merges the stays of one site and
@@ -77,11 +77,12 @@ type Tx = Prisma.TransactionClient;
 /**
  * The detector's marker on every event it writes (payloadJson.detector): lib/ivms/types.ts, shared with the analysis facts.
  * ivms-v2 (owner request 19 Oct 2026): frozen runs as gaps, the customer's site radius, merged stays, held departures
- * and the stay summary in the payload; ivms-v1 events (16-19 Oct 2026) have no summary.
+ * and the stay summary in the payload; ivms-v1 events (16-19 Oct 2026) have no summary. ivms-v3 (owner decision
+ * 21 Oct 2026): up to 4 stays per stop and 8 events per visit, the payload unchanged.
  */
 export { DETECTOR_VERSION };
-/** At most this many AYUN arrivals and departures per stop. */
-export const MAX_AYUN_EVENTS_PER_VISIT = 4;
+/** At most this many AYUN arrivals and departures per stop (4 until 21 Oct 2026: owner decision F3, 4 stays per stop). */
+export const MAX_AYUN_EVENTS_PER_VISIT = 8;
 /** No GPS event once the stop holds this many arrivals, departures and results (of the shared 40). */
 export const AYUN_ROOM_LIMIT = MAX_EVENTS_PER_VISIT - MAX_AYUN_EVENTS_PER_VISIT;
 /** An AYUN event of the same kind this close (minutes) to a stay's start is that stay's (first write wins). */

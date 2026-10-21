@@ -544,6 +544,8 @@ function visitsTable(): Record<string, unknown>[] {
           stop: `${t.code} L${l.loadNo} #${i + 1} ${shop}`,
           arrived: v ? localS(v.arrivedAt) : '-',
           arrivalBy: v?.arrivedAt ? arrivalByText(v.arrivalSource, v.arrivalObserved) : '',
+          // The driver's own tap a GPS arrival replaced (owner decision 21 Oct 2026, F1); '' when none was replaced.
+          tapped: v?.arrivalSource === 'AYUN' && v.ownArrivedAt ? `${localS(v.ownArrivedAt)} ${arrivalByText(v.ownArrivalSource, v.ownArrivalObserved ?? true)}` : '',
           left: v ? (v.departedAtOutcome ? `${localS(v.departedAt)} (result)` : localS(v.departedAt)) : '-',
           leftBy: v?.departedAt && !v.departedAtOutcome ? `${v.departureSource}${dep?.payloadJson?.gap ? ' (not observed)' : ''}` : '',
           result: v?.outcome ? `${v.outcome} by ${v.outcomeSource} ${local(v.outcomeAt)}` : 'no result',
@@ -638,7 +640,12 @@ describe('a whole invented day at 100 calls a day: the allowance', () => {
     expect(n.OBJECT_GET_ROUTE ?? 0).toBeLessThanOrEqual(d.shares.ROUTE!);
     expect(n.OBJECT_GET_LAST_EVENTS ?? 0).toBe(0); // no backstop below 1,000 a day
     expect(d.calls[0]!.at.getTime()).toBeGreaterThanOrEqual(T('05:30').getTime());
-    expect(d.calls[d.calls.length - 1]!.at.getTime()).toBeLessThan(T('10:30').getTime());
+    // F6 (owner decision 21 Oct 2026): T05's last load was completed at 10:12 with only the trail's depot moves known
+    // (no webhook): it was out at 08:46 and its entry at 09:58 shows with the next regular pull (10:55), so the final
+    // pull follows it there, not at 10:22. Nothing after the last final pull.
+    const lastFinal = Math.max(...d.truckDays.filter((x) => x.finalPull !== '-').map((x) => T(String(x.finalPull)).getTime()));
+    expect(d.calls[d.calls.length - 1]!.at.getTime()).toBeLessThan(lastFinal + 60_000);
+    expect(d.calls[d.calls.length - 1]!.at.getTime()).toBeLessThan(T('11:00').getTime());
   });
 
   it('every truck-day with a tracker gets its final pull; the truck without one is never asked about', () => {
@@ -655,9 +662,12 @@ describe('a whole invented day in TIMES: what the visits show', () => {
     expect(visitOf('OFF', 'T05 L1 #1 A')).toMatchObject({ arrived: '-', result: 'DELIVERED by PHONE_MANUAL 07:15' });
   });
 
-  it("the driver's tap stays the arrival; GPS only adds the departure the phone did not have", () => {
-    expect(visitOf('TIMES', 'T05 L1 #2 B')).toMatchObject({ arrived: '07:27:00', arrivalBy: 'Manual', leftBy: 'AYUN' });
-    expect(visitOf('TIMES', 'T06 L1 #1 F')).toMatchObject({ arrived: '07:24:00', arrivalBy: 'Manual', leftBy: 'AYUN' });
+  it("a tap made while the truck had stood at the stop for more than 2 min shows the GPS arrival, the tap kept (owner decision 21 Oct 2026, F1); GPS adds the departure the phone did not have", () => {
+    expect(visitOf('TIMES', 'T05 L1 #2 B')).toMatchObject({ arrived: '07:24:30', arrivalBy: 'GPS (Ayun)', tapped: '07:27:00 Manual', leftBy: 'AYUN' });
+    expect(visitOf('TIMES', 'T06 L1 #1 F')).toMatchObject({ arrived: '07:20:30', arrivalBy: 'GPS (Ayun)', tapped: '07:24:00 Manual', leftBy: 'AYUN' });
+    // With the link off both are the driver's taps.
+    expect(visitOf('OFF', 'T05 L1 #2 B')).toMatchObject({ arrived: '07:27:00', arrivalBy: 'Manual' });
+    expect(visitOf('OFF', 'T06 L1 #1 F')).toMatchObject({ arrived: '07:24:00', arrivalBy: 'Manual' });
   });
 
   it('a coverage gap before the stop: the GPS arrival is marked not observed and never measured or counted on time', () => {
@@ -684,7 +694,8 @@ describe('a whole invented day in TIMES: what the visits show', () => {
     for (const [i, v] of d.visits.entries()) {
       const off = days.OFF!.visits[i]!;
       expect(v.result).toBe(off.result);
-      if (off.arrived !== '-') expect([v.arrived, v.arrivalBy]).toEqual([off.arrived, off.arrivalBy]);
+      // The driver's own arrival is kept: the shown one, or the tap a GPS arrival replaced (F1).
+      if (off.arrived !== '-') expect(v.tapped ? v.tapped : `${v.arrived} ${v.arrivalBy}`).toEqual(`${off.arrived} ${off.arrivalBy}`);
     }
   });
 
