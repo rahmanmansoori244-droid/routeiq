@@ -4,7 +4,7 @@
  * pins as metre offsets from it; trucks and customers are made up.
  */
 import { describe, expect, it } from 'vitest';
-import { detectTruckDay, loadAnchor, matchTripsToLoads, staysAt, trackerMismatch, trailDepotMoves, tripsOf, type DetectorInput, type DetectorLoad, type DetectorStop, type DetectedTrip } from '@/lib/ivms/stops';
+import { detectTruckDay, loadAnchor, MAX_STAYS_PER_STOP, matchTripsToLoads, staysAt, trackerMismatch, trailDepotMoves, tripsOf, type DetectorInput, type DetectorLoad, type DetectorStop, type DetectedTrip } from '@/lib/ivms/stops';
 import { DETECTOR_FIXED, type DetectorParams, type TrailPoint } from '@/lib/ivms/types';
 import { T, Trail, at, hhmm } from './ivms-trail';
 
@@ -123,11 +123,17 @@ describe('two pins inside together, out of sequence, coming back (H4)', () => {
     ]);
   });
 
-  it('coming back to a stop gives a second stay; never more than two', () => {
+  it('coming back to a stop gives a further stay each time; never more than four (two until 21 Oct 2026, owner decision F3)', () => {
     const trail = new Trail('06:30').park(30).drive(3000).park(5).drive(4000).park(5).drive(3000).park(5).drive(4000).park(5).drive(3000).park(5).drive(9000).park(30);
-    const out = detectTruckDay(input(trail.pts, [load(1, [stop(1, 3000)])]));
-    expect(out.candidates.filter((c) => c.kind === 'ARRIVED')).toHaveLength(2);
-    expect(out.candidates.filter((c) => c.kind === 'DEPARTED')).toHaveLength(2);
+    const three = detectTruckDay(input(trail.pts, [load(1, [stop(1, 3000)])]));
+    expect(three.candidates.filter((c) => c.kind === 'ARRIVED')).toHaveLength(3);
+    expect(three.candidates.filter((c) => c.kind === 'DEPARTED')).toHaveLength(3);
+    let five = new Trail('06:30').park(30).drive(3000).park(5);
+    for (let i = 0; i < 4; i++) five = five.drive(4000).park(5).drive(3000).park(5);
+    const out = detectTruckDay(input(five.drive(9000).park(30).pts, [load(1, [stop(1, 3000)])]));
+    expect(out.candidates.filter((c) => c.kind === 'ARRIVED')).toHaveLength(4);
+    expect(out.candidates.filter((c) => c.kind === 'DEPARTED')).toHaveLength(4);
+    expect(MAX_STAYS_PER_STOP).toBe(4);
   });
 
   it('a stay still in progress at the end of the trail gives an arrival only', () => {

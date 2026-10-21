@@ -148,7 +148,7 @@ export async function purgeOldLocations(now: Date = new Date(), db: Db = prisma)
       const ids = (await db.stopVisit.findMany({ where: { tenantId: t.tenantId, deliveryDate: { lt: cutoffDay }, locationPurgedAt: null }, take: JANITOR_BATCH, select: { id: true } })).map((v) => v.id);
       if (!ids.length) break;
       mine.visits += (
-        await db.stopVisit.updateMany({ where: { tenantId: t.tenantId, id: { in: ids } }, data: { outcomeLat: null, outcomeLng: null, outcomeAccuracyM: null, arrivalAccuracyM: null, locationPurgedAt: now } })
+        await db.stopVisit.updateMany({ where: { tenantId: t.tenantId, id: { in: ids } }, data: { outcomeLat: null, outcomeLng: null, outcomeAccuracyM: null, arrivalAccuracyM: null, ownArrivalAccuracyM: null, locationPurgedAt: now } })
       ).count;
       if (ids.length < JANITOR_BATCH) break;
     }

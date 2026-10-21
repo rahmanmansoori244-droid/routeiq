@@ -33,6 +33,7 @@ import {
 } from '@/lib/ivms/truck-day';
 import { zonedDayStart } from '@/lib/dispatch/time';
 import { countedLeaveTap, turnaroundOf } from '@/lib/delivery/turnaround';
+import { NO_OWN_TIMES } from '@/lib/delivery/visit';
 
 const TZ = 'Asia/Muscat';
 const DATE = '2026-10-20';
@@ -81,6 +82,7 @@ const L2: TruckDayLoadInput = {
 };
 
 const visit = (loadNo: number, sequence: number, fields: Partial<TruckDayVisitInput>): TruckDayVisitInput => ({
+  ...NO_OWN_TIMES,
   depotId: 'D1',
   loadNo,
   sequence,

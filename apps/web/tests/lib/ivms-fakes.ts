@@ -8,6 +8,7 @@
 import { utcDay } from '@/lib/ivms/budget';
 import { readIvmsEnv, type IvmsEnv } from '@/lib/ivms/env';
 import { MAX_EVENTS_PER_TRUCK_DAY, type DepotZone, type NewZoneEvent } from '@/lib/ivms/events';
+import type { DepotMove } from '@/lib/ivms/poll';
 import type { ClaimLimits, FleetTruck, IvmsCompany, IvmsStateRow, IvmsStore, TruckDayRow, WebhookCounter } from '@/lib/ivms/store';
 import type { GpsTimesSummary } from '@/lib/ivms/stop-events';
 import { CALL_CLASS_COUNTER, MOVING_KMH, type AyunErrorKind, type IvmsCallClass, type LiveFix, type TrailPoint } from '@/lib/ivms/types';
@@ -67,6 +68,8 @@ export class MemoryIvmsStore implements IvmsStore {
   positions = new Map<string, { fix: LiveFix; receivedAt: Date; movedAt: Date | null }>();
   trail = new Map<string, Map<number, TrailPoint>>();
   days = new Map<string, TruckDayRow>();
+  /** F6: the depot moves the Prisma store reads for a truck-day (`truckId|date`), joined to the fleet as it does. */
+  depotMoves = new Map<string, DepotMove[]>();
   events: (NewZoneEvent & { tenantId: string; receivedAt: Date })[] = [];
   /** Every store call by name (the OFF tests: nothing at all beyond the company). */
   touched: string[] = [];
@@ -119,7 +122,14 @@ export class MemoryIvmsStore implements IvmsStore {
   }
   async fleet(_c: IvmsCompany, now: Date) {
     this.touched.push('fleet');
-    return this.fleetOf(now);
+    if (!this.depotMoves.size) return this.fleetOf(now);
+    return this.fleetOf(now).map((t) => ({
+      ...t,
+      days: t.days.map((d) => {
+        const moves = this.depotMoves.get(`${t.truckId}|${d.date}`);
+        return moves ? { ...d, depotMoves: [...moves].sort((a, b) => a.at.getTime() - b.at.getTime()) } : d;
+      }),
+    }));
   }
   async depotZones() {
     this.touched.push('depotZones');

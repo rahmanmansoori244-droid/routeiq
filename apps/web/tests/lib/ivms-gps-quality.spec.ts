@@ -439,7 +439,7 @@ describe('the writer: a dock move never writes a departure; a real one is writte
     r = await processGpsTimes(TEN, 't5', DATE, T('07:33'));
     expect(gps(1).map((e) => `${e.kind} ${hhmm(e.at)}`)).toEqual(['ARRIVED 07:04', 'DEPARTED 07:31']);
     expect(gps(1)[1]!.payloadJson).toMatchObject({ detector: DETECTOR_VERSION, observed: true, stay: { merged: 1, maxDistM: 350, exitRule: 'FAST' } });
-    expect(DETECTOR_VERSION).toBe('ivms-v2');
+    expect(DETECTOR_VERSION).toBe('ivms-v3');
     expect(visitOf(1)).toMatchObject({ arrivalSource: 'AYUN', departureSource: 'AYUN', awayMinutes: null });
     expect(visitOf(1)!.departedAt).toEqual(T('07:31'));
   });

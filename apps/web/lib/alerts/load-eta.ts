@@ -37,6 +37,11 @@ export interface EtaFactPhoto {
 export interface EtaFactVisit {
   arrivedAt: Date | null;
   arrivalSource: string | null;
+  /**
+   * The driver's own arrival tap a GPS arrival replaced (owner decision 21 Oct 2026, StopVisit.ownArrivedAt): the
+   * driver confirmed the stop, so it is followed as a tapped one, not as a GPS stay alone. Absent: none.
+   */
+  ownArrivedAt?: Date | null;
   departedAt: Date | null;
   outcome: string | null;
   outcomeAt: Date | null;
@@ -105,7 +110,7 @@ export function projectionStopsOf(stops: readonly EtaFactStop[], o: { date: stri
     // GPS: a stop with an arrival and nothing that ends it, where the GPS knows better than the clock
     // (the truck away from it, or a GPS stay the trail lost sight of): its projected end (gps.ts openStayEnd).
     if (gps && o.gps && v?.arrivedAt && !v.departedAt && !v.outcome) {
-      endAt = openStayEnd({ arrivedAt: v.arrivedAt, gpsArrival: isGps(v.arrivalSource), plannedServiceMin: plannedServiceOf(s) }, liveAt(gps, s.pin, atStopRadiusOf(o.gps.settings, s.siteRadiusM), o.now), gps, o.now);
+      endAt = openStayEnd({ arrivedAt: v.arrivedAt, gpsArrival: isGps(v.arrivalSource) && !v.ownArrivedAt, plannedServiceMin: plannedServiceOf(s) }, liveAt(gps, s.pin, atStopRadiusOf(o.gps.settings, s.siteRadiusM), o.now), gps, o.now);
     }
     // M3: a delivery photo of the driver's phone is the truck being there, when no arrival was recorded.
     const arrAt = v?.arrivedAt ?? firstPhotoAt(v);

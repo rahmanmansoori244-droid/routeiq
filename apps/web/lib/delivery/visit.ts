@@ -49,6 +49,25 @@
  * - GPS never writes a result, so the result and the driver facts never come from it; the
  *   plausibility flags stay phone-only (a GPS position is never pin evidence).
  * - The operations alerts read the visit without its GPS times (withoutGpsTimes), until ivmsMode ALERTS.
+ *
+ * GPS times win over late phone times (owner decision 21 Oct 2026, "GPS arrival should win of course"; the
+ * GPS timing study of 19-20 Oct 2026: Ayun's own detection was right, the times shown were wrong on about
+ * 15% of the visits because of the rules above). The office's times still always win; the driver's taps stay
+ * recorded (StopEvent, and the replaced times in the visit's own* fields, withOwnTimes):
+ * - F1 GPS arrival wins: a phone arrival (a tap, a "when?" answer, an automatic one) made more than
+ *   GPS_ARRIVAL_WINS_MIN after an observed GPS stay at the stop began, while the truck was still standing
+ *   there (at most GPS_TAP_LOOKBACK_MIN after it began), shows the GPS arrival.
+ * - F2 the GPS departure after the result: the GPS stay that holds the driver's own result gives its observed
+ *   departure (not one after a gap) up to GPS_MAX_AFTER_RESULT_MIN after the result (else the 15-minute rule,
+ *   as before), unless the driver worked at another stop of the truck-day in between
+ *   (VisitContext.otherStopTimes). The minutes more than AFTER_RESULT_UNLOADING_MIN after the result are
+ *   "after the result" (afterResultMinutes), never unloading: every unloading time still ends at the result.
+ * - F4 a GPS departure replaces the phone's automatic departure (PHONE_AUTO) when it is observed and more than
+ *   GPS_DEPARTURE_WINS_MIN away from it (without a result, only when the truck did not come back to the pin
+ *   before the phone's departure); the automatic timing stays the phone's (M3, H-2).
+ * - F5 late taps (lateTapVisit): the arrival and a result tapped within LATE_TAP_TOGETHER_MIN of each other,
+ *   at least LATE_TAP_GAP_MIN after the last GPS stay at the stop ended and with none in progress: the taps
+ *   were made after leaving, the visit shows that stay's arrival and departure.
  */
 import { distanceM } from '../dispatch/snapshots';
 
@@ -113,6 +132,13 @@ export interface VisitContext {
   radiusM: number;
   /** A departure later than the result + this is capped at the result (default 15). */
   maxAfterOutcomeMin?: number;
+  /**
+   * The times of the phone's ARRIVED and OUTCOME events (PHONE_MANUAL / PHONE_AUTO) at the truck-day's OTHER
+   * visits (F2's neighbour guard, owner decision 21 Oct 2026): when one falls between this visit's result and
+   * its GPS departure, the driver was already working elsewhere, so the GPS departure is not this visit's end
+   * and the 15-minute rule applies. Absent: none known (the rebuild reads them only for a visit with GPS events).
+   */
+  otherStopTimes?: readonly Date[];
 }
 
 export interface VisitState {
@@ -165,12 +191,51 @@ export interface VisitState {
    * events has the field (absent otherwise: the rebuild without GPS is unchanged); null: none.
    */
   awayMinutes?: number | null;
+  /**
+   * The driver's and the office's own times that a GPS time REPLACED (owner decision 21 Oct 2026, F1/F4/F5
+   * and the result standing in for a departure: withOwnTimes), so the visit "without GPS" stays exact
+   * (withoutGpsTimes) and the driver page, the photo check, the office's "Left" check and the KPI read the
+   * driver's own arrival (ownArrivalOf). Set only when the shown arrival (departure) is AYUN and an own one
+   * existed; null otherwise on a visit with GPS events; undefined on a visit without any (deriveOwnVisit:
+   * the JSON of the golden rebuild is unchanged). The source is never AYUN.
+   */
+  ownArrivedAt: Date | null | undefined;
+  ownArrivalSource: EventSource | null | undefined;
+  ownArrivalDistanceM: number | null | undefined;
+  ownArrivalAccuracyM: number | null | undefined;
+  ownArrivalObserved: boolean | null | undefined;
+  ownDepartedAt: Date | null | undefined;
+  ownDepartureSource: EventSource | null | undefined;
+  ownDepartedAtOutcome: boolean | null | undefined;
+  /**
+   * F2 (owner decision 21 Oct 2026): the minutes the truck still stood at the stop after the driver's result,
+   * when the GPS departure shown is more than AFTER_RESULT_UNLOADING_MIN after it (the time away in that span
+   * taken off). Never unloading: unloading = departure - arrival - awayMinutes - afterResultMinutes, which ends
+   * at the result. Null: none; undefined on a visit without GPS events.
+   */
+  afterResultMinutes: number | null | undefined;
 }
 
 const AUTO: ReadonlySet<EventSource> = new Set(['PHONE_AUTO', 'AYUN']);
 const PHONE: ReadonlySet<EventSource> = new Set(['PHONE_AUTO', 'PHONE_MANUAL']);
 /** A GPS departure counts only for a GPS stay that began at most this long after the chosen arrival. */
 export const GPS_DEPARTURE_MATCH_MIN = 15;
+/** F1 (owner decision 21 Oct 2026): a phone arrival more than this after the observed GPS arrival of the stay it was made in shows the GPS one. */
+export const GPS_ARRIVAL_WINS_MIN = 2;
+/** F1 and F5: a GPS stay that began (F1) or ended (F5) more than this before the driver's tap is never used for it. */
+export const GPS_TAP_LOOKBACK_MIN = 240;
+/** F2: the GPS departure of the stay holding the driver's result is shown up to this long after the result. */
+export const GPS_MAX_AFTER_RESULT_MIN = 60;
+/** F2: the minutes of a GPS departure after the result beyond this are "after the result", never unloading (today's 15-minute rule). */
+export const AFTER_RESULT_UNLOADING_MIN = 15;
+/** F4: a GPS departure replaces the phone's automatic departure only when the two differ by more than this. */
+export const GPS_DEPARTURE_WINS_MIN = 2;
+/** F5: the arrival and the result tapped within this of each other ... */
+export const LATE_TAP_TOGETHER_MIN = 3;
+/** ... at least this long after a GPS stay at the stop ended ... */
+export const LATE_TAP_GAP_MIN = 10;
+/** ... a stay the truck stood still at for at least this long (the detector's stay summary; ivms-v1 events have none and pass). */
+export const LATE_TAP_MIN_STAND_MIN = 3;
 
 const t = (d: Date) => d.getTime();
 const isObserved = (e: VisitEvent) => e.payload?.observed !== false;
@@ -315,17 +380,99 @@ const minutesBetween = (a: number, b: number) => (b - a) / 60_000;
 
 /**
  * The visit rebuilt from all its events (spec section 8.4). Pure. The driver's and the office's events
- * make the visit exactly as with the IVMS link off; GPS (AYUN) events then only fill its gaps (withGps).
+ * make the visit exactly as with the IVMS link off (deriveOwnVisit: the golden rebuild); with GPS (AYUN)
+ * events, the late-tap rule (lateTapVisit, F5) or withGps (fills the gaps, F1/F2/F4) then gives the times
+ * shown, and the own times a GPS time replaced are kept on the visit (withOwnTimes).
  */
 export function deriveVisit(events: readonly VisitEvent[], ctx: VisitContext): VisitState {
   const gps = events.filter((e) => e.source === 'AYUN' && (e.kind === 'ARRIVED' || e.kind === 'DEPARTED'));
-  const base = deriveOwnVisit(gps.length ? events.filter((e) => e.source !== 'AYUN') : events, ctx);
-  return gps.length ? withGps(base, gps, ctx) : base;
+  if (!gps.length) return deriveOwnVisit(events, ctx);
+  const own = deriveOwnVisit(events.filter((e) => e.source !== 'AYUN'), ctx);
+  const shown = lateTapVisit(own, gps, events) ?? withGps(own, gps, ctx);
+  return withOwnTimes(shown, own);
+}
+
+/**
+ * The shown visit with the own times the GPS replaced (owner decision 21 Oct 2026): the arrival the driver's
+ * and the office's events alone gave when the shown arrival is AYUN (F1, F5; null for a stop that had none),
+ * and their departure (a real one, or the result standing in for it) when the shown departure is AYUN (F2,
+ * F4, F5). Never an AYUN source: `own` is rebuilt without the GPS events.
+ */
+function withOwnTimes(shown: VisitState, own: VisitState): VisitState {
+  const arr = shown.arrivalSource === 'AYUN' && own.arrivedAt !== null;
+  const dep = shown.departureSource === 'AYUN' && own.departedAt !== null;
+  return {
+    ...shown,
+    ownArrivedAt: arr ? own.arrivedAt : null,
+    ownArrivalSource: arr ? own.arrivalSource : null,
+    ownArrivalDistanceM: arr ? own.arrivalDistanceM : null,
+    ownArrivalAccuracyM: arr ? own.arrivalAccuracyM : null,
+    ownArrivalObserved: arr ? own.arrivalObserved : null,
+    ownDepartedAt: dep ? own.departedAt : null,
+    ownDepartureSource: dep ? own.departureSource : null,
+    ownDepartedAtOutcome: dep ? own.departedAtOutcome : null,
+    afterResultMinutes: shown.afterResultMinutes ?? null,
+  };
+}
+
+/** The shown arrival fields of a GPS arrival event. */
+function gpsArrivalFields(a: VisitEvent): Pick<VisitState, 'arrivedAt' | 'arrivalSource' | 'arrivalDistanceM' | 'arrivalAccuracyM' | 'arrivalObserved'> {
+  return { arrivedAt: a.at, arrivalSource: 'AYUN', arrivalDistanceM: num(a.distanceM) ?? null, arrivalAccuracyM: num(a.accuracyM) ?? null, arrivalObserved: isObserved(a) };
+}
+
+/**
+ * F5, the late-tap rule (owner decision 21 Oct 2026; strict: the GPS timing study of 19-20 Oct 2026 found a
+ * looser one wrong on a real visit). The driver tapped "I arrived" and saved a result together, after the
+ * truck had already left the stop: the visit shows the GPS stay's arrival and departure. All of these hold:
+ * 1. the own arrival is the phone's (a tap, a "when?" answer, an automatic one; never the office's), and the
+ *    office entered no Left;
+ * 2. no GPS stay at the stop is in progress at the tap (a minute either side): then F1 applies instead;
+ * 3. the last GPS stay that ended before the tap ended at least LATE_TAP_GAP_MIN and at most
+ *    GPS_TAP_LOOKBACK_MIN before it (review of 21 Oct 2026: a later stay that ended less than
+ *    LATE_TAP_GAP_MIN before the tap is never skipped for an older one: no rule then);
+ * 4. the truck stood still there at least LATE_TAP_MIN_STAND_MIN (its stay summary; ivms-v1 events, with
+ *    none, pass);
+ * 5. a phone result (any of them: a result corrected later does not undo the rule) within
+ *    LATE_TAP_TOGETHER_MIN of the tap, and the visit has a result now (review of 21 Oct 2026: after the
+ *    driver's Undo the stop is in progress again on his phone, as without GPS).
+ * Only that last stay is shown (a big site with two unmerged stays before the taps: a known limit). The
+ * result, the automatic timing and the flags stay the driver's; no minutes away or after the result.
+ */
+function lateTapVisit(own: VisitState, gpsEvents: readonly VisitEvent[], events: readonly VisitEvent[]): VisitState | null {
+  if (!own.arrivedAt || !own.arrivalSource || !PHONE.has(own.arrivalSource) || own.departureSource === 'DISPATCHER' || !own.outcome) return null;
+  const a = t(own.arrivedAt);
+  const cycles = cyclesOf(gpsEvents);
+  const tol = 60_000;
+  if (cycles.some((c) => c.start <= a + tol && (!c.departure || t(c.departure.at) >= a - tol))) return null;
+  // The stays do not overlap (cyclesOf): the last one left before the tap is the one that ended last.
+  const ended = cycles.filter((c) => c.departure && t(c.departure.at) < a);
+  const stay = ended[ended.length - 1];
+  if (!stay?.departure) return null;
+  const sinceLeft = a - t(stay.departure.at);
+  if (sinceLeft <= LATE_TAP_GAP_MIN * 60_000 || sinceLeft > GPS_TAP_LOOKBACK_MIN * 60_000) return null;
+  const standMin = num((stay.arrivals[0]?.payload?.stay as { standMin?: unknown } | null | undefined)?.standMin);
+  if (standMin !== null && standMin < LATE_TAP_MIN_STAND_MIN) return null;
+  const together = events.some((e) => e.kind === 'OUTCOME' && PHONE.has(e.source) && typeof e.payload?.outcome === 'string' && Math.abs(t(e.at) - a) <= LATE_TAP_TOGETHER_MIN * 60_000);
+  if (!together) return null;
+  const out: VisitState = {
+    ...own,
+    ...gpsArrivalFields(gpsArrivalOf(stay)),
+    departedAt: stay.departure.at,
+    departureSource: 'AYUN',
+    departedAtOutcome: false,
+    departureGap: stay.departure.payload?.gap === true,
+    awayMinutes: null,
+    afterResultMinutes: null,
+  };
+  out.state = 'DONE'; // the visit has a result (condition 5)
+  return out;
 }
 
 /**
  * The GPS (AYUN) events fill what the driver and the office left empty (see the header): the arrival of a
- * stop that has none, the departure of a stop nothing else ends. The automatic timing stays the phone's.
+ * stop that has none, the departure of a stop nothing else ends; and since 21 Oct 2026 (owner decision) they
+ * replace a phone arrival made late in the GPS stay (F1), the phone's automatic departure (F4), and the result
+ * standing in for the departure up to an hour after it (F2). The automatic timing stays the phone's.
  */
 function withGps(v: VisitState, gpsEvents: readonly VisitEvent[], ctx: VisitContext): VisitState {
   const cycles = cyclesOf(gpsEvents);
@@ -343,13 +490,29 @@ function withGps(v: VisitState, gpsEvents: readonly VisitEvent[], ctx: VisitCont
     if (c && a && (v.departedAt === null || t(a.at) < t(v.departedAt))) {
       stay = c;
       arrivalAt = t(a.at);
-      out.arrivedAt = a.at;
-      out.arrivalSource = 'AYUN';
-      out.arrivalDistanceM = num(a.distanceM) ?? null;
-      out.arrivalAccuracyM = num(a.accuracyM) ?? null;
-      out.arrivalObserved = isObserved(a);
+      Object.assign(out, gpsArrivalFields(a));
     }
   } else {
+    if (v.arrivalSource && PHONE.has(v.arrivalSource)) {
+      // F1 (owner decision 21 Oct 2026): the truck was already standing at the stop when the driver tapped (or
+      // the phone noticed): the GPS stay in progress at that time began more than GPS_ARRIVAL_WINS_MIN earlier,
+      // and its arrival was observed. The office's arrival always wins; a tap before the stay (on the approach),
+      // an unobserved GPS arrival (only an upper bound) or a stay begun hours before keep the tap.
+      const a0 = arrivalAt;
+      const cover = cycles.filter((c) => c.start <= a0 && (!c.departure || t(c.departure.at) >= a0));
+      const c = cover[cover.length - 1];
+      const ga = c ? gpsArrivalOf(c) : null;
+      if (
+        ga &&
+        isObserved(ga) &&
+        t(ga.at) < a0 - GPS_ARRIVAL_WINS_MIN * 60_000 &&
+        a0 - t(ga.at) <= GPS_TAP_LOOKBACK_MIN * 60_000 &&
+        (v.departedAt === null || t(ga.at) < t(v.departedAt))
+      ) {
+        arrivalAt = t(ga.at);
+        Object.assign(out, gpsArrivalFields(ga), { arrivalAccuracyM: null });
+      }
+    }
     const at = arrivalAt;
     // The stays not left before the arrival shown, and those of them that began at most 15 min after it.
     const live = cycles.filter((c) => !c.departure || t(c.departure.at) > at);
@@ -376,16 +539,42 @@ function withGps(v: VisitState, gpsEvents: readonly VisitEvent[], ctx: VisitCont
     // return they hold is never counted as unloading.
     stay = later && (later.start <= at + match || later.arrivals.some(hasStaySummary)) ? later : ofArrival;
   }
+  const dep = stay?.departure ?? null;
+  // A GPS departure found after a gap in the trail is only an upper bound (lib/alerts/gps.ts principle 3).
+  const depObserved = !!dep && dep.payload?.gap !== true;
+  // F2 (owner decision 21 Oct 2026): the GPS stay that holds the driver's own result (begun at or before it,
+  // not left before it) gives its OBSERVED departure up to GPS_MAX_AFTER_RESULT_MIN after the result, unless
+  // the driver tapped at another stop of the truck-day in between (the neighbour guard: the truck stood here,
+  // the driver worked elsewhere). An office result, any other stay or a departure after a gap (review of 21 Oct
+  // 2026: it would end the unloading alert's measure, "not certain"): the 15-minute rule, as before.
+  const holdsDriverResult =
+    !!stay && outcomeAt !== null && v.outcomeSource !== 'DISPATCHER' && stay.start <= outcomeAt && (!stay.departure || t(stay.departure.at) >= outcomeAt);
+  const neighbour = holdsDriverResult && !!dep && (ctx.otherStopTimes ?? []).some((d) => t(d) > outcomeAt! && t(d) < t(dep.at));
+  const cap = holdsDriverResult && depObserved && !neighbour ? GPS_MAX_AFTER_RESULT_MIN * 60_000 : maxAfter;
+  // F4 (owner decision 21 Oct 2026): the phone's automatic departure is replaced by an observed GPS one more
+  // than GPS_DEPARTURE_WINS_MIN away from it (two measurements of the same moment are left alone). A manual
+  // departure and the office's Left never are. Without a result (review of 21 Oct 2026), only when no other GPS
+  // stay began between this stay and the phone's departure: the truck came back to the pin, and the phone's
+  // departure is the later stay's, not this one's.
+  const phoneDepAt = v.departureSource === 'PHONE_AUTO' && v.departedAt !== null ? t(v.departedAt) : null;
+  const cameBack = outcomeAt === null && !!stay && phoneDepAt !== null && cycles.some((c) => c.start > stay!.start && c.start < phoneDepAt);
+  const autoDiffers = phoneDepAt !== null && depObserved && !cameBack && Math.abs(t(dep!.at) - phoneDepAt) > GPS_DEPARTURE_WINS_MIN * 60_000;
   // The result time is only a stand-in for a departure nobody saw, unless the phone's automatic timing ends
   // there ("Auto to result"): that one is never replaced (second review H-2).
-  const standIn = v.departedAtOutcome && v.autoBasis !== 'RESULT';
+  const standIn = (v.departedAtOutcome && v.autoBasis !== 'RESULT') || autoDiffers;
+  let afterResult: number | null = null;
   if ((out.departedAt === null || standIn) && arrivalAt !== null) {
-    const dep = stay?.departure ?? null;
-    if (dep && t(dep.at) > arrivalAt && !(outcomeAt !== null && t(dep.at) > outcomeAt + maxAfter)) {
+    if (dep && t(dep.at) > arrivalAt && !(outcomeAt !== null && t(dep.at) > outcomeAt + cap)) {
       out.departedAt = dep.at;
       out.departureSource = 'AYUN';
       out.departureGap = dep.payload?.gap === true;
       out.departedAtOutcome = false;
+      if (outcomeAt !== null && t(dep.at) > outcomeAt + AFTER_RESULT_UNLOADING_MIN * 60_000) {
+        // F2: the minutes after the result are not unloading (the time away in them is taken off once, there).
+        const span = minutesBetween(outcomeAt, t(dep.at)) - (awayMinutesOf(gpsEvents, outcomeAt, t(dep.at)) ?? 0);
+        const r = Math.round(span * 10) / 10;
+        afterResult = r > 0 ? r : null;
+      }
     } else if (out.departedAt === null && out.arrivalSource === 'AYUN' && outcomeAt !== null && outcomeAt >= arrivalAt && v.outcomeSource !== 'DISPATCHER') {
       // A GPS arrival and the driver's result: the result ends the stop, as for any arrival.
       out.departedAt = new Date(outcomeAt);
@@ -396,6 +585,7 @@ function withGps(v: VisitState, gpsEvents: readonly VisitEvent[], ctx: VisitCont
   }
   // Owner request 19 Oct 2026: the time the truck was away (a leave-and-return) inside the visit shown.
   out.awayMinutes = out.arrivedAt ? awayMinutesOf(gpsEvents, t(out.arrivedAt), out.departedAt ? t(out.departedAt) : null) : null;
+  out.afterResultMinutes = afterResult;
   out.state = out.outcome ? 'DONE' : out.arrivedAt && out.departedAt === null ? 'ARRIVED' : 'PENDING';
   return out;
 }
@@ -440,6 +630,61 @@ export interface VisitTimes {
   outcomeSource: string | null;
   /** The minutes away the GPS stays showed inside the visit (owner request 19 Oct 2026); absent or null: none. */
   awayMinutes?: number | null;
+  /**
+   * The own times a GPS time replaced and the minutes after the result (owner decision 21 Oct 2026, VisitState).
+   * Required keys (a value, null, or undefined on a visit rebuilt without GPS events), so a row read with a
+   * `select` that forgot them does not compile: withoutGpsTimes could not restore the driver's times.
+   */
+  ownArrivedAt: Date | null | undefined;
+  ownArrivalSource: string | null | undefined;
+  ownArrivalDistanceM: number | null | undefined;
+  ownArrivalAccuracyM: number | null | undefined;
+  ownArrivalObserved: boolean | null | undefined;
+  ownDepartedAt: Date | null | undefined;
+  ownDepartureSource: string | null | undefined;
+  ownDepartedAtOutcome: boolean | null | undefined;
+  afterResultMinutes: number | null | undefined;
+}
+
+/** The keys of the own times and the minutes after the result (StopVisit columns of migration 20261022090000_gps_times_win). */
+export const OWN_TIME_KEYS = [
+  'ownArrivedAt',
+  'ownArrivalSource',
+  'ownArrivalDistanceM',
+  'ownArrivalAccuracyM',
+  'ownArrivalObserved',
+  'ownDepartedAt',
+  'ownDepartureSource',
+  'ownDepartedAtOutcome',
+  'afterResultMinutes',
+] as const;
+
+/** No own time replaced and no minutes after the result (a visit whose shown times are all the driver's and the office's). */
+export const NO_OWN_TIMES: Readonly<Pick<VisitTimes, (typeof OWN_TIME_KEYS)[number]>> = Object.freeze(
+  Object.fromEntries(OWN_TIME_KEYS.map((k) => [k, null])) as unknown as Pick<VisitTimes, (typeof OWN_TIME_KEYS)[number]>,
+);
+
+/** A Prisma `select` of the own times and the minutes after the result, for a row withoutGpsTimes or ownArrivalOf reads. */
+export const OWN_TIMES_SELECT = Object.fromEntries(OWN_TIME_KEYS.map((k) => [k, true])) as { [K in (typeof OWN_TIME_KEYS)[number]]: true };
+
+/**
+ * The minutes after the result (F2) a stored visit holds, read only under the GPS departure they belong to: a row
+ * an older version rebuilt after an app rollback may hold stale ones (the readers then ignore them, as the own
+ * times). Null: none.
+ */
+export function afterResultOf(v: { departureSource: string | null; departedAtOutcome: boolean; afterResultMinutes?: number | null }): number | null {
+  return v.departureSource === 'AYUN' && !v.departedAtOutcome && v.afterResultMinutes && v.afterResultMinutes > 0 ? v.afterResultMinutes : null;
+}
+
+/**
+ * The driver's (or the office's) own arrival at a stop (owner decision 21 Oct 2026): the arrival a GPS one
+ * replaced (ownArrivedAt), else the shown arrival when it is not GPS; null for a GPS-only arrival or none.
+ * The driver page, the photo old-check, the office's "Left" check and the on-time KPI read this one: a
+ * GPS time is never the driver's.
+ */
+export function ownArrivalOf(v: { arrivedAt: Date | null; arrivalSource: string | null; ownArrivedAt?: Date | null; ownArrivalSource?: string | null }): { at: Date; source: string } | null {
+  if (v.arrivalSource === 'AYUN') return v.ownArrivedAt && v.ownArrivalSource ? { at: v.ownArrivedAt, source: v.ownArrivalSource } : null;
+  return v.arrivedAt && v.arrivalSource ? { at: v.arrivedAt, source: v.arrivalSource } : null;
 }
 
 /**
@@ -454,34 +699,64 @@ export interface VisitTimes {
  * - a GPS departure after the driver's or the office's arrival: the stop had none, or the result stood in
  *   for it (a result from the phone; one the office recorded never ends a stop).
  * - the minutes away (awayMinutes, owner request 19 Oct 2026): from the GPS stays only, so none.
- * Everything else (the result, the automatic timing, the flags, the rest of the row) is the driver's and
- * the office's already. The same object back when GPS gave neither time nor minutes away.
+ * Since GPS times also REPLACE late phone times (owner decision 21 Oct 2026: F1, F2, F4, F5), the replaced
+ * own times are stored with the visit (ownArrivedAt ... ownDepartedAtOutcome) and restored from there:
+ * - a GPS arrival with an own arrival stored: that own arrival;
+ * - a GPS departure with an own departure stored (a real one or the result standing in for it): that one;
+ *   without one, as above (the own departure was empty: a phone result would have stood in for it);
+ * - the minutes after the result (afterResultMinutes) are GPS facts: none.
+ * The own fields are read only under an AYUN source, so a row an older version rebuilt (own fields left
+ * stale) is read as before. Everything else (the result, the automatic timing, the flags, the rest of the
+ * row) is the driver's and the office's already. The same object back when GPS gave neither time nor
+ * minutes away nor after the result.
  */
 export function withoutGpsTimes<V extends VisitTimes>(v: V): V {
   const gpsArrival = v.arrivalSource === 'AYUN';
+  const gpsDeparture = v.departureSource === 'AYUN';
   const away = v.awayMinutes !== undefined && v.awayMinutes !== null;
-  if (!gpsArrival && v.departureSource !== 'AYUN' && !away) return v;
+  const after = v.afterResultMinutes !== undefined && v.afterResultMinutes !== null;
+  if (!gpsArrival && !gpsDeparture && !away && !after) return v;
   const out: V = { ...v };
   const o: VisitTimes = out;
   if (away) o.awayMinutes = null;
-  if (!gpsArrival && v.departureSource !== 'AYUN') return out;
-  if (gpsArrival) {
+  const replacedArrival = gpsArrival && !!v.ownArrivedAt && !!v.ownArrivalSource;
+  const replacedDeparture = gpsDeparture && !!v.ownDepartedAt && !!v.ownDepartureSource;
+  for (const k of OWN_TIME_KEYS) (o as unknown as Record<string, unknown>)[k] = null;
+  if (gpsArrival && !replacedArrival) {
+    // A GPS-only arrival: the stop had none, so no result stood in for its departure; a departure the office
+    // gave stays, a GPS one or the result ending the GPS arrival goes.
     o.arrivedAt = null;
     o.arrivalSource = null;
     o.arrivalDistanceM = null;
     o.arrivalAccuracyM = null;
     o.arrivalObserved = true;
-    if (v.departureSource === 'AYUN' || v.departedAtOutcome) {
+    if (gpsDeparture || v.departedAtOutcome) {
       o.departedAt = null;
       o.departureSource = null;
       o.departedAtOutcome = false;
     }
     return out;
   }
-  const standIn = v.outcome !== null && v.outcomeAt !== null && v.outcomeSource !== 'DISPATCHER';
-  o.departedAt = standIn ? v.outcomeAt : null;
-  o.departureSource = standIn ? v.outcomeSource : null;
-  o.departedAtOutcome = standIn;
+  if (replacedArrival) {
+    o.arrivedAt = v.ownArrivedAt!;
+    o.arrivalSource = v.ownArrivalSource!;
+    o.arrivalDistanceM = v.ownArrivalDistanceM ?? null;
+    o.arrivalAccuracyM = v.ownArrivalAccuracyM ?? null;
+    o.arrivalObserved = v.ownArrivalObserved ?? true;
+  }
+  if (gpsDeparture) {
+    if (replacedDeparture) {
+      o.departedAt = v.ownDepartedAt!;
+      o.departureSource = v.ownDepartureSource!;
+      o.departedAtOutcome = v.ownDepartedAtOutcome ?? false;
+    } else {
+      // The departure was empty before GPS filled it: only a phone result could have stood in for it.
+      const standIn = v.outcome !== null && v.outcomeAt !== null && v.outcomeSource !== 'DISPATCHER';
+      o.departedAt = standIn ? v.outcomeAt : null;
+      o.departureSource = standIn ? v.outcomeSource : null;
+      o.departedAtOutcome = standIn;
+    }
+  }
   return out;
 }
 
@@ -588,5 +863,15 @@ function deriveOwnVisit(events: readonly VisitEvent[], ctx: VisitContext): Visit
     lines,
     casesDelivered,
     ...driverFacts(evs),
+    // Only a visit with GPS events has these (withOwnTimes); undefined keeps the golden rebuild's JSON unchanged.
+    ownArrivedAt: undefined,
+    ownArrivalSource: undefined,
+    ownArrivalDistanceM: undefined,
+    ownArrivalAccuracyM: undefined,
+    ownArrivalObserved: undefined,
+    ownDepartedAt: undefined,
+    ownDepartureSource: undefined,
+    ownDepartedAtOutcome: undefined,
+    afterResultMinutes: undefined,
   };
 }

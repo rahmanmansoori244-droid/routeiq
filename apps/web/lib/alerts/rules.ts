@@ -113,7 +113,7 @@
  * - R7, R8, R9, R11: unchanged (GPS never writes a result and is never pin evidence; R9's "a later stop had
  *   activity before the result" sees the GPS stop times too).
  */
-import { actualMinutes, awayInside, awayText, OUTCOME_LABEL, reasonLabel, sourceWord } from '../delivery/office-text';
+import { actualMinutes, afterResultText, awayInside, awayText, OUTCOME_LABEL, reasonLabel, sourceWord } from '../delivery/office-text';
 import { arrivalIsObserved } from '../delivery/kpis';
 import { zonedDayStart } from '../dispatch/time';
 import {
@@ -212,6 +212,16 @@ export interface FactVisit {
    * R1 measures the time on site. Absent or null: none (as before).
    */
   awayMinutes?: number | null;
+  /**
+   * GPS tracking ALERTS (owner decision 21 Oct 2026, F2): minutes the truck still stood at the stop after the
+   * driver's result (StopVisit.afterResultMinutes): never unloading, R1's final time ends at the result. Absent: none.
+   */
+  afterResultMinutes?: number | null;
+  /**
+   * GPS tracking ALERTS (owner decision 21 Oct 2026, F1/F5): the driver's own arrival tap that the GPS arrival shown
+   * replaced (StopVisit.ownArrivedAt): the arrival is not the GPS's alone, the driver confirmed the stop. Absent: none.
+   */
+  ownArrivedAt?: Date | null;
 }
 
 /** One planned stop of a load that left (DISPATCHED or COMPLETED), with its visit. */
@@ -586,6 +596,10 @@ function unloadOver(out: Out, c: LoadCtx): void {
     // GPS tracking ALERTS: an unobserved GPS arrival (a gap in the trail before it) is only an upper bound:
     // the unloading is never measured from it (gps.ts principle 3).
     const gpsArrival = !!out.facts.gps && isGps(v.arrivalSource);
+    // Owner decision 21 Oct 2026: a GPS arrival that replaced the driver's later tap (F1/F5) is measured from, but
+    // the driver did tap the stop: what "a GPS arrival alone" needs (followed live only while the truck is seen
+    // there, waiting for the GPS departure before measuring) does not apply to it.
+    const gpsOnlyArrival = gpsArrival && !v.ownArrivedAt;
     if (gpsArrival && !v.arrivalObserved) {
       return out.end(rule, key, `${label}: GPS arrival ${clockText(v.arrivedAt, l.date, tz)} is not certain (a gap in the GPS trail before it), so the unloading is not measured (GPS).`);
     }
@@ -628,7 +642,7 @@ function unloadOver(out: Out, c: LoadCtx): void {
         // down after a failed call): no end (review of 18 Oct 2026, finding 2: closing as NOT_FOLLOWED here and
         // raising again at the next fix sent the alert again). An open row waits for a fresh fix or the GPS
         // departure; the planned return (above) or the truck moving on ends it. Nothing new is raised.
-        if (where === null && gpsArrival) {
+        if (where === null && gpsOnlyArrival) {
           return out.holdOrEnd(rule, key, `${label}: GPS arrival ${clockText(v.arrivedAt, l.date, tz)}; no recent GPS position shows the truck still there, so the unloading is not followed live (GPS).`);
         }
         if (where === 'AT') stillThere = ` GPS: the truck is still there at ${fix}.`;
@@ -686,7 +700,7 @@ function unloadOver(out: Out, c: LoadCtx): void {
     // measure (trailTo): until then an open row waits and no history row is written (one is never corrected).
     // The history is pulled while a load is out and once after it closed: a day over with it still short
     // (the link down) ends the wait, not measured.
-    if (gpsArrival && v.departedAtOutcome && !actual.auto && endAt) {
+    if (gpsOnlyArrival && v.departedAtOutcome && !actual.auto && endAt) {
       const covered = c.gps?.trailTo ?? null;
       if (!covered || covered.getTime() < endAt.getTime()) {
         const res = v.outcomeAt ? `, result ${clockText(v.outcomeAt, l.date, tz)}` : '';
@@ -703,11 +717,14 @@ function unloadOver(out: Out, c: LoadCtx): void {
     // The time on site (actualMinutes took the minutes away off already): say so.
     const awayFinal = took === actual.min ? awayInside(v.awayMinutes, actual.auto && v.autoMinutes !== null && v.autoServiceMinutes !== null ? v.autoMinutes - v.autoServiceMinutes : 0) : 0;
     const awayDone = awayFinal > 0 ? ` (${awayText(awayFinal)} not counted, GPS)` : '';
-    const final = `${label}: unloading took ${fmtDuration(took)}${until}${gpsWords}${awayDone}, planned ${fmtDuration(planned)}${over > 0 ? ` (${fmtDuration(over)} over)` : ''}.`;
+    // The minutes the truck still stood there after the driver's result (F2, owner decision 21 Oct 2026): the unloading ended at the result.
+    const afterFinal = took === actual.min && !actual.auto && v.afterResultMinutes && v.afterResultMinutes > 0 ? v.afterResultMinutes : 0;
+    const afterDone = afterFinal > 0 ? ` (${afterResultText(afterFinal)} not counted, GPS)` : '';
+    const final = `${label}: unloading took ${fmtDuration(took)}${until}${gpsWords}${awayDone}${afterDone}, planned ${fmtDuration(planned)}${over > 0 ? ` (${fmtDuration(over)} over)` : ''}.`;
     const tier = tierAt(over, T);
     // A stop that ended over the limit before any sweep saw it live: kept as history (no toast, no e-mail).
     if (!out.isOpen(rule, key) && tier) {
-      return out.raise({ ...stopBase(c, s), rule, kind: 'CONDITION', subjectKey: key, tier, value: over, threshold: T, text: final, occurredAt, history: true, facts: { tookMin: Math.round(took), plannedMin: planned, ...(byGps || awayFinal > 0 ? { gps: true } : {}), ...(awayFinal > 0 ? { awayMin: Math.round(awayFinal) } : {}) } });
+      return out.raise({ ...stopBase(c, s), rule, kind: 'CONDITION', subjectKey: key, tier, value: over, threshold: T, text: final, occurredAt, history: true, facts: { tookMin: Math.round(took), plannedMin: planned, ...(byGps || awayFinal > 0 || afterFinal > 0 ? { gps: true } : {}), ...(awayFinal > 0 ? { awayMin: Math.round(awayFinal) } : {}), ...(afterFinal > 0 ? { afterResultMin: Math.round(afterFinal) } : {}) } });
     }
     return out.end(rule, key, final);
   });

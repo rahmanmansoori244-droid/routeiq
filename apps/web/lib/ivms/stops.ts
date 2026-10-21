@@ -42,8 +42,9 @@
  *    than LATE_PRESS_MAX_MIN before its load's Dispatch press or after `now` (a trail shifted by a wrong
  *    time offset; first review H-1), or one that began at the first point of a trail that started
  *    outside the depot (when the truck got there is unknown: second review L-4).
- * 5. At most 2 stays per stop (leaving to park and coming back), each an ARRIVED and, once the truck
- *    left, a DEPARTED. An arrival is `observed` only when the point before it is at most
+ * 5. At most 4 stays per stop (leaving to park and coming back; 2 until 21 Oct 2026, owner decision: a
+ *    truck that moved inside a big site and came back to the pin lost its last stay), each an ARRIVED and,
+ *    once the truck left, a DEPARTED. An arrival is `observed` only when the point before it is at most
  *    observedMaxGapSec earlier, a departure only when the last point inside is (else its time is an
  *    upper bound and never feeds measured times or the on-time KPI). Each candidate carries its stay's
  *    first inside fix time (segmentStartAt): the writer keys it by that, never by a cycle index (M2).
@@ -192,8 +193,8 @@ export interface DetectorOutput {
 export const ZONE_CONFIRM_MIN = 10;
 /** A point beyond the radius at this speed (km/h) or more ends a stay at once. */
 export const EXIT_FAST_KMH = 10;
-/** At most this many stays per stop. */
-export const MAX_STAYS_PER_STOP = 2;
+/** At most this many stays per stop (2 until 21 Oct 2026: owner decision, the GPS timing study of 19-20 Oct, F3). */
+export const MAX_STAYS_PER_STOP = 4;
 /** Trip to load matching: a trip further than this (minutes) from the load's anchor is never its trip. */
 export const MAX_TRIP_COST_MIN = 240;
 /** A load dispatched after its trip came back (a very late press) costs this much more. */

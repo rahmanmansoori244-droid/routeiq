@@ -25,6 +25,7 @@ import { ACTUALS_MAX_DAYS, actualMinutes, arrivalByText, OUTCOME_LABEL, POSITION
 import { cameraCountsByTruckDay, keyOfVisit, kpiVisitOf, liveRunsInRange, loadsOfRuns, outcomeSettings, photoWaitOverOf, stopsOfLoads, truckDaysWithLinkOrVisit, visitKey, visitsInRange } from './day-results';
 import { helpersText } from '../dispatch/load-helpers';
 import { CAMERA_ALERT_PER_DAY, cameraShareText, noPhotoAfterText, noPhotoKind, truckDayKey } from './camera-exceptions';
+import { afterResultOf } from './visit';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -296,6 +297,8 @@ export function actualsRowOf(
         reasonNote: string | null;
         recordedBy: string | null;
         driverResultAt?: Date | string | null;
+        /** F2 (owner decision 21 Oct 2026): minutes the truck still stood there after the driver's result, never unloading. */
+        afterResultMinutes?: number | null;
       })
     | null,
   photos: readonly { positionStatus: string; distanceM: number | null }[],
@@ -329,6 +332,7 @@ export function actualsRowOf(
         departedAtOutcome: v.departedAtOutcome,
         outcomeSource: v.outcomeSource,
         awayMinutes: v.awayMinutes ?? null,
+        afterResultMinutes: v.afterResultMinutes ?? null,
       })
     : { min: null, auto: false };
   const timedBy =
@@ -490,6 +494,7 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
                 reasonNote: v.reasonNote,
                 recordedBy,
                 driverResultAt: v.driverResultAt,
+                afterResultMinutes: afterResultOf(v),
               }
             : null,
           v ? (photosOf.get(v.id) ?? []) : [],
