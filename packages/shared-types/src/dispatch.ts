@@ -243,6 +243,12 @@ export interface SearchReport {
    * absent from a solver before it. The fields above stay the main search's (or the one that replaced it).
    */
   best_of?: BestOfReport | null;
+  /**
+   * Far-area grouping (SOLVER_FAR_AREA): the far areas, what they need, the search with each area on its
+   * fewest trucks and what each option made of it. Null with the switch off (the default) and absent from a
+   * solver before it.
+   */
+  far_area?: FarAreaReport | null;
 }
 
 /**
@@ -304,6 +310,82 @@ export interface BestOfGain {
   gain_trucks?: number | null;
   served_delta?: number | null;
   used?: boolean;
+}
+
+/**
+ * Far-area grouping (apps/solver dispatch_models.FarAreaReport; far_area.py). status: USED (an option took the
+ * grouped plan: chosen_for), NOT_USED, SKIPPED (not run: reason) or FAILED; reason, outcome and direction are plain
+ * strings (an unknown value must be shown, not refused). An area is named by km and compass from the depot only.
+ */
+export interface FarAreaReport {
+  mode: string;
+  status: string;
+  reason?: string | null;
+  core_km?: number | null;
+  slack_min?: number | null;
+  plan_sec?: number | null;
+  sent?: boolean;
+  chosen_for?: string[];
+  areas?: FarAreaInfo[];
+  search?: SearchRunReport | null;
+  results?: FarAreaResult[];
+}
+
+/**
+ * One far area (apps/solver dispatch_models.FarAreaInfo). min_loads / min_loads_reason: the route check's fewest
+ * loads (PALLETS, TIME, NO_TRUCK, OUT_OF_TIME); targets: the trucks it was pinned to; loads_* / trucks_* /
+ * served_*: new loads with an area stop, their trucks and its stops served in the main search's plan, the
+ * far-area search's plan and the final RECOMMENDED plan.
+ */
+export interface FarAreaInfo {
+  area: string;
+  label: string;
+  stops: number;
+  km_from: number;
+  km_to: number;
+  direction: string;
+  gap_km?: number | null;
+  pallet_units?: number | null;
+  cases?: number | null;
+  unload_min?: number | null;
+  min_loads?: number | null;
+  min_loads_reason?: string | null;
+  targets?: string[];
+  pinned?: boolean;
+  loads_main?: number | null;
+  trucks_main?: number | null;
+  served_main?: number | null;
+  loads_far?: number | null;
+  trucks_far?: number | null;
+  served_far?: number | null;
+  loads_final?: number | null;
+  trucks_final?: number | null;
+  served_final?: number | null;
+}
+
+/**
+ * One option's judgement of the grouped plan (apps/solver dispatch_models.FarAreaResult). outcome: GROUPED (used)
+ * or KEPT_* (why not). Gains are "without minus with" (positive = the grouped plan is better); gain_preferences_omr
+ * is the preference cost part (orders moved from their previous truck, early P1/P2 delivery, preferred hours);
+ * moved_before / moved_after: orders on another truck than in the previous plan; loads_before / loads_after: per
+ * area; slack_min: the tightest grouped load's minutes before its truck's latest return.
+ */
+export interface FarAreaResult {
+  option: string;
+  outcome: string;
+  source?: string | null;
+  gain_omr?: number | null;
+  gain_operating_omr?: number | null;
+  gain_preferences_omr?: number | null;
+  gain_km?: number | null;
+  gain_trucks?: number | null;
+  gain_loads?: number | null;
+  served_delta?: number | null;
+  loads_before?: number[];
+  loads_after?: number[];
+  slack_min?: number | null;
+  moved_before?: number | null;
+  moved_after?: number | null;
 }
 
 /**
