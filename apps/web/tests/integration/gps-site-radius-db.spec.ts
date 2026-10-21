@@ -134,7 +134,7 @@ describe("2. a customer's site radius", () => {
     expect(ev.map((e) => e.kind)).toEqual(['ARRIVED', 'DEPARTED']);
     // Before the site radius the move to the second drop point (07:45) was the departure.
     expect(ev[1]!.at.getTime()).toBeGreaterThan(L('08:10').getTime());
-    expect(ev[1]!.payloadJson).toMatchObject({ detector: 'ivms-v2', stay: { radiusM: 400, merged: 0, exitRule: 'FAST' } });
+    expect(ev[1]!.payloadJson).toMatchObject({ detector: 'ivms-v3', stay: { radiusM: 400, merged: 0, exitRule: 'FAST' } });
     const v = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId, truckId } });
     expect(v).toMatchObject({ arrivalSource: 'AYUN', departureSource: 'AYUN', awayMinutes: null });
   });
@@ -171,7 +171,11 @@ describe('3. a leave-and-return under the driver\'s own times', () => {
     const away = (gps[2]!.payloadJson as { stay: { awayMin: number } }).stay.awayMin;
     expect(away).toBeGreaterThan(35);
     const v = await prisma.stopVisit.findUniqueOrThrow({ where: { id: visit.id } });
-    expect(v).toMatchObject({ arrivalSource: 'PHONE_MANUAL', departureSource: 'AYUN', outcome: 'DELIVERED' });
+    // GPS arrival wins (owner decision 21 Oct 2026): the 07:16 tap came well after the truck stopped, so the
+    // shown arrival is the first GPS stay's and the tap is kept as the driver's own arrival.
+    expect(v).toMatchObject({ arrivalSource: 'AYUN', departureSource: 'AYUN', outcome: 'DELIVERED', ownArrivalSource: 'PHONE_MANUAL' });
+    expect(v.arrivedAt!.getTime()).toBe(gps[0]!.at.getTime());
+    expect(v.ownArrivedAt!.getTime()).toBe(L('07:16').getTime());
     expect(v.departedAt!.getTime()).toBe(gps[3]!.at.getTime());
     expect(v.awayMinutes).toBe(away);
   });
