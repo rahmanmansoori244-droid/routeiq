@@ -766,6 +766,10 @@ class SearchReport(BaseModel):
     # RECOMMENDED and what came of it. None when one search ran (the default), and from a solver before it.
     # The fields above stay the main search's (or, when it failed, those of the search that replaced it).
     best_of: "BestOfReport | None" = None
+    # Far-area grouping (SOLVER_FAR_AREA, far_area.py): the far areas found, what they need, the search with each
+    # area on its fewest trucks and what each option made of it. None with the switch off (the default), and
+    # from a solver before it.
+    far_area: "FarAreaReport | None" = None
 
 
 class PyvrpReport(BaseModel):
@@ -879,6 +883,90 @@ class BestOfReport(BaseModel):
     chosen_for: list[str] = Field(default_factory=list)
     gains: list[BestOfGain] = Field(default_factory=list)
     searches: list[SearchRunReport] = Field(default_factory=list)
+
+
+class FarAreaInfo(BaseModel):
+    """One far area of the day (far_area.detect: straight-line km and compass from the depot only - never a place
+    or customer name). min_loads / min_loads_reason: the route check's fewest loads (PALLETS: the room bound;
+    TIME: the day's hours and windows need more; NO_TRUCK: none found on 3 loads or fewer; OUT_OF_TIME); targets:
+    the trucks the area was pinned to in the search beside the main one (pinned). loads_* / trucks_* / served_*:
+    new loads with an area stop, their trucks and the area stops served - in the main search's plan, the far-area
+    search's plan and the final RECOMMENDED plan (None: not known)."""
+
+    area: str
+    label: str
+    stops: int
+    km_from: float
+    km_to: float
+    direction: str
+    gap_km: float | None = None
+    pallet_units: int | None = None
+    cases: int | None = None
+    unload_min: int | None = None
+    min_loads: int | None = None
+    min_loads_reason: str | None = None
+    targets: list[str] = Field(default_factory=list)
+    pinned: bool = False
+    loads_main: int | None = None
+    trucks_main: int | None = None
+    served_main: int | None = None
+    loads_far: int | None = None
+    trucks_far: int | None = None
+    served_far: int | None = None
+    loads_final: int | None = None
+    trucks_final: int | None = None
+    served_final: int | None = None
+
+
+class FarAreaResult(BaseModel):
+    """One option's judgement of the grouped plan (far_area.judge) against the plan it has with the switch off.
+    outcome: GROUPED (used), KEPT_NOT_BETTER, KEPT_SERVES_LESS, KEPT_SWAP, KEPT_NO_FEWER_LOADS, KEPT_AREA_STOP_OUT
+    (it left out an area stop the plan without it serves), KEPT_BELOW_MIN_LOADS (an area below the route check's
+    fewest loads), KEPT_SLACK, KEPT_NOT_VERIFIED, NO_CANDIDATE, NOT_COMPARED, ERROR - a plain string. Gains are
+    "without minus with" (positive: the grouped plan is cheaper, shorter or uses fewer trucks or loads);
+    gain_operating_omr is the money part of gain_omr and gain_preferences_omr the rest, the preference cost
+    (load_repack.score: orders on another truck than in the previous plan of the day, early delivery of P1/P2 and
+    the customers' preferred hours - not the preferred hours alone). moved_before / moved_after: orders on another
+    truck than in the previous plan (0 on a day's first plan). loads_before / loads_after: per area. slack_min: the
+    tightest grouped load's time before its truck's latest return."""
+
+    option: str
+    outcome: str
+    source: str | None = None
+    gain_omr: float | None = None
+    gain_operating_omr: float | None = None
+    gain_preferences_omr: float | None = None
+    gain_km: float | None = None
+    gain_trucks: int | None = None
+    gain_loads: int | None = None
+    served_delta: int | None = None
+    loads_before: list[int] = Field(default_factory=list)
+    loads_after: list[int] = Field(default_factory=list)
+    slack_min: float | None = None
+    moved_before: int | None = None
+    moved_after: int | None = None
+
+
+class FarAreaReport(BaseModel):
+    """Far-area grouping (SOLVER_FAR_AREA, far_area.py; off by default). mode: report, thorough or on. status: USED
+    (an option took the grouped plan: chosen_for), NOT_USED, SKIPPED (not run: reason), FAILED (the far-area search
+    or its load re-check failed: reason). reason: a plain string (REPORT_ONLY, HIRE_CHECK, NO_FAR_AREA, NO_TARGET,
+    IN_PROCESS, CPU_GATE, NO_WORKERS, STOPPED, MAIN_STUCK, NO_FEWER_LOADS, AT_MIN_LOADS, NO_STAGE_WORKER, NO_STAGE,
+    STAGE_FAILED, OUT_OF_TIME, NOT_BETTER, SERVES_LESS, SWAP, AREA_STOP_OUT, BELOW_MIN_LOADS, SLACK, NOT_VERIFIED,
+    TIMEOUT, LOST, FAILED, NO_SOLUTION, ERROR, ...).
+    sent: the far-area search's plan went to the load re-check. search: that search (index 99)."""
+
+    mode: str
+    status: str
+    reason: str | None = None
+    core_km: float | None = None
+    slack_min: int | None = None
+    plan_sec: float | None = None
+    sent: bool = False
+    chosen_for: list[str] = Field(default_factory=list)
+    areas: list[FarAreaInfo] = Field(default_factory=list)
+    search: SearchRunReport | None = None
+    results: list[FarAreaResult] = Field(default_factory=list)
 
 
 SearchReport.model_rebuild()

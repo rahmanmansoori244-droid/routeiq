@@ -90,6 +90,7 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 import best_of as BO
 import costing
+import far_area as FA
 import feasibility as FZ
 import load_repack as LR
 import pyvrp_candidate as PV
@@ -897,6 +898,8 @@ def _search_report(mode: str, cap: int, state: dict, started: float) -> SearchRe
         # Best-of-N (None with one search, the default): a report that does not validate is left out with
         # a warning, never the finished plan (best_of.report_or_none).
         best_of=BO.report_or_none(state.get("best_of")),
+        # Far-area grouping (None with SOLVER_FAR_AREA off, the default): validated the same way, never the plan.
+        far_area=FA.report_or_none(state.get("far_area")),
     )
 
 
@@ -2449,12 +2452,31 @@ def _displaced_of(sc: DispatchScenario, stop_idx: dict[str, int]) -> set[int]:
             if u.stop_id in stop_idx and u.reason_message.startswith(PRIORITY_DISPLACED_HEAD)}
 
 
+# The reason of a stop an option's plan without far-area grouping serves and its grouped plan leaves out
+# (far_area.judge takes such a plan only when it serves the day strictly better by priority, and never one that
+# leaves out a stop of the far area itself): _build_scenario's far_drops (review of the far-area build: such a stop
+# read "the loading time ... no longer fitted", which never named the step that left it out).
+FAR_DROP_HEAD = "Not planned: the plan with a far area on fewer loads serves the day better by priority"
+
+
+def _far_drop_reason(priority: int) -> str:
+    return (f"{FAR_DROP_HEAD}, and it plans other stops in place of this P{priority} stop (see the plan's "
+            "\"Far area:\" note). Add a truck or add it by hand.")
+
+
+def _far_drops_of(sc: DispatchScenario, stop_idx: dict[str, int]) -> set[int]:
+    """The stops of ``sc`` its far-area grouping left out (by their reason)."""
+    return {stop_idx[u.stop_id] for u in sc.unserved
+            if u.stop_id in stop_idx and u.reason_message.startswith(FAR_DROP_HEAD)}
+
+
 def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                     timed: LR.TimedPlan, values: list[int], use_margin: bool, pre_drops: list[UnservedStop], *,
                     solver_status: str, elapsed: float, time_limit: int, objective_value: int,
                     extra_warnings: list[str] | None = None, timing_drops: set[int] | None = None,
                     exact_timing: bool = True, hire_drops: set[int] | None = None,
-                    displaced: set[int] | None = None, timing_repair: dict[int, str] | None = None) -> DispatchScenario:
+                    displaced: set[int] | None = None, timing_repair: dict[int, str] | None = None,
+                    far_drops: set[int] | None = None) -> DispatchScenario:
     """Loads, stop times, costs, unserved reasons and totals of a timed plan. The ONE place a
     plan becomes a scenario: the search's plans and the post-solve plans are reported alike, and
     every scenario gets its independent feasibility report here (feasibility.check_scenario).
@@ -2468,6 +2490,9 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     displaced: stops the priority repair (_repair_inversions) took off for a higher priority and found no
     other place for; those this plan does not serve say so (PRIORITY_DISPLACED_HEAD), never counted among
     the stops the optimizer could not place.
+    far_drops: stops the option's plan without far-area grouping serves and its grouped plan leaves out (a plan that
+    serves the day better by priority took their place): _far_drop_reason, never counted among the stops the
+    optimizer could not place, and never "the loading time".
     exact_timing: the times come from load_repack.time_plan (the exact loading time between loads);
     False for the route search's own times (80% of a full truck per turnaround).
 
@@ -2479,6 +2504,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     hire_drops = hire_drops or set()
     displaced = displaced or set()
     timing_repair = timing_repair or {}
+    far_drops = far_drops or set()
     loads: list[PlannedLoad] = []
     served: set[int] = set()
     comp = dict(fixed=0.0, trip=0.0, distance=0.0, fuel=0.0, time=0.0, overtime=0.0, window=0.0, early=0.0, continuity=0.0)
@@ -2635,6 +2661,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             unserved.append(_unserved(s, "LATE_ORDER_NO_CAPACITY",
                                       f"Late order (P{s.priority}): no unlocked truck/load had capacity or time left. "
                                       "Locked and dispatched loads were not changed."))
+        elif k in far_drops:
+            unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY", _far_drop_reason(s.priority)))
         elif k in timing_drops:
             # "Lowest priorities first" only while no lower priority is planned (_timing_drop_reason).
             lower_served = sum(1 for ld in loads for st in ld.stops if priority_of[st.stop_id] > s.priority)
@@ -2892,6 +2920,38 @@ def matrix_budget_sec(budget: float) -> float:
     return max(1.0, min(MATRIX_BUDGET_CAP_SEC, MATRIX_BUDGET_SHARE * budget))
 
 
+def _far_twin_wanted(req: DispatchRequest, solvable: list[DispatchStop], far: FA.Run, parallel: bool, k: int) -> bool:
+    """Far-area grouping, before the road matrix: run the twin search (RECOMMENDED's search with each far area on
+    its fewest trucks, far_area.py) for this solve? Every gate, in order; a gate that says no records why in the
+    far-area report (SKIPPED). Best-of's own K is decided first and never changes for it."""
+    cfg = req.config
+    if any(t.hire_candidate for t in req.trucks):
+        FA.skip(far, "HIRE_CHECK")  # the hire check's what-ifs compare many solves: never on them
+    elif not solvable:
+        FA.skip(far, "NOTHING_TO_PLAN")
+    elif "RECOMMENDED" not in cfg.scenarios:
+        FA.skip(far, "NO_RECOMMENDED")
+    elif not FA.groups(cfg.search_mode):
+        FA.skip(far, "REPORT_ONLY")  # report, or thorough on a QUICK solve: the notes only
+    else:
+        try:
+            areas = FA.groupable(FA.detect(req.depot.lat, req.depot.lng, solvable))
+        except Exception as exc:  # noqa: BLE001 - the step is optional: the solve goes on without it
+            log.warning("far-area run=%s detection failed (%s: %s); no far-area search", req.run_id, type(exc).__name__, exc)
+            FA.skip(far, "ERROR")
+            return False
+        if not areas:
+            FA.skip(far, "NO_FAR_AREA")
+        elif not parallel:
+            FA.skip(far, "IN_PROCESS")
+        elif BO.room(PV.enabled(cfg.search_mode)[0]) - k < 1:
+            FA.skip(far, "CPU_GATE")
+        else:
+            far.twin = True
+            far.report.update(status="NOT_USED", reason=None)
+    return far.twin
+
+
 def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveControl | None = None) -> DispatchResponse:
     started = time.monotonic()
     cfg = req.config
@@ -2917,6 +2977,8 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
     # when the other searches' pool cannot start - gate).
     asked = BO.setting(cfg.search_mode)
     k, gate = 1, None
+    # Far-area grouping (far_area.py; SOLVER_FAR_AREA, off by default: then None and nothing below changes).
+    far: FA.Run | None = FA.start(cfg.search_mode) if FA.mode() != "off" else None
     # CI (PR #50): every worker pool and process of this solve is closed - its processes joined, its
     # pipes and locks released - in the finally below, in this thread, whatever happens after it
     # started (the second search's start included). Nothing is left for the garbage collector.
@@ -2929,13 +2991,20 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
             workers = _start_workers(max(1, len([n for n in cfg.scenarios if n != "RECOMMENDED"])), control, req.run_id,
                                      "search")
         if asked > 1 and solvable and "RECOMMENDED" in cfg.scenarios:
-            # The other searches' own pool (K - 1 processes), after rule 22's proof of the solve's pool and
-            # before the road matrix, so they are up when the searches start; optional, like the second search.
             k, gate = BO.effective(cfg.search_mode, parallel=workers is not None, pyvrp_on=PV.enabled(cfg.search_mode)[0])
-            if k > 1:
-                extras = _start_extra_workers(k - 1, control, req.run_id)
-                if extras is None:
+        # The far-area twin search: one more process beside best-of's, only on a day with a far area to group and
+        # with a CPU left after best-of's K (decided first, exactly as without it).
+        twin = far is not None and _far_twin_wanted(req, solvable, far, workers is not None, k)
+        if k > 1 or twin:
+            # The other searches' own pool (K - 1 processes, + 1 for the twin search), after rule 22's proof of the
+            # solve's pool and before the road matrix, so they are up when the searches start; optional, like the
+            # second search.
+            extras = _start_extra_workers(k - 1 + int(twin), control, req.run_id)
+            if extras is None:
+                if k > 1:
                     k, gate = 1, "NO_WORKERS"
+                if twin:
+                    FA.skip(far, "NO_WORKERS")  # type: ignore[arg-type]
         # The second route search (PyVRP): its own optional process, after rule 22's proof (a machine
         # that cannot start it still solves). Not waited for here.
         pv = _pv_start(req, solvable, control, workers is not None)
@@ -2967,11 +3036,14 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
         state: dict = {}
         scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget,
                                    control=control, state=state, workers=workers, pv=pv,
-                                   best_of=k, best_of_gate=gate, best_of_requested=asked, extras=extras)
+                                   best_of=k, best_of_gate=gate, best_of_requested=asked, extras=extras,
+                                   far=far if far is not None and FA.explains(far) else None)
         if asked > 1 and solvable and "RECOMMENDED" in cfg.scenarios and "best_of" not in state:
             # Only where best-of applies (review of 16 Oct 2026): with no RECOMMENDED asked for, or nothing to
             # plan, best_of stays null (it said "3 asked, 1 run" with no reason).
             state["best_of"] = _one_search_report(asked, gate, cfg.search_mode, state)
+        if far is not None and "far_area" not in state:
+            state["far_area"] = far.report  # SKIPPED, and why (HIRE_CHECK, NOTHING_TO_PLAN, NO_RECOMMENDED)
     finally:
         if pv is not None:
             pv.close()  # already closed by _run_scenarios when it ran; a no-op then
@@ -3380,6 +3452,7 @@ def _rebuilt(ctx: _StageCtx, sc: DispatchScenario, plan: LR.Plan, as_is: LR.Time
         objective_value=LR.score(ctx.day, ctx.rec_pricing, timed).objective, extra_warnings=ctx.value_warnings,
         timing_drops=still, exact_timing=exact, hire_drops=hire,
         displaced=set(displaced or ()) | _displaced_of(sc, ctx.stop_idx), timing_repair=timing_repair,
+        far_drops=_far_drops_of(sc, ctx.stop_idx),
     )
     if still:
         inverted = _inverted_drops(stops, still, served_new)
@@ -5536,9 +5609,15 @@ def _variant_worker(job) -> dict:
     Test hooks, for the other searches only (the main one has _scenario_worker's): ROUTEIQ_TEST_HANG_VARIANT,
     _FAIL_VARIANT and _KILL_VARIANT (a search that never returns, one that raises, one whose process dies),
     and ROUTEIQ_TEST_NO_STALL_VARIANT (no stall rule: it ends only on its limit or when joined), each the
-    search's index."""
-    variant, submitted_at, (name, req, solvable, tds, mx, limit, drops) = job
-    idx = str(variant.index)
+    search's index.
+
+    Far-area grouping's twin search (far_area.py; ``variant.far``): ``job`` carries a 4th item, the pins (stop id
+    -> the trucks it may go on). It searches far_area.pinned's copy of the request - each far area's stops only on
+    its target trucks, nothing else changed - with the same parameters, stall and join rules, and its plan is
+    ranked with the request as it is. Its test hooks take the value "far"."""
+    variant, submitted_at, (name, req, solvable, tds, mx, limit, drops) = job[0], job[1], job[2]
+    pins = job[3] if len(job) > 3 else None
+    idx = "far" if getattr(variant, "far", False) else str(variant.index)
     if os.environ.get("ROUTEIQ_TEST_HANG_VARIANT") == idx:
         time.sleep(3600)
     if os.environ.get("ROUTEIQ_TEST_FAIL_VARIANT") == idx:
@@ -5554,13 +5633,16 @@ def _variant_worker(job) -> dict:
         stops_v, mx_v = _submatrix(solvable, BO.order(solvable, variant.order_seed), mx)
     else:
         stops_v, mx_v = solvable, mx
+    req_v = req
+    if pins:
+        req_v, stops_v = FA.pinned(req, stops_v, pins)
     no_stall = os.environ.get("ROUTEIQ_TEST_NO_STALL_VARIANT") == idx
     saved = os.environ.get("THOROUGH_STALL_SEC")
     if no_stall:
         os.environ["THOROUGH_STALL_SEC"] = "3600"
     _WATCHES.pop(name, None)
     try:
-        sc = _solve_scenario(name, req, stops_v, tds, mx_v, limit_v, drops, first_solution=variant.first_solution,
+        sc = _solve_scenario(name, req_v, stops_v, tds, mx_v, limit_v, drops, first_solution=variant.first_solution,
                              join=variant.index > 0)
     finally:
         watch = _WATCHES.pop(name, None)
@@ -5661,13 +5743,18 @@ class _BestOf:
     extra_sources: list[tuple[str, DispatchScenario]]  # the other plans for the load re-check (RECOMMENDED~i)
     main_stuck: bool  # the main search's worker did not answer by its backstop and may still be running
     report: dict | None  # SearchReport.best_of (a dict that _post_solve may add to), None if it could not be built
+    # Far-area grouping: the twin search's plan, sent to the load re-check (far_area.should_send), and the pool its
+    # own stage job runs in (the other searches' pool, kept open for it; _run_scenarios closes it).
+    far_source: DispatchScenario | None = None
+    far_pool: "_Workers | None" = None
 
 
 def _recommended_best_of(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                          drops: list[UnservedStop], job: tuple, *, workers: _Workers, extras: _Workers, k: int, m: int,
                          time_limit: int, tail: ThoroughTail | None, n_alt: int, n_sources: int, budget_end: float,
-                         control: SolveControl | None, pv: _PvRun, requested: int, gate: str | None) -> _BestOf:
-    """RECOMMENDED's phase with K searches (best_of.py, K > 1).
+                         control: SolveControl | None, pv: _PvRun, requested: int, gate: str | None,
+                         far: FA.Run | None = None) -> _BestOf:
+    """RECOMMENDED's phase with K searches (best_of.py, K > 1), and/or far-area grouping's twin search (``far``).
 
     Search 0, the main one, is exactly the one-search RECOMMENDED: the same job in the solve's own pool,
     the same backstop, the same answer when the pool breaks (WorkersUnavailable). Searches 1..K-1 run at
@@ -5684,7 +5771,16 @@ def _recommended_best_of(req: DispatchRequest, solvable: list[DispatchStop], tds
 
     The main plan is ranked here, in the API process, once it is in (_ranked: LPs only, as _retime; never
     on the main search's path, critique HIGH-3); the others in their workers. The other searches' pool is
-    closed here, before the alternatives (a search still running is stopped: TIMEOUT)."""
+    closed here, before the alternatives (a search still running is stopped: TIMEOUT).
+
+    Far-area grouping (far_area.py): after every search above was submitted (so it delays none of them), the route
+    check on the day's stops (at most far_area.PLAN_SEC, in this process) picks each far area's target trucks; the
+    twin search (_variant_worker with the pins) then runs in the same pool, beside the main search, waited for
+    under the same rules as the other searches - never the main plan, never the alternatives' start, never one of
+    best-of's searches or sources. Its plan is sent to the load re-check (_BestOf.far_source) only when it puts a
+    pinned area on fewer loads than the main plan and no area on more; the pool then stays open for that plan's
+    own stage job (_BestOf.far_pool) when no search in it is still running. With K == 1 (best-of off) only the
+    twin runs here: the main search is the one-search search, not ranked, and best_of's report is not built."""
     mode = req.config.search_mode
     thorough = mode == "THOROUGH"
     rec_limit = int(job[5])
@@ -5700,20 +5796,24 @@ def _recommended_best_of(req: DispatchRequest, solvable: list[DispatchStop], tds
         except Exception as exc:  # noqa: BLE001 - its pool broke: only this search is lost
             outcome[str(v.index)] = ("broken", f"{type(exc).__name__}: {exc}")
     _pv_submit(pv, req, solvable, tds, mx, time_limit, rec_limit, n_alt, tail, budget_end, n_sources)
+    far_variant = _far_submit(req, solvable, tds, mx, drops, job, extras, far, t_sub, extra_jobs, outcome) \
+        if far is not None else None
     kind0, value0 = _await_all(workers, {"RECOMMENDED": rec_job}, deadline)["RECOMMENDED"]
     if kind0 == "broken":
         raise WorkersUnavailable(str(value0))  # rule 22, as with one search: the solve's own pool broke
     main_end = time.monotonic()
     sc0, watch0 = value0 if kind0 == "ok" else (None, None)  # type: ignore[misc]
     main_ok = sc0 is not None and sc0.status == "OPTIMIZED"
-    ranked0 = _ranked(req, solvable, tds, mx, drops, sc0) if main_ok else {}
+    ranked0 = _ranked(req, solvable, tds, mx, drops, sc0) if main_ok and k > 1 else {}
 
     now = time.monotonic()
     natural_end = min(t_sub + rec_limit + REC_OVERHEAD_SEC, deadline)  # the others have ended on their limit by then
     grace_cap: float | None = None  # THOROUGH: after the join flag, wait for the others until then at most
     join_window: float | None = None
     floor = budget_end - (tail.total if tail is not None else 0)  # THOROUGH: the alternatives' and re-check's reserve
-    if not main_ok:
+    if not main_ok and k == 1:
+        window_end = now  # only the twin search runs beside it, and it never replaces the main search
+    elif not main_ok:
         window_end = natural_end
         grace_cap = max(now, min(deadline, floor)) if thorough else None
     elif thorough:
@@ -5725,13 +5825,18 @@ def _recommended_best_of(req: DispatchRequest, solvable: list[DispatchStop], tds
         alt_need = (max(2, time_limit // 2) + ALT_GRACE_SEC) if n_alt else 0
         window_end = min(now + BO.QUICK_WAIT_SEC, budget_end - _quick_stage_need(time_limit, n_sources) - alt_need)
     window_end = max(now, window_end)
-    if extra_jobs:
-        outcome.update(_await_all(extras, extra_jobs, window_end))
-        late = {i: extra_jobs[i] for i in extra_jobs if outcome[i][0] == "timeout"}
+    # A stop request: the far-area search's plan is never sent (_far_collect), so it is not waited for at all -
+    # best-of's searches are, exactly as before; extras.close() stops it (its report then says TIMEOUT).
+    waited = {i: j for i, j in extra_jobs.items()
+              if not (i == FA.TWIN_KEY and control is not None and control.stop_requested.is_set())}
+    if waited:
+        outcome.update(_await_all(extras, waited, window_end))
+        late = {i: waited[i] for i in waited if outcome[i][0] == "timeout"}
         if late and grace_cap is not None:
             extras.raise_join()
             outcome.update(_await_all(extras, late, max(time.monotonic(), min(time.monotonic() + BO.JOIN_GRACE_SEC, grace_cap))))
-    extras.close()  # bounded; frees its CPUs and memory before the alternatives
+    if far_variant is None:
+        extras.close()  # bounded; frees its CPUs and memory before the alternatives
 
     runs = [{"variant": variants[0], "index": 0, "kind": kind0, "status": BO.run_status(kind0, sc0.status if sc0 else None),
              "scenario": sc0, "watch": watch0, "limit": rec_limit, "ok": main_ok, **_rank_fields(ranked0),
@@ -5746,26 +5851,110 @@ def _recommended_best_of(req: DispatchRequest, solvable: list[DispatchStop], tds
                      "ok": sc is not None and sc.status == "OPTIMIZED", **_rank_fields(res),
                      "error": value if kind in ("error", "broken") else None})
     main, warm_run, picked = _best_of_choice(runs, m)
-    _log_best_of(req.run_id, runs, main, warm_run, picked, k)
+    if k > 1:
+        _log_best_of(req.run_id, runs, main, warm_run, picked, k)
     if main is None:
         if kind0 != "ok":
             _raise_task_failure(kind0, value0, "recommended plan")  # no search has a plan: as with one search
         main = runs[0]  # NO_SOLUTION, as with one search (the second search may still rescue it)
     promoted = main["index"] if main["index"] != 0 else None
-    report: dict | None
-    try:
-        report = {"requested": requested, "used": k, "gate": gate, "join_sec": join_window,
-                  "primary_status": runs[0]["status"] if promoted is not None else None, "promoted": promoted,
-                  "chosen_for": [], "gains": [],
-                  "searches": [_run_report(r, mode, warm=r is warm_run, rechecked=any(r is p for p in picked)) for r in runs]}
-    except Exception as exc:  # noqa: BLE001 - the report never costs the plan (critique HIGH-1)
-        log.warning("best-of run=%s: its report could not be built (%s: %s); the plan is unaffected", req.run_id,
-                    type(exc).__name__, exc)
-        report = None
+    report: dict | None = None
+    if k > 1:
+        try:
+            report = {"requested": requested, "used": k, "gate": gate, "join_sec": join_window,
+                      "primary_status": runs[0]["status"] if promoted is not None else None, "promoted": promoted,
+                      "chosen_for": [], "gains": [],
+                      "searches": [_run_report(r, mode, warm=r is warm_run, rechecked=any(r is p for p in picked)) for r in runs]}
+        except Exception as exc:  # noqa: BLE001 - the report never costs the plan (critique HIGH-1)
+            log.warning("best-of run=%s: its report could not be built (%s: %s); the plan is unaffected", req.run_id,
+                        type(exc).__name__, exc)
+            report = None
+    far_source: DispatchScenario | None = None
+    far_pool: _Workers | None = None
+    if far_variant is not None:
+        far_source = _far_collect(req, far, far_variant, outcome.get(FA.TWIN_KEY, ("timeout", None)), main["scenario"],  # type: ignore[arg-type]
+                                  mode, stopped=control is not None and control.stop_requested.is_set(),
+                                  main_stuck=kind0 == "timeout")
+        if far_source is not None:
+            if any(kind == "timeout" for kind, _ in outcome.values()) or extras.broken():
+                # A search still runs in the pool (or it broke): its stage job could queue behind it.
+                far_source = None
+                FA.note_stage(far, "NO_STAGE_WORKER")
+                far.report["sent"] = False  # type: ignore[union-attr]
+            else:
+                far_pool = extras  # kept open for the twin's stage job; _run_scenarios closes it
+        if far_pool is None:
+            extras.close()
     warm_sc = (warm_run or main)["scenario"]
     return _BestOf(scenario=main["scenario"], watch=main["watch"], limit=int(main["limit"] or rec_limit),
                    warm=warm_sc.loads or None, extra_sources=[(BO.source_name(r["index"]), r["scenario"]) for r in picked],
-                   main_stuck=kind0 == "timeout", report=report)
+                   main_stuck=kind0 == "timeout", report=report, far_source=far_source, far_pool=far_pool)
+
+
+def _far_submit(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
+                drops: list[UnservedStop], job: tuple, extras: _Workers, far: FA.Run, t_sub: float,
+                extra_jobs: dict, outcome: dict) -> BO.SearchVariant | None:
+    """Far-area grouping: the route check on the day's final stops (far_area.check: areas, fewest loads, target
+    trucks; at most PLAN_SEC, in this process) and the twin search submitted to the other searches' pool under
+    far_area.TWIN_KEY. None (and why, in the report) when there is nothing to pin. Never fails the solve."""
+    try:
+        ctx = _stage_ctx(req, solvable, tds, mx, drops)
+        pins = FA.check(far, ctx.day, ctx.rec_pricing, req.depot.lat, req.depot.lng, solvable)
+    except Exception as exc:  # noqa: BLE001 - optional: the solve goes on without it
+        log.warning("far-area run=%s route check failed (%s: %s); no far-area search", req.run_id, type(exc).__name__, exc)
+        FA.skip(far, "ERROR")
+        return None
+    if not pins:
+        FA.skip(far, "NO_FAR_AREA" if not far.areas else
+                "OUT_OF_TIME" if any(nd.reason == "OUT_OF_TIME" for nd in far.needs.values()) else "NO_TARGET")
+        return None
+    variant = BO.SearchVariant(FA.TWIN_INDEX, 0, far=True)
+    try:
+        extra_jobs[FA.TWIN_KEY] = extras.submit(_variant_worker, (variant, t_sub, job, pins), FA.SOURCE)
+    except Exception as exc:  # noqa: BLE001 - its pool broke: only this search is lost
+        outcome[FA.TWIN_KEY] = ("broken", f"{type(exc).__name__}: {exc}")
+    return variant
+
+
+def _far_collect(req: DispatchRequest, far: FA.Run, variant: BO.SearchVariant, got: tuple[str, object],
+                 main_sc: DispatchScenario | None, mode: str, *, stopped: bool, main_stuck: bool) -> DispatchScenario | None:
+    """The twin search's outcome: its SearchRunReport, its areas' loads against the main plan's, and its plan when
+    it is to be sent to the load re-check (far_area.should_send). Never fails the solve."""
+    kind, value = got
+    res = value if kind == "ok" and isinstance(value, dict) else {}
+    sc = res.get("scenario")
+    status = BO.run_status(kind, res.get("status")) if kind == "ok" else BO.run_status(kind)
+    try:
+        r = {"variant": variant, "index": variant.index, "kind": kind, "status": status, "scenario": sc,
+             "watch": res.get("watch"), "limit": res.get("limit"), **_rank_fields(res)}
+        far.report["search"] = _run_report(r, mode, warm=False, rechecked=False)
+        if stopped:
+            # A stop request: the twin's plan is never sent (and it was not waited for), whatever it found.
+            far.report.update(sent=False, status="NOT_USED", reason="STOPPED")
+            return None
+        if sc is None or sc.status != "OPTIMIZED":
+            log.log(logging.WARNING if kind in ("error", "lost", "broken") else logging.INFO,
+                    "far-area run=%s the far-area search gave no plan: %s%s", req.run_id, status,
+                    f" ({type(value).__name__}: {value})" if kind == "error" else "")
+            FA.fail(far, status if status != "OPTIMIZED" else "NO_SOLUTION")
+            return None
+        ids = [frozenset(a.stop_ids) for a in far.areas]
+        main_counts = [FA.scenario_counts(main_sc, s) for s in ids] \
+            if main_sc is not None and main_sc.status == "OPTIMIZED" else None
+        twin_counts = [FA.scenario_counts(sc, s) for s in ids]
+        FA.set_counts(far, "main", main_counts)
+        FA.set_counts(far, "far", twin_counts)
+        send, why = FA.should_send(main_counts, twin_counts, FA.pinned_flags(far), stopped=stopped, main_stuck=main_stuck,
+                                   mins=FA.min_loads(far))
+        far.report.update(sent=send, status="NOT_USED", reason=why)
+        if far.report.get("search"):
+            far.report["search"]["rechecked"] = send
+        return sc if send else None
+    except Exception as exc:  # noqa: BLE001 - optional: the solve goes on without it
+        log.warning("far-area run=%s its search's outcome could not be read (%s: %s); not used", req.run_id,
+                    type(exc).__name__, exc)
+        FA.fail(far, "ERROR")
+        return None
 
 
 def _rank_fields(res: dict) -> dict:
@@ -5812,7 +6001,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                    control: SolveControl | None = None, state: dict | None = None,
                    workers: _Workers | None = None, pv: _PvRun | None = None,
                    best_of: int = 1, best_of_gate: str | None = None, best_of_requested: int | None = None,
-                   extras: _Workers | None = None, repair_inversions: bool = True) -> list[DispatchScenario]:
+                   extras: _Workers | None = None, repair_inversions: bool = True,
+                   far: FA.Run | None = None) -> list[DispatchScenario]:
     """RECOMMENDED is solved first with the full time budget. Alternatives are then warm-started
     from it with half the budget. Finally the post-solve stage (_post_solve) re-assigns the
     searches' loads and picks each scenario's plan from all of them, so unless it serves more,
@@ -5861,6 +6051,13 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     ``best_of_gate``: what the setting asked for and why fewer run (the report only). The best of the
     other searches' plans (at most best_of.sources(K), distinct) are more sources of the load re-check,
     each with one more repack cap kept free in the budgets (n_sources).
+
+    Far-area grouping (far_area.py; SOLVER_FAR_AREA, off by default: ``far`` None and nothing here changes):
+    ``far.twin`` runs the twin search in ``extras`` beside RECOMMENDED's (_recommended_best_of, also with best-of
+    off); its plan, when sent, gets its own stage job in that pool and each option judges it (_post_solve).
+    RECOMMENDED's limit, the THOROUGH tail and the load re-check's budgets are those without it. After the
+    priority repair, RECOMMENDED gets at most two lines on why a far area is still on two or more loads (every
+    mode but off), and ``state["far_area"]`` the report (SearchReport.far_area). Never at the cost of a plan.
     """
     global _STOP_FLAG
     if budget_end is None:
@@ -5881,6 +6078,10 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     # Best-of-N: K searches of RECOMMENDED (1: as always), m of the others' plans re-checked, each one more
     # load re-check source (n_sources, 3 with one search: every budget exactly as before).
     k = best_of if (best_of > 1 and extras is not None and workers is not None and "RECOMMENDED" in names) else 1
+    # Far-area grouping's twin search: in the other searches' pool, beside RECOMMENDED's (with or without best-of).
+    far_slot = far is not None and far.twin and extras is not None and workers is not None and "RECOMMENDED" in names
+    if far is not None and far.twin and not far_slot:
+        FA.skip(far, "NO_WORKERS")
     m = BO.sources(k) if k > 1 else 0
     n_sources = 3 + m
     bo: _BestOf | None = None
@@ -5898,13 +6099,15 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             if workers is None:
                 results["RECOMMENDED"], watch = _searched(job)
                 _pv_submit(pv, req, solvable, tds, mx, time_limit, rec_limit, len(alt_names), tail, budget_end)
-            elif k > 1:
+            elif k > 1 or far_slot:
                 bo = _recommended_best_of(req, solvable, tds, mx, drops, job, workers=workers, extras=extras, k=k, m=m,  # type: ignore[arg-type]
                                           time_limit=time_limit, tail=tail, n_alt=len(alt_names), n_sources=n_sources,
                                           budget_end=budget_end, control=control, pv=pv,
-                                          requested=max(k, best_of_requested or best_of), gate=best_of_gate)
+                                          requested=max(k, best_of_requested or best_of), gate=best_of_gate,
+                                          far=far if far_slot else None)
                 results["RECOMMENDED"], watch, rec_limit = bo.scenario, bo.watch, bo.limit
-                state["best_of"] = bo.report
+                if k > 1:
+                    state["best_of"] = bo.report
             else:
                 deadline = min(time.monotonic() + rec_limit * 2 + REC_GRACE_SEC, budget_end)
                 rec_job = workers.submit(_searched, job, "RECOMMENDED")
@@ -6025,6 +6228,10 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                     # Best-of-N: the other searches' best plans, distinct, as more sources (at most m, each with
                     # its repack cap kept free in the budgets: n_sources); it adds what it chose to the report.
                     stage_kw.update(extra_sources=bo.extra_sources, best_of=state.get("best_of"))
+                if bo is not None and bo.far_source is not None and far is not None:
+                    # Far-area grouping: the twin's plan, in its own stage job in the pool kept for it (never one of
+                    # the engine's sources), judged per option against the plan it has without it.
+                    stage_kw.update(far_source=bo.far_source, far_pool=bo.far_pool, far=far)
                 _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw,
                             rechecked=state.setdefault("rechecked", set()))
         except SolveAborted:
@@ -6056,6 +6263,13 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             raise
         except Exception as exc:  # noqa: BLE001 - the plans the load re-check chose stay
             log.exception("run=%s priority repair failed: %s; the plans found are kept", req.run_id, exc)
+    if far is not None:
+        # Far-area grouping: the report, and on RECOMMENDED why a far area is still on two or more loads.
+        state["far_area"] = far.report
+        _far_finish(req, solvable, tds, mx, drops, results, far, budget_end)
+        # An option that took the grouped plan may serve the day better by priority with fewer stops: the "serves
+        # N more stop(s)" note below then compares by priority, as after the priority repair.
+        repaired |= set(far.report.get("chosen_for") or [])
     rec = results.get("RECOMMENDED")
     if skipped and rec:
         rec.warnings.append(
@@ -6083,6 +6297,29 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                     "Review it under Plan options and choose 'Use instead' if it suits."
                 )
     return [results[n] for n in names if n in results]
+
+
+def _far_finish(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
+                drops: list[UnservedStop], results: dict[str, DispatchScenario], far: FA.Run, budget_end: float) -> None:
+    """Far-area grouping, once the plans are final (after the priority repair): the route check when it has not
+    run yet (report mode, or the twin search was not run; at most far_area.PLAN_SEC, only with that time left),
+    each area's loads in the final RECOMMENDED plan, at most far_area.MAX_LINES lines on it saying why an area is
+    still on two or more loads, the report's final status and its log lines. Never at the cost of a plan."""
+    try:
+        rec = results.get("RECOMMENDED")
+        if (not far.checked and solvable and rec is not None and rec.status == "OPTIMIZED"
+                and time.monotonic() + FA.PLAN_SEC < budget_end - 2):
+            ctx = _stage_ctx(req, solvable, tds, mx, drops)
+            FA.check(far, ctx.day, ctx.rec_pricing, req.depot.lat, req.depot.lng, solvable)
+        if rec is not None and rec.status == "OPTIMIZED" and far.areas:
+            counts = [FA.scenario_counts(rec, frozenset(a.stop_ids)) for a in far.areas]
+            FA.set_counts(far, "final", counts)
+            rec.warnings.extend(FA.explain_lines(far, counts))
+        FA.finish(far)
+        log.info("far-area run=%s %s", req.run_id, FA.summary(far))
+    except Exception as exc:  # noqa: BLE001 - a note never costs the plan
+        log.warning("far-area run=%s its notes could not be built (%s: %s); the plans are unaffected", req.run_id,
+                    type(exc).__name__, exc)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -6292,7 +6529,9 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                 time_limit: int, drops: list[UnservedStop], results: dict[str, DispatchScenario], pool,
                 budget_end: float, done: set[str] | None = None, repack_cap: float | None = None,
                 pv: "_PvRun | None" = None, rechecked: set[str] | None = None,
-                extra_sources: list[tuple[str, DispatchScenario]] | tuple = (), best_of: dict | None = None) -> None:
+                extra_sources: list[tuple[str, DispatchScenario]] | tuple = (), best_of: dict | None = None,
+                far_source: DispatchScenario | None = None, far_pool: "_Workers | None" = None,
+                far: FA.Run | None = None) -> None:
     """Replace each OPTIMIZED scenario in ``results`` by the best candidate for its goal.
 
     Candidates = every raw scenario plan (re-timed exactly) + its repacks: whole loads
@@ -6335,7 +6574,16 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     (_best_of_note) and the option is added to ``best_of["chosen_for"]``. ``best_of`` (the solve's
     best-of report, SearchReport.best_of) also receives, per option, the best candidate of the other
     searches against the best one without them (``gains``, BestOfGain: paired evidence of what they add,
-    on the re-check's own scores). Without them (one search, the default) nothing here changes."""
+    on the re-check's own scores). Without them (one search, the default) nothing here changes.
+
+    ``far_source`` (far-area grouping, far_area.py, with ``far`` its state): the twin search's plan, with each far
+    area on its fewest trucks. Like the second search's, it has its own stage job (far_area.stage_in_worker, in
+    ``far_pool``, the pool kept for it; in-process after the engine's jobs when ``pool`` is None), never longer
+    than the engine's job, and the engine's sources, optional stops, budgets and jobs are exactly as without it.
+    Its candidates never join the pick: after each option's choice (``prev``, the plan it has without them, the
+    best-of and second-search rules included), far_area.judge decides whether the best of them that puts an area
+    on fewer loads (and none on more) replaces it; one that then fails the independent check falls back to
+    ``prev``. The option's note says so (far_area.grouped_note), and the verdicts go to the far-area report."""
     done = done if done is not None else set()
     raw = {n: sc for n, sc in results.items() if sc.status == "OPTIMIZED"}
     pv_plan = pv.plan if pv is not None else None
@@ -6376,10 +6624,23 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     repair = (not raw and bool(rescue)) or any(
         sc.feasibility is None or sc.feasibility.status != "VERIFIED" for sc in raw.values())
     stage_room = max(0.0, budget_end - t0 - STAGE_GRACE_SEC - 5) if repair else 0.0
+    # Far-area grouping: the twin search's plan, by stop id (its search had the request's stops, pinned).
+    far_plan: LR.TimedPlan | None = None
+    if far is not None and far_source is not None and "RECOMMENDED" in raw:
+        try:
+            if far_source.status == "OPTIMIZED":
+                far_plan = _timed_from_scenario(far_source, ctx.stop_idx, ctx.truck_idx) or None
+        except Exception as exc:  # noqa: BLE001 - only the grouped plan is lost
+            log.warning("far-area run=%s its plan could not be read (%s: %s); not used", req.run_id, type(exc).__name__, exc)
+            far_plan = None
+        if far_plan is None:
+            FA.note_stage(far, "NO_STAGE")
 
     def fallback(why: str) -> None:
         if pv_plan:
             pv.report.update(status="NOT_CHOSEN", reason="NO_STAGE")  # type: ignore[union-attr]
+        if far_plan:
+            FA.note_stage(far, "NO_STAGE")
         before = dict(results)
         _retime_fallback(req, solvable, tds, mx, drops, results, why, ctx=ctx)
         done.update(n for n in raw if results[n] is not before[n])
@@ -6404,6 +6665,21 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                           extra_s=min(LR.EXTENDED_MAX_SEC, max(0.0, stage_room - pv_budget) / max(1, len(pv_goals))))
         else:
             pv.report.update(status="NOT_CHOSEN", reason="OUT_OF_TIME")  # type: ignore[union-attr]
+    # Far-area grouping's own job (PyVRP's pattern): RECOMMENDED's prices, and MIN_TRUCKS' when that option has a
+    # plan; never more time than the engine's job (they run side by side).
+    far_job = None
+    if far_plan:
+        f_goals = ["RECOMMENDED"] + (["MIN_TRUCKS"] if "MIN_TRUCKS" in goals else [])
+        f_budget = min(cap * len(f_goals), job_budget)
+        if f_budget >= REPACK_MIN_SEC:
+            far_job = dict(day=ctx.day, score_pricing=rec_pricing, plan=far_plan,
+                           goals=[(g, rec_pricing if g == "RECOMMENDED" else _pricing(g, req, tds, solvable)) for g in f_goals],
+                           optional=_repair_weights(solvable, set(range(n_stops)) - LR.served_of(far_plan), cfg, req.trucks,
+                                                    req.depot) or None,
+                           cap_s=cap, budget_s=f_budget, fit_weights=fit_weights,
+                           extra_s=min(LR.EXTENDED_MAX_SEC, max(0.0, stage_room - f_budget) / len(f_goals)))
+        else:
+            FA.note_stage(far, "OUT_OF_TIME")
     extra = min(LR.EXTENDED_MAX_SEC, max(0.0, stage_room / rounds_of(len(goals)) - job_budget)) if goals else 0.0
     jobs = {g: dict(day=ctx.day, score_pricing=rec_pricing, goal=g,
                     goal_pricing=rec_pricing if g == "RECOMMENDED" else _pricing(g, req, tds, solvable),
@@ -6417,6 +6693,22 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     if pv_proc is not None:
         # Its own process (idle since its search ended): starts now, beside the engine's jobs.
         pv_proc.submit(PV.stage_in_worker, pv_job)
+    # Far-area grouping: its job in the pool kept for it (the twin search's, idle now), beside the engine's jobs.
+    far_task = None
+    far_deadline = 0.0
+    if far_job is not None and pool is not None:
+        if far_pool is not None:
+            try:
+                far_task = far_pool.submit(FA.stage_in_worker, far_job, "stage:far")
+                far_deadline = min(time.monotonic() + far_job["budget_s"] + len(far_job["goals"]) * far_job["extra_s"]
+                                   + LR.CLOSING_LATE_SEC + STAGE_GRACE_SEC, budget_end - 2)
+            except Exception as exc:  # noqa: BLE001 - only the grouped plan is lost
+                log.warning("far-area run=%s its stage job could not start (%s: %s)", req.run_id, type(exc).__name__, exc)
+                FA.note_stage(far, "STAGE_FAILED")
+        else:
+            FA.note_stage(far, "NO_STAGE_WORKER")
+        if far_task is None:
+            far_job = None
     # A job's closing recovery may end up to LR.CLOSING_LATE_SEC past its budget (load_repack.build_candidates,
     # when its repacks ended late): waited for, once per round of jobs (the second search's goals share one
     # budget, a goal's late end shortens the next), never past the solve's deadline.
@@ -6460,14 +6752,41 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         except Exception as exc:  # noqa: BLE001 - only the second search's candidates are lost
             log.warning("pyvrp run=%s stage failed: %s; the engine's plans are used", req.run_id, exc)
             pv.report.update(status="NOT_CHOSEN", reason="STAGE_FAILED")  # type: ignore[union-attr]
+    far_out: tuple[list[LR.Candidate], list[str]] | None = None
+    if far_task is not None:
+        kind, value = _await_all(far_pool, {"far": far_task}, max(far_deadline, time.monotonic()))["far"]  # type: ignore[arg-type]
+        if kind == "ok":
+            far_out = value  # type: ignore[assignment]
+        else:
+            log.warning("far-area run=%s stage %s%s; the plans without it are used", req.run_id,
+                        {"lost": "lost its worker process", "timeout": "timed out", "broken": _NOT_RUN["broken"]}.get(kind, "failed"),
+                        f": {value}" if value is not None else "")
+            FA.note_stage(far, "STAGE_FAILED")
+    elif far_job is not None:
+        try:  # no worker pool (direct calls, SOLVER_PARALLEL=0): in-process, after the engine's jobs
+            far_out = FA.stage_in_worker(far_job)
+        except Exception as exc:  # noqa: BLE001 - only the grouped plan's candidates are lost
+            log.warning("far-area run=%s stage failed: %s; the plans without it are used", req.run_id, exc)
+            FA.note_stage(far, "STAGE_FAILED")
     stage_sec = time.monotonic() - t0
     if sources and "RECOMMENDED" not in outputs:  # the raw plans were not re-timed either
         return fallback("the check failed or ran out of time")
     eng = [c for g in goals if g in outputs for c in outputs[g][0]]
     pvc = list(pv_out[0]) if pv_out else []
     cands = eng + pvc  # the engine's first: a tie keeps the engine's plan
+    # Far-area grouping's candidates: never in the pick, only judged against each option's choice (below).
+    far_cands = list(far_out[0]) if far_out else []
+    far_verdicts: dict[str, FA.Verdict] = {}
+    far_idx: list[frozenset[int]] = []
+    far_mins: list[int | None] = []
+    if far_out is not None and far is not None:
+        if not far.areas:
+            far.areas = FA.groupable(FA.detect(req.depot.lat, req.depot.lng, solvable))
+        far_idx = [frozenset(ctx.stop_idx[i] for i in a.stop_ids if i in ctx.stop_idx) for a in far.areas]
+        far_mins = FA.min_loads(far)
     log.info("post-solve run=%s %.1fs: %s", req.run_id, stage_sec,
-             "; ".join([n for g in goals if g in outputs for n in outputs[g][1]] + (list(pv_out[1]) if pv_out else [])))
+             "; ".join([n for g in goals if g in outputs for n in outputs[g][1]] + (list(pv_out[1]) if pv_out else [])
+                       + (list(far_out[1]) if far_out else [])))
     if pv_plan and not pvc and pv.report.get("reason") is None:  # type: ignore[union-attr]
         pv.report.update(status="NOT_CHOSEN", reason="NO_FEASIBLE_PLAN")  # type: ignore[union-attr]
 
@@ -6495,8 +6814,11 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     # sixth reviews): after the pick, so it never changes which truck carries what; each candidate once,
     # each with up to HIRE_ORDER_SEC, all of them together with up to three times that (the second
     # search's plan and the engine's own are compared after it, so neither may starve the other) - four
-    # times with best-of-N's other searches (the best plan without them is compared too).
-    orders_end = min(time.monotonic() + (3 + bool(extras)) * HIRE_ORDER_SEC, budget_end - 2)
+    # times with best-of-N's other searches (the best plan without them is compared too) - and one more per
+    # option with far-area candidates (each option may judge a different one: never at the cost of the time the
+    # options' own plans have without them).
+    orders_end = min(time.monotonic() + (3 + bool(extras) + (len(raw) if far_cands else 0)) * HIRE_ORDER_SEC,
+                     budget_end - 2)
     in_order: dict[int, LR.Candidate] = {}
 
     def ordered(c: LR.Candidate | None) -> LR.Candidate | None:
@@ -6538,10 +6860,38 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             # Better only by less than the note can show (under 1 OMR or 1 km, same trucks and loads):
             # the engine's own plan is kept (review: "529 -> 529 OMR" was called a better plan).
             best, lost = ref, ref_lost
+        # Far-area grouping: the option's choice so far (``prev``: exactly its plan with the switch off) against the
+        # best grouped candidate that puts an area on fewer loads and none on more (far_area.judge) - among those that
+        # also keep every area stop prev serves and no area below its fewest loads (far_area.area_rule) when there
+        # are such, else the best of the others, so that the report says why. Never at the cost of the option's plan:
+        # an error here keeps ``prev`` (verdict ERROR).
+        far_prev: tuple[LR.Candidate | None, bool] | None = None
+        if far_out is not None and name in raw:
+            prev_choice = (best, lost)
+            try:
+                fewer = [c for c in far_cands if best is not None and FA.fewer_loads(c.plan, best.plan, far_idx)]
+                kept = [c for c in fewer if FA.area_rule(c.plan, best.plan, far_idx, far_mins) is None]  # type: ignore[union-attr]
+                fc, fc_lost = pick(name, kept or fewer, own) if fewer else (None, False)
+                v = FA.judge(name, ordered(fc), fc_lost, best, lost, far_idx, ctx.day, FA.slack_min() * 60, len(far_cands),
+                             far_mins)
+                far_verdicts[name] = v
+                if v.use:
+                    far_prev = (best, lost)
+                    best, lost = ordered(fc), fc_lost
+            except Exception:  # noqa: BLE001 - the keep rule never costs an option its plan
+                log.exception("far-area run=%s %s: the keep rule failed; the plan without it is kept", req.run_id, name)
+                far_verdicts[name] = FA.Verdict(name, "ERROR")
+                far_prev = None
+                best, lost = prev_choice
         new = None
+        far_drops: set[int] = set()
         while best is not None:
-            timing_drops = own_carried - served(best) if lost else set()
             from_pv = best.source.startswith("PYVRP")
+            from_far = far_prev is not None and FA.from_far(best.source)
+            # The stops the grouped plan leaves out that the plan without it serves: their own reason (a plan that
+            # serves the day better by priority took the place), never "the loading time" (_far_drop_reason).
+            far_drops = served(far_prev[0]) - served(best) if from_far and far_prev[0] is not None else set()  # type: ignore[index]
+            timing_drops = (own_carried - served(best) if lost else set()) - far_drops
             try:
                 new = _build_scenario(
                     name, req, solvable, tds, mx, best.plan, values, use_margin, drops,
@@ -6549,15 +6899,23 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                     solver_status="SECOND_SEARCH" if name in rescue else sc.solver_status,
                     elapsed=sc.solver_time_sec + stage_sec, time_limit=sc.time_limit_sec,
                     objective_value=best.score.objective, extra_warnings=value_warnings, timing_drops=timing_drops,
-                    exact_timing=True,
+                    exact_timing=True, far_drops=far_drops,
                 )
             except Exception:
-                if not from_pv:
+                if not (from_pv or from_far):
                     raise
-                log.exception("pyvrp run=%s %s: its plan could not be built", req.run_id, name)
+                log.exception("%s run=%s %s: its plan could not be built", "far-area" if from_far else "pyvrp", req.run_id, name)
                 new = None
-            if not from_pv or (new is not None and new.feasibility is not None and new.feasibility.status == "VERIFIED"):
+            if not (from_pv or from_far) or (new is not None and new.feasibility is not None and new.feasibility.status == "VERIFIED"):
                 break
+            if from_far:
+                # R5: never an unchecked grouped plan - the plan the option has without it.
+                log.warning("far-area run=%s %s: the grouped plan failed the independent check (%d violations); the plan "
+                            "without it is used", req.run_id, name,
+                            len(new.feasibility.violations) if new is not None and new.feasibility else 0)
+                far_verdicts[name].outcome, far_verdicts[name].use = "KEPT_NOT_VERIFIED", False
+                (best, lost), far_prev, new = far_prev, None, None  # type: ignore[misc]
+                continue
             # Belt and braces: never an unchecked plan from the second search.
             log.warning("pyvrp run=%s %s: candidate failed the independent check (%d violations); the engine's plan is used",
                         req.run_id, name, len(new.feasibility.violations) if new is not None and new.feasibility else 0)
@@ -6586,7 +6944,7 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             continue
         served_now = served(best)
         added = served_now - own_carried
-        timing_drops = own_carried - served_now if lost else set()
+        timing_drops = (own_carried - served_now if lost else set()) - far_drops
         changed = (new.trucks_used, new.trips) != (sc.trucks_used, sc.trips) or abs(new.operating_cost - sc.operating_cost) >= 0.5
         if timing_drops:
             new.warnings.append(_timing_drop_warning(cfg, len(timing_drops), len(added),
@@ -6599,6 +6957,14 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         if best.source.startswith("PYVRP"):
             new.warnings.append(_second_search_note(name, name in rescue, ref, best, served(ref) if ref else set(), served_now))
             pv.report["chosen_for"] = [*pv.report.get("chosen_for", []), name]  # type: ignore[union-attr]
+        elif far_prev is not None and FA.from_far(best.source):
+            # Not "Loads were re-assigned after the route search": compared with the plan it has without grouping.
+            try:
+                note = FA.grouped_note(far_verdicts[name], far.areas, FA.slack_min())  # type: ignore[union-attr]
+            except Exception:  # noqa: BLE001 - a note never costs the plan it describes
+                log.exception("far-area run=%s %s: its note could not be written", req.run_id, name)
+                note = "Far area: a far area now goes on fewer loads. It passed the planner's own checks, timing and costs."
+            new.warnings.append(note)
         elif timing_drops:
             pass
         elif _from_extra(best.source):
@@ -6620,6 +6986,19 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         done.add(name)
         if rechecked is not None:
             rechecked.add(name)
+    if far_out is not None and far is not None and far_verdicts:
+        try:
+            FA.judged(far, far_verdicts)
+            for v in far_verdicts.values():
+                log.info("far-area run=%s %s: %s (gain %s OMR, %s km, %s trucks, %+d stops, area loads %s -> %s)",
+                         req.run_id, v.option, v.outcome, v.gains.get("gain_omr"), v.gains.get("gain_km"),
+                         v.gains.get("gain_trucks"), v.added - v.dropped, [b[0] for b in v.before], [a[0] for a in v.after])
+        except Exception:  # noqa: BLE001 - the report never costs a plan, and never contradicts one
+            log.exception("far-area run=%s: its report could not be written", req.run_id)
+            chosen = [n for n, v in far_verdicts.items() if v.use]
+            far.judged = True
+            far.report.update(results=[], chosen_for=chosen, status="USED" if chosen else "FAILED",
+                              reason=None if chosen else "ERROR")
     if pv_plan:
         if pv.report.get("chosen_for"):  # type: ignore[union-attr]
             pv.report.update(status="CHOSEN", reason=None)  # type: ignore[union-attr]
