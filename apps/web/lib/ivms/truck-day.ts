@@ -43,9 +43,9 @@
 import { alertReviewFlags, alertReviewText, alertStateText, alertText, ruleLabel } from '../alerts/view';
 import { SEVERITY_LABEL } from '../alerts/catalog';
 import type { OpsAlertRow } from '../alerts/types';
-import { awayText, countOf, GPS_WORD, OUTCOME_LABEL, reasonText, sourceWord } from '../delivery/office-text';
+import { afterResultText, awayText, countOf, GPS_WORD, OUTCOME_LABEL, reasonText, sourceWord } from '../delivery/office-text';
 import { countedLeaveTap, firstSignOf } from '../delivery/turnaround';
-import { cyclesOf, GPS_DEPARTURE_MATCH_MIN, withoutGpsTimes, type VisitEvent, type VisitTimes } from '../delivery/visit';
+import { afterResultOf, cyclesOf, GPS_DEPARTURE_MATCH_MIN, withoutGpsTimes, type VisitEvent, type VisitTimes } from '../delivery/visit';
 import { distanceM } from '../dispatch/snapshots';
 import { addDaysIso, fmtDayMonth, fmtHhmm, fmtWindow, localMinutes, todayIso, zonedDayStart } from '../dispatch/time';
 import { AT_STOP_MARGIN_M, liveEta } from './eta';
@@ -232,6 +232,13 @@ export interface TruckDayStop {
   onSiteMin: number | null;
   /** Minutes the GPS showed the truck away from the customer between the arrival and the departure (StopVisit.awayMinutes); null: none. */
   awayMin: number | null;
+  /**
+   * The driver's own arrival tap a GPS arrival replaced (owner decision 21 Oct 2026: GPS arrival wins; StopVisit.ownArrivedAt),
+   * ISO: "driver tapped 10:15" beside the GPS time, for coaching late taps. Null: none replaced (or GPS times not shown).
+   */
+  arrivalTapAt: string | null;
+  /** F2: whole minutes the truck still stood at the stop after the driver's result (StopVisit.afterResultMinutes, never unloading); null: none. */
+  afterResultMin: number | null;
   plannedServiceMin: number | null;
   /** Arrived before the receiving window opened: about this many minutes of waiting. */
   waitedMin: number | null;
@@ -848,6 +855,8 @@ function stopOf(l: TruckDayLoadInput, s: TruckDayStopInput, v: TruckDayVisitInpu
     lateMin: arrived && plannedAt ? minutesBetween(plannedAt, arrived) : null,
     onSiteMin,
     awayMin: away === null ? null : Math.round(away),
+    arrivalTapAt: arrived && v?.arrivalSource === 'AYUN' && v.ownArrivedAt ? iso(v.ownArrivedAt) : null,
+    afterResultMin: departed && v && afterResultOf(v) ? Math.max(1, Math.round(afterResultOf(v)!)) : null,
     plannedServiceMin: s.plannedServiceMin,
     waitedMin,
     // A window that is the whole day ("any time") is no window.
@@ -871,12 +880,18 @@ function stopItem(stop: TruckDayStop, s: TruckDayStopInput, v: TruckDayVisitInpu
   lines.push(plan.join(', '));
   if (stop.arrivedAt) {
     const late = stop.lateMin === null || stop.lateMin === 0 ? '' : stop.lateMin > 0 ? `, ${stop.lateMin} min late` : `, ${-stop.lateMin} min early`;
-    lines.push(`Arrived ${at(stop.arrivedAt)} (${stop.arrivalBy})${late}${stop.arrivalObserved ? '' : '; not observed: the real arrival was earlier'}`);
+    // Owner decision 21 Oct 2026: a GPS arrival that replaced the driver's later tap names the tap (coaching).
+    const tap = stop.arrivalTapAt ? `; driver tapped ${at(stop.arrivalTapAt)}` : '';
+    lines.push(`Arrived ${at(stop.arrivedAt)} (${stop.arrivalBy}${tap})${late}${stop.arrivalObserved ? '' : '; not observed: the real arrival was earlier'}`);
   }
-  if (stop.departedAt) lines.push(stop.departedAtResult ? `Left: no departure seen, the result at ${at(stop.departedAt)} ended the stop` : `Left ${at(stop.departedAt)} (${stop.departureBy})`);
+  const afterResult = afterResultText(stop.afterResultMin);
+  if (stop.departedAt) {
+    lines.push(stop.departedAtResult ? `Left: no departure seen, the result at ${at(stop.departedAt)} ended the stop` : `Left ${at(stop.departedAt)} (${stop.departureBy})${afterResult ? `, ${afterResult}` : ''}`);
+  }
   if (stop.onSiteMin !== null) {
     const away = stop.awayMin ? `; ${awayText(stop.awayMin)} not counted (GPS: the truck left the customer and came back)` : '';
-    lines.push(`On site ${stop.onSiteMin} min${stop.plannedServiceMin !== null ? ` (planned unloading ${stop.plannedServiceMin} min${away})` : away ? ` (${away.slice(2)})` : ''}`);
+    const after = afterResult ? `; ${afterResult}, not unloading` : '';
+    lines.push(`On site ${stop.onSiteMin} min${stop.plannedServiceMin !== null ? ` (planned unloading ${stop.plannedServiceMin} min${away}${after})` : away || after ? ` (${(away + after).slice(2)})` : ''}`);
   } else if (stop.awayMin) lines.push(`${awayText(stop.awayMin)} (GPS: the truck left the customer and came back)`);
   if (stop.waitedMin !== null) lines.push(`Waited about ${stop.waitedMin} min for the receiving window to open (${fmtHhmm(s.windowStartMin)})`);
   if (stop.resultText) {

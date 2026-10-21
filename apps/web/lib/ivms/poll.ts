@@ -18,8 +18,12 @@
  *    its age), a fix whose clock runs ahead never moves the latest position forward.
  * 4. ROUTE (mode TIMES, and ALERTS which does all TIMES does): OBJECT_GET_ROUTE per truck-day, from the operating hours' start of the delivery
  *    date: every ivmsRoutePullMin (30-60 min; longer when the ROUTE share would not last) while a load of
- *    that day is out, and once more, over the whole day, 10 minutes after its last load was completed
- *    (late buffered points included). The points are the trail (TruckTrailPoint), the only source of GPS
+ *    that day is out, and once more, over the whole day, after its last load was completed (late buffered
+ *    points included): 10 minutes after the completion when the truck was in the depot then, else 15 minutes
+ *    after it came back (its first depot entry after the completion, finalPullTarget: owner decision 21 Oct
+ *    2026, the GPS timing study found the trail of 7 of 16 truck-days ending before the truck was back),
+ *    pulled as a regular truck-day until then, 3 h at most. The points are the trail (TruckTrailPoint), the
+ *    only source of GPS
  *    arrival and departure times (H5); a suppressed truck-day (undo, mismatch) is not pulled, nor anything
  *    from before the tracker was mapped to the truck (IvmsTruckDay.trailFrom, second review M-1). Only
  *    while the provider's clock is right (budget.ts clockCheck, first review H-1): the skew of the latest
@@ -79,15 +83,28 @@ export const ROUTE_MIN_STOP_MIN = 60 as const;
 export const ROUTE_OVERLAP_MS = 10 * 60_000;
 /** The final pull of a truck-day waits this long after its last load was completed. */
 export const FINAL_PULL_DELAY_MS = 10 * 60_000;
-/** ... and covers the day until this long after that completion (the drive back is already in it). */
+/** ... and covers the day until this long after that completion (the drive back is already in it), or after the truck's return. */
 export const FINAL_PULL_TAIL_MS = 30 * 60_000;
+/**
+ * F6 (owner decision 21 Oct 2026): a depot entry after the last completion is the truck's return when no depot
+ * exit follows within this long (a flap at the gate, a customer inside the depot circle); the final pull is due
+ * this long after it.
+ */
+export const FINAL_RETURN_HOLD_MS = 15 * 60_000;
+/** F6: no return seen this long after the last completion: the final pull is made anyway (FALLBACK). */
+export const FINAL_RETURN_FALLBACK_MS = 3 * 3600_000;
+/** F6: a final pull due longer ago than this and not made yet is overdue (counted in route.finals and logged once). */
+export const FINAL_OVERDUE_MS = 30 * 60_000;
 /** TIMES: the GPS stop times are processed at least this often while truck-days are on the road (no pull needed). */
 export const PROCESS_EVERY_MS = 5 * 60_000;
 
 const OUT = new Set(['LOCKED', 'LOADING', 'DISPATCHED']);
 const LEFT = new Set(['DISPATCHED', 'COMPLETED']);
 
-/** A truck-day whose history is pulled: REGULAR while a load of it is out, FINAL once after the last one. */
+/**
+ * A truck-day whose history is pulled: REGULAR while a load of it is out (or the truck is still driving back
+ * after the last completion: `awaitingReturn`), FINAL once after the last one.
+ */
 export interface RouteDay {
   truckId: string;
   imei: string;
@@ -95,6 +112,63 @@ export interface RouteDay {
   kind: 'REGULAR' | 'FINAL';
   /** The newest completion of the day's loads (FINAL), or null. */
   lastCompletedAt: Date | null;
+  /** F6: the time the final pull must reach (the completion, the return, or the fallback), never past the next day's operating hours; null: none known (any final covers it). */
+  finalTargetAt?: Date | null;
+  /** F6: when the final pull is due; null: now. */
+  finalDueAt?: Date | null;
+  /** F6: the last load was completed while the truck was out and it is not back yet: pulled as REGULAR. */
+  awaitingReturn?: boolean;
+  /** F6: why the final pull is due when it is (finalPullTarget). */
+  finalReason?: FinalReason;
+}
+
+/** F6: why a truck-day's final pull is due when it is (finalPullTarget). */
+export type FinalReason = 'NO_ZONE_INFO' | 'IN_AT_COMPLETION' | 'RETURNED' | 'AWAITING_RETURN' | 'FALLBACK';
+
+/** A depot move of a truck (IvmsEvent DEPOT_IN / DEPOT_OUT: a webhook, the backstop or the trail; not an unconfirmed or duplicate one). */
+export interface DepotMove {
+  kind: 'DEPOT_IN' | 'DEPOT_OUT';
+  at: Date;
+}
+
+/**
+ * F6 (owner decision 21 Oct 2026; the GPS timing study of 19-20 Oct: on 7 of 16 truck-days the last load was
+ * completed while the truck was still out, its return came 22-307 min later, and the final pull 10 min after
+ * the completion left the drive back - and the last stops' GPS departures - out of the trail). When the final
+ * pull of a truck-day is due and how far it must reach. Pure. C = the last completion:
+ * - no depot move known (NO_ZONE_INFO), or the truck was in the depot at C (its last move at or before C is an
+ *   entry: IN_AT_COMPLETION): due C + FINAL_PULL_DELAY_MS, reaching C (as before);
+ * - out at C (its last move before C an exit, or none before C and an entry after it): the return R is its first
+ *   depot entry after C not followed by an exit within FINAL_RETURN_HOLD_MS; due R + the hold, reaching R
+ *   (RETURNED). Until then the truck-day is pulled as a regular one (AWAITING_RETURN, `awaiting`), at most
+ *   FINAL_RETURN_FALLBACK_MS after C: then due at once, reaching C + that (FALLBACK).
+ */
+export function finalPullTarget(
+  day: { lastCompletedAt: Date | null; depotMoves?: readonly DepotMove[] },
+  now: Date,
+): { reason: FinalReason; targetAt: Date | null; dueAt: Date | null; awaiting: boolean } {
+  const c = day.lastCompletedAt?.getTime() ?? null;
+  const moves = [...(day.depotMoves ?? [])].sort((a, b) => a.at.getTime() - b.at.getTime());
+  if (c === null) return { reason: 'NO_ZONE_INFO', targetAt: null, dueAt: null, awaiting: false };
+  const asBefore = (reason: FinalReason) => ({ reason, targetAt: new Date(c), dueAt: new Date(c + FINAL_PULL_DELAY_MS), awaiting: false });
+  if (!moves.length) return asBefore('NO_ZONE_INFO');
+  const before = moves.filter((m) => m.at.getTime() <= c);
+  const after = moves.filter((m) => m.at.getTime() > c);
+  const lastBefore = before[before.length - 1];
+  const outAtCompletion = lastBefore ? lastBefore.kind === 'DEPOT_OUT' : after[0]?.kind === 'DEPOT_IN';
+  if (!outAtCompletion) return asBefore(lastBefore ? 'IN_AT_COMPLETION' : 'NO_ZONE_INFO');
+  const t = now.getTime();
+  for (const m of after) {
+    if (m.kind !== 'DEPOT_IN') continue;
+    const r = m.at.getTime();
+    // A flap: the truck left again within the hold.
+    if (after.some((x) => x.kind === 'DEPOT_OUT' && x.at.getTime() > r && x.at.getTime() <= r + FINAL_RETURN_HOLD_MS)) continue;
+    // The hold is not over yet: an exit may still follow.
+    if (t < r + FINAL_RETURN_HOLD_MS) return { reason: 'AWAITING_RETURN', targetAt: null, dueAt: null, awaiting: true };
+    return { reason: 'RETURNED', targetAt: new Date(Math.max(c, r)), dueAt: new Date(r + FINAL_RETURN_HOLD_MS), awaiting: false };
+  }
+  if (t < c + FINAL_RETURN_FALLBACK_MS) return { reason: 'AWAITING_RETURN', targetAt: null, dueAt: null, awaiting: true };
+  return { reason: 'FALLBACK', targetAt: new Date(c + FINAL_RETURN_FALLBACK_MS), dueAt: new Date(c + FINAL_RETURN_FALLBACK_MS), awaiting: false };
 }
 
 export interface TickPlan {
@@ -110,8 +184,11 @@ export interface TickPlan {
 /**
  * Who is out and what may be asked now. Pure. Inside the operating hours a truck with a LOCKED, LOADING
  * or DISPATCHED load; after them only a DISPATCHED one (a load still out). History: a truck-day once one
- * of its loads left (DISPATCHED or COMPLETED); FINAL when none is out any more (outside the hours only
- * REGULAR pulls of a day with a DISPATCHED load).
+ * of its loads left (DISPATCHED or COMPLETED); FINAL when none is out any more and the truck is back
+ * (finalPullTarget, F6), REGULAR while it drives back. Outside the hours only REGULAR pulls of a day with a
+ * DISPATCHED load, and a day whose truck is driving back after its last completion or whose final pull after
+ * the return (or the fallback) is due, until FINAL_OVERDUE_MS after it: the live map is unchanged (positions
+ * only while a load is out, M7).
  */
 export function planTick(c: Pick<IvmsCompany, 'mode' | 'timezone' | 'fromMin' | 'toMin'>, fleet: readonly FleetTruck[], now: Date): TickPlan {
   const hours: OperatingHours = { timezone: c.timezone, fromMin: c.fromMin, toMin: c.toMin };
@@ -127,9 +204,34 @@ export function planTick(c: Pick<IvmsCompany, 'mode' | 'timezone' | 'fromMin' | 
       for (const d of t.days) {
         if (!d.loads.some((l) => LEFT.has(l.status))) continue;
         const out = d.loads.some((l) => OUT.has(l.status));
-        if (!inHours && !d.loads.some((l) => l.status === 'DISPATCHED')) continue;
         const done = d.loads.filter((l) => l.status === 'COMPLETED' && l.statusChangedAt).map((l) => l.statusChangedAt!.getTime());
-        routeDays.push({ truckId: t.truckId, imei: t.imei, date: d.date, kind: out ? 'REGULAR' : 'FINAL', lastCompletedAt: done.length ? new Date(Math.max(...done)) : null });
+        const lastCompletedAt = done.length ? new Date(Math.max(...done)) : null;
+        if (out) {
+          if (!inHours && !d.loads.some((l) => l.status === 'DISPATCHED')) continue;
+          routeDays.push({ truckId: t.truckId, imei: t.imei, date: d.date, kind: 'REGULAR', lastCompletedAt });
+          continue;
+        }
+        // F6 (owner decision 21 Oct 2026): the final pull waits for the truck's return.
+        const f = finalPullTarget({ lastCompletedAt, depotMoves: d.depotMoves }, now);
+        if (!inHours) {
+          // After the hours: only a truck still driving back, or a final after the return (or the fallback) not overdue yet.
+          const late = f.reason === 'RETURNED' || f.reason === 'FALLBACK';
+          if (!f.awaiting && !(late && f.dueAt && now.getTime() < f.dueAt.getTime() + FINAL_OVERDUE_MS)) continue;
+        }
+        // Never past the next day's operating hours (routeWindow's hard end): a later target could never be covered.
+        const hardEnd = nextOpsStartOf(d.date, hours).getTime();
+        const target = f.targetAt ? new Date(Math.min(f.targetAt.getTime(), hardEnd)) : null;
+        routeDays.push({
+          truckId: t.truckId,
+          imei: t.imei,
+          date: d.date,
+          kind: f.awaiting ? 'REGULAR' : 'FINAL',
+          lastCompletedAt,
+          finalTargetAt: target,
+          finalDueAt: f.dueAt,
+          awaitingReturn: f.awaiting,
+          finalReason: f.reason,
+        });
       }
     }
   }
@@ -145,7 +247,11 @@ export function routeWindow(day: RouteDay, row: TruckDayRow | undefined, hours: 
   // A load left out past the next day's start (never closed): nothing new to ask for this truck-day.
   if (day.kind === 'REGULAR' && row?.pulledTo && row.pulledTo.getTime() >= hardEnd) return null;
   if (day.kind === 'FINAL') {
-    if (day.lastCompletedAt) to = Math.min(to, day.lastCompletedAt.getTime() + FINAL_PULL_TAIL_MS);
+    const target = day.finalTargetAt ?? day.lastCompletedAt;
+    if (target) to = Math.min(to, target.getTime() + FINAL_PULL_TAIL_MS);
+    // F6: a repeat (a final made before the truck was back, or the fallback's) adds only what came since: the
+    // whole day was read once already, and a short answer stays within the call's time and size limits.
+    if (row?.finalPullAt && row.pulledTo) from = Math.max(start, row.pulledTo.getTime() - ROUTE_OVERLAP_MS);
   } else if (row?.pulledTo) {
     from = Math.max(start, row.pulledTo.getTime() - ROUTE_OVERLAP_MS);
   }
@@ -159,13 +265,46 @@ export function routeWindow(day: RouteDay, row: TruckDayRow | undefined, hours: 
 export function routePullDue(day: RouteDay, row: TruckDayRow | undefined, everyMin: number | null, pullMin: number, now: Date, force = false): boolean {
   if (row?.suppressedAt) return false;
   if (day.kind === 'FINAL') {
-    if (row?.finalPullAt) return false;
-    return !day.lastCompletedAt || now.getTime() >= day.lastCompletedAt.getTime() + FINAL_PULL_DELAY_MS;
+    if (finalCovered(day, row)) return false;
+    const dueAt = finalDueOf(day);
+    return !dueAt || now.getTime() >= dueAt.getTime();
   }
   if (everyMin === null) return false;
   if (!row?.lastPullAt) return true;
   if (force && everyMin <= pullMin) return true;
   return now.getTime() - row.lastPullAt.getTime() >= everyMin * 60_000;
+}
+
+/** F6: the final pull made reaches the target (a final made before the truck was back is repeated once). */
+export function finalCovered(day: Pick<RouteDay, 'finalTargetAt'>, row: TruckDayRow | undefined): boolean {
+  if (!row?.finalPullAt) return false;
+  if (!day.finalTargetAt) return true;
+  return !!row.pulledTo && row.pulledTo.getTime() >= day.finalTargetAt.getTime();
+}
+
+/** A final pull that cannot be made (nothing to ask for, the tracker not readable) counts as made: never retried in a loop (finalCovered). */
+function givenUpTo(day: RouteDay, row: TruckDayRow | undefined, fallback: Date): Date {
+  return new Date(Math.max(row?.pulledTo?.getTime() ?? fallback.getTime(), day.finalTargetAt?.getTime() ?? 0));
+}
+
+/** When a FINAL day's pull is due: finalPullTarget's time, else (no target known) 10 min after the completion; null: now. */
+function finalDueOf(day: RouteDay): Date | null {
+  if (day.finalDueAt !== undefined) return day.finalDueAt;
+  return day.lastCompletedAt ? new Date(day.lastCompletedAt.getTime() + FINAL_PULL_DELAY_MS) : null;
+}
+
+/** F6: final pulls due now, and those due more than FINAL_OVERDUE_MS ago and not made (a lost answer, the allowance). Pure. */
+export function finalsOf(days: readonly RouteDay[], rowOf: (d: RouteDay) => TruckDayRow | undefined, now: Date): { due: number; overdue: number } {
+  let due = 0;
+  let overdue = 0;
+  for (const d of days) {
+    const row = rowOf(d);
+    if (d.kind !== 'FINAL' || row?.suppressedAt || finalCovered(d, row)) continue;
+    const at = finalDueOf(d)?.getTime() ?? now.getTime();
+    if (now.getTime() >= at) due++;
+    if (now.getTime() - at > FINAL_OVERDUE_MS) overdue++;
+  }
+  return { due, overdue };
 }
 
 export interface IvmsTickDeps {
@@ -185,7 +324,8 @@ export interface IvmsTickResult {
   clock?: ClockState;
   /** notReturned: trackers asked for that the answer did not include (not visible with this key, or no fix). */
   map?: { trucks: number; intervalSec: number | null; called: boolean; written?: number; notReturned?: number; error?: AyunErrorKind };
-  route?: { due: number; pulls: number; points: number; everyMin: number | null; errors: AyunErrorKind[] };
+  /** finals (F6): the final pulls due, and those overdue (due more than FINAL_OVERDUE_MS ago, not made); absent: none. */
+  route?: { due: number; pulls: number; points: number; everyMin: number | null; errors: AyunErrorKind[]; finals?: { due: number; overdue: number } };
   events?: { called: boolean; inserted?: number; duplicates?: number; error?: AyunErrorKind };
   /** TIMES: the processing step's counts (only when it ran); `error` when it failed (its code only). */
   times?: { truckDays: number; written: number; corrected: number; busy: number; failed: number; removed?: number; error?: string };
@@ -205,6 +345,8 @@ interface ProcState {
   /** When the GPS stop times were last processed, per company (PROCESS_EVERY_MS). */
   processedAt?: Map<string, number>;
   lastLogged?: string;
+  /** F6: the number of overdue final pulls last logged (logged once per change). */
+  lastOverdue?: number;
   seq?: number;
   pid?: string;
 }
@@ -345,6 +487,13 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
           return la - lb || a.truckId.localeCompare(b.truckId) || a.date.localeCompare(b.date);
         });
       result.route = { due: due.length, pulls: 0, points: 0, everyMin, errors: [] };
+      // F6: the final pulls due and overdue (counts only: never a truck or a plate in the log).
+      const finals = finalsOf(plan.routeDays, (d) => rowOf.get(`${d.truckId}|${d.date}`), now);
+      if (finals.due || finals.overdue) result.route.finals = finals;
+      if (finals.overdue !== (p.lastOverdue ?? 0)) {
+        p.lastOverdue = finals.overdue;
+        if (finals.overdue) console.warn(`ivms: final pull overdue (${finals.overdue})`);
+      }
       // Regular pulls never eat into the final pull kept for every truck still out.
       let regularLeft = shares.ROUTE - state.routeCalls - trucksOut;
       for (const day of due.slice(0, MAX_ROUTE_PULLS_PER_TICK)) {
@@ -353,7 +502,7 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
         if (!final && regularLeft <= 0) continue;
         const w = routeWindow(day, row, hours, now);
         if (!w) {
-          await store.markPulled(c.tenantId, day.truckId, day.date, { pulledTo: row?.pulledTo ?? now, final, now });
+          await store.markPulled(c.tenantId, day.truckId, day.date, { pulledTo: final ? givenUpTo(day, row, now) : (row?.pulledTo ?? now), final, now });
           continue;
         }
         if (!(await store.claim(c.tenantId, owner, 'ROUTE', now, limits(shares.ROUTE)))) break;
@@ -371,8 +520,9 @@ export async function runIvmsTick(now: Date = new Date(), opts: { force?: boolea
         const kind: AyunErrorKind = r.ok ? 'PARSE' : r.kind;
         result.route.errors.push(kind);
         if (kind === 'NO_PERMISSION') {
-          // This tracker's history is not readable with the key: try again after the interval, never in a loop.
-          await store.markPulled(c.tenantId, day.truckId, day.date, { pulledTo: row?.pulledTo ?? w.from, final, now });
+          // This tracker's history is not readable with the key: try again after the interval, never in a loop (a
+          // final counts as made, as before F6: its target is covered).
+          await store.markPulled(c.tenantId, day.truckId, day.date, { pulledTo: final ? givenUpTo(day, row, w.from) : (row?.pulledTo ?? w.from), final, now });
         }
         if (await failed('ROUTE', kind, (everyMin ?? c.routePullMin) * 60, state)) {
           stop = true;

@@ -99,6 +99,8 @@ export interface SalesVisitIn {
   sequence: number;
   arrivedAt: Date | null;
   arrivalSource: string | null;
+  /** The driver's own arrival tap a GPS arrival replaced (owner decision 21 Oct 2026); absent or null: none. The live ETA follows such a stop as a tapped one. */
+  ownArrivedAt?: Date | null;
   departedAt: Date | null;
   departureSource: string | null;
   outcome: string | null;
@@ -908,6 +910,7 @@ function etaStopOf(s: DetailStop, v: SalesVisitIn | null, siteRadius: ReadonlyMa
       ? {
           arrivedAt: v.arrivedAt,
           arrivalSource: v.arrivalSource,
+          ...(v.arrivalSource === 'AYUN' && v.ownArrivedAt ? { ownArrivedAt: v.ownArrivedAt } : {}),
           departedAt: v.departedAt,
           outcome: v.outcome,
           outcomeAt: v.outcomeAt,

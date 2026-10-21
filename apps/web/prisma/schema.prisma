@@ -1600,6 +1600,29 @@ model StopVisit {
   /// time and UNLOAD_OVER use departure - arrival - awayMinutes. NULL = none (every visit without GPS).
   /// Rebuilt with the visit; CHECK "StopVisit_awayMinutes_range" (NULL, or more than 0 and at most 1440).
   awayMinutes         Float?
+  /// Owner decision 21 Oct 2026 ("GPS arrival should win of course"; the GPS timing study of 19-20 Oct): a GPS
+  /// (AYUN) time now REPLACES a late phone time (lib/delivery/visit.ts F1, F4, F5, and the result standing in for
+  /// a departure, F2). The driver's and the office's own times it replaced, as their events alone gave them
+  /// (deriveOwnVisit), so the visit "without GPS" stays exact (withoutGpsTimes: alerts below ALERTS, turnaround,
+  /// analysis) and the driver page, the photo check, the office's Left check and the KPI read the driver's own
+  /// arrival (ownArrivalOf). Set only when arrivalSource is AYUN and an own arrival existed; never AYUN itself
+  /// (CHECKs "StopVisit_ownArrival_pair", "StopVisit_ownArrival_notGps"). Read only under an AYUN arrivalSource:
+  /// a row an older version rebuilt (stale) is harmless. ownArrivalAccuracyM is erased with the positions.
+  ownArrivedAt        DateTime?            @db.Timestamptz(3)
+  ownArrivalSource    StopEventSource?
+  ownArrivalDistanceM Float?
+  ownArrivalAccuracyM Float?
+  ownArrivalObserved  Boolean?
+  /// The own departure a GPS departure replaced (a real one or the result standing in for it), set only when
+  /// departureSource is AYUN and an own one existed (CHECKs "StopVisit_ownDeparture_pair", "..._notGps").
+  ownDepartedAt       DateTime?            @db.Timestamptz(3)
+  ownDepartureSource  StopEventSource?
+  ownDepartedAtOutcome Boolean?
+  /// F2: minutes the truck still stood at the stop after the driver's result, when the GPS departure shown is
+  /// more than 15 min after it (the time away in that span taken off). Never unloading: every unloading time
+  /// ends at the result (departure - arrival - awayMinutes - afterResultMinutes). NULL = none. CHECK
+  /// "StopVisit_afterResultMinutes_range" (NULL, or more than 0 and at most 1440).
+  afterResultMinutes  Float?
   locationPurgedAt    DateTime?            @db.Timestamptz(3) // lat/lng/accuracy erased; distances kept
   createdAt           DateTime             @default(now()) @db.Timestamptz(3)
   updatedAt           DateTime             @updatedAt @db.Timestamptz(3)

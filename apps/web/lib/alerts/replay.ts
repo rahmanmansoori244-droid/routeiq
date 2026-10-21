@@ -182,7 +182,11 @@ export function statusAsOf(l: Pick<ExportLoad, 'history' | 'finalStatus'>, t: nu
   return { status, statusChangedAt: changed };
 }
 
-function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: { startMin: number; endMin: number } | null; radiusM: number; gps?: boolean }): FactVisit | null {
+function visitAsOf(
+  v: ExportVisit,
+  t: number,
+  ctx: { dayStart: Date; breakMin: { startMin: number; endMin: number } | null; radiusM: number; gps?: boolean; otherStopTimes?: readonly Date[] },
+): FactVisit | null {
   // The GPS (AYUN) events of the IVMS live link are left out, as the live facts leave out their times
   // (facts.ts alertVisitRow): a visit only GPS made is none. With the GPS alerts (`gps`) they are kept.
   const events: VisitEvent[] = v.events
@@ -201,7 +205,16 @@ function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: {
       ...(p.takenAt ? { takenAt: new Date(p.takenAt) } : {}),
     }));
   if (!events.length && !photos.length) return null;
-  const s = deriveVisit(events, { dayStart: ctx.dayStart, windowStartMin: v.windowStartMin, breakMin: ctx.breakMin, lines: [], pin: null, radiusM: ctx.radiusM });
+  const s = deriveVisit(events, {
+    dayStart: ctx.dayStart,
+    windowStartMin: v.windowStartMin,
+    breakMin: ctx.breakMin,
+    lines: [],
+    pin: null,
+    radiusM: ctx.radiusM,
+    // F2's neighbour guard (owner decision 21 Oct 2026), as the live rebuild (event-service.ts rebuildVisit).
+    ...(ctx.otherStopTimes ? { otherStopTimes: ctx.otherStopTimes } : {}),
+  });
   return {
     arrivedAt: s.arrivedAt,
     arrivalSource: s.arrivalSource,
@@ -230,7 +243,23 @@ function visitAsOf(v: ExportVisit, t: number, ctx: { dayStart: Date; breakMin: {
     ...(ctx.gps ? { departureSource: s.departureSource, departureObserved: !s.departureGap } : {}),
     // The minutes away the GPS stays showed (owner request 19 Oct 2026): with the GPS alerts only, as the live facts.
     ...(ctx.gps && s.awayMinutes ? { awayMinutes: s.awayMinutes } : {}),
+    // The minutes after the result and the driver's tap a GPS arrival replaced (owner decision 21 Oct 2026), as the live facts.
+    ...(ctx.gps && s.afterResultMinutes ? { afterResultMinutes: s.afterResultMinutes } : {}),
+    ...(ctx.gps && s.arrivalSource === 'AYUN' && s.ownArrivedAt ? { ownArrivedAt: s.ownArrivedAt } : {}),
   };
+}
+
+/** The phone's arrivals and results at a truck-day's stops other than `self`, received by t (F2's neighbour guard). */
+function otherStopTimesOf(exp: AlertDayExport, truckId: string, self: ExportVisit, t: number): Date[] {
+  const out: Date[] = [];
+  for (const l of exp.loads) {
+    if (l.truckId !== truckId) continue;
+    for (const s of l.stops) {
+      if (!s.visit || s.visit === self) continue;
+      for (const e of s.visit.events) if (PHONE.has(e.source) && (e.kind === 'ARRIVED' || e.kind === 'OUTCOME') && known(e.receivedAt, t)) out.push(new Date(e.at));
+    }
+  }
+  return out;
 }
 
 /** The facts of the saved day as of `at` (the rows open in `rows` are the open alerts); `opts.gps`: with the GPS alerts (see the file comment). */
@@ -264,7 +293,8 @@ export function factsAsOf(exp: AlertDayExport, at: Date, rows: readonly MemAlert
             for (const e of s.visit.events) if (PHONE.has(e.source) && known(e.receivedAt, t)) take(l.truckId, { at: new Date(e.receivedAt), kind: e.kind, depotId: l.depotId, loadNo: l.loadNo, sequence: s.sequence });
             for (const p of s.visit.photos) if (PHONE.has(p.source) && known(p.receivedAt, t)) take(l.truckId, { at: new Date(p.receivedAt), kind: 'PHOTO', depotId: l.depotId, loadNo: l.loadNo, sequence: s.sequence });
           }
-          return { ...s, visit: s.visit ? visitAsOf(s.visit, t, { dayStart, breakMin: l.breakMin, radiusM, gps: gpsOn(l.truckId) }) : null };
+          const g = gpsOn(l.truckId);
+          return { ...s, visit: s.visit ? visitAsOf(s.visit, t, { dayStart, breakMin: l.breakMin, radiusM, gps: g, ...(g ? { otherStopTimes: otherStopTimesOf(exp, l.truckId, s.visit, t) } : {}) }) : null };
         })
       : [];
     return {

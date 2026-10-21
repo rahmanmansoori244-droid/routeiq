@@ -22,6 +22,7 @@
 import { prisma } from '../db';
 import { ALERT_ROW_USERS, toOpsAlertRow } from '../alerts/types';
 import { liveRunsInRange, stopsOfLoads } from '../delivery/day-results';
+import { OWN_TIMES_SELECT } from '../delivery/visit';
 import { dispatchedAt } from '../dispatch/dispatched-at';
 import { shownTruckCode } from '../dispatch/hire';
 import { readTruckSnapshot } from '../dispatch/snapshots';
@@ -112,6 +113,9 @@ export async function readTruckDay(tenantId: string, truckId: string, date: stri
         outcomeLate: true,
         // Owner request 19 Oct 2026: the minutes the GPS showed the truck away (a leave-and-return), "away N min".
         awayMinutes: true,
+        // Owner decision 21 Oct 2026: the driver's taps a GPS time replaced ("driver tapped 10:15") and the minutes
+        // after the result; withoutGpsTimes restores the taps below TIMES.
+        ...OWN_TIMES_SELECT,
       },
     }),
     // The driver's and the office's load-level taps; the GPS arrivals and departures in TIMES only.

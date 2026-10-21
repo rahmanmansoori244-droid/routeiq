@@ -172,20 +172,29 @@ export function arrivalByText(source: string | null, observed: boolean): string 
 
 /**
  * The note under an arrival time: "manual", "set by office", "arrival not observed (page opened at the
- * shop)"; a GPS arrival says so: "GPS (Ayun)" or "GPS (Ayun): not observed (gap in the tracker's points)".
+ * shop)"; a GPS arrival says so: "GPS (Ayun)" or "GPS (Ayun): not observed (gap in the tracker's points)";
+ * a GPS arrival that replaced the driver's later tap (owner decision 21 Oct 2026, F1/F5) names the tap:
+ * "GPS (Ayun); driver tapped 10:15" (`ownTap`: the tap's HH:MM, company time).
  */
-export function arrivalNote(source: string | null, observed: boolean): string | null {
+export function arrivalNote(source: string | null, observed: boolean, ownTap?: string | null): string | null {
   if (source === 'PHONE_MANUAL') return 'manual';
   if (source === 'DISPATCHER') return 'set by office';
-  if (source === 'AYUN') return observed ? GPS_WORD : `${GPS_WORD}: not observed (gap in the tracker's points)`;
+  if (source === 'AYUN') return `${observed ? GPS_WORD : `${GPS_WORD}: not observed (gap in the tracker's points)`}${ownTap ? `; driver tapped ${ownTap}` : ''}`;
   if (source === 'PHONE_AUTO' && !observed) return 'arrival not observed (page opened at the shop)';
   return null;
 }
 
-/** The note under a departure time: "result time" / "not observed"; a GPS departure: "GPS (Ayun)" / "GPS (Ayun), not observed". */
-export function departureNote(atOutcome: boolean, gap: boolean, source?: string | null): string | null {
+/**
+ * The note under a departure time: "result time" / "not observed"; a GPS departure: "GPS (Ayun)" / "GPS (Ayun),
+ * not observed"; one well after the driver's result (owner decision 21 Oct 2026, F2): "GPS (Ayun), 30 min after
+ * the result".
+ */
+export function departureNote(atOutcome: boolean, gap: boolean, source?: string | null, afterResultMinutes?: number | null): string | null {
   if (atOutcome) return 'result time';
-  if (source === 'AYUN') return gap ? `${GPS_WORD}, not observed` : GPS_WORD;
+  if (source === 'AYUN') {
+    const after = afterResultText(afterResultMinutes);
+    return `${gap ? `${GPS_WORD}, not observed` : GPS_WORD}${after ? `, ${after}` : ''}`;
+  }
   if (gap) return 'not observed';
   return null;
 }
@@ -237,12 +246,21 @@ export function awayText(awayMinutes: number | null | undefined): string | null 
   return `away ${Math.max(1, Math.round(awayMinutes))} min`;
 }
 
+/** "30 min after the result" (whole minutes) for a visit's minutes after the result (F2), or null when none. */
+export function afterResultText(afterResultMinutes: number | null | undefined): string | null {
+  if (!afterResultMinutes || !Number.isFinite(afterResultMinutes) || afterResultMinutes <= 0) return null;
+  return `${Math.max(1, Math.round(afterResultMinutes))} min after the result`;
+}
+
 /**
  * Actual unloading of a visit (spec section 10.1), the plan screen's and the actuals Excel's: automatic
  * from the window start, else automatic, else arrival to departure (an office or manual timing). The
  * minutes the GPS showed the truck away in between (owner request 19 Oct 2026, `awayMinutes`) are never
  * unloading: taken off (onSite; from the window start only what can have been after it), and the label
- * says so ("arrival to departure, less 53 min away").
+ * says so ("arrival to departure, less 53 min away"). Nor are the minutes the truck still stood there after
+ * the driver's result (owner decision 21 Oct 2026, F2, `afterResultMinutes`: a GPS departure up to an hour
+ * after the result): the unloading ends at the result ("arrival to departure, less 30 min after the result").
+ * The automatic timing is the phone's and never has any.
  */
 export function actualMinutes(v: {
   autoServiceMinutes: number | null;
@@ -252,6 +270,7 @@ export function actualMinutes(v: {
   departedAtOutcome: boolean;
   outcomeSource: string | null;
   awayMinutes?: number | null;
+  afterResultMinutes?: number | null;
 }): { min: number | null; label: string | null; auto: boolean } {
   const less = (label: string, beforeStartMin = 0) => {
     const away = awayText(awayInside(v.awayMinutes, beforeStartMin));
@@ -265,7 +284,15 @@ export function actualMinutes(v: {
   if (v.autoMinutes !== null) return { min: onSite(v.autoMinutes, v.awayMinutes), label: less('auto'), auto: true };
   // An office result recorded later is not the end of the stop.
   if (v.arrivedAt && v.departedAt && v.departedAt > v.arrivedAt && !(v.departedAtOutcome && v.outcomeSource === 'DISPATCHER')) {
-    return { min: onSite(minutesBetween(v.arrivedAt, v.departedAt), v.awayMinutes), label: less(v.departedAtOutcome ? 'arrival to result' : 'arrival to departure'), auto: false };
+    const label = less(v.departedAtOutcome ? 'arrival to result' : 'arrival to departure');
+    const min = onSite(minutesBetween(v.arrivedAt, v.departedAt), v.awayMinutes);
+    const after = afterResultText(v.afterResultMinutes);
+    if (!after) return { min, label, auto: false };
+    return {
+      min: Math.max(0, Math.round((min - v.afterResultMinutes!) * 10) / 10),
+      label: label.includes(', less ') ? `${label} and ${after}` : `${label}, less ${after}`,
+      auto: false,
+    };
   }
   return { min: null, label: null, auto: false };
 }

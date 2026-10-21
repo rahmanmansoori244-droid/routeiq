@@ -26,7 +26,7 @@ import { prisma } from '../db';
 import { audit } from '../audit';
 import { HttpError } from '../http-error';
 import { isLockBusy, PlanBusyError, setLockTimeout } from '../dispatch/plan-locks';
-import { DEFAULT_TZ, dateOnly, parseHhmm, zonedDayStart } from '../dispatch/time';
+import { DEFAULT_TZ, dateOnly, fmtHhmm, localMinutes, parseHhmm, zonedDayStart } from '../dispatch/time';
 import { isoDateSchema } from '../schemas';
 import { DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
 import { lockForUndo, undoCheck, undoCarryTx, type UndoCarryResult, type UndoRefusalCode } from '../dispatch/carry-over';
@@ -38,6 +38,7 @@ import { carriedRefusalText, type CarriedCopy } from './office-text';
 import { plannedStopOf } from './planned-stop';
 import { carryChangeCheck, inCarryBasis, normalizeResult } from './outcome-rules';
 import { carryBases, ensureVisit, findVisit, maybeCompleteLoad, rebuildVisit, UUID_RE, type VisitKey } from './event-service';
+import { ownArrivalOf } from './visit';
 
 const hhmmField = z
   .string()
@@ -172,13 +173,24 @@ export async function recordOfficeOutcome(
         const vk: VisitKey = { tenantId, depotId: load.depotId, date: input.date, truckId: input.truckId, loadNo: input.loadNo, sequence: input.sequence };
         const visit = await findVisit(tx, vk);
         // "Left" needs an arrival (typed now, or already stored) and must come after it. A GPS (AYUN) arrival does
-        // not count (IVMS live link, first review LOW): the office confirms the arrival with the Left.
-        const arrivalForLeft = arrivedAt ?? (visit && visit.arrivalSource !== 'AYUN' ? visit.arrivedAt : null) ?? null;
+        // not count (IVMS live link, first review LOW): the office confirms the arrival with the Left. Since GPS
+        // arrivals replace the driver's late taps (owner decision 21 Oct 2026), the stored arrival may be the GPS
+        // one with the driver's tap kept (ownArrivalOf): the tap is what the rebuild compares a Left with, so a
+        // Left between the two would be dropped silently - refused here with both times.
+        const own = visit ? ownArrivalOf(visit) : null;
+        const arrivalForLeft = arrivedAt ?? own?.at ?? null;
         if (departedAt && !arrivalForLeft) {
           const gps = visit?.arrivalSource === 'AYUN' && !!visit.arrivedAt;
           throw new OfficeOutcomeError(gps ? 'Enter "Arrived" too: "Left" needs an arrival time (the GPS arrival is not enough).' : 'Enter "Arrived" too: "Left" needs an arrival time.', 422, 'INVALID');
         }
-        if (departedAt && arrivalForLeft && departedAt <= arrivalForLeft) throw new OfficeOutcomeError('"Left" must be after "Arrived".', 422, 'INVALID');
+        if (departedAt && arrivalForLeft && departedAt <= arrivalForLeft) {
+          const gpsAt = !arrivedAt && visit?.arrivalSource === 'AYUN' ? visit.arrivedAt : null;
+          if (gpsAt && own && departedAt > gpsAt) {
+            const hhmm = (d: Date) => fmtHhmm(localMinutes(d, tz));
+            throw new OfficeOutcomeError(`"Left" must be after the driver's Arrived tap (${hhmm(own.at)}). The GPS arrival is ${hhmm(gpsAt)}: enter it as "Arrived" too.`, 422, 'INVALID');
+          }
+          throw new OfficeOutcomeError('"Left" must be after "Arrived".', 422, 'INVALID');
+        }
         const after = new Map(planned.lines.map((l) => [l.lineId, 0]));
         if (norm.outcome !== null) for (const l of norm.lines) after.set(l.lineId, l.planned - l.delivered);
         const payload: Record<string, unknown> =

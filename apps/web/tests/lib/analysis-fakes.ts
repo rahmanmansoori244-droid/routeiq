@@ -112,6 +112,15 @@ export const visit = (loadNo: number, sequence: number, v: Partial<VisitIn>): Vi
   casesDelivered: null,
   plannedLat: null,
   plannedLng: null,
+  ownArrivedAt: null,
+  ownArrivalSource: null,
+  ownArrivalDistanceM: null,
+  ownArrivalAccuracyM: null,
+  ownArrivalObserved: null,
+  ownDepartedAt: null,
+  ownDepartureSource: null,
+  ownDepartedAtOutcome: null,
+  afterResultMinutes: null,
   ...v,
 });
 

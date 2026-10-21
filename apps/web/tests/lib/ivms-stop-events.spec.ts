@@ -14,7 +14,7 @@ vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fake
 const { completeLoad } = vi.hoisted(() => ({ completeLoad: vi.fn(async () => ({ completed: true })) }));
 vi.mock('@/lib/dispatch/plan-service', async (orig) => ({ ...(await orig<typeof import('@/lib/dispatch/plan-service')>()), completeLoadAsDriver: completeLoad }));
 
-const { processGpsTimes, processGpsTimesForCompany, suppressGpsTimes, gpsEventKey, clampEventAt, MAX_AYUN_EVENTS_PER_VISIT } = await import('@/lib/ivms/stop-events');
+const { processGpsTimes, processGpsTimesForCompany, suppressGpsTimes, gpsEventKey, clampEventAt, MAX_AYUN_EVENTS_PER_VISIT, AYUN_ROOM_LIMIT } = await import('@/lib/ivms/stop-events');
 const { completeReturnedLoads } = await import('@/lib/delivery/event-service');
 
 const TEN = 'tA';
@@ -117,7 +117,7 @@ describe('a dispatched load with a trail', () => {
     const a1 = events()[0]!;
     expect(a1.idempotencyKey).toBe(gpsEventKey({ kind: 'ARRIVED', loadNo: 1, sequence: 1, segmentStartAt: T('07:04:30') }, 'D1', DATE, 't5'));
     expect(a1.idempotencyKey).toMatch(/^ayun:A:D1:2026-10-20:t5:1:1:\d+$/);
-    expect(a1.payloadJson).toMatchObject({ observed: true, detector: 'ivms-v2', segmentStartAt: T('07:04:30').toISOString() });
+    expect(a1.payloadJson).toMatchObject({ observed: true, detector: 'ivms-v3', segmentStartAt: T('07:04:30').toISOString() });
     // No driver link, no user, no browser: GPS is nobody's tap.
     expect([a1.driverLinkId ?? null, a1.userId ?? null, a1.clientIp ?? null, a1.deviceId ?? null, a1.accuracyM]).toEqual([null, null, null, null, null]);
     // Never a result, a Back at depot, a completion or an audit row.
@@ -177,13 +177,18 @@ describe('a dispatched load with a trail', () => {
     expect(events().filter((e) => e.sequence === 2)).toHaveLength(2);
   });
 
-  it('leaves the driver room: never past 4 AYUN events, never once the stop holds 36 events', async () => {
+  it.each([
+    [36, 0, 2],
+    [32, 0, 2],
+    [31, 1, 1],
+  ])('leaves the driver room: never past 8 AYUN events, never once the stop holds 32 events (owner decision 21 Oct 2026, F3: 4 and 36 before) - %i events held', async (held, written, room) => {
     tables.stopVisit!.push({ id: 'v1', tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't5', loadNo: 1, sequence: 1, customerId: 'C-A', firstLoadId: 'L1', plannedLat: SHOP_A.lat, plannedLng: SHOP_A.lng, windowStartMin: null, windowEndMin: null, linesJson: [], casesPlanned: 30, arrivalSource: null, locationPurgedAt: null });
-    for (let i = 0; i < 36; i++) tables.stopEvent!.push({ id: `x${i}`, tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't5', loadNo: 1, sequence: 1, visitId: 'v1', kind: i % 2 ? 'DEPARTED' : 'ARRIVED', source: 'PHONE_AUTO', at: T('05:00'), receivedAt: T('05:00'), idempotencyKey: `dl:x${i}`, payloadJson: {} });
+    for (let i = 0; i < held; i++) tables.stopEvent!.push({ id: `x${i}`, tenantId: TEN, depotId: 'D1', deliveryDate: day, truckId: 't5', loadNo: 1, sequence: 1, visitId: 'v1', kind: i % 2 ? 'DEPARTED' : 'ARRIVED', source: 'PHONE_AUTO', at: T('05:00'), receivedAt: T('05:00'), idempotencyKey: `dl:x${i}`, payloadJson: {} });
     const r = await processGpsTimes(TEN, 't5', DATE, NOW);
-    expect(r.kept.ROOM).toBe(2);
-    expect(events().filter((e) => e.source === 'AYUN' && e.sequence === 1)).toEqual([]);
-    expect(MAX_AYUN_EVENTS_PER_VISIT).toBe(4);
+    expect(r.kept.ROOM ?? 0).toBe(room);
+    expect(events().filter((e) => e.source === 'AYUN' && e.sequence === 1)).toHaveLength(written);
+    expect(MAX_AYUN_EVENTS_PER_VISIT).toBe(8);
+    expect(AYUN_ROOM_LIMIT).toBe(32);
   });
 
   it('an unconfirmed (forged) depot webhook never cuts the trip; a confirmed one is marked USED', async () => {

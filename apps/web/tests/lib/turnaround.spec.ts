@@ -11,7 +11,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { firstSignOf, leftHowText, plannedDriveOf, previousTrip, TURNAROUND_MAX_MIN, turnaroundLine, turnaroundMinutesText, turnaroundOf, type TurnaroundIn } from '@/lib/delivery/turnaround';
-import { withoutGpsTimes } from '@/lib/delivery/visit';
+import { NO_OWN_TIMES, withoutGpsTimes } from '@/lib/delivery/visit';
 
 const T0 = Date.parse('2026-10-20T07:20:00Z'); // 11:20 in Muscat: Back at depot of trip 1
 const at = (min: number) => new Date(T0 + min * 60_000);
@@ -115,7 +115,7 @@ describe('the signs at a stop and the planned drive', () => {
     // The IVMS live link timed the first stop of the next trip from the tracker alone (arrival 11:50, and the
     // driver's result 12:05 ends it); the driver tapped Leaving for next load at 11:55, while his page still
     // showed the stop as not arrived (lib/driver-page/overlay.ts), so the page offered the button.
-    const gps = { ...v({ arrivedAt: at(30), departedAt: at(45), outcomeAt: at(45), outcomeSource: 'PHONE_MANUAL' }), arrivalSource: 'AYUN', arrivalDistanceM: 20, arrivalAccuracyM: 8, arrivalObserved: true, departureSource: 'PHONE_MANUAL', departedAtOutcome: true, outcome: 'DELIVERED' };
+    const gps = { ...NO_OWN_TIMES, ...v({ arrivedAt: at(30), departedAt: at(45), outcomeAt: at(45), outcomeSource: 'PHONE_MANUAL' }), arrivalSource: 'AYUN', arrivalDistanceM: 20, arrivalAccuracyM: 8, arrivalObserved: true, departureSource: 'PHONE_MANUAL', departedAtOutcome: true, outcome: 'DELIVERED' };
     expect(firstSignOf([gps])).toEqual(at(30)); // read as stored, the GPS arrival would be the first sign
     const sign = firstSignOf([withoutGpsTimes(gps)]); // as rule R2 and the load row read it
     expect(sign).toEqual(at(45)); // the driver's own result

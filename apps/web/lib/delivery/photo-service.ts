@@ -27,6 +27,7 @@ import { plannedStopOf } from './planned-stop';
 import { clockSkewMs, MAX_DRIVER_PHOTOS_PER_STOP, photoTime, REFUSAL_TEXT, writeRule } from './outcome-rules';
 import { dayFacts, ensureVisit, findVisit, loadsWithStop, parseStopKey, rebuildVisit, resolveTarget, UUID_RE, writerAudit, type DriverWriteContext } from './event-service';
 import { inspectJpeg, readExif, startsLikeJpeg, stripJpeg } from './jpeg';
+import { ownArrivalOf } from './visit';
 
 /** The request limit (multipart overhead included) and the file limit. */
 export const MAX_PHOTO_REQUEST_BYTES = 1_600_000;
@@ -178,8 +179,9 @@ export async function recordDriverPhoto(ctx: DriverWriteContext, meta: PhotoMeta
       const exifLng = exifBytes?.lng ?? meta.exif?.lng ?? null;
       const exifTakenAt = exifBytes?.takenAt ?? date(meta.exif?.takenAt);
       // The driver's or the office's arrival only: a GPS (AYUN) arrival is never the reference of the old-photo
-      // check (IVMS live link, first review LOW: a wrong tracker time must not mark the driver's photo old).
-      const reference = (visit.arrivalSource !== 'AYUN' ? visit.arrivedAt : null) ?? (load.status === 'DISPATCHED' ? load.statusChangedAt : null);
+      // check (IVMS live link, first review LOW: a wrong tracker time must not mark the driver's photo old); the
+      // driver's tap a GPS arrival replaced is (owner decision 21 Oct 2026, ownArrivalOf).
+      const reference = ownArrivalOf(visit)?.at ?? (load.status === 'DISPATCHED' ? load.statusChangedAt : null);
       const oldPhoto = isOldPhotoOnServerClock({
         reference,
         skewMs: skew,

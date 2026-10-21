@@ -400,6 +400,8 @@ export function kpiVisitOf(v: StopVisit, tz: string, photoWaitOver = false): Kpi
     arrivedAt: v.arrivedAt,
     arrivalSource: v.arrivalSource,
     arrivalObserved: v.arrivalObserved,
+    // Owner decision 21 Oct 2026: a GPS arrival that replaced the driver's tap counts on time as his did.
+    ...(v.arrivalSource === 'AYUN' && v.ownArrivalSource ? { ownArrivalSource: v.ownArrivalSource } : {}),
     timingSuspect: v.timingSuspect,
     windowStartMin: v.windowStartMin,
     windowEndMin: v.windowEndMin,
