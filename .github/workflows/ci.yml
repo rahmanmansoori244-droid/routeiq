@@ -44,7 +44,7 @@ jobs:
       # it is small.
       THOROUGH_MAX_SEC: '60'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v4
 
@@ -153,7 +153,7 @@ jobs:
     # (solver search upgrade, critique of its design #11).
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
