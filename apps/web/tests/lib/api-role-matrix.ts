@@ -6,6 +6,7 @@
  *   DRIVER_LINK       withDriverLink: the driver link token in a header (lib/driver-link/guard.ts)
  *   SALES_LINK        withSalesLink: the salesman link token in a header, read-only (lib/sales-link/guard.ts)
  *   ANY               withTenantApi without a role: any signed-in tenant user, VIEWER included
+ *   OWN_ACCOUNT       withAccountApi: any signed-in user, with or without a tenant, acting on their own account only
  *   <ROLE>            withTenantApi({ role }) minimum role
  *   SESSION:<ROLE>    calls auth() itself and checks the role in the handler
  * Used by api-role-matrix.spec.ts, which compares it with the checked-in expectation.
@@ -28,6 +29,7 @@ function classify(segment: string, whole: string): string {
   if (/driverAppGone\(/.test(segment)) return 'GONE';
   if (/withDriverLink\(/.test(segment)) return 'DRIVER_LINK';
   if (/withSalesLink\(/.test(segment)) return 'SALES_LINK';
+  if (/withAccountApi\(/.test(segment)) return 'OWN_ACCOUNT';
   if (/withTenantApi\(/.test(segment)) {
     const opts = [...segment.matchAll(/\}\s*,\s*\{\s*role:\s*'(\w+)'/g)];
     return opts.length ? opts[opts.length - 1]![1]! : 'ANY';

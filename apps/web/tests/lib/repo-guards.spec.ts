@@ -138,6 +138,34 @@ describe('password reset without email points to the real admin reset', () => {
   });
 });
 
+describe('every signed-in user can change their own password (owner request 24 Oct 2026)', () => {
+  const read = (rel: string) => readFileSync(path.join(WEB, rel), 'utf8');
+
+  it('the user menu offers "Change password" on the tenant pages (top bar) and on the platform admin page', () => {
+    const menu = read('components/user-menu.tsx');
+    expect(menu).toContain('Change password');
+    expect(menu).toMatch(/<ChangePasswordDialog\b/);
+    expect(read('components/topbar.tsx')).toMatch(/<UserMenu\b/);
+    expect(read('app/admin/page.tsx')).toMatch(/<UserMenu\b/);
+    expect(read('components/change-password-dialog.tsx')).toContain("'/api/account/password'");
+  });
+
+  it("the route works on the session's own user through withAccountApi (never withTenantApi: a platform admin may have no company) and takes no id", () => {
+    const src = read('app/api/account/password/route.ts');
+    expect(src).toContain('withAccountApi(');
+    expect(src).not.toContain('withTenantApi(');
+    expect(src).toMatch(/userId: user\.id\b/);
+    expect(src).not.toMatch(/\bparams\b/);
+  });
+
+  it('withAccountApi (no tenant, no role gate) is used only by own-account routes under app/api/account', () => {
+    const users = walk(path.join(WEB, 'app'), /\.(ts|tsx)$/)
+      .filter((f) => readFileSync(f, 'utf8').includes('withAccountApi('))
+      .map((f) => path.relative(WEB, f).split(path.sep).join('/'));
+    expect(users).toEqual(['app/api/account/password/route.ts']);
+  });
+});
+
 describe('docs promise only what the code guarantees (third review of PR3)', () => {
   it('no doc or code comment repeats a promise the second round of fixes had to take back', () => {
     const REPO = path.resolve(APPS, '..');

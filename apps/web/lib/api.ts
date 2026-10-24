@@ -97,6 +97,53 @@ export function withTenantApi(handler: (req: Request, ctx: AuthedContext) => Pro
   };
 }
 
+export interface AccountContext {
+  /** The signed-in user. `tenantId` is null for a platform admin without a company. */
+  user: {
+    id: string;
+    tenantId: string | null;
+    role: Role;
+    name: string;
+    email: string;
+  };
+  ip: string | null;
+}
+
+export type AccountApiOptions = Pick<ApiOptions, 'rateLimitKey' | 'rateLimitLimit' | 'rateLimitWindowMs'>;
+
+/**
+ * Wrap an API handler that acts ONLY on the signed-in user's own account (POST /api/account/password,
+ * 24 Oct 2026): auth check, rate limit per user, uniform error handling - like withTenantApi, but a
+ * user without a tenant (a platform admin) is let in, and there is no role gate and no tenant-scoped
+ * client. The handler must never take another user's id from the request: it works on `ctx.user.id`.
+ */
+export function withAccountApi(handler: (req: Request, ctx: AccountContext) => Promise<Response>, opts: AccountApiOptions = {}) {
+  return async (req: Request) => {
+    try {
+      const session = await auth();
+      if (!session?.user?.id) return fail('Unauthorized', 401);
+
+      if (opts.rateLimitKey) {
+        const r: RateLimitResult = rateLimit(`${opts.rateLimitKey}:${session.user.id}`, opts.rateLimitLimit ?? 300, opts.rateLimitWindowMs ?? 60_000);
+        if (!r.ok) return fail('Too many requests', 429);
+      }
+
+      return await handler(req, {
+        user: {
+          id: session.user.id,
+          tenantId: session.user.tenantId ?? null,
+          role: session.user.role,
+          name: session.user.name,
+          email: session.user.email,
+        },
+        ip: clientIp(req),
+      });
+    } catch (err) {
+      return handleError(err);
+    }
+  };
+}
+
 // An expected, user-facing failure with its HTTP status (lib/http-error.ts): PlanError,
 // RouteAdjustError and BatchRaceError extend it, so an uncaught one maps to its status here.
 export { HttpError };

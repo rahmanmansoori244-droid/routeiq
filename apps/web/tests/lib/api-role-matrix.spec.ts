@@ -129,12 +129,19 @@
  * - The cause & action of an operations alert (owner request 20 Oct 2026): PATCH /api/alerts is PLANNER (the
  *   dispatcher and up record what was found and decided after checking an alert; every role reads it on GET
  *   /api/alerts). The alerts-only Excel is GET /api/analysis/export?only=alerts (PLANNER, unchanged).
+ * - "Change password" (owner request 24 Oct 2026: every user changes their password): POST
+ *   /api/account/password is OWN_ACCOUNT (withAccountApi): every signed-in user, every role and a platform admin
+ *   without a company too, changes ONLY their own password (the session's user; no id in the path or the body),
+ *   after giving the current one. The only write open to a VIEWER, on purpose. Roles unchanged on POST
+ *   /api/users/[id]/reset-password (its "not your own account" message now points to Change password).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { apiRoleMatrix } from './api-role-matrix';
 
 const EXPECTED: Record<string, string> = {
+  // 24 Oct 2026: the signed-in user's own password (every role, a platform admin without a company too).
+  'POST /api/account/password': 'OWN_ACCOUNT',
   // Owner request 19 Oct 2026: the analysis facts (office data: the pins to review), company admin and dispatcher.
   'GET /api/analysis/export': 'PLANNER',
   // Operations alerts (owner request 16 Oct 2026): every role reads them; the dispatcher and up acknowledge;
@@ -335,5 +342,11 @@ describe('API role matrix', () => {
   it('no write handler is open to every role', () => {
     const openWrites = Object.entries(actual).filter(([k, v]) => !k.startsWith('GET ') && (v === 'ANY' || v === 'SESSION:ANY'));
     expect(openWrites).toEqual([]);
+  });
+
+  it("the only own-account handler is Change password, and it takes no user id from the path", () => {
+    const own = Object.entries(actual).filter(([, v]) => v === 'OWN_ACCOUNT').map(([k]) => k);
+    expect(own).toEqual(['POST /api/account/password']);
+    expect(own.filter((k) => k.includes('['))).toEqual([]);
   });
 });

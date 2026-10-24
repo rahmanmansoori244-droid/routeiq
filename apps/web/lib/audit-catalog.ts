@@ -38,6 +38,7 @@ export const AUDIT_ACTIONS = {
   SIGNUP: { label: 'Company signed up' },
   LOGIN_THROTTLED: { label: 'Sign-in attempts slowed down' },
   PASSWORD_RESET_BY_ADMIN: { label: 'Password reset by an admin' },
+  PASSWORD_CHANGED: { label: 'Password changed by its user' },
   CROSS_TENANT_VIEW: { label: 'Viewed by a platform admin' },
   PLATFORM_ADMIN_GRANTED: { label: 'Platform admin granted' },
   PLATFORM_ADMIN_REVOKED: { label: 'Platform admin revoked' },

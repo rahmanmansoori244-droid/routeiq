@@ -1,6 +1,7 @@
 'use client';
 
-import { LogOut, User as UserIcon } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { KeyRound, LogOut, User as UserIcon } from 'lucide-react';
 import { signOut } from 'next-auth/react';
 import type { Role } from '@prisma/client';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -13,6 +14,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { ChangePasswordDialog } from './change-password-dialog';
 
 interface UserMenuProps {
   name: string;
@@ -20,7 +22,12 @@ interface UserMenuProps {
   role: Role;
 }
 
+/** The signed-in user's menu (top bar of the tenant pages, header of the platform admin page). */
 export function UserMenu({ name, email, role }: UserMenuProps) {
+  const [changingPassword, setChangingPassword] = useState(false);
+  // Opening the dialog from the menu: the menu must not move the focus back to its button while it
+  // closes, or it takes the focus away from the dialog.
+  const openingDialog = useRef(false);
   const initials = name
     .split(/\s+/)
     .map((p) => p[0])
@@ -30,28 +37,49 @@ export function UserMenu({ name, email, role }: UserMenuProps) {
     .toUpperCase();
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="User menu" className="h-9 w-9 rounded-full">
-          <Avatar className="h-9 w-9">
-            <AvatarFallback>{initials || <UserIcon className="h-4 w-4" />}</AvatarFallback>
-          </Avatar>
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuLabel className="font-normal">
-          <div className="flex flex-col space-y-1">
-            <p className="text-sm font-medium">{name}</p>
-            <p className="text-xs text-muted-foreground">{email}</p>
-            <p className="text-xs text-muted-foreground">{role.replace('_', ' ')}</p>
-          </div>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void signOut({ callbackUrl: '/login' })}>
-          <LogOut className="me-2 h-4 w-4" />
-          <span>Sign out</span>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" aria-label="User menu" className="h-9 w-9 rounded-full">
+            <Avatar className="h-9 w-9">
+              <AvatarFallback>{initials || <UserIcon className="h-4 w-4" />}</AvatarFallback>
+            </Avatar>
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="w-56"
+          onCloseAutoFocus={(e) => {
+            if (openingDialog.current) {
+              openingDialog.current = false;
+              e.preventDefault();
+            }
+          }}
+        >
+          <DropdownMenuLabel className="font-normal">
+            <div className="flex flex-col space-y-1">
+              <p className="text-sm font-medium">{name}</p>
+              <p className="text-xs text-muted-foreground">{email}</p>
+              <p className="text-xs text-muted-foreground">{role.replace('_', ' ')}</p>
+            </div>
+          </DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onSelect={() => {
+              openingDialog.current = true;
+              setChangingPassword(true);
+            }}
+          >
+            <KeyRound className="me-2 h-4 w-4" />
+            <span>Change password</span>
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => void signOut({ callbackUrl: '/login' })}>
+            <LogOut className="me-2 h-4 w-4" />
+            <span>Sign out</span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <ChangePasswordDialog open={changingPassword} onOpenChange={setChangingPassword} email={email} />
+    </>
   );
 }

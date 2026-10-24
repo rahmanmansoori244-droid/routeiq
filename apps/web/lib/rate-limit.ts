@@ -170,6 +170,12 @@ export const LIMITS = {
   loginIpAttempts: { limit: 30, windowMs: 10 * 60_000 },
   loginEmailFailures: { limit: 20, windowMs: 60 * 60_000 },
   /**
+   * "Change password" (POST /api/account/password, 24 Oct 2026; lib/own-password.ts): 5 wrong current passwords
+   * per user in 15 min pause that user's password changes (soft, like the sign-in pair throttle: it never blocks
+   * signing in). Someone at an unlocked screen cannot guess the password and take the account.
+   */
+  ownPasswordFailures: { limit: 5, windowMs: 15 * 60_000 },
+  /**
    * Driver link routes (lib/driver-link/guard.ts, owner request 4 Oct 2026). Unknown tokens are
    * counted per IP (never a token that resolves, never a null or internal IP: drivers share the depot
    * Wi-Fi and mobile CGNAT); everything else is per link id. A 429 carries Retry-After.
