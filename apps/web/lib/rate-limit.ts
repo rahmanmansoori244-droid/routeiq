@@ -204,4 +204,6 @@ export const LIMITS = {
   /** Route codes with no deliveries that day, per link and IP: guessing codes is slowed, typos are not punished. */
   salesRouteMiss: { limit: 40, windowMs: 10 * 60_000 },
   salesRouteMissShared: { limit: 150, windowMs: 10 * 60_000 },
+  /** Moves by hand: Check of a change (one solver re-timing each), per user. */
+  planEditCheck: { limit: 30, windowMs: 60_000 },
 } as const;

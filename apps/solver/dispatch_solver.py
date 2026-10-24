@@ -2794,6 +2794,19 @@ def _pallet_echo(req: DispatchRequest, loads: list[PlannedLoad] | None = None) -
                 single_customer_fill_pct=req.config.single_customer_fill_pct)
 
 
+def _echo_rules(req: DispatchRequest, sc: DispatchScenario) -> None:
+    """The rules ``sc`` was planned with, echoed on it: the receiving-hours rule, the driver break, the latest
+    return, the pallet rule and the allowed-trucks rule (the web takes each rule a load was planned with ONLY from
+    these echoes). One place for optimize_dispatch and the re-timing of a move by hand (retime.py)."""
+    cfg = req.config
+    sc.window_rule = cfg.window_rule
+    sc.break_rule = _break_echo(cfg)
+    sc.latest_return_min = cfg.latest_return_min
+    for key, value in _pallet_echo(req, sc.loads).items():
+        setattr(sc, key, value)
+    sc.allowed_trucks_rule = True if any(s.allowed_truck_ids is not None for s in req.stops) else None
+
+
 def _frozen_truck_ids(tds: list[TruckDay]) -> set[str]:
     """Trucks that carry locked / loading / dispatched loads today, usable for new loads or not."""
     return {td.truck.id for td in tds if td.n_frozen}
@@ -2985,12 +2998,7 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
     if any(t.hire_candidate for t in req.trucks):
         scenarios, hire_check = _reduce_hire(req, solvable, mx, drops, time_limit, started + budget, control, scenarios)
     for sc in scenarios:
-        sc.window_rule = cfg.window_rule  # the echo, on empty and NO_SOLUTION scenarios too
-        sc.break_rule = _break_echo(cfg)
-        sc.latest_return_min = cfg.latest_return_min
-        for key, value in _pallet_echo(req, sc.loads).items():
-            setattr(sc, key, value)
-        sc.allowed_trucks_rule = True if any(s.allowed_truck_ids is not None for s in req.stops) else None
+        _echo_rules(req, sc)  # the echo, on empty and NO_SOLUTION scenarios too
         log.info("dispatch run=%s scenario=%s status=%s loads=%d unserved=%d km=%.1f t=%.1fs",
                  req.run_id, sc.name, sc.solver_status, sc.trips, len(sc.unserved), sc.total_distance_km,
                  sc.solver_time_sec)

@@ -121,4 +121,8 @@ describe('replanCouldPlace: the unserved orders that keep Step 3 RE-PLAN on (rev
       expect(replanCouldPlace(reason, false, false), reason).toBe(true);
     }
   });
+
+  it('a stop taken off the plan by hand (REMOVED_BY_HAND) keeps Step 3 RE-PLAN on: a re-plan plans it again (the guide says so)', () => {
+    expect(replanCouldPlace('REMOVED_BY_HAND', false, false)).toBe(true);
+  });
 });

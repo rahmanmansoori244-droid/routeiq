@@ -74,6 +74,15 @@ export function salesDayBuilds(): number {
   return g.__routeiqSalesDayBuilds ?? 0;
 }
 
+/**
+ * Forget a company's day (a plan of that date was changed by hand: moves by hand, lib/dispatch/plan-edit-apply.ts),
+ * so the salesmen see the new times at their next refresh instead of up to 30 s later. A build already running
+ * finishes and is kept: it read the plan before or after the change, and the next one reads it again.
+ */
+export function forgetSalesDay(tenantId: string, date: string): void {
+  memo.delete(`${tenantId}|${date}`);
+}
+
 /** Tests: forget every build. */
 export function _resetSalesDayMemo(): void {
   memo.clear();

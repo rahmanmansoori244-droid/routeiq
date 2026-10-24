@@ -241,6 +241,25 @@ const PROBES: ProbeCase[] = [
     },
   },
   {
+    // Moves by hand (24 Oct 2026): 404 FEATURE_OFF while PLAN_EDIT is off, 404 NOT_FOUND for another company's plan otherwise.
+    label: 'POST /api/runs/{id-B}/edit/check',
+    method: 'POST',
+    body: () => ({ move: { kind: 'REMOVE', from: { loadId: 'xt-load', sequence: 1 } } }),
+    build: async () => {
+      const r = await prisma.runPlan.findFirstOrThrow({ where: { tenantId: tenantB.tenantId } });
+      return `${BASE}/api/runs/${r.id}/edit/check`;
+    },
+  },
+  {
+    label: 'POST /api/runs/{id-B}/edit',
+    method: 'POST',
+    body: () => ({ move: { kind: 'REMOVE', from: { loadId: 'xt-load', sequence: 1 } }, previewHash: '0'.repeat(64), builtAt: new Date().toISOString() }),
+    build: async () => {
+      const r = await prisma.runPlan.findFirstOrThrow({ where: { tenantId: tenantB.tenantId } });
+      return `${BASE}/api/runs/${r.id}/edit`;
+    },
+  },
+  {
     label: 'GET /api/runs/{id-B}/baseline',
     method: 'GET',
     build: async () => {

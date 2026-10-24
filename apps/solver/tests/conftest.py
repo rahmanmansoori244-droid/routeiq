@@ -38,6 +38,14 @@ def _search_upgrade_settings_at_defaults(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _retime_settings_at_defaults(monkeypatch):
+    """The re-timing for moves by hand (retime.py, /retime-truck-days) reads its RETIME_* limits on every call: they
+    start at their defaults whatever the shell running the tests has set."""
+    for name in ("RETIME_MAX_CONCURRENT", "RETIME_BUDGET_SEC", "RETIME_MATRIX_SEC", "RETIME_BEST_TRIES"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_worker_health():
     """Rule 22: /ready's worker status is process-wide, and a failure stays reported for minutes
     whatever pools start meanwhile (WORKER_ALERT_MIN_SEC): one test's broken pool must not make a

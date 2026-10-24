@@ -266,6 +266,9 @@ const EXPECTED: Record<string, string> = {
   'POST /api/runs/[id]/choose-scenario': 'PLANNER',
   // Owner decision 4 (5 Oct 2026): the dispatcher (PLANNER) does every Daily dispatch action.
   'POST /api/runs/[id]/dispatch': 'PLANNER',
+  // Moves by hand (24 Oct 2026, PLAN_EDIT): Check and Save are the dispatcher's, like Lock and Re-plan.
+  'POST /api/runs/[id]/edit': 'PLANNER',
+  'POST /api/runs/[id]/edit/check': 'PLANNER',
   'GET /api/runs/[id]/export/excel': 'ANY',
   'GET /api/runs/[id]/export/pdf': 'ANY',
   // Owner request 12 Oct 2026: the warehouse load sheets and the return notes (gate pass), read like the driver sheets.

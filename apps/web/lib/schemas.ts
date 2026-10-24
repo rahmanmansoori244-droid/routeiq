@@ -233,6 +233,36 @@ export const hireUseSchema = z
   })
   .strict();
 
+/** Moves by hand (lib/dispatch/plan-edit-view.ts): a stop of a PLANNED load, and where a stop goes. */
+const editSourceSchema = z.object({ loadId: z.string().min(1).max(64), sequence: z.number().int().min(0).max(10_000) }).strict();
+const editTargetSchema = z
+  .object({
+    truckId: z.string().min(1).max(64),
+    loadId: z.string().min(1).max(64).nullable(),
+    position: z.union([z.number().int().min(0).max(1_000), z.literal('BEST')]).optional(),
+    before: z.union([z.string().min(1).max(64), z.null()]).optional(),
+  })
+  .strict();
+export const planEditMoveSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('MOVE'), from: editSourceSchema, to: editTargetSchema }).strict(),
+  z.object({ kind: z.literal('REMOVE'), from: editSourceSchema }).strict(),
+  z.object({ kind: z.literal('PLACE'), orderId: z.string().min(1).max(64), to: editTargetSchema }).strict(),
+]);
+const expectDaySchema = z.object({ date: isoDateSchema, depotId: z.string().min(1) });
+
+/** POST /api/runs/[id]/edit/check: one change, and the day on screen. */
+export const planEditCheckSchema = z.object({ move: planEditMoveSchema, expect: expectDaySchema.optional() }).strict();
+
+/** POST /api/runs/[id]/edit: the change as the check answered it (a best place resolved), its hash and when the day was read. */
+export const planEditSaveSchema = z
+  .object({
+    move: planEditMoveSchema,
+    expect: expectDaySchema.optional(),
+    previewHash: z.string().regex(/^[0-9a-f]{64}$/),
+    builtAt: z.string().datetime(),
+  })
+  .strict();
+
 export const driverSchema = z.object({
   code: codeSchema,
   name: nameSchema,

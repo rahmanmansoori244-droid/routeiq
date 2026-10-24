@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { withTenantApi, ok, fail, parseBody } from '@/lib/api';
 import { prisma } from '@/lib/db';
 import { DISPATCH_PLAN_REFUSAL, isDispatchPlan } from '@/lib/dispatch/legacy-runs';
+import { planEditMode } from '@/lib/dispatch/plan-edit-view';
 import {
   RouteAdjustError,
   lockAssignment,
@@ -11,6 +12,17 @@ import {
 } from '@/lib/route-adjust';
 
 interface Params { params: { id: string; assignmentId: string } }
+
+/**
+ * A load-based plan's stops are never moved here (this route is for legacy runs only): with moves by hand
+ * on (PLAN_EDIT check or on) they are moved with Move on the plan screen (POST /api/runs/[id]/edit/check
+ * and /edit), otherwise by locking the loads to keep and re-planning.
+ */
+function loadPlanMoveText(): string {
+  return planEditMode() === 'OFF'
+    ? 'Stops cannot be moved one by one in a load-based plan yet. Lock the loads you want to keep and re-plan instead.'
+    : "A load-based plan's stops are moved with Move on the plan screen (a new plan version), not here.";
+}
 
 const patchSchema = z.discriminatedUnion('action', [
   z.object({
@@ -32,7 +44,7 @@ export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { user, ip }) => {
       if (await isDispatchPlan(user.tenantId, params.id)) {
-        return fail({ ...DISPATCH_PLAN_REFUSAL, error: 'Stops cannot be moved one by one in a load-based plan yet. Lock the loads you want to keep and re-plan instead.' }, 409);
+        return fail({ ...DISPATCH_PLAN_REFUSAL, error: loadPlanMoveText() }, 409);
       }
       const input = await parseBody(r, patchSchema);
       {
@@ -69,7 +81,7 @@ export const DELETE = (req: Request, { params }: Params) =>
   withTenantApi(
     async (_r, { user, ip }) => {
       if (await isDispatchPlan(user.tenantId, params.id)) {
-        return fail({ ...DISPATCH_PLAN_REFUSAL, error: 'Stops cannot be moved one by one in a load-based plan yet. Lock the loads you want to keep and re-plan instead.' }, 409);
+        return fail({ ...DISPATCH_PLAN_REFUSAL, error: loadPlanMoveText() }, 409);
       }
       {
         // A refusal is a RouteAdjustError (an HttpError): withTenantApi answers with its status (review L16).

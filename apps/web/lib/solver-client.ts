@@ -1,6 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
-import type { DispatchRequest, DispatchResponse } from '@routeiq/shared-types';
+import type { DispatchRequest, DispatchResponse, RetimeRequest, RetimeResponse } from '@routeiq/shared-types';
 import type { RouteGeometryReply } from '@/lib/dispatch/load-geometry';
 import { QUICK_SOLVER_WAIT_MS, solverWaitMs } from '@/lib/dispatch/search-mode';
 import { PLANNER_UNAVAILABLE_MESSAGE, WORKERS_UNAVAILABLE } from '@/lib/planner-unavailable';
@@ -267,5 +267,66 @@ export async function callRouteGeometry(
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+/** How long a hand move's check waits for the solver: its own budget is 10 s (RETIME_BUDGET_SEC), the matrix at most 6 s of it. */
+export const RETIME_TIMEOUT_MS = 20_000;
+
+/** What POST /retime-truck-days answered (moves by hand). Never an exception: the caller says what to do. */
+export type RetimeReply =
+  | { kind: 'answer'; body: RetimeResponse }
+  /** SOLVER_URL / SOLVER_TOKEN not set, not usable or not sendable. */
+  | { kind: 'not_configured' }
+  /** 404: a solver older than the endpoint (web and solver deploy apart). */
+  | { kind: 'outdated' }
+  /** 503: the solver's checks are all busy (RETIME_MAX_CONCURRENT). */
+  | { kind: 'busy' }
+  /** 422 (a web bug: an unknown stop or truck, a stop twice), a redirect, another error, or no JSON. */
+  | { kind: 'failed'; status: number; detail: string | null }
+  | { kind: 'timeout' };
+
+/**
+ * Moves by hand (PR M2): POST /retime-truck-days - the solver re-times only the edited trucks' new loads,
+ * exactly, from the fresh request (apps/solver/retime.py; contract in packages/shared-types RetimeRequest).
+ * The rules of the other calls: a URL no call can use or a token that is not plain ASCII is never sent,
+ * and a redirect is not followed (with the token). Never throws.
+ */
+export async function callRetimeTruckDays(body: RetimeRequest, opts: { timeoutMs?: number } = {}): Promise<RetimeReply> {
+  const { url, token } = solverEnv();
+  if (!url || !token || !solverUrlUsable(url) || !tokenCanBeSent(token)) return { kind: 'not_configured' };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? RETIME_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${url}/retime-truck-days`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Solver-Token': token },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+      cache: 'no-store',
+      redirect: 'manual',
+    });
+    if (res.status === 404) return { kind: 'outdated' };
+    if (res.status === 503) return { kind: 'busy' };
+    const text = await res.text();
+    if (!res.ok) {
+      let detail: string | null = null;
+      try {
+        const j = JSON.parse(text) as { detail?: unknown };
+        detail = typeof j?.detail === 'string' ? j.detail : j?.detail !== undefined ? JSON.stringify(j.detail) : null;
+      } catch {
+        /* not JSON */
+      }
+      return { kind: 'failed', status: res.status, detail };
+    }
+    try {
+      return { kind: 'answer', body: JSON.parse(text) as RetimeResponse };
+    } catch {
+      return { kind: 'failed', status: res.status, detail: 'not JSON' };
+    }
+  } catch {
+    return ctrl.signal.aborted ? { kind: 'timeout' } : { kind: 'failed', status: 0, detail: null };
+  } finally {
+    clearTimeout(timer);
   }
 }

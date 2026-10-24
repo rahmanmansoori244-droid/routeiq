@@ -7,6 +7,7 @@ import { rateLimitConfigProblem } from './rate-limit';
 import { TOKEN_CANNOT_BE_SENT, URL_EXPECTED, URL_NOT_USABLE, solverEnv, solverUrlUsable, tokenCanBeSent } from './solver-env';
 import { uploadParseConfigProblems } from './upload-parse/config';
 import { ivmsConfigProblems } from './ivms/env';
+import { planEditConfigNote } from './dispatch/plan-edit-view';
 
 export interface ConfigProblem {
   level: 'error' | 'warn';
@@ -30,6 +31,9 @@ export function configProblems(env: NodeJS.ProcessEnv = process.env): ConfigProb
   for (const message of pdfRenderConfigProblems(env)) out.push({ level: 'warn', message });
   // IVMS live link (16 Oct 2026): variable names only, and nothing while no IVMS variable is set.
   for (const message of ivmsConfigProblems(env)) out.push({ level: 'warn', message });
+  // Moves by hand (24 Oct 2026): PLAN_EDIT check or on is said once; a value it does not know is a warning (it stays off).
+  const planEdit = planEditConfigNote(env);
+  if (planEdit) out.push({ level: 'warn', message: planEdit });
   if (env.NODE_ENV !== 'production') return out;
 
   // Audit F15: without these every optimization fails; /api/health answers 503 for the same reason.

@@ -7,7 +7,7 @@
  * DISPATCHED / COMPLETED) are copied verbatim, the parent is marked SUPERSEDED (kept, never
  * overwritten) and only the remaining orders are optimized again.
  */
-import { Prisma, type LoadStatus, type OptimizationMode, type OrderStatus, type PlanReason, type RunStatus, type UnservedReasonCode } from '@prisma/client';
+import { Prisma, type LoadStatus, type OptimizationMode, type OrderStatus, type PlanReason, type RunPlan, type RunStatus, type Truck, type UnservedReasonCode } from '@prisma/client';
 import type {
   DispatchRequest,
   DispatchResponse,
@@ -44,7 +44,7 @@ import {
   type HoursMismatch,
 } from './data-collection';
 import type { ServiceArea } from './location-input';
-import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
+import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName, type TripDriver } from './load-state';
 import { leaveOnDay, onLeaveMoveRefusal } from './driver-leave';
 import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
 import { driverTripsElsewhere, helperTripsElsewhere, loadsOnOtherDepots, otherDepotClash, truckHoursAround, type TruckHoursAround } from './cross-depot';
@@ -122,7 +122,7 @@ import {
   smallTruckStopFields,
 } from './small-truck';
 import { copyRowData } from './prisma-copy';
-import { planHelpers, type HelperChangeNote } from './load-helpers';
+import { planHelpers, type HelperChangeNote, type TripHelpers } from './load-helpers';
 import { copyLoadHelpers, deleteHelpersOfLoads, helperEvidenceOf, setHelpersTx, writeLoadHelpers } from './load-helpers-service';
 import { lockWarningsOf } from '../delivery/carry-conflicts';
 import { windowRuleOf } from './window-rule';
@@ -225,6 +225,8 @@ export interface BuiltRequest {
    * Absent / empty otherwise.
    */
   missingPalletFactors?: MissingPalletFactor[];
+  /** The open lines behind missingPalletFactors, each with its order (a move by hand gates on its own trucks' orders only). */
+  missingPalletLines?: { orderId: string; productId: string; productCode: string; productName: string; cases: number }[];
   /** The cases per pallet of each product the request was planned with (by product code); absent without bay trucks. */
   palletFactors?: Record<string, number>;
   /**
@@ -694,7 +696,7 @@ export async function buildDispatchRequest(
   // Pallets: every optimizer order ref's need in units (sent as the stops' demand_pallet_units and
   // stored on the rows by applyScenario), and the lines whose product has no usable factor.
   const refUnits: Record<string, number> = {};
-  const missingPalletLines: { productId: string; productCode: string; productName: string; cases: number }[] = [];
+  const missingPalletLines: { orderId: string; productId: string; productCode: string; productName: string; cases: number }[] = [];
   const cppOfLine = new Map<string, number | null>();
   const unitsOfLines = (lines: { lineId: string; cases: number }[]) => linesPalletUnits(lines, cppOfLine);
   // Id the optimizer sees for (the open part of) an order: plain when the whole order is open.
@@ -800,7 +802,7 @@ export async function buildDispatchRequest(
           const info = lineInfo.get(l.lineId);
           cppOfLine.set(l.lineId, l.casesPerPallet ?? null);
           if (l.cases > 0 && !l.casesPerPallet) {
-            missingPalletLines.push({ productId: info?.productId ?? '?', productCode: info?.productCode ?? '?', productName: info?.productName ?? '', cases: l.cases });
+            missingPalletLines.push({ orderId: x.o.id, productId: info?.productId ?? '?', productCode: info?.productCode ?? '?', productName: info?.productName ?? '', cases: l.cases });
           }
         }
       }
@@ -1075,7 +1077,7 @@ export async function buildDispatchRequest(
     blocking: [...blockingByCustomer.values()],
     warnings,
     unknownWeights,
-    ...(byPallets ? { missingPalletFactors: groupMissingPalletFactors(missingPalletLines), palletFactors } : {}),
+    ...(byPallets ? { missingPalletFactors: groupMissingPalletFactors(missingPalletLines), missingPalletLines, palletFactors } : {}),
     smallTruckMaxBays: smallMaxBays,
     weightChanges,
     settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }, planFrom, loadingFromMin),
@@ -1273,7 +1275,7 @@ function loadCostJson(ld: DispatchScenario['loads'][number], costVersion: number
 }
 
 /** Portion columns of a RouteAssignment / UnservedOrder row (all null = the whole order). */
-function portionFields(p: PortionRecord | null) {
+export function portionFields(p: PortionRecord | null) {
   return p
     ? { portionCases: p.cases, portionWeightKg: p.weightKg, portionLinesJson: p.lines as unknown as Prisma.InputJsonValue }
     : { portionCases: null, portionWeightKg: null, portionLinesJson: Prisma.DbNull };
@@ -1451,204 +1453,23 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     throw new PlanError('Loads were locked/unlocked after this optimization. Optimize again before applying.', 409);
   }
 
-  // Drivers (rules: planDrivers in load-state.ts). The evidence is this version's loads as they are
-  // now, read before its PLANNED loads are deleted: for the re-plan job, the copies createNextVersion
-  // made of the previous version's loads (with any driver the dispatcher set on a copy before the job
-  // started), never the previous version's own loads; for "Use instead", the loads of the option in
-  // use - so both read the same kind of evidence. Frozen loads keep their drivers. A hand-set driver
-  // (the row's marker) stays on its truck and trip with the marker, even over an overlap (the yellow clash
-  // warning shows it). Every other trip, the one that moved least first, gets its own driver, the
-  // driver of the truck's nearest trip or the truck's default driver - whichever is active and free
-  // first. The driver notes (a trip that lost or changed its driver, a hand-set driver whose trip the
-  // plan does not have) are kept in the plan summary (driverChanges, shown as plan warnings),
-  // audited and returned. driverSetById comes from the evidence row: its foreign key keeps it valid.
-  // driverIsCover: the row's "given as the cover" marker (a re-plan offers that driver again only as the cover).
-  const driverSel = { truckId: true, loadNo: true, status: true, driverId: true, departMin: true, returnMin: true, driverSetById: true, driverSetAt: true, driverIsCover: true } as const;
-  const evidence = await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel });
-  // The trucks of the new loads and of the evidence loads (named in the driver notes).
-  const trucks = await tx.truck.findMany({ where: { tenantId, id: { in: [...new Set([...d.loads.map((l) => l.truck_id), ...evidence.map((l) => l.truckId)])] } } });
-  const truckById = new Map(trucks.map((t) => [t.id, t]));
-  for (const ld of d.loads) if (!truckById.has(ld.truck_id)) throw new PlanError(`Truck ${ld.truck_id} no longer exists.`, 409);
-  const tenantDrivers = await tx.driver.findMany({ where: { tenantId }, select: { id: true, name: true, active: true } });
-  const driverName = new Map(tenantDrivers.map((x) => [x.id, x.name]));
-  const loadKey = (truckId: string, loadNo: number) => `${truckId}:${loadNo}`;
-  // Who is on leave on the delivery day, and who covers them (owner request 6 Oct 2026, driver-leave.ts).
-  const leave = leaveOnDay(await leaveRowsOn(tx, tenantId, run.runDate), isoOf(run.runDate));
-  const elsewhere = await driversOnOtherDepots(tx, tenantId, run, leave);
-  // Review web-plan-service-1: a driver on a load of another depot's plan that day is not given a trip
-  // here at an overlapping time, the drive between the depots included (cross-depot.ts).
-  const otherDepots = await driverTripsElsewhere(tx, tenantId, run);
-  const { drivers: driverOf, notes } = planDrivers(
-    d.loads.map((ld) => ({
-      key: loadKey(ld.truck_id, ld.load_no),
-      truckId: ld.truck_id,
-      loadNo: ld.load_no,
-      departMin: ld.depart_min,
-      returnMin: ld.return_min,
-      defaultDriverId: truckById.get(ld.truck_id)!.defaultDriverId,
-    })),
-    evidence,
-    new Set(tenantDrivers.filter((x) => x.active).map((x) => x.id)),
-    leave,
-    elsewhere,
-    otherDepots,
-  );
-  // Helpers (owner request 13 Oct 2026; rules: planHelpers in load-helpers.ts): frozen loads keep theirs,
-  // helpers set by hand stay on their truck and trip, every other trip gets the truck's usual helper when
-  // he is active and free at that time (here and on the other depots' plans that day). Read before the
-  // PLANNED loads (and their helper rows) are deleted. A hand-set helper the plan drops is a helper note
-  // (as a driver note): kept in the summary (helperChanges, plan warnings), audited and returned.
-  const helperEv = await helperEvidenceOf(tx, tenantId, runId);
-  const tenantHelpers = await tx.helper.findMany({ where: { tenantId }, select: { id: true, name: true, active: true } });
-  const activeHelpers = new Set(tenantHelpers.filter((h) => h.active).map((h) => h.id));
-  const { helpers: helpersOf, notes: helperNotes } = planHelpers(
-    d.loads.map((ld) => ({
-      key: loadKey(ld.truck_id, ld.load_no),
-      truckId: ld.truck_id,
-      loadNo: ld.load_no,
-      departMin: ld.depart_min,
-      returnMin: ld.return_min,
-      defaultHelperId: truckById.get(ld.truck_id)!.defaultHelperId ?? null,
-    })),
-    helperEv.evidence,
-    activeHelpers,
-    await helperTripsElsewhere(tx, tenantId, run),
-  );
-  const truckCode = (id: string) => truckById.get(id)?.code ?? id;
-  const person = (id: string) => ({ id, name: driverName.get(id) ?? 'Unknown driver' });
-  const helperName = new Map(tenantHelpers.map((h) => [h.id, h.name]));
-  const appliedAt = new Date().toISOString();
-  const helperChanges: HelperChangeNote[] = helperNotes.map((n) => ({
-    truckId: n.truckId,
-    truckCode: truckCode(n.truckId),
-    loadNo: n.loadNo,
-    departMin: n.departMin,
-    returnMin: n.returnMin,
-    helper: { id: n.helperId, name: helperName.get(n.helperId) ?? 'Unknown helper' },
-    reason: n.reason,
-    at: appliedAt,
-  }));
-  const driverChanges: DriverChangeNote[] = notes.map((n) => ({
-    truckId: n.truckId,
-    truckCode: truckCode(n.truckId),
-    loadNo: n.loadNo,
-    departMin: n.departMin,
-    returnMin: n.returnMin,
-    from: person(n.fromDriverId),
-    to: n.toDriverId ? person(n.toDriverId) : null,
-    reason: n.reason,
-    // A trip of another depot carries its own name ("T03 (North depot)").
-    other: n.other ? { truckCode: n.other.truckCode ?? truckCode(n.other.truckId), loadNo: n.other.loadNo } : null,
-    ...(n.leaveUntil ? { leaveUntil: n.leaveUntil } : {}),
-    ...(n.cover ? { cover: n.cover } : {}),
-  }));
+  // Drivers and helpers of the new loads (planCrew), from this version's loads as they are now: read
+  // before its PLANNED loads are deleted.
+  const crew = await planCrew(tx, tenantId, run, d.loads);
+  const { driverChanges, helperChanges } = crew;
 
-  await deleteHelpersOfLoads(tx, tenantId, helperEv.plannedIds);
+  await deleteHelpersOfLoads(tx, tenantId, crew.plannedIds);
   await tx.planLoad.deleteMany({ where: { runId, status: 'PLANNED' } });
   await tx.routeAssignment.deleteMany({ where: { runId, loadId: null } });
 
-  const orderIds = [...d.scope.orderIds];
-  const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { id: true, totalCases: true, totalWeightKg: true } });
-  const casesOf = new Map(orders.map((o) => [o.id, o.totalCases]));
-  const kgOf = new Map(orders.map((o) => [o.id, o.totalWeightKg]));
-  const kgMismatches: { truckId: string; loadNo: number; solverKg: number; ordersKg: number }[] = [];
-  const palletMismatches: { truckId: string; loadNo: number; solverUnits: number; rowsUnits: number }[] = [];
-  // Pallets: each row keeps the units it was sent with (scope.palletUnits); a load is stored as
-  // planned by pallets only when the optimizer echoed the rule and planned it on a truck with bays.
-  const refUnits = d.scope.palletUnits ?? null;
-  const palletEcho = typeof d.pallet_unit === 'number';
   // The facts each new load and stop is planned with (F08): frozen with the rows, so a later pin,
   // hours or truck correction never changes what this plan shows. From the option's inputs (what
   // the optimizer was sent); an option stored before inputs existed takes the master data now.
-  const snap = await snapshotSource(tx, tenantId, run.depotId, d, trucks);
-
-  for (const ld of d.loads) {
-    // A load weighs what its orders (or split portions) weigh - the same figures the stops,
-    // manifests and driver sheets show. The optimizer's own sum must agree (F01: a capped part
-    // weight once made a load look lighter than it was); a difference is kept in the audit.
-    const ordersKg = loadKgFromRefs(ld.stops.flatMap((st) => st.order_ids), d.scope, kgOf);
-    if (Math.abs(ordersKg - ld.kg) > KG_ROUNDING_TOL) kgMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverKg: ld.kg, ordersKg });
-    // The load's pallets = the sum of its rows' (the optimizer's own sum must agree; kept in the audit if not).
-    const rowsUnits = refUnits ? ld.stops.flatMap((st) => st.order_ids).reduce((a, ref) => a + (refUnits[ref] ?? 0), 0) : null;
-    const loadUnits = palletEcho && typeof ld.pallet_units === 'number' && rowsUnits !== null ? rowsUnits : null;
-    if (loadUnits !== null && loadUnits !== ld.pallet_units) palletMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverUnits: ld.pallet_units as number, rowsUnits: loadUnits });
-    const driver = driverOf.get(loadKey(ld.truck_id, ld.load_no));
-    const crew = helpersOf.get(loadKey(ld.truck_id, ld.load_no));
-    const load = await tx.planLoad.create({
-      data: {
-        tenantId,
-        runId,
-        truckId: ld.truck_id,
-        loadNo: ld.load_no,
-        status: 'PLANNED',
-        driverId: driver?.driverId ?? null,
-        // The dispatcher's hand-set choice for this truck and trip carries its marker; RouteIQ's picks have none.
-        driverSetById: driver?.driverSetById ?? null,
-        driverSetAt: driver?.driverSetAt ?? null,
-        // Given as the cover of the truck's usual driver on leave (the column defaults to false).
-        ...(driver?.driverIsCover ? { driverIsCover: true } : {}),
-        // Helpers set by hand keep their marker; RouteIQ's (the usual helper) have none.
-        helpersSetById: crew?.helpersSetById ?? null,
-        helpersSetAt: crew?.helpersSetAt ?? null,
-        departMin: ld.depart_min,
-        returnMin: ld.return_min,
-        distanceKm: ld.distance_km,
-        durationMin: ld.duration_min,
-        cases: ld.cases,
-        weightKg: ordersKg,
-        utilizationPct: ld.utilization_pct,
-        fuelLitres: ld.fuel_litres,
-        fuelCost: ld.fuel_cost,
-        // The load's share of the day under the one cost model (review F17): whole-day driver
-        // pay and overtime included. An older solver sends no breakdown: costed the earlier way.
-        operatingCost: ld.total_cost,
-        costJson: loadCostJson(ld, d.cost_version),
-        returnLegKm: ld.return_leg_km,
-        // Per load (review F18): estimated when the whole matrix was, or any of its own legs is.
-        distanceIsEstimated: d.distance_is_estimated || (ld.estimated_legs ?? 0) > 0,
-        truckSnapshotJson: snap.truck(ld.truck_id) as unknown as Prisma.InputJsonValue,
-        // The driver break planned with this load (the solver's timetable), NULL when none.
-        breakJson: (loadBreakJson(ld.driver_break) ?? Prisma.DbNull) as Prisma.InputJsonValue | typeof Prisma.DbNull,
-        // Pallets planned (1/1000 pallet), NULL when the load was planned by cases.
-        palletUnits: loadUnits,
-      },
-    });
-    if (crew?.helperIds.length) await writeLoadHelpers(tx, tenantId, load.id, crew.helperIds);
-    let running = 0;
-    const rows: Prisma.RouteAssignmentCreateManyInput[] = [];
-    for (const st of ld.stops) {
-      const stopSnapshot = snap.stop(st) as unknown as Prisma.InputJsonValue;
-      st.order_ids.forEach((ref, k) => {
-        const { orderId, portion } = resolveOrderRef(d.scope, ref);
-        running += portion ? portion.cases : (casesOf.get(orderId) ?? 0);
-        rows.push({
-          ...portionFields(portion),
-          stopSnapshotJson: stopSnapshot,
-          runId,
-          truckId: ld.truck_id,
-          orderId,
-          loadId: load.id,
-          loadNo: ld.load_no,
-          sequenceInTruck: st.sequence,
-          orderInStop: k,
-          plannedArrivalMin: Math.max(0, st.arrival_min - ld.depart_min),
-          plannedDistanceFromPrevKm: k === 0 ? st.leg_km : 0,
-          plannedLoadCases: running,
-          etaMin: st.arrival_min,
-          serviceStartMin: st.service_start_min,
-          departureMin: st.departure_min,
-          waitMin: st.wait_min,
-          cumulativeKm: st.cum_km,
-          hardWindowOk: st.hard_window_ok,
-          prefWindowOk: st.pref_window_ok,
-          // The row's pallets exactly as sent (null on a day without bay trucks, or when the
-          // optimizer did not say it planned by pallets: an older solver).
-          palletUnits: palletEcho && refUnits && typeof refUnits[ref] === 'number' ? refUnits[ref] : null,
-        });
-      });
-    }
-    if (rows.length) await tx.routeAssignment.createMany({ data: rows });
-  }
+  const { kgMismatches, palletMismatches } = await materializeLoads(tx, tenantId, runId, d, d.loads, {
+    orderIds: [...d.scope.orderIds],
+    snap: await snapshotSource(tx, tenantId, run.depotId, d, crew.trucks),
+    crew,
+  });
 
   const plannedNew = new Set(d.loads.flatMap((l) => l.stops.flatMap((s) => s.order_ids.map(orderIdOf))));
   // A split order with any part on a truck counts as assigned; the summary reports it as partial.
@@ -1699,6 +1520,252 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   return { driverChanges, helperChanges };
 }
 
+/** The trip key of planCrew's maps: truck and load number. */
+export function crewKey(truckId: string, loadNo: number): string {
+  return `${truckId}:${loadNo}`;
+}
+
+/** Drivers and helpers planCrew gives the new loads of a plan being applied, with their notes. */
+export interface CrewPlan {
+  /** The trucks of the new loads and of the evidence loads (rows as stored). */
+  trucks: Truck[];
+  driverOf: Map<string, TripDriver>;
+  helpersOf: Map<string, TripHelpers>;
+  driverChanges: DriverChangeNote[];
+  helperChanges: HelperChangeNote[];
+  /** The version's PLANNED loads (their helper rows go when they are deleted). */
+  plannedIds: string[];
+}
+
+/**
+ * The drivers and helpers of the new loads of a plan being applied to `run` (applyScenario, and a hand
+ * move: plan-edit-apply.ts), from the version's loads as they are now - read before its PLANNED loads are
+ * deleted. `keepTrucks`: trucks whose PLANNED loads stay as they are (a hand move re-times only the trucks
+ * it touches): their loads count as frozen evidence, so their drivers and helpers stay and are busy then.
+ */
+export async function planCrew(
+  tx: Tx,
+  tenantId: string,
+  run: Pick<RunPlan, 'id' | 'tenantId' | 'depotId' | 'runDate'>,
+  loads: readonly DispatchScenario['loads'][number][],
+  opts: { keepTrucks?: ReadonlySet<string> } = {},
+): Promise<CrewPlan> {
+  // Drivers (rules: planDrivers in load-state.ts). The evidence is this version's loads as they are
+  // now, read before its PLANNED loads are deleted: for the re-plan job, the copies createNextVersion
+  // made of the previous version's loads (with any driver the dispatcher set on a copy before the job
+  // started), never the previous version's own loads; for "Use instead", the loads of the option in
+  // use - so both read the same kind of evidence. Frozen loads keep their drivers. A hand-set driver
+  // (the row's marker) stays on its truck and trip with the marker, even over an overlap (the yellow clash
+  // warning shows it). Every other trip, the one that moved least first, gets its own driver, the
+  // driver of the truck's nearest trip or the truck's default driver - whichever is active and free
+  // first. The driver notes (a trip that lost or changed its driver, a hand-set driver whose trip the
+  // plan does not have) are kept in the plan summary (driverChanges, shown as plan warnings),
+  // audited and returned. driverSetById comes from the evidence row: its foreign key keeps it valid.
+  // driverIsCover: the row's "given as the cover" marker (a re-plan offers that driver again only as the cover).
+  const driverSel = { truckId: true, loadNo: true, status: true, driverId: true, departMin: true, returnMin: true, driverSetById: true, driverSetAt: true, driverIsCover: true } as const;
+  // A hand move (plan-edit-apply.ts) keeps the other trucks' PLANNED loads as they are: their drivers and
+  // helpers stay and count as busy, like a frozen load's (status read as LOCKED, in memory only).
+  const kept = (e: { truckId: string; status: string }) => (opts.keepTrucks?.has(e.truckId) && e.status === 'PLANNED' ? { status: 'LOCKED' as const } : {});
+  const evidence = (await tx.planLoad.findMany({ where: { runId: run.id, tenantId }, select: driverSel })).map((e) => ({ ...e, ...kept(e) }));
+  // The trucks of the new loads and of the evidence loads (named in the driver notes).
+  const trucks = await tx.truck.findMany({ where: { tenantId, id: { in: [...new Set([...loads.map((l) => l.truck_id), ...evidence.map((l) => l.truckId)])] } } });
+  const truckById = new Map(trucks.map((t) => [t.id, t]));
+  for (const ld of loads) if (!truckById.has(ld.truck_id)) throw new PlanError(`Truck ${ld.truck_id} no longer exists.`, 409);
+  const tenantDrivers = await tx.driver.findMany({ where: { tenantId }, select: { id: true, name: true, active: true } });
+  const driverName = new Map(tenantDrivers.map((x) => [x.id, x.name]));
+  const loadKey = crewKey;
+  // Who is on leave on the delivery day, and who covers them (owner request 6 Oct 2026, driver-leave.ts).
+  const leave = leaveOnDay(await leaveRowsOn(tx, tenantId, run.runDate), isoOf(run.runDate));
+  const elsewhere = await driversOnOtherDepots(tx, tenantId, run, leave);
+  // Review web-plan-service-1: a driver on a load of another depot's plan that day is not given a trip
+  // here at an overlapping time, the drive between the depots included (cross-depot.ts).
+  const otherDepots = await driverTripsElsewhere(tx, tenantId, run);
+  const { drivers: driverOf, notes } = planDrivers(
+    loads.map((ld) => ({
+      key: loadKey(ld.truck_id, ld.load_no),
+      truckId: ld.truck_id,
+      loadNo: ld.load_no,
+      departMin: ld.depart_min,
+      returnMin: ld.return_min,
+      defaultDriverId: truckById.get(ld.truck_id)!.defaultDriverId,
+    })),
+    evidence,
+    new Set(tenantDrivers.filter((x) => x.active).map((x) => x.id)),
+    leave,
+    elsewhere,
+    otherDepots,
+  );
+  // Helpers (owner request 13 Oct 2026; rules: planHelpers in load-helpers.ts): frozen loads keep theirs,
+  // helpers set by hand stay on their truck and trip, every other trip gets the truck's usual helper when
+  // he is active and free at that time (here and on the other depots' plans that day). Read before the
+  // PLANNED loads (and their helper rows) are deleted. A hand-set helper the plan drops is a helper note
+  // (as a driver note): kept in the summary (helperChanges, plan warnings), audited and returned.
+  const helperEv = await helperEvidenceOf(tx, tenantId, run.id);
+  const tenantHelpers = await tx.helper.findMany({ where: { tenantId }, select: { id: true, name: true, active: true } });
+  const activeHelpers = new Set(tenantHelpers.filter((h) => h.active).map((h) => h.id));
+  const { helpers: helpersOf, notes: helperNotes } = planHelpers(
+    loads.map((ld) => ({
+      key: loadKey(ld.truck_id, ld.load_no),
+      truckId: ld.truck_id,
+      loadNo: ld.load_no,
+      departMin: ld.depart_min,
+      returnMin: ld.return_min,
+      defaultHelperId: truckById.get(ld.truck_id)!.defaultHelperId ?? null,
+    })),
+    helperEv.evidence.map((e) => ({ ...e, ...kept(e) })),
+    activeHelpers,
+    await helperTripsElsewhere(tx, tenantId, run),
+  );
+  const truckCode = (id: string) => truckById.get(id)?.code ?? id;
+  const person = (id: string) => ({ id, name: driverName.get(id) ?? 'Unknown driver' });
+  const helperName = new Map(tenantHelpers.map((h) => [h.id, h.name]));
+  const appliedAt = new Date().toISOString();
+  const helperChanges: HelperChangeNote[] = helperNotes.map((n) => ({
+    truckId: n.truckId,
+    truckCode: truckCode(n.truckId),
+    loadNo: n.loadNo,
+    departMin: n.departMin,
+    returnMin: n.returnMin,
+    helper: { id: n.helperId, name: helperName.get(n.helperId) ?? 'Unknown helper' },
+    reason: n.reason,
+    at: appliedAt,
+  }));
+  const driverChanges: DriverChangeNote[] = notes.map((n) => ({
+    truckId: n.truckId,
+    truckCode: truckCode(n.truckId),
+    loadNo: n.loadNo,
+    departMin: n.departMin,
+    returnMin: n.returnMin,
+    from: person(n.fromDriverId),
+    to: n.toDriverId ? person(n.toDriverId) : null,
+    reason: n.reason,
+    // A trip of another depot carries its own name ("T03 (North depot)").
+    other: n.other ? { truckCode: n.other.truckCode ?? truckCode(n.other.truckId), loadNo: n.other.loadNo } : null,
+    ...(n.leaveUntil ? { leaveUntil: n.leaveUntil } : {}),
+    ...(n.cover ? { cover: n.cover } : {}),
+  }));
+
+  return { trucks, driverOf, helpersOf, driverChanges, helperChanges, plannedIds: helperEv.plannedIds };
+}
+
+/**
+ * Create the PlanLoads, their helper rows and RouteAssignments of `loads` (an option's new loads) on version
+ * `runId`: applyScenario for a whole option, a hand move (plan-edit-apply.ts) for the trucks it re-timed. `d`
+ * gives the scope (order refs and portions), the cost version, the pallet echo and the distance quality;
+ * `ctx.snap` the facts each row is planned with (snapshotSource), `ctx.crew` the drivers and helpers
+ * (planCrew), `ctx.orderIds` the orders whose cases and kg the rows read. Returns the kg and pallet sums
+ * that differ from the optimizer's (kept in the audit).
+ */
+export async function materializeLoads(
+  tx: Tx,
+  tenantId: string,
+  runId: string,
+  d: ScenarioDetails,
+  loads: readonly DispatchScenario['loads'][number][],
+  ctx: { orderIds: string[]; snap: Awaited<ReturnType<typeof snapshotSource>>; crew: Pick<CrewPlan, 'driverOf' | 'helpersOf'> },
+) {
+  const orderIds = ctx.orderIds;
+  const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { id: true, totalCases: true, totalWeightKg: true } });
+  const casesOf = new Map(orders.map((o) => [o.id, o.totalCases]));
+  const kgOf = new Map(orders.map((o) => [o.id, o.totalWeightKg]));
+  const kgMismatches: { truckId: string; loadNo: number; solverKg: number; ordersKg: number }[] = [];
+  const palletMismatches: { truckId: string; loadNo: number; solverUnits: number; rowsUnits: number }[] = [];
+  // Pallets: each row keeps the units it was sent with (scope.palletUnits); a load is stored as
+  // planned by pallets only when the optimizer echoed the rule and planned it on a truck with bays.
+  const refUnits = d.scope.palletUnits ?? null;
+  const palletEcho = typeof d.pallet_unit === 'number';
+  const { snap, crew } = ctx;
+
+  for (const ld of loads) {
+    // A load weighs what its orders (or split portions) weigh - the same figures the stops,
+    // manifests and driver sheets show. The optimizer's own sum must agree (F01: a capped part
+    // weight once made a load look lighter than it was); a difference is kept in the audit.
+    const ordersKg = loadKgFromRefs(ld.stops.flatMap((st) => st.order_ids), d.scope, kgOf);
+    if (Math.abs(ordersKg - ld.kg) > KG_ROUNDING_TOL) kgMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverKg: ld.kg, ordersKg });
+    // The load's pallets = the sum of its rows' (the optimizer's own sum must agree; kept in the audit if not).
+    const rowsUnits = refUnits ? ld.stops.flatMap((st) => st.order_ids).reduce((a, ref) => a + (refUnits[ref] ?? 0), 0) : null;
+    const loadUnits = palletEcho && typeof ld.pallet_units === 'number' && rowsUnits !== null ? rowsUnits : null;
+    if (loadUnits !== null && loadUnits !== ld.pallet_units) palletMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverUnits: ld.pallet_units as number, rowsUnits: loadUnits });
+    const driver = crew.driverOf.get(crewKey(ld.truck_id, ld.load_no));
+    const helpers = crew.helpersOf.get(crewKey(ld.truck_id, ld.load_no));
+    const load = await tx.planLoad.create({
+      data: {
+        tenantId,
+        runId,
+        truckId: ld.truck_id,
+        loadNo: ld.load_no,
+        status: 'PLANNED',
+        driverId: driver?.driverId ?? null,
+        // The dispatcher's hand-set choice for this truck and trip carries its marker; RouteIQ's picks have none.
+        driverSetById: driver?.driverSetById ?? null,
+        driverSetAt: driver?.driverSetAt ?? null,
+        // Given as the cover of the truck's usual driver on leave (the column defaults to false).
+        ...(driver?.driverIsCover ? { driverIsCover: true } : {}),
+        // Helpers set by hand keep their marker; RouteIQ's (the usual helper) have none.
+        helpersSetById: helpers?.helpersSetById ?? null,
+        helpersSetAt: helpers?.helpersSetAt ?? null,
+        departMin: ld.depart_min,
+        returnMin: ld.return_min,
+        distanceKm: ld.distance_km,
+        durationMin: ld.duration_min,
+        cases: ld.cases,
+        weightKg: ordersKg,
+        utilizationPct: ld.utilization_pct,
+        fuelLitres: ld.fuel_litres,
+        fuelCost: ld.fuel_cost,
+        // The load's share of the day under the one cost model (review F17): whole-day driver
+        // pay and overtime included. An older solver sends no breakdown: costed the earlier way.
+        operatingCost: ld.total_cost,
+        costJson: loadCostJson(ld, d.cost_version),
+        returnLegKm: ld.return_leg_km,
+        // Per load (review F18): estimated when the whole matrix was, or any of its own legs is.
+        distanceIsEstimated: d.distance_is_estimated || (ld.estimated_legs ?? 0) > 0,
+        truckSnapshotJson: snap.truck(ld.truck_id) as unknown as Prisma.InputJsonValue,
+        // The driver break planned with this load (the solver's timetable), NULL when none.
+        breakJson: (loadBreakJson(ld.driver_break) ?? Prisma.DbNull) as Prisma.InputJsonValue | typeof Prisma.DbNull,
+        // Pallets planned (1/1000 pallet), NULL when the load was planned by cases.
+        palletUnits: loadUnits,
+      },
+    });
+    if (helpers?.helperIds.length) await writeLoadHelpers(tx, tenantId, load.id, helpers.helperIds);
+    let running = 0;
+    const rows: Prisma.RouteAssignmentCreateManyInput[] = [];
+    for (const st of ld.stops) {
+      const stopSnapshot = snap.stop(st) as unknown as Prisma.InputJsonValue;
+      st.order_ids.forEach((ref, k) => {
+        const { orderId, portion } = resolveOrderRef(d.scope, ref);
+        running += portion ? portion.cases : (casesOf.get(orderId) ?? 0);
+        rows.push({
+          ...portionFields(portion),
+          stopSnapshotJson: stopSnapshot,
+          runId,
+          truckId: ld.truck_id,
+          orderId,
+          loadId: load.id,
+          loadNo: ld.load_no,
+          sequenceInTruck: st.sequence,
+          orderInStop: k,
+          plannedArrivalMin: Math.max(0, st.arrival_min - ld.depart_min),
+          plannedDistanceFromPrevKm: k === 0 ? st.leg_km : 0,
+          plannedLoadCases: running,
+          etaMin: st.arrival_min,
+          serviceStartMin: st.service_start_min,
+          departureMin: st.departure_min,
+          waitMin: st.wait_min,
+          cumulativeKm: st.cum_km,
+          hardWindowOk: st.hard_window_ok,
+          prefWindowOk: st.pref_window_ok,
+          // The row's pallets exactly as sent (null on a day without bay trucks, or when the
+          // optimizer did not say it planned by pallets: an older solver).
+          palletUnits: palletEcho && refUnits && typeof refUnits[ref] === 'number' ? refUnits[ref] : null,
+        });
+      });
+    }
+    if (rows.length) await tx.routeAssignment.createMany({ data: rows });
+  }
+  return { kgMismatches, palletMismatches };
+}
+
 /**
  * "Use instead": apply another option of the same version (choose-scenario). One transaction; the
  * plan row is locked before anything is checked, so a re-plan or a Lock that commits first is
@@ -1743,7 +1810,7 @@ export function loadKgFromRefs(refs: string[], scope: Pick<PlanScope, 'portions'
  * access notes now. An option stored before inputs existed: the truck, customer and settings now
  * (source MASTER).
  */
-async function snapshotSource(
+export async function snapshotSource(
   tx: Tx,
   tenantId: string,
   depotId: string,

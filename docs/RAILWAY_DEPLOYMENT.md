@@ -385,6 +385,43 @@ reason and warning texts changed, where they were untrue).
 - **Rollback:** unset the variables (or set `SOLVER_BEST_OF=1`, `SOLVER_BEST_OF_QUICK=1` and `SOLVER_PRIORITY_REPAIR=off`);
   no code change.
 
+## Re-timing for moves by hand (24 Oct 2026, the solver part; called by the Move dialog below)
+
+The solver gets `POST /retime-truck-days` (`apps/solver/retime.py`; `docs/PROJECT_HANDBOOK.md` 4.16): a few truck days
+re-timed exactly for a stop moved by hand. It changes no optimization and no plan; the web part that calls it (below)
+ships in the same release behind its own switch, `PLAN_EDIT`, off by default, so until that is set nothing calls the
+endpoint. Deploy it outside the evening's planning, like any solver deploy (a restart cuts a running solve).
+
+- **Settings** (optional, all with defaults; see the handbook 2.9): `RETIME_MAX_CONCURRENT` (4 checks at once, then 503
+  "Route checks busy"), `RETIME_BUDGET_SEC` (10), `RETIME_MATRIX_SEC` (6), `RETIME_BEST_TRIES` (24). Leave them unset.
+  A check runs a few small timing LPs in the solver's API process (no search, no worker process: rule 22) and takes
+  no optimization slot.
+- **Verify after the deploy** (`railway logs --service solver`): the startup line
+  `Re-timing for moves by hand (/retime-truck-days v1): max 4 at once, budget 10 s, road matrix 6 s, best place 24 tries`;
+  `GET /ready` (with the solver token) has `"retime": {"version": 1, ...}`. The next optimization answers as before.
+  Each check later logs one line `retime run=<id> tenant=<id> trucks=... stops=... ok=... provider=... timings=...
+  seconds=...` (ids only).
+- **Rollback:** redeploy the previous solver commit; nothing in the database changes.
+
+## Moves by hand on the plan screen (24 Oct 2026, the web part; `PLAN_EDIT`, off by default)
+
+The web gets the Move dialog and two routes, `POST /api/runs/:id/edit/check` and `POST /api/runs/:id/edit`
+(`docs/PROJECT_HANDBOOK.md` 3.7, 4.16). They call the solver's `/retime-truck-days` above. Both services deploy from the
+same merge; **check the solver's startup line above before setting `PLAN_EDIT`** (an older solver answers 404 and the
+dialog says "The route optimizer is being updated"; nothing is written). The web deploy runs the migration
+`20261024120000_unserved_removed_by_hand` (one enum value, additive).
+
+- **Switch** (web variable, read on every request): `PLAN_EDIT` unset or `off` = no Move button, the routes answer 404;
+  `check` = dispatchers can Check a move (re-timed by the solver, nothing written) but not Save; `on` = Check and Save.
+  Pilot: `check` for one or two planning days, then `on` with the owner's OK.
+- **Verify** (`railway logs --service web`): with `check` or `on` the startup log has the `PLAN_EDIT=...` line; a Check
+  on the plan in use answers a preview and the solver logs one `retime run=... ok=...` line; with `on`, a saved move makes
+  the next plan version `MANUAL_ADJUSTMENT` ("By hand: ..." in the versions list) and the audit log has
+  `ROUTE_MANUALLY_CHANGED`.
+- **Rollback:** set `PLAN_EDIT=off` (Railway restarts the web; no deploy). Versions saved by hand stay valid plans. To roll
+  the web code back past this release, first run the `UPDATE` in the migration file if any stop was taken off by hand
+  (the previous Prisma client cannot read the new reason).
+
 ## Private networking notes
 
 - Service addresses are `<service>.railway.internal`. This environment resolves over **IPv4 and IPv6**.
