@@ -1716,7 +1716,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                 <Link className="font-medium underline-offset-2 hover:underline" href={`/t/${slug}/dispatch/plan/${v.id}`}>
                   Version {v.version}
                 </Link>{' '}
-                · {v.reason.replace('_', ' ')} · {v.status} · {new Date(v.createdAt).toLocaleString()}
+                · {v.reason.replace('_', ' ')}
+                {/* The version's note tells the two MANUAL ADJUSTMENTs apart: "By hand: ..." (a move saved) or "Unlocked for changed customer data: ..." (the kept-load re-plan). */}
+                {v.reasonNote ? <span data-testid="version-note"> ({v.reasonNote})</span> : null} · {v.status} · {new Date(v.createdAt).toLocaleString()}
                 {v.changeText ? <span className="text-muted-foreground"> — {v.changeText}</span> : null}
               </p>
             ))}

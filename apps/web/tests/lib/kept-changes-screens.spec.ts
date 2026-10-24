@@ -379,3 +379,36 @@ describe('Step 3 on the day screen', () => {
     expect(io.toasts.find(([k]) => k === 'success')?.[1]).toMatch(/^T05 L3 and T05 L2 are back to Planned\. RE-PLAN to plan them with the customer data now/);
   });
 });
+
+describe('the plan versions list: the two MANUAL ADJUSTMENTs apart (kept-load re-plan and a move by hand, release of 24 Oct 2026)', () => {
+  it("each version shows its note; the header's \"adjusted by hand\" comes from details.manual, never from the reason", async () => {
+    const d = fixture();
+    const at = '2026-09-27T12:00:00.000Z';
+    io.plan = {
+      ...d,
+      run: { ...d.run, version: 3, reason: 'MANUAL_ADJUSTMENT', reasonNote: 'Unlocked for changed customer data: T05 L2' },
+      kept: null,
+      manual: null,
+      versions: [
+        { id: 'run1', version: 3, status: 'READY', reason: 'MANUAL_ADJUSTMENT', reasonNote: 'Unlocked for changed customer data: T05 L2', createdAt: at, changeText: null },
+        { id: 'v2', version: 2, status: 'SUPERSEDED', reason: 'MANUAL_ADJUSTMENT', reasonNote: 'By hand: Move Shop 7 (C007) from T05 L2, stop 1 to T06 L1, stop 2', createdAt: at, changeText: null },
+        { id: 'v1', version: 1, status: 'SUPERSEDED', reason: 'INITIAL', reasonNote: null, createdAt: at, changeText: null },
+      ],
+    };
+    const host: Host<any> = new Host(PlanView as any, { slug: 'nmwc', runId: 'run1', canPlan: true, canDispatch: true, phoneCountryCode: '968', reloadSignal: 0, onBusyChange: () => {}, onChanged: async () => {}, today: '2026-09-27' });
+    host.render();
+    await host.settle();
+    const rows = elements(host.tree).filter((e) => e.type === 'p' && textOf(e).startsWith('Version '));
+    expect(rows.map((e) => textOf(e).split(' · ').slice(0, 3).join(' · '))).toEqual([
+      'Version 3 · MANUAL ADJUSTMENT (Unlocked for changed customer data: T05 L2) · READY',
+      'Version 2 · MANUAL ADJUSTMENT (By hand: Move Shop 7 (C007) from T05 L2, stop 1 to T06 L1, stop 2) · SUPERSEDED',
+      'Version 1 · INITIAL · SUPERSEDED',
+    ]);
+    // The kept-load re-plan's version is not "adjusted by hand": only an option with details.manual is.
+    expect(textOf(host.tree)).not.toContain('adjusted by hand');
+    io.plan = { ...io.plan, manual: { count: 1, at } };
+    host.render({ reloadSignal: 1 });
+    await host.settle();
+    expect(textOf(host.tree)).toContain(' · adjusted by hand');
+  });
+});
