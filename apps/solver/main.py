@@ -45,6 +45,7 @@ from dispatch_solver import (
     priority_repair_on,
 )
 import best_of
+import join_trips
 import pyvrp_candidate
 import retime
 from models import OptimizeRequest, OptimizeResponse
@@ -162,6 +163,8 @@ log.info(best_of.startup_line())
 log.info(priority_repair_line())
 # Re-timing for moves by hand (/retime-truck-days): its limits, and any RETIME_* value it could not read.
 log.info(retime.startup_line())
+# Join small trips after the load re-check (SOLVER_JOIN_TRIPS): off (the default), report or on.
+log.info(join_trips.startup_line())
 
 
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
@@ -241,6 +244,9 @@ def ready_endpoint(
         # Re-timing for moves by hand (/retime-truck-days): its version and limits; the web's move check needs it.
         # Never affects ok.
         "retime": {**retime.status(), "max_concurrent": RETIME_MAX_CONCURRENT},
+        # Join small trips (SOLVER_JOIN_TRIPS, off by default; read on every solve): mode, its rule, values not read.
+        # Never affects ok.
+        "join_trips": join_trips.status(),
     }
 
 

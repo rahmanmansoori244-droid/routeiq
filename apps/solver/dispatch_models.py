@@ -769,6 +769,9 @@ class SearchReport(BaseModel):
     # RECOMMENDED and what came of it. None when one search ran (the default), and from a solver before it.
     # The fields above stay the main search's (or, when it failed, those of the search that replaced it).
     best_of: "BestOfReport | None" = None
+    # Join small trips (SOLVER_JOIN_TRIPS, join_trips.py): what the step found and did per option. None with the
+    # setting off (the default), and from a solver before it.
+    join_trips: "JoinTripsReport | None" = None
 
 
 class PyvrpReport(BaseModel):
@@ -882,6 +885,84 @@ class BestOfReport(BaseModel):
     chosen_for: list[str] = Field(default_factory=list)
     gains: list[BestOfGain] = Field(default_factory=list)
     searches: list[SearchRunReport] = Field(default_factory=list)
+
+
+class JoinTripsMove(BaseModel):
+    """One change of the join step (join_trips.py). kind: JOIN = a load fewer on ``truck_id`` (a small load's
+    visits as one run in another load; also the truck's stops cut again into fewer loads, or another stop order),
+    SPREAD = a small load's visits spread over the truck's other loads, MOVE = a one-visit load onto a load of
+    ``to_truck_id``, a company truck already out (reported only until the owner's OK: ``applied`` false).
+    stop_ids: the small load's stops (request ids; a re-cut: the truck's smallest load before). loads_*: the
+    truck's new loads (MOVE: ``truck_id``'s). Gains positive = cheaper / fewer km (gain_omr: money plus the
+    customer time preferences). back_*: the last return (MOVE: ``to_truck_id``'s). The margins after the change:
+    end_slack_min to the truck's latest return (or the shift), break_slack_min to the break window's end (None: no
+    break question), window_slack_min the tightest closing time, road_wait_* minutes waited on the road.
+    stops_after: the truck's new loads after the change, each its stops (request ids) in order (MOVE:
+    ``to_truck_id``'s) - what a dispatcher reviews in report mode, where the plan keeps its loads. applied: the
+    change is in the option's plan."""
+
+    kind: Literal["JOIN", "SPREAD", "MOVE"]
+    truck_id: str
+    to_truck_id: str | None = None
+    stop_ids: list[str] = Field(default_factory=list)
+    cases: int = 0
+    loads_before: int
+    loads_after: int
+    gain_omr: float
+    gain_operating_omr: float
+    gain_km: float
+    back_before_min: int | None = None
+    back_after_min: int | None = None
+    break_start_min: int | None = None
+    end_slack_min: int | None = None
+    break_slack_min: int | None = None
+    window_slack_min: int | None = None
+    road_wait_before_min: int | None = None
+    road_wait_min: int | None = None
+    stops_after: list[list[str]] = Field(default_factory=list)
+    applied: bool = False
+
+
+class JoinTripsOption(BaseModel):
+    """The join step on one option. outcome: JOINED (its plan is the joined one), WOULD_JOIN (report mode: found and
+    passed the independent check), NOT_VERIFIED (found, failed the independent check: the plan without it), ERROR
+    (the step failed: the plan without it), or when nothing was found the furthest step reached: NO_SMALL_LOAD
+    (no company truck with two or more new loads, or none of its loads has at most max_stops customer visits),
+    NONE_FITS, NOT_BETTER, SLACK, OUT_OF_TIME. A reported MOVE (onto another truck, not applied) leaves the outcome
+    of the truck's own step, so ``moves`` may hold one under NO_SMALL_LOAD. A plain string, so a value this list does
+    not know never fails a finished solve. loads_* and gain_*: the whole plan; tried: proposals timed exactly;
+    verified: the joined plan passed the independent check (None: nothing was built)."""
+
+    option: str
+    outcome: str
+    loads_before: int = 0
+    loads_after: int = 0
+    gain_omr: float = 0.0
+    gain_operating_omr: float = 0.0
+    gain_km: float = 0.0
+    tried: int = 0
+    verified: bool | None = None
+    moves: list[JoinTripsMove] = Field(default_factory=list)
+
+
+class JoinTripsReport(BaseModel):
+    """Join small trips (SOLVER_JOIN_TRIPS = report or on; join_trips.py). status, the first that applies: FAILED
+    (an option's step failed or its joined plan did not pass the independent check, whatever the other options
+    did), JOINED (an option uses a joined plan), WOULD_JOIN (report mode found one), NONE, SKIPPED (``reason``:
+    HIRE_CHECK, NOTHING_TO_PLAN, NO_STAGE). The rule's constants as they ran; seconds, timings (exact timings asked
+    for) and lps (timing LPs) are the step's own."""
+
+    mode: Literal["report", "on"]
+    status: str
+    reason: str | None = None
+    min_gain_omr: float
+    slack_min: int
+    max_stops: int
+    across_trucks: bool = False
+    seconds: float = 0.0
+    timings: int = 0
+    lps: int = 0
+    options: list[JoinTripsOption] = Field(default_factory=list)
 
 
 SearchReport.model_rebuild()

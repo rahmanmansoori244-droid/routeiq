@@ -1,5 +1,6 @@
 """Replay saved dispatch requests through the optimizer, arm against arm: the gate for switching on the solver
-search upgrade's flags (best-of-N route search, PyVRP on small-truck-only days, the priority repair).
+search upgrade's flags (best-of-N route search, PyVRP on small-truck-only days, the priority repair, join small
+trips).
 
 Every one of those flags ships off. docs/RAILWAY_DEPLOYMENT.md: none goes on until this tool's pre-written rule
 (RULE below, written before any replay ran) passes on saved real requests.
@@ -8,7 +9,8 @@ How each solve runs: as the solver service runs it. The saved request is validat
 optimize_dispatch runs in a solve thread with its own SolveControl (main.py does the same), its route searches
 in spawned worker pools (SOLVER_PARALLEL=1, never in this process). An ARM is a set of environment variables.
 The solver reads each of them on every solve (best_of.py, pyvrp_candidate.allowed_setting,
-dispatch_solver.priority_repair_on), so the bench sets them just before each run and restores them after it.
+dispatch_solver.priority_repair_on, join_trips.py), so the bench sets them just before each run and restores them
+after it.
 Each record keeps the settings exactly as the solver read them during that run. The arms are interleaved per
 repetition, request and mode (A B C, then B C A, ...). So the runs of a pair (same request, mode and repetition)
 ran minutes apart on the same machine.
@@ -25,7 +27,9 @@ default) or presets separated by commas ("base,best_of;k4=SOLVER_BEST_OF=4"). Th
     best_of      SOLVER_BEST_OF=3, SOLVER_BEST_OF_QUICK=3
     pyvrp_model  SOLVER_PYVRP_ALLOWED=model
     repair_on    SOLVER_PRIORITY_REPAIR=on
-    all_on       all three
+    join_report  SOLVER_JOIN_TRIPS=report (join small trips computed and reported; plans unchanged)
+    join_on      SOLVER_JOIN_TRIPS=on (join small trips applied)
+    all_on       best_of, pyvrp_model, repair_on and join_on
 Before each run, every flag in FLAG_VARS is unset, then the arm's own values are set. Every other variable
 comes from the shell, and the header of the summary lists it. --base names the arm that the others are paired
 against ("base" when there is one, else the first arm).
@@ -87,14 +91,16 @@ TOOL_VERSION = 1
 
 # The solver search upgrade's flags: unset before every run (each arm starts from production defaults).
 FLAG_VARS = ("SOLVER_BEST_OF", "SOLVER_BEST_OF_QUICK", "SOLVER_BEST_OF_SOURCES", "SOLVER_BEST_OF_JOIN_SEC",
-             "SOLVER_BEST_OF_STRATEGIES", "SOLVER_PYVRP_ALLOWED", "SOLVER_PRIORITY_REPAIR")
+             "SOLVER_BEST_OF_STRATEGIES", "SOLVER_PYVRP_ALLOWED", "SOLVER_PRIORITY_REPAIR", "SOLVER_JOIN_TRIPS")
 PRESETS: dict[str, dict[str, str]] = {
     "base": {},
     "best_of": {"SOLVER_BEST_OF": "3", "SOLVER_BEST_OF_QUICK": "3"},
     "pyvrp_model": {"SOLVER_PYVRP_ALLOWED": "model"},
     "repair_on": {"SOLVER_PRIORITY_REPAIR": "on"},
+    "join_report": {"SOLVER_JOIN_TRIPS": "report"},
+    "join_on": {"SOLVER_JOIN_TRIPS": "on"},
     "all_on": {"SOLVER_BEST_OF": "3", "SOLVER_BEST_OF_QUICK": "3", "SOLVER_PYVRP_ALLOWED": "model",
-               "SOLVER_PRIORITY_REPAIR": "on"},
+               "SOLVER_PRIORITY_REPAIR": "on", "SOLVER_JOIN_TRIPS": "on"},
 }
 DEFAULT_ARMS = "base,best_of,pyvrp_model,repair_on,all_on"
 MODES = ("QUICK", "THOROUGH")
@@ -105,8 +111,8 @@ SHOWN_ENV = re.compile(r"^(SOLVER_|THOROUGH_|MATRIX_BUDGET_SEC$|OSRM_TABLE_TILE$
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD", re.I)
 # The solver's source files: an arm may only set a variable one of them reads (catches typos such as
 # SOLVER_BESTOF, which the solver would silently ignore).
-SOLVER_SOURCES = ("dispatch_solver.py", "best_of.py", "pyvrp_candidate.py", "load_repack.py", "providers.py", "main.py",
-                  "feasibility.py", "costing.py")
+SOLVER_SOURCES = ("dispatch_solver.py", "best_of.py", "join_trips.py", "pyvrp_candidate.py", "load_repack.py",
+                  "providers.py", "main.py", "feasibility.py", "costing.py")
 
 CAP_MARGIN_SEC = 60  # rule 4: every run answers within its cap minus this
 CASH_TOL_OMR = 0.005  # two operating costs closer than this are equal
@@ -133,7 +139,7 @@ each arm run paired with the base run of the same request and repetition:
      fails (an error: the service's 503 or 504), and no worker process is left after a run.
 Verdict: FAIL when any of 1-5 fails. Otherwise INCOMPLETE while a planned pair is missing, and NOT EXERCISED
 when the flag never took effect (best-of never ran 2+ searches, PyVRP never ran on a day with small-truck-only
-stops, the repair never acted). Otherwise PASS. PASS means the flag is safe, not that it helps. Whether it is
+stops, the repair never acted, join small trips never joined or would have joined). Otherwise PASS. PASS means the flag is safe, not that it helps. Whether it is
 worth switching on is the benefit line: wins and losses over the pairs (service first, then cash), with a
 one-sided sign test (p <= 0.10, which needs at least 4 decisive pairs; 7 wins of 9 gives p = 0.09).
 Switch on only with the owner's OK, one flag at a time, never during the evening's planning."""
@@ -360,6 +366,7 @@ def _effective(mode: str) -> dict:
             "best_of_join_sec": BO.join_sec(), "best_of_strategies": list(BO.strategies()),
             "pyvrp": PV.setting(), "pyvrp_on": pyvrp_on, "pyvrp_off_why": pyvrp_why, "pyvrp_allowed": PV.allowed_setting(),
             "pyvrp_models_limits": PV.limits_modelled(mode), "priority_repair": ds.priority_repair_on(),
+            "join_trips": ds.JT.mode(),
             "parallel": ds._parallel(), "max_concurrent": BO.max_concurrent(), "cpus": PV.effective_cpus()}
 
 
@@ -370,7 +377,7 @@ def check_arm_values(arms: list[Arm], max_concurrent: int) -> None:
     for a in arms:
         saved = _apply(a, max_concurrent)
         try:
-            bad = [f"{n}={raw!r} ({what})" for n, raw, what in BO.unread()]
+            bad = [f"{n}={raw!r} ({what})" for n, raw, what in [*BO.unread(), *_ds.JT.unread()]]
             repair = os.environ.get("SOLVER_PRIORITY_REPAIR")
             if repair is not None and repair.strip().lower() not in ("on", "1", "true", "yes", "off", "0", "false", "no"):
                 bad.append(f"SOLVER_PRIORITY_REPAIR={repair!r} (on or off)")
@@ -600,6 +607,14 @@ def _from_response(resp, rf: RequestFile, ds) -> dict:
             out["best_of"] = bo
         else:
             out["best_of"] = None
+        # Join small trips: what it found and did per option (counts and gains only, never an id).
+        jt = getattr(s, "join_trips", None)
+        out["join_trips"] = None if jt is None else {
+            "status": jt.status, "reason": jt.reason, "seconds": jt.seconds, "timings": jt.timings, "lps": jt.lps,
+            "options": [{"option": o.option, "outcome": o.outcome, "loads_before": o.loads_before,
+                         "loads_after": o.loads_after, "gain_omr": o.gain_omr, "gain_operating_omr": o.gain_operating_omr,
+                         "gain_km": o.gain_km, "verified": o.verified, "moves": dict(Counter(m.kind for m in o.moves)),
+                         "applied": sum(1 for m in o.moves if m.applied)} for o in jt.options]}
     hc = getattr(resp, "hire_check", None)
     if hc is not None:
         out["hire_check"] = {"to_rent": len(hc.used), "solves": hc.solves, "complete": hc.complete}
@@ -695,6 +710,10 @@ def exercised(rec: dict) -> dict[str, bool]:
             (rec.get("pyvrp") or {}).get("status") in ("CHOSEN", "NOT_CHOSEN")
     if eff.get("priority_repair"):
         out["priority repair"] = any(sum(o["repair"].values()) > 0 for o in (rec.get("options") or {}).values())
+    if eff.get("join_trips") in ("report", "on"):
+        # Per option: the report's status says FAILED when any option failed, whatever the others joined.
+        out["join small trips"] = any(o.get("outcome") in ("JOINED", "WOULD_JOIN")
+                                      for o in (rec.get("join_trips") or {}).get("options") or [])
     return out
 
 
@@ -896,7 +915,7 @@ def summarize(records: list[dict], header: dict) -> str:
                              f"{max(busy)} on {cpus}" if busy else "-"])
     L.append(_table(["Request", "Mode", "Arm", "Runs ok", "Cash OMR", "km", "Trucks", "Stops left out", "Used s", "Cap s",
                      "Busy searches (RECOMMENDED phase) on CPUs"], rows) if rows else "No run yet.")
-    bo_rows, pv_rows, rp_rows = [], [], []
+    bo_rows, pv_rows, rp_rows, jt_rows = [], [], [], []
     for mode in dict.fromkeys(r["mode"] for r in records):
         for arm in dict.fromkeys(r["arm"] for r in records):
             rs = [r for r in records if r["mode"] == mode and r["arm"] == arm and not r.get("error")]
@@ -926,6 +945,19 @@ def summarize(records: list[dict], header: dict) -> str:
                                 sum(o["repair"]["displaced"] for r in rs for o in r["options"].values()),
                                 sum(o["repair"]["tried_no_place_or_time"] for r in rs for o in r["options"].values()),
                                 _abs([float(o["inverted"]) for o in rec_opts], 0)])
+            jts = [r["join_trips"] for r in rs if r.get("join_trips")]
+            if jts:
+                jo = [o for j in jts for o in j.get("options") or []]
+                kinds: Counter = Counter()
+                for o in jo:
+                    kinds.update(o.get("moves") or {})
+                jt_rows.append([arm, mode, len(jts),
+                                ", ".join(f"{k} {v}" for k, v in sorted(Counter(str(j.get("status")) for j in jts).items())),
+                                ", ".join(f"{k} {v}" for k, v in sorted(Counter(f"{o['option']}/{o['outcome']}"
+                                                                                for o in jo).items())) or "-",
+                                ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())) or "-",
+                                sum(o.get("applied") or 0 for o in jo),
+                                _med([o["gain_operating_omr"] for o in jo if o.get("outcome") in ("JOINED", "WOULD_JOIN")], 2)])
     if bo_rows:
         L += ["", "## Best-of searches", "",
               "Gain: the other searches' best RECOMMENDED candidate against the best one without them, in the same run "
@@ -935,6 +967,13 @@ def summarize(records: list[dict], header: dict) -> str:
     if pv_rows:
         L += ["", "## PyVRP second search", ""]
         L.append(_table(["Arm", "Mode", "Status/reason counts"], pv_rows))
+    if jt_rows:
+        L += ["", "## Join small trips", "",
+              "Per option the outcome (JOINED or WOULD_JOIN: a join passed every check), the changes found by kind "
+              "(a MOVE onto another truck is reported only), how many were applied, and the operating OMR gained by "
+              "the joins that passed (positive = cheaper).", ""]
+        L.append(_table(["Arm", "Mode", "Runs", "Status", "Option/outcome", "Changes found", "Applied",
+                         "Gain OMR (joined options)"], jt_rows))
     if rp_rows:
         L += ["", "## Priority repair", ""]
         L.append(_table(["Arm", "Mode", "Runs", "Runs repaired", "Stops put back", "Stops displaced",
@@ -1115,10 +1154,11 @@ def describe(plan: Plan, args) -> str:
                              + ", PyVRP " + ("off" if not e["pyvrp_on"] else "on, models small-truck-only days"
                                              if e["pyvrp_models_limits"] else "on"))
             repair = "on" if _effective("QUICK")["priority_repair"] else "off"
+            join = _effective("QUICK")["join_trips"]
         finally:
             _restore(saved)
         L.append(f"  {a.name:12} {a.describe()}")
-        L.append(f"  {'':12} as read: {'; '.join(parts)}; priority repair {repair}")
+        L.append(f"  {'':12} as read: {'; '.join(parts)}; priority repair {repair}; join small trips {join}")
     n = len(plan.schedule)
     worst = 0.0
     for _p, rf, mode, _a, _rep in plan.schedule:

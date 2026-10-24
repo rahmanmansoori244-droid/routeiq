@@ -91,6 +91,7 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 import best_of as BO
 import costing
 import feasibility as FZ
+import join_trips as JT
 import load_repack as LR
 import pyvrp_candidate as PV
 from dispatch_models import (
@@ -897,6 +898,8 @@ def _search_report(mode: str, cap: int, state: dict, started: float) -> SearchRe
         # Best-of-N (None with one search, the default): a report that does not validate is left out with
         # a warning, never the finished plan (best_of.report_or_none).
         best_of=BO.report_or_none(state.get("best_of")),
+        # Join small trips (None with SOLVER_JOIN_TRIPS off, the default): validated the same way, never the plan.
+        join_trips=JT.report_or_none(state.get("join_trips")),
     )
 
 
@@ -2978,9 +2981,22 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
 
         time_limit = cfg.time_limit_sec or auto_time_limit(len(solvable))
         state: dict = {}
+        # Join small trips (join_trips.py; SOLVER_JOIN_TRIPS, off by default: then None and nothing below changes).
+        # Never on the hire suggestion's what-if: its comparisons stay like for like (its trial solves get no join).
+        join = JT.start()
+        if join is not None:
+            if any(t.hire_candidate for t in req.trucks):
+                JT.skip(join, "HIRE_CHECK")
+            elif not solvable:
+                JT.skip(join, "NOTHING_TO_PLAN")
+            state["join_trips"] = join.report
         scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget,
                                    control=control, state=state, workers=workers, pv=pv,
-                                   best_of=k, best_of_gate=gate, best_of_requested=asked, extras=extras)
+                                   best_of=k, best_of_gate=gate, best_of_requested=asked, extras=extras,
+                                   join=join if join is not None and join.active else None)
+        if join is not None:
+            JT.finish(join)
+            log.info("join-trips run=%s %s", req.run_id, JT.summary(join))
         if asked > 1 and solvable and "RECOMMENDED" in cfg.scenarios and "best_of" not in state:
             # Only where best-of applies (review of 16 Oct 2026): with no RECOMMENDED asked for, or nothing to
             # plan, best_of stays null (it said "3 asked, 1 run" with no reason).
@@ -5820,7 +5836,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                    control: SolveControl | None = None, state: dict | None = None,
                    workers: _Workers | None = None, pv: _PvRun | None = None,
                    best_of: int = 1, best_of_gate: str | None = None, best_of_requested: int | None = None,
-                   extras: _Workers | None = None, repair_inversions: bool = True) -> list[DispatchScenario]:
+                   extras: _Workers | None = None, repair_inversions: bool = True,
+                   join: JT.Run | None = None) -> list[DispatchScenario]:
     """RECOMMENDED is solved first with the full time budget. Alternatives are then warm-started
     from it with half the budget. Finally the post-solve stage (_post_solve) re-assigns the
     searches' loads and picks each scenario's plan from all of them, so unless it serves more,
@@ -5869,6 +5886,10 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     ``best_of_gate``: what the setting asked for and why fewer run (the report only). The best of the
     other searches' plans (at most best_of.sources(K), distinct) are more sources of the load re-check,
     each with one more repack cap kept free in the budgets (n_sources).
+
+    ``join`` (join_trips.py; SOLVER_JOIN_TRIPS, off by default: None and nothing here changes): the load
+    re-check joins each option's small loads of one company truck after its pick (_post_solve, _join_option).
+    The hire check's trial solves never get it.
     """
     global _STOP_FLAG
     if budget_end is None:
@@ -6033,6 +6054,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                     # Best-of-N: the other searches' best plans, distinct, as more sources (at most m, each with
                     # its repack cap kept free in the budgets: n_sources); it adds what it chose to the report.
                     stage_kw.update(extra_sources=bo.extra_sources, best_of=state.get("best_of"))
+                if join is not None:
+                    stage_kw["join"] = join  # join small trips, after each option's pick
                 _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw,
                             rechecked=state.setdefault("rechecked", set()))
         except SolveAborted:
@@ -6199,6 +6222,61 @@ def _shorter_orders(ctx: _StageCtx, cand: LR.Candidate, deadline: float) -> LR.C
     return LR.Candidate(cand.source, plan, LR.score(ctx.day, ctx.rec_pricing, plan))
 
 
+def _join_option(ctx: _StageCtx, join: JT.Run, name: str, best: LR.Candidate, company: frozenset[int], end: float,
+                 build: Callable[[LR.TimedPlan, int], DispatchScenario]
+                 ) -> tuple[LR.Candidate, DispatchScenario, JT.JoinResult] | None:
+    """SOLVER_JOIN_TRIPS (join_trips.py): the option's chosen candidate with small loads of one company truck
+    (``company``) joined onto its other loads (JT.join_plan, at most JT.OPTION_SEC and never past ``end``), and its
+    report entry. The whole joined plan is checked again - the same stops, better on the option's goal (_GOALS), at
+    least JT.MIN_GAIN_OMR cheaper, no more money - then built with ``build`` (the exact arguments of the plan it
+    replaces) and checked independently (VERIFIED). Returns (candidate, built scenario, the step's result) only in
+    mode on and only when every check passes; otherwise None and the option keeps its plan. Report mode builds and
+    checks it too, so the report says whether each join would pass. Never at the cost of the plan: an error anywhere
+    here (the step, the checks, the build, its report entry) is ERROR and the option keeps its plan."""
+    t0 = time.monotonic()
+    deadline = min(t0 + JT.OPTION_SEC, end)
+    try:
+        res = JT.join_plan(ctx.day, ctx.rec_pricing, best.plan, company, name, deadline)
+        if not res.changed:
+            JT.record(join, name, res, base=best.plan)
+            return None
+        t1 = time.monotonic()
+        before = LR.score(ctx.day, ctx.rec_pricing, best.plan)
+        cand = LR.Candidate(best.source + JT.SUFFIX, res.plan, LR.score(ctx.day, ctx.rec_pricing, res.plan))
+        goal = _GOALS[name]
+        if (LR.served_of(cand.plan) != LR.served_of(best.plan) or not goal(cand.score) < goal(before)
+                or before.cost - cand.score.cost < JT.MIN_GAIN_UNITS or cand.score.operating > before.operating):
+            # Belt and braces: every change already kept these rules on its own trucks.
+            log.warning("join-trips run=%s %s: the joined plan failed the whole-plan check; the plan is kept as it is",
+                        ctx.req.run_id, name)
+            JT.record(join, name, res, base=best.plan, outcome="ERROR", before=before, after=cand.score,
+                      seconds=time.monotonic() - t1)
+            return None
+        try:
+            sc = build(cand.plan, cand.score.objective)
+        except Exception:  # noqa: BLE001 - the plan without it is built as always
+            log.exception("join-trips run=%s %s: the joined plan could not be built; the plan is kept as it is",
+                          ctx.req.run_id, name)
+            JT.record(join, name, res, base=best.plan, outcome="ERROR", before=before, after=cand.score,
+                      seconds=time.monotonic() - t1)
+            return None
+        ok = sc.feasibility is not None and sc.feasibility.status == "VERIFIED"
+        if not ok:
+            log.warning("join-trips run=%s %s: the joined plan failed the independent check (%d violations); the plan "
+                        "without it is used", ctx.req.run_id, name, len(sc.feasibility.violations) if sc.feasibility else 0)
+        JT.record(join, name, res, base=best.plan, verified=ok, before=before, after=cand.score,
+                  seconds=time.monotonic() - t1)
+        return (cand, sc, res) if ok and join.mode == "on" else None
+    except Exception as exc:  # noqa: BLE001 - the step is optional: the option keeps its plan
+        log.warning("join-trips run=%s %s failed (%s: %s); the plan is kept as it is", ctx.req.run_id, name,
+                    type(exc).__name__, exc)
+        try:
+            JT.record(join, name, None, base=best.plan, outcome="ERROR", seconds=time.monotonic() - t0)
+        except Exception:  # noqa: BLE001 - nor its report entry
+            log.exception("join-trips run=%s %s: its report entry could not be written", ctx.req.run_id, name)
+        return None
+
+
 def _retime(ctx: _StageCtx, name: str, sc: DispatchScenario) -> DispatchScenario | None:
     """The safety net when the post-solve stage did not re-check a plan (out of time, a failed or
     lost worker, an internal error): the SAME loads, re-timed exactly with the loading time between
@@ -6300,7 +6378,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                 time_limit: int, drops: list[UnservedStop], results: dict[str, DispatchScenario], pool,
                 budget_end: float, done: set[str] | None = None, repack_cap: float | None = None,
                 pv: "_PvRun | None" = None, rechecked: set[str] | None = None,
-                extra_sources: list[tuple[str, DispatchScenario]] | tuple = (), best_of: dict | None = None) -> None:
+                extra_sources: list[tuple[str, DispatchScenario]] | tuple = (), best_of: dict | None = None,
+                join: JT.Run | None = None) -> None:
     """Replace each OPTIMIZED scenario in ``results`` by the best candidate for its goal.
 
     Candidates = every raw scenario plan (re-timed exactly) + its repacks: whole loads
@@ -6343,7 +6422,14 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     (_best_of_note) and the option is added to ``best_of["chosen_for"]``. ``best_of`` (the solve's
     best-of report, SearchReport.best_of) also receives, per option, the best candidate of the other
     searches against the best one without them (``gains``, BestOfGain: paired evidence of what they add,
-    on the re-check's own scores). Without them (one search, the default) nothing here changes."""
+    on the re-check's own scores). Without them (one search, the default) nothing here changes.
+
+    ``join`` (join small trips, join_trips.py; SOLVER_JOIN_TRIPS, off by default: None and nothing here
+    changes): once an option's plan is built - after the pick and every fallback above, so every comparison
+    stays as without it - its small loads of one company truck are joined onto the truck's other loads
+    (_join_option), built with the same arguments and used (mode on) only when the joined plan passes every
+    check. The notes about how the plan was chosen describe the plan without the join (the one built first);
+    the joined plan carries them, then its own note (JT.note). The safety net's plans are never joined."""
     done = done if done is not None else set()
     raw = {n: sc for n, sc in results.items() if sc.status == "OPTIMIZED"}
     pv_plan = pv.plan if pv is not None else None
@@ -6505,13 +6591,20 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     # search's plan and the engine's own are compared after it, so neither may starve the other) - four
     # times with best-of-N's other searches (the best plan without them is compared too).
     orders_end = min(time.monotonic() + (3 + bool(extras)) * HIRE_ORDER_SEC, budget_end - 2)
+    # Join small trips: every option within JT.TOTAL_SEC together from the first option's step (so the orders
+    # above never use up its time), on the company trucks only (never a truck to rent or one whose driver is paid
+    # by the day: _hired_km). Its seconds are given back to the orders' window (``spent``), so the next option's
+    # orders get the time they have without it. Off: spent stays 0 and nothing here changes.
+    join_clock: dict = {"end": None, "spent": 0.0}
+    company = frozenset(td.idx for td in ctx.day.trucks if not _hired_km(td.truck)) if join is not None else frozenset()
     in_order: dict[int, LR.Candidate] = {}
 
     def ordered(c: LR.Candidate | None) -> LR.Candidate | None:
         if c is None:
             return None
         if id(c) not in in_order:
-            in_order[id(c)] = _shorter_orders(ctx, c, min(time.monotonic() + HIRE_ORDER_SEC, orders_end))
+            end = min(orders_end + join_clock["spent"], budget_end - 2) if join_clock["spent"] else orders_end
+            in_order[id(c)] = _shorter_orders(ctx, c, min(time.monotonic() + HIRE_ORDER_SEC, end))
         return in_order[id(c)]
 
     for name in list(raw) + rescue:
@@ -6547,18 +6640,19 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             # the engine's own plan is kept (review: "529 -> 529 OMR" was called a better plan).
             best, lost = ref, ref_lost
         new = None
+        kw: dict = {}  # the build's arguments besides the plan and its objective (join small trips builds alike)
         while best is not None:
             timing_drops = own_carried - served(best) if lost else set()
             from_pv = best.source.startswith("PYVRP")
+            kw = dict(
+                # A rescued option has its own status: never the failed search's "no plan found".
+                solver_status="SECOND_SEARCH" if name in rescue else sc.solver_status,
+                elapsed=sc.solver_time_sec + stage_sec, time_limit=sc.time_limit_sec,
+                extra_warnings=value_warnings, timing_drops=timing_drops, exact_timing=True,
+            )
             try:
-                new = _build_scenario(
-                    name, req, solvable, tds, mx, best.plan, values, use_margin, drops,
-                    # A rescued option has its own status: never the failed search's "no plan found".
-                    solver_status="SECOND_SEARCH" if name in rescue else sc.solver_status,
-                    elapsed=sc.solver_time_sec + stage_sec, time_limit=sc.time_limit_sec,
-                    objective_value=best.score.objective, extra_warnings=value_warnings, timing_drops=timing_drops,
-                    exact_timing=True,
-                )
+                new = _build_scenario(name, req, solvable, tds, mx, best.plan, values, use_margin, drops,
+                                      objective_value=best.score.objective, **kw)
             except Exception:
                 if not from_pv:
                     raise
@@ -6592,6 +6686,17 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                     "The final timing check failed for this plan; check load times before dispatching."
                 )
             continue
+        # Join small trips: on the plan just built (every fallback above has settled), built with its own arguments.
+        joined = None
+        if join is not None:
+            t_join = time.monotonic()
+            if join_clock["end"] is None:
+                join_clock["end"] = min(t_join + JT.TOTAL_SEC, budget_end - 2)
+            joined = _join_option(ctx, join, name, best, company, join_clock["end"],
+                                  lambda plan, obj: _build_scenario(name, req, solvable, tds, mx, plan, values,
+                                                                    use_margin, drops, objective_value=obj, **kw))
+            join_clock["spent"] += time.monotonic() - t_join
+        n_notes = len(new.warnings)
         served_now = served(best)
         added = served_now - own_carried
         timing_drops = own_carried - served_now if lost else set()
@@ -6621,6 +6726,19 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             )
         elif added:
             new.warnings.append(f"{len(added)} stop(s) the route search had left out were planned after the search.")
+        if joined is not None:
+            # The notes above compare the plan without the join (``new``) with the search's: the joined plan
+            # carries them as they are (never its own numbers counted twice), then says what the join changed.
+            cand, jsc, res = joined
+            jsc.warnings += [w for w in new.warnings[n_notes:] if w not in jsc.warnings]
+            try:
+                jsc.warnings.append(JT.note([m for m in res.moves + res.across if m.in_plan], new.trips, jsc.trips,
+                                            new.operating_cost, jsc.operating_cost, break_rule(cfg) is not None))
+            except Exception:  # noqa: BLE001 - a note never costs the plan it describes
+                log.exception("join-trips run=%s %s: its note could not be written", req.run_id, name)
+                jsc.warnings.append(f"{JT.NOTE_HEAD}{new.trips} -> {jsc.trips} loads. Each joined day was timed again "
+                                    "with every rule and checked independently.")
+            new, best = jsc, cand
         log.info("post-solve run=%s %s: %s -> %s trucks, %s -> %s loads, %.1f -> %.1f OMR, +%d/-%d stops (from %s)",
                  req.run_id, name, sc.trucks_used, new.trucks_used, sc.trips, new.trips, sc.operating_cost,
                  new.operating_cost, len(added), len(timing_drops), best.source)
