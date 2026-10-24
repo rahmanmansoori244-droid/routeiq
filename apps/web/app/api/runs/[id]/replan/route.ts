@@ -15,12 +15,15 @@ const schema = z.object({
   expect: z.object({ date: isoDateSchema, depotId: z.string().min(1) }).optional(),
   /** Quick or Thorough (absent: QUICK, as before search modes; the screens pre-select by day - requestedSearchMode, search-mode.ts). */
   searchMode: searchModeSchema.optional(),
+  /** The fingerprint of the kept-load list the dialog showed (lib/dispatch/kept-changes.ts): the answer's `kept.unseen` says when it changed since. */
+  keptSeen: z.string().trim().max(32).optional(),
 });
 
 // POST /api/runs/:id/replan - create plan version N+1 (a usable copy of this plan: locked,
 // loading and dispatched loads are kept exactly) and optimize the remaining + new orders.
 // Refused before any version is created: nothing to plan (409 NOTHING_TO_PLAN), no truck (400),
-// missing locations / weights (409), a job running (409), solve quota or queue (429 / 503).
+// missing locations / weights (409), a job running (409), solve quota or queue (429 / 503). The 202
+// answer adds `kept` when locked or loading loads kept by it were planned with older customer data.
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { user, ip }) => {
@@ -36,6 +39,7 @@ export const POST = (req: Request, { params }: Params) =>
         input.expect,
         {},
         input.searchMode,
+        { keptSeen: input.keptSeen },
       );
       return startResponse(res);
     },

@@ -31,6 +31,24 @@ import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
 import { locationButtonText, savedPointProblem } from '@/lib/dispatch/customer-attrs';
+import {
+  keptEchoText,
+  keptQuestion,
+  keptReplanBody,
+  keptReplanNote,
+  keptSeenAfter,
+  mergeUnlocks,
+  replanNotStartedText,
+  unlockConfirmText,
+  unlockStoppedText,
+  unlockedNextText,
+  unlockedReplanText,
+  type KeptEcho,
+  type KeptLoadRef,
+  type KeptReport,
+} from '@/lib/dispatch/kept-changes';
+import { KeptChangesBox } from './kept-changes-box';
+import { readKept, unlockKept } from './kept-client';
 
 interface Issue {
   code: string;
@@ -148,6 +166,8 @@ interface Day {
   loadingGaps?: DataGap[];
   /** Delivery results of the day (owner request 4 Oct 2026): the Deliveries card under the plan. */
   deliveries?: DayDeliveries | null;
+  /** Locked and loading loads of the plan in use planned with older customer data (Step 3's box); null / absent: none to show. */
+  kept?: KeptReport | null;
 }
 interface Validation {
   totalRows: number;
@@ -390,34 +410,69 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     const capSec = day.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT;
     const stops = day.orders.customers || null;
     const { defaultMode, deliveryDay } = searchModeNow(day.date, { timezone: day.timezone, today: day.today }, new Date());
-    const searchMode = await searchChoice.ask({
+    // A re-plan keeps locked and loading loads as they are: the dialog lists those planned with older
+    // customer data, read fresh (the day polls only while optimizing), and offers their Unlock first.
+    const kept = replanning && planId ? await readKept(planId) : null;
+    const keptQ = keptQuestion(kept);
+    const answer = await searchChoice.askFull({
       verb: replanning ? 'Re-plan' : 'Optimize',
       defaultMode,
       stops,
       capSec,
       deliveryDay,
-      note: replanning ? 'Locked and dispatched loads stay exactly as they are.' : undefined,
+      note: replanning ? keptReplanNote(keptQ) : undefined,
+      ...(keptQ ? { kept: keptQ } : {}),
     });
-    if (!searchMode) return;
+    if (!answer) return;
+    const searchMode = answer.mode;
     // Busy until the day shows the result (the job, or the day as it is after a refusal), and
     // never stuck: api() never rejects, and the flag is cleared in finally (review of PR3).
     setOptimizing(true);
     try {
+      // The ticked kept loads go back to Planned first, latest first; a refusal stops here (no re-plan).
+      let unlocked: KeptLoadRef[] = [];
+      if (planId && answer.unlock.length) {
+        const res = await unlockKept(planId, mergeUnlocks(answer.unlock));
+        unlocked = res.unlocked;
+        if (res.failed) {
+          toast.error(unlockStoppedText({ unlocked, failed: res.failed }));
+          setPlanKey((k) => k + 1);
+          await refresh();
+          return;
+        }
+      }
+      // After an unlock: a manual adjustment (the unlocked stops prefer their truck), named in its note.
+      const body = keptReplanBody(reason, unlocked);
+      // What the dialog showed, without the loads now back to Planned (the re-plan reads the list again).
+      const keptSeen = keptSeenAfter(kept, unlocked);
+      // The unlock went through but the re-plan did not start (review W7): say both.
+      const notStarted = (why: string | null) => (unlocked.length ? replanNotStartedText(unlocked, why) : null);
       let overrides: OptimizeOverrides = {};
       // False when the start never reached the server (status 0): the plan below stays as it is.
       let reached = true;
       for (;;) {
         const r = replanning
-          ? await api<{ runId: string } & StartedAnswer>(`/api/runs/${planId}/replan`, { method: 'POST', json: { reason, expect, searchMode, ...overrides } })
-          : await api<{ runId: string } & StartedAnswer>('/api/dispatch/plan', {
+          ? await api<{ runId: string; kept?: KeptEcho } & StartedAnswer>(`/api/runs/${planId}/replan`, {
+              method: 'POST',
+              json: { ...body, expect, searchMode, ...(keptSeen ? { keptSeen } : {}), ...overrides },
+            })
+          : await api<{ runId: string; kept?: KeptEcho } & StartedAnswer>('/api/dispatch/plan', {
               method: 'POST',
               json: { date: expect.date, depotId: expect.depotId, optimize: true, expect, searchMode, ...overrides },
             });
         if (r.ok) {
           // From the server's answer: a job another dispatcher already started keeps its own mode.
-          const text = optimizeStartedText(r.data, searchMode, capSec, stops);
+          const text = [
+            optimizeStartedText(r.data, searchMode, capSec, stops),
+            unlocked.length ? unlockedReplanText(unlocked) : '',
+            keptEchoText(r.data?.kept) ?? '',
+          ]
+            .filter(Boolean)
+            .join(' ');
           if (r.data?.alreadyRunning && r.data.searchMode !== searchMode) toast.warning(text);
           else toast.success(text);
+          // The list changed between the dialog and the start (another dispatcher, a customer saved).
+          if (r.data?.kept?.unseen) toast.warning(`Locked loads with older customer data changed meanwhile: ${r.data.kept.lines.join('; ')}`);
           break;
         }
         const more = askOverride(r.errorBody, replanning ? 'Re-plan' : 'Optimize', { canEditProducts });
@@ -425,19 +480,44 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           overrides = { ...overrides, ...more };
           continue;
         }
-        if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
+        if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') {
+          // A question declined: nothing started. Loads unlocked for it stay Planned, and the plan shows them so.
+          if (!unlocked.length) return;
+          toast.error(notStarted(r.error) ?? 'Re-plan not started.');
+          break;
+        }
         if (isPalletFactorRefusal(r.errorBody)) {
           // Refused, no question: the products to fix, with the Products link.
-          toast.error(r.error ?? 'Cannot plan by pallets: products have no cases per pallet.', palletRefusalToast(slug));
+          toast.error(notStarted(r.error) ?? r.error ?? 'Cannot plan by pallets: products have no cases per pallet.', palletRefusalToast(slug));
           break;
         }
         // The day may have changed under the screen (another user, a failed re-plan): show it as it is.
-        toast.error(r.error ?? 'Could not start optimization.');
+        toast.error(notStarted(r.error) ?? r.error ?? 'Could not start optimization.');
         reached = r.status !== 0;
         break;
       }
+      // Loads unlocked for this re-plan are Planned now: the plan below shows them so, whatever the start answered.
+      if (unlocked.length) reached = true;
       // The plan below is loaded again: the job, or the plan as it is after a refusal.
       if (reached) setPlanKey((k) => k + 1);
+      await refresh();
+    } finally {
+      setOptimizing(false);
+    }
+  }
+
+  /** The box's Unlock (Step 3): the load and its truck's later frozen loads back to Planned, latest first, under the day's busy state. */
+  async function unlockFromBox(loads: KeptLoadRef[]) {
+    if (!day?.plan || !dayReady || planBusy || optimizing) return;
+    if (!window.confirm(unlockConfirmText(loads))) return;
+    const planId = day.plan.id;
+    setOptimizing(true);
+    try {
+      const res = await unlockKept(planId, loads);
+      if (res.failed) toast.error(unlockStoppedText({ unlocked: res.unlocked, failed: res.failed }, false));
+      else toast.success(unlockedNextText(res.unlocked));
+      // The plan below in place, and the day (RE-PLAN turns on for the stops now on Planned loads).
+      setPlanReload((k) => k + 1);
       await refresh();
     } finally {
       setOptimizing(false);
@@ -767,6 +847,11 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             . RE-PLAN to apply this — locked and dispatched loads are kept exactly as they are.
           </div>
         ) : null}
+        {/* Locked and loading loads planned with older customer data: never part of "out of date" (a re-plan keeps
+            them), so shown also when RE-PLAN is off - unlocking is then the only way to plan them again. */}
+        {day.kept?.loads.length && day.plan?.chosen && !running ? (
+          <KeptChangesBox report={day.kept} canPlan={canPlan && dayReady} busy={optimizing || planBusy || running} onUnlock={(loads) => void unlockFromBox(loads)} testId="kept-changed" />
+        ) : null}
         {nothingLeftText && !running ? (
           <p className="text-xs text-muted-foreground" data-testid="nothing-to-plan">
             {nothingLeftText}
@@ -796,6 +881,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             canEditProducts={canEditProducts}
             phoneCountryCode={phoneCountryCode}
             externalBusy={optimizing}
+            // Step 3 above shows the kept-load box for this plan already.
+            showKeptBox={false}
             onBusyChange={setPlanBusy}
             reloadSignal={planReload}
             onResultRecorded={() => void refreshResults()}

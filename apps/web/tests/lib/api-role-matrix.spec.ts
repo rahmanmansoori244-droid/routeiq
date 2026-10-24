@@ -129,6 +129,10 @@
  * - The cause & action of an operations alert (owner request 20 Oct 2026): PATCH /api/alerts is PLANNER (the
  *   dispatcher and up record what was found and decided after checking an alert; every role reads it on GET
  *   /api/alerts). The alerts-only Excel is GET /api/analysis/export?only=alerts (PLANNER, unchanged).
+ * - The kept-load warning (locked and loading loads planned with older customer data): GET
+ *   /api/runs/[id]/kept-changes is readable by every role, like the plan (another company's version 404).
+ *   Roles unchanged on PATCH /api/runs/[id]/loads/[loadId] (`via` on an unlock from the warning), POST
+ *   /api/runs/[id]/replan (`keptSeen`, the answer's `kept`), GET /api/runs/[id]/plan and GET /api/dispatch/day (`kept`).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -275,6 +279,8 @@ const EXPECTED: Record<string, string> = {
   'GET /api/runs/[id]/export/salesman-eta': 'ANY',
   // Owner request 6 Oct 2026: the hire suggestion (read by everyone; check and "Use this plan" PLANNER).
   'GET /api/runs/[id]/hire-suggestion': 'ANY',
+  // The kept-load warning: locked and loading loads planned with older customer data, read like the plan.
+  'GET /api/runs/[id]/kept-changes': 'ANY',
   'POST /api/runs/[id]/hire-suggestion': 'PLANNER',
   'POST /api/runs/[id]/hire-suggestion/use': 'PLANNER',
   'GET /api/runs/[id]/jobs/[jobId]/debug': 'SUPERVISOR',

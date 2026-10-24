@@ -53,6 +53,22 @@ export function preferredEndText(rule: WindowRule): string {
   return rule === 'FINISH' ? 'finishes after the preferred end' : 'starts after the preferred end';
 }
 
+/** The minutes past closing a FINISH-rule unloading may end (feasibility.ts TOL_MIN: the solver rounds to the minute). */
+export const FINISH_TOL_MIN = 1;
+
+/**
+ * A stop's planned unloading misses the hard window [start, end] (null = open on that side) by the rule
+ * its load was planned with - exactly as the timetable check reads it (feasibility.ts HARD_WINDOW, a spec
+ * holds both to the same answers): unloading starting before the start or after the end is outside; under
+ * FINISH unloading must also end by the end (+FINISH_TOL_MIN). START, or an older plan without the echo
+ * (null): only the start counts. `startMin` null (not known): false - the caller says it cannot tell.
+ */
+export function hardWindowMiss(startMin: number | null, departureMin: number | null, start: number | null, end: number | null, rule: WindowRule | null | undefined): boolean {
+  if (startMin === null) return false;
+  if ((start !== null && startMin < start) || (end !== null && startMin > end)) return true;
+  return rule === 'FINISH' && end !== null && departureMin !== null && departureMin > end + FINISH_TOL_MIN;
+}
+
 /** "Made by a planner without the rule ..." (plannerRulesNote): the rule that was asked for, in words. */
 export function windowRuleAskedText(rule: WindowRule): string {
   return rule === 'FINISH' ? 'that unloading must be finished by closing' : 'that the end of the receiving hours is the latest arrival';

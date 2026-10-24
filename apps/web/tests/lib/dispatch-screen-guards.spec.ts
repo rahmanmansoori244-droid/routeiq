@@ -49,7 +49,9 @@ describe('day screen (dispatch-client.tsx)', () => {
   });
 
   it('OPTIMIZE / RE-PLAN clears its busy flag in finally, after the day shows the result', () => {
-    expect(count(dayScreen, /setOptimizing\(false\)/g)).toBe(1);
+    // OPTIMIZE / RE-PLAN, and the kept-load box's Unlock (it takes the same busy state), each clear it in their finally.
+    expect(count(dayScreen, /setOptimizing\(false\)/g)).toBe(2);
+    expect(count(dayScreen, /\} finally \{\s*setOptimizing\(false\);\s*\}/g)).toBe(2);
     expect(dayScreen).toMatch(/await refresh\(\);\s*\} finally \{\s*setOptimizing\(false\);\s*\}/);
   });
 

@@ -23,6 +23,8 @@ import { isoOf } from './time';
 import { describeUnknownWeights } from './weights';
 import { palletFactorGate } from './pallets';
 import { cancelHireChecksOfDay } from './hire-whatif';
+import { keptAudit, keptEcho, type KeptReport } from './kept-changes';
+import { keptChangesOrNull } from './kept-changes-server';
 
 export interface StartResult {
   status: number;
@@ -601,6 +603,8 @@ export async function startDispatchOptimize(
  * optimization keeps the previous plan usable on it. `pre.ticket`: an admission the caller reserved
  * already (the hire suggestion's "Use this plan" asks before it rents a truck, third review of the hire
  * branch): used instead of reserving here, and given back on every answer that starts no job.
+ * `pre.keptSeen`: the fingerprint of the kept-load list the dispatcher's dialog showed (kept-changes.ts);
+ * the answer's `kept.unseen` says when the list changed since.
  */
 export async function replan(
   tenantId: string,
@@ -613,7 +617,7 @@ export async function replan(
   expect?: ExpectedDay,
   clock: { now?: Date } = {},
   searchMode?: SearchMode,
-  pre: { ticket?: SolveTicket; keepReason?: boolean } = {},
+  pre: { ticket?: SolveTicket; keepReason?: boolean; keptSeen?: string } = {},
 ): Promise<StartResult> {
   const handed = { done: false };
   try {
@@ -634,7 +638,7 @@ async function replanInner(
   expect: ExpectedDay | undefined,
   clock: { now?: Date },
   searchMode: SearchMode | undefined,
-  pre: { ticket?: SolveTicket; keepReason?: boolean },
+  pre: { ticket?: SolveTicket; keepReason?: boolean; keptSeen?: string },
   handed: { done: boolean },
 ): Promise<StartResult> {
   const found = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
@@ -677,13 +681,18 @@ async function replanInner(
         : !pre.keepReason && (await ordersTakenOffPlannedLoads(runId))
           ? 'MANUAL_ADJUSTMENT'
           : reason;
+  // The locked and loading loads this re-plan keeps although their customer data changed since they were
+  // planned (kept-changes.ts): recorded on PLAN_VERSION_CREATED and said in the answer. Never a refusal - a
+  // re-plan never changes a kept load - so a report that cannot be read is only left out.
+  const kept: KeptReport | null = await keptChangesOrNull(prisma, tenantId, runId, { now: clock.now }, 'replan');
+  const keptRows = kept?.loads.length ? keptAudit(kept) : null;
   // Admission before the version exists: a 429 must never leave a new version behind. Reserved for
   // the search mode the new version's start then uses (the ticket carries it).
   const adm = pre.ticket ? { ok: true as const, ticket: pre.ticket } : solveAdmission.reserve(tenantId, user.id, requestedSearchMode(searchMode));
   if (!adm.ok) return admissionRefused(adm);
   let child;
   try {
-    child = (await createNextVersion(tenantId, runId, effectiveReason, note, user.id)).child;
+    child = (await createNextVersion(tenantId, runId, effectiveReason, note, user.id, keptRows ? { keptChanged: keptRows.rows, keptTruncated: keptRows.truncated } : undefined)).child;
   } catch (e) {
     adm.ticket.release();
     if (e instanceof PlanError) {
@@ -695,9 +704,10 @@ async function replanInner(
   // The ticket is handed over: startDispatchOptimize releases it on any answer that starts no job.
   handed.done = true;
   const res = await startDispatchOptimize(tenantId, child.id, user, ip, { ...overrides, freshVersion: true, ticket: adm.ticket, now: clock.now, searchMode });
+  const echo = res.status < 400 ? keptEcho(kept, pre.keptSeen) : null;
   return {
     status: res.status,
     headers: res.headers,
-    body: { ...res.body, runId: child.id, version: child.version, parentRunId: runId, reason: effectiveReason, ...(res.status >= 400 ? { previousPlanKept: true } : {}) },
+    body: { ...res.body, runId: child.id, version: child.version, parentRunId: runId, reason: effectiveReason, ...(res.status >= 400 ? { previousPlanKept: true } : {}), ...(echo ? { kept: echo } : {}) },
   };
 }

@@ -269,6 +269,25 @@ export function plannedVisitOrders<T extends { id: string; lines: readonly { id:
   return orders.filter((o) => !leftOut.has(o.id) && !whole.has(o.id) && !(lockedCases.size > 0 && allCasesOn(o.lines, lockedCases)));
 }
 
+/**
+ * The orders a KEPT stop - on a locked, loading or dispatched load - is judged with now (review W3 of
+ * the kept-load warning): plannedVisitOrders, without the orders that came after the stop was planned
+ * (Order.uploadedAt, the time it was received, after the stop's capturedAt). A re-plan never adds an
+ * order to a kept stop: a new order of its customer becomes another visit, so its delivery time is not
+ * the kept stop's hours. The plan screen's "Changed after planning" note of a kept stop and the kept-load
+ * warning (kept-changes.ts keptStopLive) both read it, so they never disagree. Not known when the stop
+ * was planned, or when the order came: kept.
+ */
+export function keptVisitOrders<T extends { id: string; lines: readonly { id: string; cases: number }[]; uploadedAt?: Date | string | null }>(
+  orders: readonly T[],
+  placements: readonly OrderPlacement[],
+  stopCapturedAt: string | null,
+): T[] {
+  const at = stopCapturedAt ? Date.parse(stopCapturedAt) : Number.NaN;
+  const came = (o: T) => (o.uploadedAt instanceof Date ? o.uploadedAt.getTime() : o.uploadedAt ? Date.parse(o.uploadedAt) : Number.NaN);
+  return plannedVisitOrders(orders, placements, stopCapturedAt).filter((o) => !(Number.isFinite(at) && Number.isFinite(came(o)) && came(o) > at));
+}
+
 /** A planned stop's promised time as kept in the plan inputs (StopFacts.promised), or null. */
 export function readPromised(json: unknown): OrderTime | null {
   if (!json || typeof json !== 'object') return null;
