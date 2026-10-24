@@ -38,7 +38,7 @@ import { defaultSearchMode, searchOptionOf, thoroughMaxSec, type SearchOption } 
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers, roundKg } from './weights';
 import { DEFAULT_TZ, fmtWindow, isoOf, todayIso } from './time';
 import { carriedLoadShows } from './carry-view';
-import { shownTruckCode } from './hire';
+import { shownTruckCode, trucksOfDayWhere } from './hire';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
 import { withPlainSolverCodes } from './solver-status';
 import { isDispatchPlanShape } from './legacy-runs';
@@ -50,6 +50,9 @@ import { hadTimeHere } from './cross-depot';
 import { isSmallTruck, smallTruckMaxBaysOf } from './small-truck';
 import { loadingInstructionText } from './loading-instruction';
 import { echoedWindowRule, windowRuleAskedText, type WindowRule } from './window-rule';
+import { keptStopLive, type KeptReport } from './kept-changes';
+import { keptChangesMode, keptChangesOrNull } from './kept-changes-server';
+import { manualOf, planEditMode } from './plan-edit-view';
 
 export interface DetailStop {
   sequence: number;
@@ -480,6 +483,15 @@ export interface PlanDetail {
   feasibilityGate?: 'enforce' | 'warn';
   /** The tenant settings the plan in use was built with (null: an option from before they were kept). */
   planSettings?: PlanSettings | null;
+  /** The option in use was changed by hand (its `details.manual`, never the version's reason): the header says "adjusted by hand". */
+  manual?: { count: number; at: string } | null;
+  /**
+   * Moves by hand (PLAN_EDIT check or on, lib/dispatch/plan-edit-view.ts): the mode and the trucks of the
+   * day the Move dialog offers (the depot's active trucks, a one-day hired truck of that date included),
+   * each with its loads a day. Null / absent when the switch is off, the version is not the live, applied
+   * dispatch plan, or its day is over (every check would be refused).
+   */
+  edit?: { mode: 'CHECK' | 'ON'; trucks: { id: string; code: string; bays: number | null; capacityCases: number; maxTrips: number }[] } | null;
   /** PR9: orders of this plan (on its loads or unserved) brought forward from earlier days. */
   carriedIn?: CarrySummary | null;
   /** PR9: orders of this plan brought forward to later days since: not delivered on this day, planned there. */
@@ -495,6 +507,13 @@ export interface PlanDetail {
    * stuck plan): what the screen says, and whether a dispatcher may reset it now. null = not stuck.
    */
   stuck?: StuckState | null;
+  /**
+   * Locked and loading loads planned with older customer data (kept-changes.ts), read in the same
+   * snapshot; only when asked for (GET /api/runs/:id/plan: the driver and salesman pages never pay for
+   * it). null: not asked, switched off (KEPT_CHANGES=off), superseded, optimizing, no applied plan or a
+   * day that is over.
+   */
+  kept?: KeptReport | null;
 }
 
 /** PR9: orders brought forward, in one line: how many, their cases and the days (first due, or went to). */
@@ -534,10 +553,10 @@ export const PLAN_DETAIL_TX = { maxWait: 5_000, timeout: 20_000 } as const;
  * the snapshot (really optimizing) or already ended there (plan READY or FAILED, never stuck); a
  * job started after the question is under 2 minutes old, so never "lost" (JOB_LOST_AFTER_MS).
  */
-export async function getPlanDetail(tenantId: string, runId: string, clock: { now?: Date } = {}): Promise<PlanDetail | null> {
+export async function getPlanDetail(tenantId: string, runId: string, clock: { now?: Date } = {}, opts: { kept?: boolean } = {}): Promise<PlanDetail | null> {
   const db = tenantDb(tenantId);
   const liveAtStart = isOptimizing(runId);
-  return db.$transaction((tx) => readPlanDetail(tx as unknown as DetailDb, tenantId, runId, clock, liveAtStart), {
+  return db.$transaction((tx) => readPlanDetail(tx as unknown as DetailDb, tenantId, runId, clock, liveAtStart, opts.kept === true), {
     isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
     ...PLAN_DETAIL_TX,
   });
@@ -546,8 +565,11 @@ export async function getPlanDetail(tenantId: string, runId: string, clock: { no
 /** The tenant-scoped transaction client getPlanDetail reads through (typed as a plain transaction client). */
 type DetailDb = Prisma.TransactionClient;
 
-/** `liveAtStart`: this web process was running the plan's optimization when the read began (getPlanDetail). */
-async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clock: { now?: Date }, liveAtStart: boolean): Promise<PlanDetail | null> {
+/**
+ * `liveAtStart`: this web process was running the plan's optimization when the read began (getPlanDetail).
+ * `withKept`: add the kept-load report (PlanDetail.kept).
+ */
+async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clock: { now?: Date }, liveAtStart: boolean, withKept = false): Promise<PlanDetail | null> {
   const run = await db.runPlan.findUnique({ where: { id: runId }, include: { depot: true } });
   if (!run) return null;
   const cfg = await db.tenantConfig.findUnique({ where: { tenantId } });
@@ -589,7 +611,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   // all of its customer's orders in this plan - on every load and left unserved - as the plan was made
   // (every part of a split customer carries the time of any of its orders; data collection review),
   // not only the part on this load.
-  type VisitOrder = OrderTimeColumns & { id: string; lines: { id: string; cases: number }[] };
+  type VisitOrder = OrderTimeColumns & { id: string; uploadedAt: Date | null; lines: { id: string; cases: number }[] };
   const visitOrders = new Map<string, Map<string, VisitOrder>>();
   const addVisitOrder = (customerId: string, o: VisitOrder) => {
     const m = visitOrders.get(customerId) ?? new Map<string, VisitOrder>();
@@ -601,7 +623,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   if (unservedIds.length) {
     const times = await db.order.findMany({
       where: { tenantId, id: { in: unservedIds } },
-      select: { id: true, customerId: true, deliveryStartMin: true, deliveryEndMin: true, deliveryTimeReason: true, deliveryTimeNote: true, lines: { select: { id: true, cases: true } } },
+      select: { id: true, customerId: true, uploadedAt: true, deliveryStartMin: true, deliveryEndMin: true, deliveryTimeReason: true, deliveryTimeNote: true, lines: { select: { id: true, cases: true } } },
     });
     for (const o of times) addVisitOrder(o.customerId, o);
   }
@@ -615,6 +637,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   );
   // Orders the chosen option left unserved whole as heavier than any truck: not in its stops' visits.
   const tooHeavy = leftOutWhole(chosen?.unservedOrders ?? []);
+  // The kept-stop hours rule (review W3) is part of the kept-load warning: KEPT_CHANGES=off answers as
+  // before it, on every screen and sheet that reads these notes (review S2).
+  const keptRule = keptChangesMode() === 'on';
   // Pallets: the cases per pallet the option was planned with (by product code), so a factor changed
   // under Products later never changes how a planned load reads.
   const plannedFactors = inputs?.palletFactors ?? {};
@@ -772,10 +797,14 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         snapshot: !!snap,
         masterChanged: snap
           ? (() => {
+              const visit = [...(visitOrders.get(c.id)?.values() ?? [o])];
+              // A kept stop (locked, loading or dispatched) never takes an order that came after it was
+              // planned: its customer's new order is another visit. Judged as the kept-load warning judges
+              // it (keptStopLive, review W3), so the badge and the warning never disagree.
+              if (l.status !== 'PLANNED' && keptRule) return stopMasterChanges(snap, keptStopLive(c, eff, visit, placements, snap.capturedAt));
               // As the stop would be planned now: its customer's orders' own delivery time, else its hours.
               // The chosen option's left-out orders only for its own stops (a frozen one may be older).
-              const leftOut = l.status === 'PLANNED' ? tooHeavy : undefined;
-              const sw = stopWindowFor(eff, plannedVisitOrders([...(visitOrders.get(c.id)?.values() ?? [o])], placements, snap.capturedAt, leftOut));
+              const sw = stopWindowFor(eff, plannedVisitOrders(visit, placements, snap.capturedAt, l.status === 'PLANNED' ? tooHeavy : undefined));
               return stopMasterChanges(snap, {
                 name: c.name,
                 address: c.address,
@@ -1050,6 +1079,17 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     };
     return { s, d, frozenLoads: frozen.length, frozenCost, dayKm, trucksUsed, pref, facts };
   });
+  // Moves by hand: the trucks of the day for the Move dialog, only on the live applied plan of a day not over, with the switch on.
+  const editMode = planEditMode();
+  const edit =
+    editMode !== 'OFF' && live && chosenDetails && isoOf(run.runDate) >= today
+      ? {
+          mode: editMode,
+          trucks: (
+            await db.truck.findMany({ where: trucksOfDayWhere(run.depotId, run.runDate), orderBy: { code: 'asc' }, select: { id: true, code: true, bays: true, capacityCases: true, maxTripsPerDay: true } })
+          ).map((t) => ({ id: t.id, code: t.code, bays: t.bays ?? null, capacityCases: t.capacityCases, maxTrips: t.maxTripsPerDay || cfg?.maxTripsPerTruck || 1 })),
+        }
+      : null;
   const tradeoffs = optionTradeoffs(
     options.map((o) => o.facts),
     early.map((p) => `P${p}`).join('/'),
@@ -1173,10 +1213,17 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     feasibility,
     feasibilityGate: feasibilityGateMode(),
     planSettings: inputs?.settings ?? null,
+    manual: (() => {
+      const m = manualOf(chosenDetails);
+      return m ? { count: m.count, at: m.at } : null;
+    })(),
+    edit,
     carriedIn,
     carriedOut,
     today: todayIso(cfg?.timezone || DEFAULT_TZ, clock.now ?? new Date()),
     stuck,
+    // In the same snapshot as the loads; never while a search runs (the screen polls then, review W8).
+    ...(withKept ? { kept: live && run.status !== 'OPTIMIZING' ? await keptChangesOrNull(db, tenantId, runId, { now: clock.now, cfg, profiles }, 'plan detail') : null } : {}),
   };
 }
 

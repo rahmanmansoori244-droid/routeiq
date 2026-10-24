@@ -42,7 +42,7 @@ def test_check_token_without_configuration_is_500(monkeypatch):
     assert exc.value.status_code == 500
 
 
-@pytest.mark.parametrize("endpoint", ["optimize_dispatch_endpoint", "stop_dispatch_endpoint", "route_geometry_endpoint", "optimize_endpoint"])
+@pytest.mark.parametrize("endpoint", ["optimize_dispatch_endpoint", "stop_dispatch_endpoint", "route_geometry_endpoint", "retime_truck_days_endpoint", "optimize_endpoint"])
 def test_every_protected_endpoint_goes_through_check_token(configured, monkeypatch, endpoint):
     calls = []
 

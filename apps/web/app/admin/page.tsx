@@ -3,6 +3,7 @@ import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { redirectToSignIn } from '@/lib/session-redirect';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { UserMenu } from '@/components/user-menu';
 
 export const metadata = { title: 'Platform admin — RouteIQ' };
 
@@ -26,11 +27,15 @@ export default async function AdminPage() {
 
   return (
     <main className="mx-auto max-w-5xl space-y-6 p-8">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Platform admin</h1>
-        <p className="text-sm text-muted-foreground">
-          Tenant list. Suspend/restore controls land in Phase 5.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Platform admin</h1>
+          <p className="text-sm text-muted-foreground">
+            Tenant list. Suspend/restore controls land in Phase 5.
+          </p>
+        </div>
+        {/* The user menu: Change password (a platform admin may have no company, so no top bar) and Sign out. */}
+        <UserMenu name={session.user.name ?? ''} email={session.user.email ?? ''} role={session.user.role} />
       </div>
       <Card>
         <CardHeader>

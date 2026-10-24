@@ -334,7 +334,9 @@ reason and warning texts changed, where they were untrue).
   ```
 
   - **Arms.** Presets: `base` (every switch at its default), `best_of` (`SOLVER_BEST_OF=3`, `SOLVER_BEST_OF_QUICK=3`),
-    `pyvrp_model` (`SOLVER_PYVRP_ALLOWED=model`), `repair_on` (`SOLVER_PRIORITY_REPAIR=on`), `all_on`; or your own,
+    `pyvrp_model` (`SOLVER_PYVRP_ALLOWED=model`), `repair_on` (`SOLVER_PRIORITY_REPAIR=on`), `join_report` / `join_on`
+    (`SOLVER_JOIN_TRIPS=report` / `on`, below), `all_on` (every switch on; since 24 Oct 2026 that includes `join_on`, so
+    an `all_on` result from before then is not like for like with one after); or your own,
     separated by `;`: `k4=SOLVER_BEST_OF=4,SOLVER_BEST_OF_SOURCES=2`. Before each run every switch is unset and the arm's
     own values set; the solver reads them on every solve, and each record keeps them as the solver read them. A variable
     the solver never reads, or a value it cannot read, is refused. The arms take turns within each repetition (A B C,
@@ -384,6 +386,109 @@ reason and warning texts changed, where they were untrue).
   dispatch from it, and tell the engineer the run id.
 - **Rollback:** unset the variables (or set `SOLVER_BEST_OF=1`, `SOLVER_BEST_OF_QUICK=1` and `SOLVER_PRIORITY_REPAIR=off`);
   no code change.
+
+## The kept-load warning (24 Oct 2026, web only, on by default)
+
+Daily dispatch (step 3), the plan screen and the RE-PLAN dialog list the locked and loading loads whose customer data
+(receiving hours, pin, small-truck mark, a deactivated customer, cancelled or moved orders, new orders) changed after
+they were planned, with an **Unlock** for each. It only adds information: nothing is refused, no migration, no solver
+change. See `docs/PROJECT_HANDBOOK.md` 3.5, 3.7, 3.8 and 3.11, and `docs/DISPATCHER_GUIDE.md`.
+
+- `KEPT_CHANGES` on **web** stays **unset** (on). `off` (also `0`, `false`, `no`) is the **kill switch**: every screen
+  answers as before the warning (no `kept` field, no box, the dialog as before, no audit fields, and the plan screen's and
+  the sheets' "Changed after planning" hours note of a locked stop as before; the RE-PLAN buttons still ask the server once,
+  which answers nothing). It is read on every request, so no restart is needed. The web logs a startup warning while it
+  is off, or set to a value it does not read (it then stays on).
+- **Verify after the deploy** (a test day, never a live one): optimize, lock a load, change the receiving hours of a
+  customer on it under Customers, then reload Daily dispatch: the box *Locked loads planned with older customer data*
+  lists the load under step 3, and **RE-PLAN** shows it with an unticked *Unlock ... first*.
+- **Rollback:** set `KEPT_CHANGES=off` on web (no code change, no restart).
+
+## Re-timing for moves by hand (24 Oct 2026, the solver part; called by the Move dialog below)
+
+The solver gets `POST /retime-truck-days` (`apps/solver/retime.py`; `docs/PROJECT_HANDBOOK.md` 4.16): a few truck days
+re-timed exactly for a stop moved by hand. It changes no optimization and no plan; the web part that calls it (below)
+ships in the same release behind its own switch, `PLAN_EDIT`, off by default, so until that is set nothing calls the
+endpoint. Deploy it outside the evening's planning, like any solver deploy (a restart cuts a running solve).
+
+- **Settings** (optional, all with defaults; see the handbook 2.9): `RETIME_MAX_CONCURRENT` (4 checks at once, then 503
+  "Route checks busy"), `RETIME_BUDGET_SEC` (10), `RETIME_MATRIX_SEC` (6), `RETIME_BEST_TRIES` (24). Leave them unset.
+  A check runs a few small timing LPs in the solver's API process (no search, no worker process: rule 22) and takes
+  no optimization slot.
+- **Verify after the deploy** (`railway logs --service solver`): the startup line
+  `Re-timing for moves by hand (/retime-truck-days v1): max 4 at once, budget 10 s, road matrix 6 s, best place 24 tries`;
+  `GET /ready` (with the solver token) has `"retime": {"version": 1, ...}`. The next optimization answers as before.
+  Each check later logs one line `retime run=<id> tenant=<id> trucks=... stops=... ok=... provider=... timings=...
+  seconds=...` (ids only).
+- **Rollback:** redeploy the previous solver commit; nothing in the database changes.
+
+## Moves by hand on the plan screen (24 Oct 2026, the web part; `PLAN_EDIT`, off by default)
+
+The web gets the Move dialog and two routes, `POST /api/runs/:id/edit/check` and `POST /api/runs/:id/edit`
+(`docs/PROJECT_HANDBOOK.md` 3.7, 4.16). They call the solver's `/retime-truck-days` above. Both services deploy from the
+same merge; **check the solver's startup line above before setting `PLAN_EDIT`** (an older solver answers 404 and the
+dialog says "The route optimizer is being updated"; nothing is written). The web deploy runs the migration
+`20261024120000_unserved_removed_by_hand` (one enum value, additive).
+
+- **Switch** (web variable, read on every request): `PLAN_EDIT` unset or `off` = no Move button, the routes answer 404;
+  `check` = dispatchers can Check a move (re-timed by the solver, nothing written) but not Save; `on` = Check and Save.
+  Pilot: `check` for one or two planning days, then `on` with the owner's OK.
+- **Verify** (`railway logs --service web`): with `check` or `on` the startup log has the `PLAN_EDIT=...` line; a Check
+  on the plan in use answers a preview and the solver logs one `retime run=... ok=...` line; with `on`, a saved move makes
+  the next plan version `MANUAL_ADJUSTMENT` ("By hand: ..." in the versions list) and the audit log has
+  `ROUTE_MANUALLY_CHANGED`.
+- **Rollback:** set `PLAN_EDIT=off` (Railway restarts the web; no deploy). Versions saved by hand stay valid plans. To roll
+  the web code back past this release, first run the `UPDATE` in the migration file if any stop was taken off by hand
+  (the previous Prisma client cannot read the new reason).
+
+## Join small trips (24 Oct 2026, off by default)
+
+`SOLVER_JOIN_TRIPS` on the solver: `off` (unset, the default: every plan is the one from before and `search.join_trips`
+is null), `report` (each option's small loads of one company truck are joined, timed with every rule, built and checked,
+and reported in `search.join_trips`; the plans stay as they are) or `on` (the joined plan is used when it passes every
+check, with the note "Small loads joined after the load re-check: ..."). See `docs/PROJECT_HANDBOOK.md` 2.9 and 4.11.
+
+- **Deploy it unset.** Nothing changes; the first deploy after the Railway pause also ships whatever `main` holds (#94).
+- **Verify after the deploy or a change** (`railway logs --service solver`): the startup line
+  `Join small trips: off (the default; SOLVER_JOIN_TRIPS unset or off)` (or `report (...)` / `on (...)`); `GET /ready`
+  (with the solver token) has `join_trips.mode`. A value the solver cannot read counts as off and is named in the startup
+  line (`...; SOLVER_JOIN_TRIPS='enable' not read (off, report or on): off is used)`).
+- **Then `report`** with the owner's OK, outside the evening's planning (a variable change restarts the solver and cuts
+  any running solve), for at least 5 planning days. Each morning read the night's `RunJob.responseJson->'search'->
+  'join_trips'` in a read-only SQL session (query below): `status` is `FAILED` whenever any option was `NOT_VERIFIED` or
+  `ERROR`, whatever the others found; per option the outcome (`WOULD_JOIN`, `NOT_VERIFIED`, `ERROR`, or why nothing was
+  joined), the gains, `verified`; per change its kind (a `MOVE` onto another truck is reported only, also under
+  `NO_SMALL_LOAD`), the truck, the margins to the latest return and to the break window's end, and `stops_after`; and the
+  solver log's `join-trips run=<id> ...` line (per option its changes by kind). Publish only differences, never a real
+  day's totals.
+
+  ```sql
+  SELECT j."runId", j."createdAt", j."responseJson"->'search'->'join_trips'->>'status' AS status,
+         o->>'option' AS option, o->>'outcome' AS outcome, o->>'verified' AS verified, o->>'gain_omr' AS gain_omr,
+         m->>'kind' AS kind, m->>'truck_id' AS truck_id, m->>'applied' AS applied, m->>'end_slack_min' AS end_slack_min,
+         m->>'break_slack_min' AS break_slack_min, m->'stops_after' AS stops_after
+  FROM "RunJob" j
+  CROSS JOIN LATERAL jsonb_array_elements(j."responseJson"->'search'->'join_trips'->'options') o
+  LEFT JOIN LATERAL jsonb_array_elements(o->'moves') m ON true
+  WHERE j."createdAt" > now() - interval '1 day'
+    AND jsonb_typeof(j."responseJson"->'search'->'join_trips') = 'object'
+  ORDER BY j."createdAt", option;
+  ```
+- **Then `on`**, outside planning hours, once over those days no option was `NOT_VERIFIED` or `ERROR` and a dispatcher has
+  looked at 3 days the report would have joined. In report mode the plan keeps its loads, so the review is of each
+  change's `stops_after`: the truck's loads as the join would make them, stops in order (match the stop ids to customers
+  and the truck id to its code in that night's `RunJob.requestJson`), with its return before and after and the margins.
+  The offline replay and `scripts/bench_search.py` (arms `base,join_report,join_on`; NOT EXERCISED when no run joined or
+  would have joined) come first, as for the switches above.
+- **What it changes.** Every solve but the hire check's what-if (SKIPPED `HIRE_CHECK`; its trial solves are never joined):
+  the evening's plan, every re-plan of the day. Only company trucks (never a truck to rent or one whose driver is paid by
+  the day), only new loads (locked, loading and dispatched loads are never in a plan). Moves onto another truck are
+  reported only. It runs in the API process for milliseconds (at most 2 s per option, 6 s per solve counted from the
+  first option's step; its seconds are given back to the rented and day-paid trucks' re-ordering, so report mode leaves
+  that step its time; the priority repair after it shares the solve's budget as before).
+- **Roll back at once** (no code change: unset the variable) on any of: an option `NOT_VERIFIED` or `ERROR` in
+  `search.join_trips`; a joined load a dispatcher says cannot be driven as planned. Plans already made stay valid: a joined
+  plan is an ordinary plan.
 
 ## Private networking notes
 

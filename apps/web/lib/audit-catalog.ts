@@ -38,6 +38,7 @@ export const AUDIT_ACTIONS = {
   SIGNUP: { label: 'Company signed up' },
   LOGIN_THROTTLED: { label: 'Sign-in attempts slowed down' },
   PASSWORD_RESET_BY_ADMIN: { label: 'Password reset by an admin' },
+  PASSWORD_CHANGED: { label: 'Password changed by its user' },
   CROSS_TENANT_VIEW: { label: 'Viewed by a platform admin' },
   PLATFORM_ADMIN_GRANTED: { label: 'Platform admin granted' },
   PLATFORM_ADMIN_REVOKED: { label: 'Platform admin revoked' },
@@ -111,7 +112,10 @@ export const AUDIT_ACTIONS = {
   // IVMS live link (16 Oct 2026): the company admin removed a truck-day's GPS times (the undo).
   GPS_TIMES_UNDONE: { label: "GPS times of a truck's day removed" },
   BASELINE_UPLOADED: { label: 'Baseline uploaded (legacy run)' },
-  ROUTE_MANUALLY_CHANGED: { label: 'Route changed by hand (legacy run)' },
+  // Moves by hand (24 Oct 2026): a stop moved, put on or taken off a load-based plan, saved as a new version
+  // (entity RunPlan); legacy runs (lib/route-adjust.ts) still write it with entity RouteAssignment, so the
+  // label names neither.
+  ROUTE_MANUALLY_CHANGED: { label: 'Stops moved by hand' },
   SECURITY_CLEANUP: { label: 'Security clean-up (migration)' },
   DEPOT_BACKFILL: { label: 'Depot filled in for orders and order files without one (migration)' },
   LOGOUT: { label: 'Signed out', legacy: true },

@@ -78,7 +78,9 @@ function asked(host: Host<any>) {
   if (!dialog) return null;
   const q = dialog.props.question;
   const thorough = searchChoices(q.defaultMode, q.stops, q.capSec, !!q.deliveryDay).find((c) => c.mode === 'THOROUGH')!;
-  return { q, reason: defaultModeReason(q.defaultMode), thoroughDetail: thorough.detail, answer: dialog.props.onDone as (m: string | null) => void };
+  // The dialog answers with the mode and the kept loads ticked to unlock first (none here).
+  const onDone = dialog.props.onDone as (a: { mode: string; unlock: unknown[] } | null) => void;
+  return { q, reason: defaultModeReason(q.defaultMode), thoroughDetail: thorough.detail, answer: (m: string | null) => onDone(m === null ? null : { mode: m, unlock: [] }) };
 }
 
 describe('the day screen left open across midnight', () => {
@@ -135,7 +137,8 @@ describe('the plan screen left open across midnight', () => {
     elements(host.tree).find((e) => typeName(e) === 'LateOrderDialog').props.onSaved({ locationRequired: false });
     await host.settle();
     const a = asked(host)!;
-    expect(requests.length).toBe(read);
+    // Not read again: only the kept-load list, read fresh for the dialog (a READY plan does not poll).
+    expect(requests.slice(read).map((r) => r.url)).toEqual(['/api/runs/run1/kept-changes']);
     expect(a.q).toMatchObject({ verb: 'Re-plan', defaultMode: 'QUICK', deliveryDay: true });
     expect(a.q.note).toMatch(/^Late order saved\. Re-plan now\?/);
     expect(a.thoroughDetail).toMatch(TODAY_LINE);

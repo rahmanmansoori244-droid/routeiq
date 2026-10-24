@@ -56,6 +56,24 @@ import { fullAndLooseText, loadPallets, manifestPalletTotals, manifestTotalText,
 import { api, askOverride, durH, hhmm, isPalletFactorRefusal, palletRefusalToast, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 import { useSearchModeChoice } from './search-mode-dialog';
+import {
+  keptEchoText,
+  keptQuestion,
+  keptReplanBody,
+  keptReplanNote,
+  keptSeenAfter,
+  mergeUnlocks,
+  replanNotStartedText,
+  unlockConfirmText,
+  unlockStoppedText,
+  unlockedNextText,
+  unlockedReplanText,
+  type KeptEcho,
+  type KeptLoadRef,
+  type KeptReport,
+} from '@/lib/dispatch/kept-changes';
+import { KeptChangesBox } from './kept-changes-box';
+import { readKept, unlockKept } from './kept-client';
 import { useTicker } from './use-ticker';
 import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
 import type { DriverLinkView } from '@/lib/driver-link/manifest-types';
@@ -73,10 +91,19 @@ import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
 import { PhotoViewer } from './photo-viewer';
 import { CameraExceptions } from './camera-exceptions';
 import { HireSuggestionBox } from './hire-suggestion';
+import { MoveStopDialog, type MoveSubject } from './move-stop-dialog';
+import { LOCKED_MOVE_TITLE, savedText } from '@/lib/dispatch/plan-edit-view';
 import { CAMERA_ALERT_PER_DAY } from '@/lib/delivery/camera-exceptions';
 import { addDaysIso } from '@/lib/dispatch/time';
 import { LiveTrucksBar, useLiveTrucks } from './live-trucks';
 import { truckDayHref } from '@/lib/ivms/truck-day';
+
+/** A re-plan's answers before it starts: Quick or Thorough, the kept loads ticked to unlock first, and the kept-load report the dialog showed. */
+interface ReplanChoice {
+  mode: SearchMode;
+  unlock: KeptLoadRef[];
+  kept: KeptReport | null;
+}
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -159,9 +186,14 @@ interface Props {
    * the user is PLANNER or above (the page decides). Off or absent: nothing is fetched or shown.
    */
   liveMap?: boolean;
+  /**
+   * The "Locked loads planned with older customer data" box above the warnings (default on). Off on the
+   * day screen, whose Step 3 shows the same box right above the plan.
+   */
+  showKeptBox?: boolean;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today, liveMap = false }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today, liveMap = false, showKeptBox = true }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -269,6 +301,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const [reissueAsk, setReissueAsk] = useState<{ link: DriverLinkView; text: string } | null>(null);
   // The salesman link of the plan's date (owner request 19 Oct 2026): one per company and date, for every depot.
   const [salesLinkOpen, setSalesLinkOpen] = useState(false);
+  // Moves by hand (PLAN_EDIT check or on): the stop or unserved customer the Move dialog is open for.
+  const [moveFor, setMoveFor] = useState<MoveSubject | null>(null);
   const loadLinks = useCallback(async () => {
     if (!canPlan) return;
     const r = await api<DriverLinkView[]>(`/api/dispatch/driver-links?runId=${encodeURIComponent(runId)}`);
@@ -621,37 +655,61 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
    * a plan screen left open across midnight must not suggest Thorough on the delivery day (skeptic
    * review of the long-search PR).
    */
-  function askSearchMode(note?: string): Promise<SearchMode | null> {
-    if (!d) return Promise.resolve(null);
+  async function askSearchMode(note?: string): Promise<ReplanChoice | null> {
+    if (!d) return null;
     const stops = new Set([...d.loads.flatMap((l) => l.stops.map((s) => s.customerId)), ...d.unserved.map((u) => u.customerId)]).size + (d.pendingOrders ?? 0);
     const { defaultMode, deliveryDay } = searchModeNow(d.run.runDate, { timezone: d.timezone, today: today ?? d.today }, new Date());
-    return searchChoice.ask({
+    // The locked and loading loads planned with older customer data, read fresh (a READY plan does not
+    // poll): listed with their Unlock first, unticked. A failed read lists nothing (never blocks a re-plan).
+    const kept = await readKept(runId);
+    const keptQ = keptQuestion(kept);
+    const a = await searchChoice.askFull({
       verb: 'Re-plan',
       defaultMode,
       stops: stops || null,
       capSec: d.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT,
       deliveryDay,
-      note: note ?? 'Locked and dispatched loads stay exactly as they are.',
+      // `note`: what asked (the late order); then what the re-plan keeps.
+      note: `${note ? `${note} ` : ''}${keptReplanNote(keptQ)}`,
+      ...(keptQ ? { kept: keptQ } : {}),
     });
+    return a ? { mode: a.mode, unlock: mergeUnlocks(a.unlock), kept } : null;
   }
 
-  // The mode chosen with "Late order saved. Re-plan now?" (one dialog for both).
-  const lateOrderMode = useRef<SearchMode | null>(null);
+  // The choice made with "Late order saved. Re-plan now?" (one dialog for both).
+  const lateOrderMode = useRef<ReplanChoice | null>(null);
 
-  async function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE', preset?: SearchMode) {
-    const searchMode = preset ?? (await askSearchMode());
-    if (!searchMode) return;
+  async function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE', preset?: ReplanChoice) {
+    const choice = preset ?? (await askSearchMode());
+    if (!choice) return;
+    const searchMode = choice.mode;
     const expect = d ? { date: d.run.runDate, depotId: d.run.depot.id } : undefined;
     const capSec = d?.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT;
     return runPlanAction(
       lock,
       'replan',
       async () => {
+        // The ticked kept loads go back to Planned first, latest first; a refusal stops here (no re-plan).
+        let unlocked: KeptLoadRef[] = [];
+        if (choice.unlock.length) {
+          const res = await unlockKept(runId, choice.unlock);
+          unlocked = res.unlocked;
+          if (res.failed) {
+            toast.error(unlockStoppedText({ unlocked, failed: res.failed }));
+            await load();
+            await onChanged?.();
+            return;
+          }
+        }
+        // After an unlock: a manual adjustment (the unlocked stops prefer their truck), named in its note.
+        const body = keptReplanBody(reason, unlocked);
+        // What the dialog showed, without the loads now back to Planned (the re-plan reads the list again).
+        const keptSeen = keptSeenAfter(choice.kept, unlocked);
         let overrides: OptimizeOverrides = {};
         for (;;) {
-          const r = await api<{ runId: string; version?: number; reason?: string } & StartedAnswer>(`/api/runs/${runId}/replan`, {
+          const r = await api<{ runId: string; version?: number; reason?: string; kept?: KeptEcho } & StartedAnswer>(`/api/runs/${runId}/replan`, {
             method: 'POST',
-            json: { reason, expect, searchMode, ...overrides },
+            json: { ...body, expect, searchMode, ...(keptSeen ? { keptSeen } : {}), ...overrides },
           });
           if (r.ok && r.data?.alreadyRunning) {
             // A version with no plan yet is optimized in place: another dispatcher's job may already
@@ -666,11 +724,18 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             const how =
               r.data.reason === 'LATE_ORDER'
                 ? 'Late order added; the other orders stay on their trucks where possible.'
-                : 'Full re-optimize: orders may move to other trucks.';
+                : r.data.reason === 'MANUAL_ADJUSTMENT'
+                  ? 'The other orders stay on their trucks where possible.'
+                  : 'Full re-optimize: orders may move to other trucks.';
             const long = searchMode === 'THOROUGH' ? ` Thorough search: up to ${fmtSearchTime(capSec)}, stops early when the plan stops improving.` : '';
+            const keptNow = [unlocked.length ? unlockedReplanText(unlocked) : '', keptEchoText(r.data.kept) ?? '']
+              .filter(Boolean)
+              .join(' ');
             toast.success(
-              `Plan version ${r.data.version ?? ''} is ${r.data.queued ? 'queued behind other optimizations' : 'being optimized'}. ${how}${long} Locked and dispatched loads are kept; if the optimization fails, the previous plan stays in use.`,
+              `Plan version ${r.data.version ?? ''} is ${r.data.queued ? 'queued behind other optimizations' : 'being optimized'}. ${how}${long} Locked and dispatched loads are kept; if the optimization fails, the previous plan stays in use.${keptNow ? ` ${keptNow}` : ''}`,
             );
+            // The list changed between the dialog and the start (another dispatcher, a customer saved).
+            if (r.data.kept?.unseen) toast.warning(`Locked loads with older customer data changed meanwhile: ${r.data.kept.lines.join('; ')}`);
             await onChanged?.(r.data.runId);
             return;
           }
@@ -680,13 +745,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             overrides = { ...overrides, ...more };
             continue;
           }
+          // The unlock went through but the re-plan did not start (review W7): say both, and show the loads as they are.
+          const notStarted = unlocked.length ? replanNotStartedText(unlocked, r.error) : null;
           if (isPalletFactorRefusal(r.errorBody)) {
             // Refused, no question: the products to fix, with the Products link (the previous plan stays).
-            toast.error(r.error ?? 'Cannot plan by pallets: products have no cases per pallet.', palletRefusalToast(slug));
+            toast.error(notStarted ?? r.error ?? 'Cannot plan by pallets: products have no cases per pallet.', palletRefusalToast(slug));
+            if (notStarted) await load();
           } else if (r.errorBody?.code !== 'LOCATION_REQUIRED' && r.errorBody?.code !== 'WEIGHT_REQUIRED') {
-            toast.error(r.error ?? 'Re-plan failed.');
+            toast.error(notStarted ?? r.error ?? 'Re-plan failed.');
             // The plan may have changed meanwhile (superseded by another re-plan, a new version kept
             // after a refused start): reload it and the day instead of keeping stale buttons.
+            await load();
+          } else if (notStarted) {
+            toast.error(notStarted);
             await load();
           }
           // Not re-planned (also when a question was declined): the day as it is now - after a
@@ -694,6 +765,23 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           await onChanged?.();
           return;
         }
+      },
+      failed,
+    );
+  }
+
+  /** The box's Unlock: the load and its truck's later frozen loads back to Planned, latest first (one action at a time). */
+  function unlockFromBox(loads: KeptLoadRef[]) {
+    if (!window.confirm(unlockConfirmText(loads))) return;
+    return runPlanAction(
+      lock,
+      'kept-unlock',
+      async () => {
+        const res = await unlockKept(runId, loads);
+        if (res.failed) toast.error(unlockStoppedText({ unlocked: res.unlocked, failed: res.failed }, false));
+        else toast.success(unlockedNextText(res.unlocked));
+        await load();
+        await onChanged?.();
       },
       failed,
     );
@@ -733,6 +821,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // Nothing to plan only because the rest was brought forward (the title says so, never "unlock a load").
   const onlyCarriedLeft = nothingToPlan && !nothingToReplan({ loadStatuses: d.loads.map((l) => l.status), unservedOrders: d.unserved.length, pendingOrders: d.pendingOrders ?? 1 });
   const applied = !!d.run.chosenScenario;
+  // Moves by hand: on the live applied plan, for the dispatcher (PLAN_EDIT check or on: d.edit is set).
+  const canMove = !!d.edit && canPlan && applied && !superseded && !running;
   // Review F04: the timetable check. With the gate on (the default), a truck whose times break a
   // rule cannot be locked, loaded or dispatched. The remedy is Re-plan - except for a problem on a
   // LOCKED or LOADING load, which a re-plan carries over unchanged: that load, and every later locked
@@ -757,7 +847,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           </h2>
           <Badge variant={superseded ? 'secondary' : d.run.status === 'FAILED' ? 'destructive' : d.run.status === 'DISPATCHED' ? 'success' : 'outline'}>{superseded ? 'SUPERSEDED' : d.run.status}</Badge>
           {d.run.reason !== 'INITIAL' ? <Badge variant="warning">{d.run.reason.replace('_', ' ')}</Badge> : null}
-          {d.run.chosenScenario ? <Badge variant="secondary">{d.run.chosenScenario === 'RECOMMENDED' ? 'RECOMMENDED PLAN' : `${d.run.chosenScenario} (alternative)`}</Badge> : null}
+          {d.run.chosenScenario ? <Badge variant="secondary">{d.run.chosenScenario === 'RECOMMENDED' ? 'RECOMMENDED PLAN' : `${d.run.chosenScenario} (alternative)`}{d.manual ? ' · adjusted by hand' : ''}</Badge> : null}
         </div>
         <div className="flex flex-wrap gap-2">
           {/* The dispatch workbook for every dispatch plan, also one in which every order is unserved
@@ -956,6 +1046,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm" data-testid="change-summary">
           <b>Changes vs version {d.change.parentVersion}:</b> {d.change.text}.
         </div>
+      ) : null}
+      {showKeptBox && d.kept?.loads.length && !superseded && !running ? (
+        <KeptChangesBox report={d.kept} canPlan={canPlan} busy={!!busy} onUnlock={(loads) => void unlockFromBox(loads)} testId="kept-changed-box" />
       ) : null}
       {d.warnings.length ? (
         <div className="space-y-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm">
@@ -1485,6 +1578,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                             })
                           }
                           onPhotos={(st, ov) => setPhotosFor({ title: `${l.truckCode} L${l.loadNo} stop ${st.sequence} · ${st.customerName}`, photos: ov.photos })}
+                          move={canMove && (l.status === 'PLANNED' || l.status === 'LOCKED') ? { disabled: l.status !== 'PLANNED' || !!busy, onMove: (st) => setMoveFor({ kind: 'MOVE', load: l, stop: st }) } : null}
                         />
                       </td>
                     </tr>
@@ -1519,6 +1613,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   <th className="p-2">Cases</th>
                   <th className="p-2">Sales orders</th>
                   <th className="p-2">Reason</th>
+                  {canMove ? <th className="p-2" /> : null}
                 </tr>
               </thead>
               <tbody>
@@ -1559,6 +1654,24 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         </>
                       )}
                     </td>
+                    {canMove ? (
+                      <td className="p-2">
+                        {!u.partial && !u.cancelled && !u.carriedTo ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={!!busy}
+                            data-testid="unserved-place"
+                            onClick={() => {
+                              const same = d.unserved.filter((x) => x.customerId === u.customerId && !x.partial && !x.cancelled && !x.carriedTo);
+                              setMoveFor({ kind: 'PLACE', unserved: u, orders: new Set(same.map((x) => x.orderId)).size, cases: same.reduce((a, x) => a + x.cases, 0) });
+                            }}
+                          >
+                            Put on a truck…
+                          </Button>
+                        ) : null}
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>
@@ -1603,7 +1716,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                 <Link className="font-medium underline-offset-2 hover:underline" href={`/t/${slug}/dispatch/plan/${v.id}`}>
                   Version {v.version}
                 </Link>{' '}
-                · {v.reason.replace('_', ' ')} · {v.status} · {new Date(v.createdAt).toLocaleString()}
+                · {v.reason.replace('_', ' ')}
+                {/* The version's note tells the two MANUAL ADJUSTMENTs apart: "By hand: ..." (a move saved) or "Unlocked for changed customer data: ..." (the kept-load re-plan). */}
+                {v.reasonNote ? <span data-testid="version-note"> ({v.reasonNote})</span> : null} · {v.status} · {new Date(v.createdAt).toLocaleString()}
                 {v.changeText ? <span className="text-muted-foreground"> — {v.changeText}</span> : null}
               </p>
             ))}
@@ -1630,6 +1745,21 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           driverPhone={dialogLoad?.driverPhone ?? null}
           phoneCountryCode={phoneCountryCode}
           onChanged={keepLink}
+        />
+      ) : null}
+      {canMove ? (
+        <MoveStopDialog
+          subject={moveFor}
+          plan={d}
+          runId={runId}
+          onOpenChange={(o) => {
+            if (!o) setMoveFor(null);
+          }}
+          run={(key, fn) => runPlanAction(lock, key, fn, failed)}
+          afterSave={async (saved) => {
+            toast.success(savedText(saved), { duration: 20_000 });
+            await onChanged?.(saved.runId);
+          }}
         />
       ) : null}
       <CasualDriverDialog
@@ -1665,7 +1795,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             weightFix: weightFixText(canEditProducts),
             // "Re-plan now?" and Quick or Thorough in one dialog (Cancel = not now).
             confirmReplan: async () => {
-              lateOrderMode.current = await askSearchMode('Late order saved. Re-plan now? Locked and dispatched loads stay exactly as they are.');
+              lateOrderMode.current = await askSearchMode('Late order saved. Re-plan now?');
               return lateOrderMode.current !== null;
             },
             replan: async () => {
@@ -2118,9 +2248,12 @@ function LoadDetail({
   canRecord = false,
   onRecord,
   onPhotos,
+  move = null,
 }: {
   l: DetailLoad;
   depotCode: string;
+  /** Moves by hand: the Move… button of each stop (disabled on a LOCKED load: unlock it first); null = none. */
+  move?: { disabled: boolean; onMove: (st: DetailLoad['stops'][number]) => void } | null;
   /** The delivery results (spec section 10.2); the extra columns show for loads that left. */
   overlay?: OutcomeOverlay | null;
   canRecord?: boolean;
@@ -2131,7 +2264,7 @@ function LoadDetail({
   const kgNote = manifestKgNote(l);
   const results = ON_ROAD.has(l.status) && !!overlay;
   const tz = overlay?.tz ?? 'Asia/Muscat';
-  const span = results ? 15 : 9;
+  const span = (results ? 15 : 9) + (move ? 1 : 0);
   // A load planned by pallets: each product's "3 pallets + 12 cases" and the TOTAL in pallets too.
   const pallets = loadPallets(l);
   // Owner request 20 Oct 2026: the special-loading customers' products in their own block(s), as on the sheets.
@@ -2283,6 +2416,7 @@ function LoadDetail({
                   <th />
                 </>
               ) : null}
+              {move ? <th /> : null}
             </tr>
           </thead>
           <tbody>
@@ -2389,6 +2523,21 @@ function LoadDetail({
                 <td>{st.legKm}</td>
                 <td>{st.cumulativeKm ?? '—'}</td>
                 {results ? <StopResultCells o={overlay!.stops[`${l.id}:${st.sequence}`] ?? null} tz={tz} canRecord={canRecord} onRecord={(o) => onRecord?.(st, o)} onPhotos={(o) => onPhotos?.(st, o)} /> : null}
+                {move ? (
+                  <td>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-xs"
+                      disabled={move.disabled}
+                      title={l.status === 'LOCKED' ? LOCKED_MOVE_TITLE : 'Move this stop to another load or position, or take it off the plan'}
+                      data-testid="stop-move"
+                      onClick={() => move.onMove(st)}
+                    >
+                      Move…
+                    </Button>
+                  </td>
+                ) : null}
               </tr>
               {l.break && l.break.where === 'ROAD' && (l.break.afterSequence ?? 0) === st.sequence ? <BreakRow l={l} /> : null}
               </Fragment>

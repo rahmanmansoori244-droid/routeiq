@@ -8,6 +8,8 @@ Endpoints (all but /health require the shared-secret X-Solver-Token header):
   worker processes cannot start is refused within seconds with 503 WORKERS_UNAVAILABLE (rule 22).
 * ``POST /optimize-dispatch/stop`` - a THOROUGH solve returns the best plan found so far.
 * ``POST /route-geometry``    - road polyline for a load via the configured OSRM.
+* ``POST /retime-truck-days`` - moves by hand: a few truck days re-timed exactly (retime.py; no search, no
+  worker process, no dispatch slot; at most RETIME_MAX_CONCURRENT at once).
 * ``GET  /ready``             - dispatch readiness for the web's /api/health: proves the token is
   set on both sides and matches, without running an optimization (audit F15), and reports a
   recent failed worker start (rule 22).
@@ -30,7 +32,7 @@ from pydantic import BaseModel
 
 from fastapi.responses import JSONResponse
 
-from dispatch_models import DispatchRequest, DispatchResponse, GeometryRequest, GeometryResponse
+from dispatch_models import DispatchRequest, DispatchResponse, GeometryRequest, GeometryResponse, RetimeRequest, RetimeResponse
 from dispatch_solver import (
     ORTOOLS_VERSION,
     WORKER_HEALTH,
@@ -43,7 +45,9 @@ from dispatch_solver import (
     priority_repair_on,
 )
 import best_of
+import join_trips
 import pyvrp_candidate
+import retime
 from models import OptimizeRequest, OptimizeResponse
 from providers import HaversineProvider, OSRMProvider, configured_osrm_url
 from solver import optimize
@@ -84,6 +88,11 @@ def _env_int(name: str, default: int) -> int:
 # covers a deploy overlap (two web processes) and direct callers.
 MAX_CONCURRENT_DISPATCH = _env_int("MAX_CONCURRENT_DISPATCH", 2)
 _DISPATCH_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_DISPATCH)
+# Moves by hand (PR M1): at most RETIME_MAX_CONCURRENT (default 4) /retime-truck-days checks at once, read here once;
+# another one is refused at once with 503. Each is a few small timing LPs in this process for at most
+# RETIME_BUDGET_SEC (no search, no worker process: rule 22) and takes no dispatch slot.
+RETIME_MAX_CONCURRENT = retime.max_concurrent()
+_RETIME_SLOTS = threading.BoundedSemaphore(RETIME_MAX_CONCURRENT)
 
 
 def _on_railway() -> bool:
@@ -152,6 +161,10 @@ log.info(pyvrp_candidate.startup_line())
 log.info(best_of.startup_line())
 # The priority repair after the load re-check (SOLVER_PRIORITY_REPAIR): off (the default) or on.
 log.info(priority_repair_line())
+# Re-timing for moves by hand (/retime-truck-days): its limits, and any RETIME_* value it could not read.
+log.info(retime.startup_line())
+# Join small trips after the load re-check (SOLVER_JOIN_TRIPS): off (the default), report or on.
+log.info(join_trips.startup_line())
 
 
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
@@ -228,6 +241,12 @@ def ready_endpoint(
         "best_of": best_of.status(),
         # The priority repair (SOLVER_PRIORITY_REPAIR, off by default; read on every solve). Never affects ok.
         "priority_repair": "on" if priority_repair_on() else "off",
+        # Re-timing for moves by hand (/retime-truck-days): its version and limits; the web's move check needs it.
+        # Never affects ok.
+        "retime": {**retime.status(), "max_concurrent": RETIME_MAX_CONCURRENT},
+        # Join small trips (SOLVER_JOIN_TRIPS, off by default; read on every solve): mode, its rule, values not read.
+        # Never affects ok.
+        "join_trips": join_trips.status(),
     }
 
 
@@ -355,6 +374,32 @@ def route_geometry_endpoint(
     return GeometryResponse(provider="HAVERSINE", is_estimated=True,
                             coordinates=HaversineProvider().get_route_geometry(list(req.coords)),
                             warning="Road routing (OSRM) is not configured; straight lines shown.")
+
+
+@app.post("/retime-truck-days", response_model=RetimeResponse)
+def retime_truck_days_endpoint(
+    body: RetimeRequest,
+    x_solver_token: Annotated[str | None, Header(alias="X-Solver-Token")] = None,
+) -> RetimeResponse:
+    """A move by hand (PR M1): the edited trucks' new loads re-timed exactly from the fresh request the web sends
+    (retime.py). 422: the request names an unknown truck or stop, a stop twice, an empty load, more than 6 trucks
+    or 80 stops; 503: RETIME_MAX_CONCURRENT checks already running (taken without waiting). It never optimizes,
+    starts no worker process and takes no dispatch slot: a check answers while solves run."""
+    _check_token(x_solver_token)
+    try:
+        retime.check_request(body)
+    except retime.RetimeInvalid as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    slots = _RETIME_SLOTS
+    if not slots.acquire(blocking=False):
+        log.warning("retime run=%s refused: %d check(s) already running", body.request.run_id, RETIME_MAX_CONCURRENT)
+        raise HTTPException(status_code=503, detail=retime.BUSY_TEXT, headers={"Retry-After": "5"})
+    try:
+        return retime.retime_truck_days(body)
+    except retime.RetimeInvalid as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    finally:
+        slots.release()
 
 
 @app.post("/optimize", response_model=OptimizeResponse)

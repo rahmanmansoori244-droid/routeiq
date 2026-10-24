@@ -4,7 +4,8 @@
  * revalidation, the /login redirect loop, Tenant.active, the callbackUrl query
  * string, security headers, platform-admin protection, the cross-tenant
  * view audit, the admin password reset and end-session (no forced logout; the
- * page to come back to survives sign-in).
+ * page to come back to survives sign-in), and (24 Oct 2026) changing your own
+ * password (every session ends, the old password stops working).
  *
  * Requires the dev server (`pnpm dev`) running at TEST_BASE_URL (default
  * http://localhost:3000) and a Postgres reachable via DATABASE_URL.
@@ -398,6 +399,54 @@ describe('admin password reset (works without reset email)', () => {
     const again = await fetchWith(h.cookieJar, `${BASE}/api/users`, j({ email: planner.email, name: 'Again', role: 'PLANNER' }));
     expect(again.status).toBe(409);
     expect(((await again.json()) as { error: string }).error).toMatch(/Reset password/);
+  });
+});
+
+describe('change your own password (owner request 24 Oct 2026: every user changes theirs)', () => {
+  const NEW = 'Chosen-By-The-User-24';
+  const change = (jar: CookieJar | undefined, currentPassword: string, newPassword = NEW) =>
+    fetchWith(jar, `${BASE}/api/account/password`, j({ currentPassword, newPassword }));
+
+  it("a signed-in user changes it: every session ends, the caller's too; the old password no longer signs in, the new one does", async () => {
+    const h = await freshTenant('auth-ownpw');
+    createdSlugs.add(h.slug);
+    const planner = await inviteUser(h, 'PLANNER');
+    const otherDevice = new CookieJar();
+    await login(otherDevice, planner.email, planner.password);
+    expect((await fetchWith(otherDevice, `${BASE}/api/depots`)).status).toBe(200);
+
+    // A wrong current password changes nothing and keeps the session.
+    expect((await change(planner.jar, 'Not-The-Password-1')).status).toBe(400);
+    expect((await fetchWith(planner.jar, `${BASE}/api/depots`)).status).toBe(200);
+
+    const res = await change(planner.jar, planner.password);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toContain('no-store');
+    expect(((await res.json()) as { data: unknown }).data).toEqual({ changed: true, signInAgain: true });
+    expect((await fetchWith(planner.jar, `${BASE}/api/depots`)).status).toBe(401);
+    expect((await fetchWith(otherDevice, `${BASE}/api/depots`)).status).toBe(401);
+    const old = new CookieJar();
+    await login(old, planner.email, planner.password);
+    expect((await fetchWith(old, `${BASE}/api/depots`)).status).toBe(401);
+    const fresh = new CookieJar();
+    await login(fresh, planner.email, NEW);
+    expect((await fetchWith(fresh, `${BASE}/api/depots`)).status).toBe(200);
+
+    const row = await prisma.auditLog.findFirst({ where: { tenantId: h.tenantId, action: 'PASSWORD_CHANGED', entityId: planner.id } });
+    expect(row?.userId).toBe(planner.id);
+    expect(JSON.stringify(row)).not.toMatch(/\$2[aby]\$\d\d\$/);
+  });
+
+  it('without a session 401; a VIEWER may change theirs (it is their own account)', async () => {
+    expect((await change(undefined, 'whatever-it-is-1')).status).toBe(401);
+    const h = await freshTenant('auth-ownpw-viewer');
+    createdSlugs.add(h.slug);
+    const viewer = await inviteUser(h, 'VIEWER');
+    expect((await change(viewer.jar, viewer.password, 'short')).status).toBe(400);
+    expect((await change(viewer.jar, viewer.password)).status).toBe(200);
+    const fresh = new CookieJar();
+    await login(fresh, viewer.email, NEW);
+    expect((await fetchWith(fresh, `${BASE}/api/depots`)).status).toBe(200);
   });
 });
 

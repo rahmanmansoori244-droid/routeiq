@@ -13,7 +13,10 @@ function first(v: string | string[] | undefined): string | undefined {
 export default function LoginPage({ searchParams }: { searchParams: Record<string, string | string[] | undefined> }) {
   // Only the path matters server-side; the form checks again against the real browser origin.
   const callbackUrl = safeCallbackUrl(first(searchParams.callbackUrl), RELATIVE_ONLY_ORIGIN);
-  const sessionEnded = first(searchParams.reason) === 'session';
+  const reason = first(searchParams.reason);
+  const sessionEnded = reason === 'session';
+  // After "Change password" (components/change-password-dialog.tsx): every session ended, this one too.
+  const passwordChanged = reason === 'password';
   const canSignUp = signupOpen();
 
   return (
@@ -26,6 +29,11 @@ export default function LoginPage({ searchParams }: { searchParams: Record<strin
         {sessionEnded ? (
           <p className="rounded-md border bg-card px-3 py-2 text-center text-sm text-muted-foreground" role="status">
             Your session has ended. Please sign in again.
+          </p>
+        ) : null}
+        {passwordChanged ? (
+          <p className="rounded-md border bg-card px-3 py-2 text-center text-sm text-muted-foreground" role="status">
+            Your password is changed. Sign in with your new password.
           </p>
         ) : null}
         <LoginForm callbackUrl={callbackUrl} />

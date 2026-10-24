@@ -24,6 +24,10 @@
  *
  * Loading instruction (owner request 16 Oct 2026): the day's customer carries it for the Details dialog only
  * when it has one, and it never makes the plan out of date (no re-plan is needed for it).
+ *
+ * Kept-load warning: the locked and loading loads planned with older customer data come in their own field
+ * (`kept`, kept-changes-server.ts, replaced here), never in `outdated` - a re-plan keeps those loads, so they
+ * never turn RE-PLAN on - and are not read while the plan is optimizing (the screen polls then; review W8).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { addDaysIso, todayIso } from '@/lib/dispatch/time';
@@ -41,6 +45,9 @@ interface State {
   trucks?: unknown[];
   /** TenantConfig.smallTruckMaxBays (undefined: the default, 6). */
   smallTruckMaxBays?: number;
+  /** The plan in use's status (default READY), and the kept-load report its loader gives. */
+  planStatus?: string;
+  kept?: unknown;
 }
 const state: State = { orders: [], assignments: [], scope: [], plannedLoads: [], unserved: [] };
 
@@ -71,8 +78,15 @@ vi.mock('@/lib/tenant', () => ({
   }),
 }));
 vi.mock('@/lib/dispatch/plan-service', () => ({
-  currentPlan: async () => ({ id: 'run1', version: 2, status: 'READY', reason: 'INITIAL', chosenScenarioId: 'sc1', summaryJson: null, reconciliationJson: null }),
+  currentPlan: async () => ({ id: 'run1', version: 2, status: state.planStatus ?? 'READY', reason: 'INITIAL', chosenScenarioId: 'sc1', summaryJson: null, reconciliationJson: null }),
   ordersInScopeWhere: async () => ({}),
+}));
+const keptRead = vi.hoisted(() => ({ calls: [] as unknown[][] }));
+vi.mock('@/lib/dispatch/kept-changes-server', () => ({
+  keptChangesOrNull: async (...args: unknown[]) => {
+    keptRead.calls.push(args);
+    return state.kept ?? null;
+  },
 }));
 
 import { getDayOverview, UP_TO_DATE } from '@/lib/dispatch/day-overview';
@@ -113,6 +127,9 @@ beforeEach(() => {
   state.unserved = [];
   state.trucks = undefined;
   state.smallTruckMaxBays = undefined;
+  state.planStatus = undefined;
+  state.kept = undefined;
+  keptRead.calls.length = 0;
 });
 
 describe('day overview: case weights of a split order partly on a frozen load (PR4 review)', () => {
@@ -441,5 +458,32 @@ describe("day overview: a customer's loading instruction (owner request 16 Oct 2
     expect(d.outdated).toEqual(UP_TO_DATE);
     state.orders = [withText(null)];
     expect((await day()).customers.every((c) => !('loadingInstruction' in c))).toBe(true);
+  });
+});
+
+describe('day overview: locked loads planned with older customer data (the kept-load warning)', () => {
+  const kept = { v: 1, fingerprint: '0a1b2c3d', counts: { loads: 1, stops: 1, breaks: 0, check: 0 }, loads: [{ loadId: 'L2', label: 'T05 L2' }] };
+  const on = (status: string) => ({ orderId: 'O1', portionLinesJson: null, portionWeightKg: 10000, stopSnapshotJson: null, load: { status, truck: { bays: 12 } } });
+
+  it('come in `kept`, read for the plan in use with the settings the day read; `outdated` stays up to date (no RE-PLAN for them)', async () => {
+    state.orders = [order(10, 10000)];
+    state.assignments = [on('LOCKED')];
+    state.kept = kept;
+    const d = await day();
+    expect(d.kept).toEqual(kept);
+    expect(d.outdated).toEqual(UP_TO_DATE);
+    expect(keptRead.calls).toHaveLength(1);
+    expect(keptRead.calls[0]!.slice(1, 3)).toEqual(['tA', 'run1']);
+    expect(keptRead.calls[0]![3]).toMatchObject({ cfg: expect.objectContaining({ timezone: 'Asia/Muscat' }), profiles: expect.any(Map), area: expect.any(Object) });
+  });
+
+  it('review W8: not read while the plan is optimizing (the day screen polls every few seconds then)', async () => {
+    state.orders = [order(10, 10000)];
+    state.assignments = [on('LOCKED')];
+    state.kept = kept;
+    state.planStatus = 'OPTIMIZING';
+    const d = await day();
+    expect(d.kept).toBeNull();
+    expect(keptRead.calls).toEqual([]);
   });
 });

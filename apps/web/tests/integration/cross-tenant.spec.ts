@@ -224,6 +224,15 @@ const PROBES: ProbeCase[] = [
     },
   },
   {
+    // The kept-load warning (locked loads planned with older customer data): another company's version is 404.
+    label: 'GET /api/runs/{id-B}/kept-changes',
+    method: 'GET',
+    build: async () => {
+      const r = await prisma.runPlan.findFirstOrThrow({ where: { tenantId: tenantB.tenantId } });
+      return `${BASE}/api/runs/${r.id}/kept-changes`;
+    },
+  },
+  {
     label: 'GET /api/runs/{id-B}/status',
     method: 'GET',
     build: async () => {
@@ -238,6 +247,25 @@ const PROBES: ProbeCase[] = [
     build: async () => {
       const l = await prisma.salesLink.findFirstOrThrow({ where: { tenantId: tenantB.tenantId } });
       return `${BASE}/api/dispatch/sales-links/${l.id}`;
+    },
+  },
+  {
+    // Moves by hand (24 Oct 2026): 404 FEATURE_OFF while PLAN_EDIT is off, 404 NOT_FOUND for another company's plan otherwise.
+    label: 'POST /api/runs/{id-B}/edit/check',
+    method: 'POST',
+    body: () => ({ move: { kind: 'REMOVE', from: { loadId: 'xt-load', sequence: 1 } } }),
+    build: async () => {
+      const r = await prisma.runPlan.findFirstOrThrow({ where: { tenantId: tenantB.tenantId } });
+      return `${BASE}/api/runs/${r.id}/edit/check`;
+    },
+  },
+  {
+    label: 'POST /api/runs/{id-B}/edit',
+    method: 'POST',
+    body: () => ({ move: { kind: 'REMOVE', from: { loadId: 'xt-load', sequence: 1 } }, previewHash: '0'.repeat(64), builtAt: new Date().toISOString() }),
+    build: async () => {
+      const r = await prisma.runPlan.findFirstOrThrow({ where: { tenantId: tenantB.tenantId } });
+      return `${BASE}/api/runs/${r.id}/edit`;
     },
   },
   {

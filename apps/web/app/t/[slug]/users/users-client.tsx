@@ -334,7 +334,8 @@ function TempPasswordDialog({
           <DialogDescription>
             {info?.reset ? 'Their old password no longer works. ' : ''}
             Give this password to {info?.email} over a secure channel (in person or by phone). It is not stored anywhere
-            readable: once you close this dialog, use &quot;Reset password&quot; to issue another.
+            readable: once you close this dialog, use &quot;Reset password&quot; to issue another. After signing in with it,
+            they choose their own password with &quot;Change password&quot; in the user menu.
           </DialogDescription>
         </DialogHeader>
         <Card>

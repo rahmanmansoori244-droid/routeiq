@@ -538,6 +538,9 @@ FeasibilityCode = Literal[
     "BREAK",
     # A stop on a truck that is not in its allowed_truck_ids (a "small truck only" customer on a big truck).
     "TRUCK_NOT_ALLOWED",
+    # /retime-truck-days only (moves by hand): no timetable keeps every rule for a truck's loads, and none of the
+    # codes above names the rule (feasibility.check_scenario never gives it).
+    "NO_TIMETABLE",
 ]
 
 
@@ -766,6 +769,9 @@ class SearchReport(BaseModel):
     # RECOMMENDED and what came of it. None when one search ran (the default), and from a solver before it.
     # The fields above stay the main search's (or, when it failed, those of the search that replaced it).
     best_of: "BestOfReport | None" = None
+    # Join small trips (SOLVER_JOIN_TRIPS, join_trips.py): what the step found and did per option. None with the
+    # setting off (the default), and from a solver before it.
+    join_trips: "JoinTripsReport | None" = None
 
 
 class PyvrpReport(BaseModel):
@@ -881,6 +887,84 @@ class BestOfReport(BaseModel):
     searches: list[SearchRunReport] = Field(default_factory=list)
 
 
+class JoinTripsMove(BaseModel):
+    """One change of the join step (join_trips.py). kind: JOIN = a load fewer on ``truck_id`` (a small load's
+    visits as one run in another load; also the truck's stops cut again into fewer loads, or another stop order),
+    SPREAD = a small load's visits spread over the truck's other loads, MOVE = a one-visit load onto a load of
+    ``to_truck_id``, a company truck already out (reported only until the owner's OK: ``applied`` false).
+    stop_ids: the small load's stops (request ids; a re-cut: the truck's smallest load before). loads_*: the
+    truck's new loads (MOVE: ``truck_id``'s). Gains positive = cheaper / fewer km (gain_omr: money plus the
+    customer time preferences). back_*: the last return (MOVE: ``to_truck_id``'s). The margins after the change:
+    end_slack_min to the truck's latest return (or the shift), break_slack_min to the break window's end (None: no
+    break question), window_slack_min the tightest closing time, road_wait_* minutes waited on the road.
+    stops_after: the truck's new loads after the change, each its stops (request ids) in order (MOVE:
+    ``to_truck_id``'s) - what a dispatcher reviews in report mode, where the plan keeps its loads. applied: the
+    change is in the option's plan."""
+
+    kind: Literal["JOIN", "SPREAD", "MOVE"]
+    truck_id: str
+    to_truck_id: str | None = None
+    stop_ids: list[str] = Field(default_factory=list)
+    cases: int = 0
+    loads_before: int
+    loads_after: int
+    gain_omr: float
+    gain_operating_omr: float
+    gain_km: float
+    back_before_min: int | None = None
+    back_after_min: int | None = None
+    break_start_min: int | None = None
+    end_slack_min: int | None = None
+    break_slack_min: int | None = None
+    window_slack_min: int | None = None
+    road_wait_before_min: int | None = None
+    road_wait_min: int | None = None
+    stops_after: list[list[str]] = Field(default_factory=list)
+    applied: bool = False
+
+
+class JoinTripsOption(BaseModel):
+    """The join step on one option. outcome: JOINED (its plan is the joined one), WOULD_JOIN (report mode: found and
+    passed the independent check), NOT_VERIFIED (found, failed the independent check: the plan without it), ERROR
+    (the step failed: the plan without it), or when nothing was found the furthest step reached: NO_SMALL_LOAD
+    (no company truck with two or more new loads, or none of its loads has at most max_stops customer visits),
+    NONE_FITS, NOT_BETTER, SLACK, OUT_OF_TIME. A reported MOVE (onto another truck, not applied) leaves the outcome
+    of the truck's own step, so ``moves`` may hold one under NO_SMALL_LOAD. A plain string, so a value this list does
+    not know never fails a finished solve. loads_* and gain_*: the whole plan; tried: proposals timed exactly;
+    verified: the joined plan passed the independent check (None: nothing was built)."""
+
+    option: str
+    outcome: str
+    loads_before: int = 0
+    loads_after: int = 0
+    gain_omr: float = 0.0
+    gain_operating_omr: float = 0.0
+    gain_km: float = 0.0
+    tried: int = 0
+    verified: bool | None = None
+    moves: list[JoinTripsMove] = Field(default_factory=list)
+
+
+class JoinTripsReport(BaseModel):
+    """Join small trips (SOLVER_JOIN_TRIPS = report or on; join_trips.py). status, the first that applies: FAILED
+    (an option's step failed or its joined plan did not pass the independent check, whatever the other options
+    did), JOINED (an option uses a joined plan), WOULD_JOIN (report mode found one), NONE, SKIPPED (``reason``:
+    HIRE_CHECK, NOTHING_TO_PLAN, NO_STAGE). The rule's constants as they ran; seconds, timings (exact timings asked
+    for) and lps (timing LPs) are the step's own."""
+
+    mode: Literal["report", "on"]
+    status: str
+    reason: str | None = None
+    min_gain_omr: float
+    slack_min: int
+    max_stops: int
+    across_trucks: bool = False
+    seconds: float = 0.0
+    timings: int = 0
+    lps: int = 0
+    options: list[JoinTripsOption] = Field(default_factory=list)
+
+
 SearchReport.model_rebuild()
 DispatchResponse.model_rebuild()
 HireCheck.model_rebuild()
@@ -896,3 +980,124 @@ class GeometryResponse(BaseModel):
     is_estimated: bool
     coordinates: list[list[float]]  # [lng, lat]
     warning: str | None = None
+
+
+# ---------------------------------------------------------------------------------------------
+# POST /retime-truck-days (moves by hand, PR M1; retime.py). Mirrored in packages/shared-types/src/dispatch.ts.
+# ---------------------------------------------------------------------------------------------
+
+# At most this many trucks, and stops on them (truck_days, best and before together), per check: a move touches
+# one or two trucks; the web sends at most 4.
+RETIME_MAX_TRUCKS = 6
+RETIME_MAX_STOPS = 80
+
+
+class RetimeTruckDay(BaseModel):
+    """One truck's NEW loads (the PLANNED ones the move may change), in trip order: each load the request's stop ids
+    in delivery order. [] = no new load left. Its frozen loads (locked, loading, dispatched, completed) are the
+    request's frozen_trips: never sent here, never changed."""
+
+    truck_id: str
+    loads: list[list[str]] = Field(default_factory=list)
+
+
+class RetimeBest(BaseModel):
+    """"Best place" for one stop (not on any load of truck_days) on one truck of truck_days: every position in
+    loads[load_index], or - load_index None - the stop alone as a new load at every place of the truck's day."""
+
+    stop_id: str
+    truck_id: str
+    load_index: int | None = Field(default=None, ge=0)
+
+
+class RetimeRequest(BaseModel):
+    """``request``: the plan version's request built FRESH by the web (today's customers, trucks, settings,
+    frozen loads and same-day clock; every stop of the day). ``truck_days``: the edited trucks' new loads after the
+    move. ``before``: the same trucks' new loads as they are now (the cost change, timed in the same call). Plan
+    continuity is never priced in a move (change_penalty_per_stop is taken as 0)."""
+
+    request: DispatchRequest
+    truck_days: list[RetimeTruckDay] = Field(min_length=1)
+    before: list[RetimeTruckDay] | None = None
+    best: RetimeBest | None = None
+
+
+class RetimeTruckBefore(BaseModel):
+    """The truck's current new loads (RetimeRequest.before) timed now, with today's data and the same matrix
+    and prices as the move. money_omr / soft_omr / km are None when they can no longer be timed (violations)."""
+
+    feasible: bool
+    violations: list[FeasibilityViolation] = Field(default_factory=list)
+    loads: int
+    money_omr: float | None = None
+    soft_omr: float | None = None
+    km: float | None = None
+    first_depart_min: int | None = None
+    last_return_min: int | None = None
+
+
+class RetimeTruckOut(BaseModel):
+    """One edited truck after the move. feasible: every hard rule holds (violations: which do not, and by how
+    much). money_omr: the new loads' money (costing.truck_day_costs, exactly what the plan stores, unrounded per
+    load); soft_omr: preferred hours and the early-arrival push (OMR-equivalent, not money). The deltas are
+    after - before, both timed in this call (None without ``before`` or when either side cannot be timed)."""
+
+    truck_id: str
+    feasible: bool
+    violations: list[FeasibilityViolation] = Field(default_factory=list)
+    loads: int
+    money_omr: float | None = None
+    soft_omr: float | None = None
+    km: float | None = None
+    first_depart_min: int | None = None
+    last_return_min: int | None = None
+    break_start_min: int | None = None
+    before: RetimeTruckBefore | None = None
+    delta_money_omr: float | None = None
+    delta_soft_omr: float | None = None
+    delta_km: float | None = None
+    delta_last_return_min: int | None = None
+
+
+class RetimeOption(BaseModel):
+    """One place for RetimeRequest.best's stop that keeps every rule, best first. load_index: the load it goes in
+    (as sent); None = a new load, at new_load_at among the truck's loads (0 = first). position: its index in that
+    load (0 = first; 0 for a new load). loads: the truck's new loads with the stop there - what a save sends back."""
+
+    truck_id: str
+    load_index: int | None = None
+    new_load_at: int | None = None
+    position: int
+    loads: list[list[str]]
+    money_omr: float
+    soft_omr: float
+    km: float
+    last_return_min: int
+
+
+class RetimeResponse(BaseModel):
+    """ok: every edited truck keeps every hard rule (and, with best, a place was found); scenario is then the
+    edited trucks' new loads, timed exactly and VERIFIED / EXACT by the independent check. Not ok: scenario (when it
+    could be built) holds the earliest timetable of the trucks that break a rule (VIOLATED: for the screen, never
+    to save) and trucks[].violations say why. The scenario covers the edited trucks only: its totals, trucks_used,
+    frozen_trucks and frozen_loads are theirs, and it carries no day-level warning."""
+
+    ok: bool
+    matrix_provider: str
+    distance_quality: Literal["ROAD", "MIXED", "ESTIMATED"]
+    distance_is_estimated: bool
+    scenario: DispatchScenario | None = None
+    trucks: list[RetimeTruckOut]
+    options: list[RetimeOption] = Field(default_factory=list)
+    # best: the places for its stop and how many were timed (at most RETIME_BEST_TRIES, within the budget).
+    best_total: int | None = None
+    best_tried: int | None = None
+    # Over every edited truck, after - before (None unless every truck has both).
+    delta_money_omr: float | None = None
+    delta_soft_omr: float | None = None
+    delta_km: float | None = None
+    # Truck timings this answer asked for (load_repack.time_truck calls, counted here: not LP_STATS, which is
+    # process-wide), and its seconds.
+    timings: int = 0
+    seconds: float = 0.0
+    warnings: list[str] = Field(default_factory=list)
