@@ -54,7 +54,7 @@ import {
 } from '@/lib/dispatch/data-collection';
 import { coordCell } from '@/lib/dispatch/customer-master';
 import { DEFAULT_SERVICE_AREA } from '@/lib/dispatch/location-input';
-import { addDaysIso, dateOnly, todayIso } from '@/lib/dispatch/time';
+import { addDaysIso, dateOnly, fmtDayMonth, todayIso } from '@/lib/dispatch/time';
 import { LOCATION_ADMIN_ONLY_MESSAGE } from '@/lib/dispatch/customer-attrs';
 
 const T = 'tA';
@@ -502,8 +502,10 @@ describe('item 6: GET /api/customers/master and the import reading it back', () 
     ]);
     expect(rowsOf(wb.worksheets[2]!).map((x) => x.code)).toEqual(['NONE', 'LOW', 'USABLE']);
     // A date chooser: from the company's midnight of that day.
-    const since = await workbookOf(await master('?since=2026-09-20'));
-    expect(since.worksheets[1]!.name).toBe('Changed since 20 Sep');
+    // 10 days back from today, so the chosen date never ages past the 31-day limit tested below.
+    const sinceDay = addDaysIso(today, -10);
+    const since = await workbookOf(await master(`?since=${sinceDay}`));
+    expect(since.worksheets[1]!.name).toBe(`Changed since ${fmtDayMonth(sinceDay)}`);
     expect(rowsOf(since.worksheets[1]!).map((x) => x.code)).toEqual(['DONE', 'USABLE', 'CONFIRMED']);
     expect((await master('?since=2026-13-45')).status).toBe(400);
     session.role = 'VIEWER';
