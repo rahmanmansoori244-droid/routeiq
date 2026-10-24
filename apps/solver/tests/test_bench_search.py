@@ -60,11 +60,12 @@ def test_dry_run_checks_the_inputs_and_solves_nothing(tmp_path, capsys, monkeypa
     assert "runs: 30 " in text  # 1 request x 2 modes x 5 arms x 3 repetitions
     assert "QUICK best-of 3, PyVRP on; THOROUGH best-of 3, PyVRP on;" in text  # best_of, as the solver reads it
     assert "priority repair on" in text and "PyVRP on, models small-truck-only days" in text
+    assert "priority repair off; join small trips off" in text and "join small trips on" in text  # base, all_on
     assert "small-truck-only stops 0 (a list decides: no)" in text
     assert not out.exists()
     _assert_no_ids(text, r)
     # The settings of the shell are untouched afterwards.
-    assert BO.setting("THOROUGH") == 1 and not ds.priority_repair_on()
+    assert BO.setting("THOROUGH") == 1 and not ds.priority_repair_on() and ds.JT.mode() == "off"
 
 
 def test_bad_inputs_are_refused_before_anything_runs(tmp_path, capsys, monkeypatch):
@@ -151,6 +152,16 @@ def test_the_pre_written_rule_reads_the_paired_runs():
     recs += [_rec("failed", 1, error={"type": "SolveAborted"}, **on), _rec("failed", 2, **on), _rec("failed", 3, **on)]
     recs += [_rec("gated", i, 90.0, k=3, ran=1) for i in (1, 2, 3)]  # the CPU gate let one search run
     recs += [_rec("partial", i, 90.0, **on) for i in (1, 2)]
+
+    def join_rec(arm: str, rep: int, outcome: str) -> dict:
+        r = _rec(arm, rep, 99.0)
+        r["effective"]["join_trips"] = "report"
+        r["join_trips"] = {"status": "NONE", "options": [{"option": "RECOMMENDED", "outcome": outcome, "moves": {"JOIN": 1},
+                                                          "applied": 0, "gain_operating_omr": 3.0}]}
+        return r
+
+    recs += [join_rec("join_idle", i, "NO_SMALL_LOAD") for i in (1, 2, 3)]  # report mode never found a join
+    recs += [join_rec("join_found", i, "WOULD_JOIN" if i == 2 else "NOT_BETTER") for i in (1, 2, 3)]
     ev = bench.evaluate(recs, "base", {"QUICK": 3})
     v = {arm: e["verdict"] for (_mode, arm), e in ev.items()}
     assert v["good"] == "PASS" and ev[("QUICK", "good")]["median_d_cash"] == -1.0
@@ -162,6 +173,7 @@ def test_the_pre_written_rule_reads_the_paired_runs():
     assert v["lost"].startswith("FAIL: 5") and "search 1 LOST" in v["lost"]
     assert v["failed"].startswith("FAIL: 5") and "error SolveAborted" in v["failed"]
     assert v["gated"].startswith("NOT EXERCISED: best-of")
+    assert v["join_idle"] == "NOT EXERCISED: join small trips never took effect" and v["join_found"] == "PASS"
     assert v["partial"] == "INCOMPLETE: 2 of 3 pairs"
     assert ("QUICK", "base") not in ev
     # Service first, the engine's strict order: one P1 fewer left out outweighs two P5s more, and wins although dearer.
@@ -172,3 +184,4 @@ def test_the_pre_written_rule_reads_the_paired_runs():
     summary = bench.summarize(recs, {"base": "base", "reps": 3, "requests": [{"label": "day", "digest": "d1", "modes": ["QUICK"],
                                                                                 "facts": {}}], "arms": []})
     assert "**PASS**" in summary and "**FAIL: 1 service worse in 1 pair(s)**" in summary
+    assert "## Join small trips" in summary and "RECOMMENDED/NOT_BETTER 2, RECOMMENDED/WOULD_JOIN 1" in summary

@@ -70,6 +70,7 @@ window); the repack only chooses trucks and the order of loads.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
@@ -516,6 +517,14 @@ _EPS_B = 1e-6
 # Timing LPs solved in this process and their seconds (the break positions are the extra ones):
 # reported in the stage's log lines and the benchmark.
 LP_STATS = {"lps": 0, "sec": 0.0}
+# The same count per thread (join_trips: a step's own LPs, never another solve's in this process - LP_STATS is
+# process-wide and another solve may time loads at the same moment).
+_LP_THREAD = threading.local()
+
+
+def thread_lps() -> int:
+    """Timing LPs solved so far by the calling thread (a difference of two readings is one step's own count)."""
+    return getattr(_LP_THREAD, "n", 0)
 
 
 def break_due(td: "TruckDay") -> bool:
@@ -559,6 +568,7 @@ def _truck_lp(day: Day, td: "TruckDay", loads: list[Load], pricing: Pricing,
     finally:
         LP_STATS["lps"] += 1
         LP_STATS["sec"] += time.perf_counter() - t_lp
+        _LP_THREAD.n = getattr(_LP_THREAD, "n", 0) + 1
 
 
 def _truck_lp_solve(pywraplp, day: Day, td: "TruckDay", loads: list[Load], pricing: Pricing,

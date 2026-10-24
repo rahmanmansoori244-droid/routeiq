@@ -43,6 +43,7 @@ from dispatch_solver import (
     priority_repair_on,
 )
 import best_of
+import join_trips
 import pyvrp_candidate
 from models import OptimizeRequest, OptimizeResponse
 from providers import HaversineProvider, OSRMProvider, configured_osrm_url
@@ -152,6 +153,8 @@ log.info(pyvrp_candidate.startup_line())
 log.info(best_of.startup_line())
 # The priority repair after the load re-check (SOLVER_PRIORITY_REPAIR): off (the default) or on.
 log.info(priority_repair_line())
+# Join small trips after the load re-check (SOLVER_JOIN_TRIPS): off (the default), report or on.
+log.info(join_trips.startup_line())
 
 
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
@@ -228,6 +231,9 @@ def ready_endpoint(
         "best_of": best_of.status(),
         # The priority repair (SOLVER_PRIORITY_REPAIR, off by default; read on every solve). Never affects ok.
         "priority_repair": "on" if priority_repair_on() else "off",
+        # Join small trips (SOLVER_JOIN_TRIPS, off by default; read on every solve): mode, its rule, values not read.
+        # Never affects ok.
+        "join_trips": join_trips.status(),
     }
 
 

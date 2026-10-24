@@ -243,6 +243,79 @@ export interface SearchReport {
    * absent from a solver before it. The fields above stay the main search's (or the one that replaced it).
    */
   best_of?: BestOfReport | null;
+  /**
+   * Join small trips (SOLVER_JOIN_TRIPS): what the step found and did per option. Null with the setting off
+   * (the default) and absent from a solver before it.
+   */
+  join_trips?: JoinTripsReport | null;
+}
+
+/**
+ * Join small trips (apps/solver dispatch_models.JoinTripsReport): a company truck's small load (at most
+ * max_stops customer visits) ridden on its other loads after the load re-check. status, the first that applies:
+ * FAILED (any option NOT_VERIFIED or ERROR), JOINED, WOULD_JOIN (report mode), NONE; or SKIPPED (reason:
+ * HIRE_CHECK, NOTHING_TO_PLAN, NO_STAGE).
+ */
+export interface JoinTripsReport {
+  mode: 'report' | 'on';
+  status: string;
+  reason?: string | null;
+  min_gain_omr: number;
+  slack_min: number;
+  max_stops: number;
+  across_trucks?: boolean;
+  seconds?: number;
+  timings?: number;
+  lps?: number;
+  options?: JoinTripsOption[];
+}
+
+/**
+ * The join step on one option (apps/solver dispatch_models.JoinTripsOption). outcome: JOINED, WOULD_JOIN,
+ * NOT_VERIFIED, ERROR, or the furthest step reached: NO_SMALL_LOAD (also: no company truck with two or more new
+ * loads), NONE_FITS, NOT_BETTER, SLACK, OUT_OF_TIME. Loads and gains are the whole plan's (gains positive =
+ * cheaper / fewer km).
+ */
+export interface JoinTripsOption {
+  option: string;
+  outcome: string;
+  loads_before?: number;
+  loads_after?: number;
+  gain_omr?: number;
+  gain_operating_omr?: number;
+  gain_km?: number;
+  tried?: number;
+  verified?: boolean | null;
+  moves?: JoinTripsMove[];
+}
+
+/**
+ * One change of the join step (apps/solver dispatch_models.JoinTripsMove). kind: JOIN, SPREAD or MOVE (onto
+ * another company truck already out: reported only, applied false). Times are minutes from midnight; the
+ * margins are after the change. stops_after: the truck's new loads after it, stop ids in order (MOVE: the
+ * other truck's).
+ */
+export interface JoinTripsMove {
+  kind: 'JOIN' | 'SPREAD' | 'MOVE';
+  truck_id: string;
+  to_truck_id?: string | null;
+  stop_ids?: string[];
+  cases?: number;
+  loads_before: number;
+  loads_after: number;
+  gain_omr: number;
+  gain_operating_omr: number;
+  gain_km: number;
+  back_before_min?: number | null;
+  back_after_min?: number | null;
+  break_start_min?: number | null;
+  end_slack_min?: number | null;
+  break_slack_min?: number | null;
+  window_slack_min?: number | null;
+  road_wait_before_min?: number | null;
+  road_wait_min?: number | null;
+  stops_after?: string[][];
+  applied?: boolean;
 }
 
 /**
