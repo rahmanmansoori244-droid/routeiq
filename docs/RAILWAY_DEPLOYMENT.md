@@ -421,6 +421,13 @@ endpoint. Deploy it outside the evening's planning, like any solver deploy (a re
   Each check later logs one line `retime run=<id> tenant=<id> trucks=... stops=... ok=... provider=... timings=...
   seconds=...` (ids only).
 - **Rollback:** redeploy the previous solver commit; nothing in the database changes.
+- **Version 2 (25 Oct 2026, moves by hand part 2: several stops at once, whole loads, "allow anyway").** Deploy this
+  solver **before** its web: the web deployed before it keeps working against it unchanged (its requests get the same
+  answers, plus fields it ignores), while the new web refuses several stops at once on an older solver and offers
+  nothing to allow by hand. No new setting. Verify: the startup line says `(/retime-truck-days v2)` and `GET /ready`
+  has `"retime": {"version": 2, ...}`; each check's log line also has `relaxed=ok|no|- best_stops=... alt=...`.
+  Rollback: redeploy the previous solver commit (the new web then answers "needs the updated route optimizer" for what
+  needs v2; explicit moves keep working).
 
 ## Moves by hand on the plan screen (24 Oct 2026, the web part; `PLAN_EDIT`, off by default)
 
