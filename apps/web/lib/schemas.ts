@@ -233,35 +233,76 @@ export const hireUseSchema = z
   })
   .strict();
 
-/** Moves by hand (lib/dispatch/plan-edit-view.ts): a stop of a PLANNED load, and where a stop goes. */
-const editSourceSchema = z.object({ loadId: z.string().min(1).max(64), sequence: z.number().int().min(0).max(10_000) }).strict();
+/** Moves by hand (lib/dispatch/plan-edit-view.ts): a stop of a PLANNED load, and where stops go. */
+const editId = z.string().min(1).max(64);
+const editSourceSchema = z.object({ loadId: editId, sequence: z.number().int().min(0).max(10_000) }).strict();
+/** A stop of a PLANNED load, or a whole unserved customer visit (one of its order ids). */
+const editStopRefSchema = z.union([editSourceSchema, z.object({ orderId: editId }).strict()]);
 const editTargetSchema = z
   .object({
-    truckId: z.string().min(1).max(64),
-    loadId: z.string().min(1).max(64).nullable(),
+    truckId: editId,
+    loadId: editId.nullable(),
     position: z.union([z.number().int().min(0).max(1_000), z.literal('BEST')]).optional(),
-    before: z.union([z.string().min(1).max(64), z.null()]).optional(),
+    // 'BEST' passes as an id.
+    before: z.union([editId, z.null()]).optional(),
+    // v2: the explicit layout (an existing load's whole order, or the new load's stops in order).
+    order: z.array(editStopRefSchema).min(1).max(120).optional(),
   })
   .strict();
 export const planEditMoveSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('MOVE'), from: editSourceSchema, to: editTargetSchema }).strict(),
   z.object({ kind: z.literal('REMOVE'), from: editSourceSchema }).strict(),
-  z.object({ kind: z.literal('PLACE'), orderId: z.string().min(1).max(64), to: editTargetSchema }).strict(),
+  z.object({ kind: z.literal('PLACE'), orderId: editId, to: editTargetSchema }).strict(),
+]);
+/**
+ * One operation of a change list (v1 MOVE / REMOVE / PLACE, and v2 several stops, a whole load, a swap). A swap
+ * of a load with itself and an `order` with `before: 'BEST'` are refused by the check (SAME_LOAD, BAD_ORDER): a
+ * discriminated union takes only plain objects.
+ */
+export const planEditOpSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('MOVE'), from: editSourceSchema, to: editTargetSchema }).strict(),
+  z.object({ kind: z.literal('REMOVE'), from: editSourceSchema }).strict(),
+  z.object({ kind: z.literal('PLACE'), orderId: editId, to: editTargetSchema }).strict(),
+  z.object({ kind: z.literal('MOVE_STOPS'), stops: z.array(editStopRefSchema).min(1).max(40), to: editTargetSchema }).strict(),
+  z.object({ kind: z.literal('REMOVE_STOPS'), stops: z.array(editSourceSchema).min(1).max(40) }).strict(),
+  z.object({ kind: z.literal('MOVE_LOAD'), loadId: editId, to: z.object({ truckId: editId, before: z.union([editId, z.null()]) }).strict() }).strict(),
+  z.object({ kind: z.literal('SWAP_LOADS'), a: editId, b: editId }).strict(),
 ]);
 const expectDaySchema = z.object({ date: isoDateSchema, depotId: z.string().min(1) });
+/** A rule allowed by hand at Save: the issue's override id and the reason (3-300 characters). */
+const overrideSchema = z.object({ id: z.string().regex(/^ovr_[0-9a-f]{16}$/), reason: z.string().trim().min(3).max(300) }).strict();
 
-/** POST /api/runs/[id]/edit/check: one change, and the day on screen. */
-export const planEditCheckSchema = z.object({ move: planEditMoveSchema, expect: expectDaySchema.optional() }).strict();
-
-/** POST /api/runs/[id]/edit: the change as the check answered it (a best place resolved), its hash and when the day was read. */
-export const planEditSaveSchema = z
+// A plain object first: a refined schema cannot be extended.
+const planEditBodyBase = z
   .object({
-    move: planEditMoveSchema,
+    /** v1 body: one change. */
+    move: planEditMoveSchema.optional(),
+    /** v2 body: a change list, applied in order. */
+    ops: z.array(planEditOpSchema).min(1).max(10).optional(),
     expect: expectDaySchema.optional(),
-    previewHash: z.string().regex(/^[0-9a-f]{64}$/),
-    builtAt: z.string().datetime(),
+    /** Trucks whose driver break is skipped (the dialog's "Skip the driver break instead"). */
+    skipBreak: z.array(editId).max(6).optional(),
   })
   .strict();
+const oneChange = (b: { move?: unknown; ops?: unknown }) => !!b.move !== !!b.ops;
+
+/** POST /api/runs/[id]/edit/check: one change (`move`) or a change list (`ops`), and the day on screen. */
+export const planEditCheckSchema = planEditBodyBase.refine(oneChange, 'Send move or ops');
+
+/**
+ * POST /api/runs/[id]/edit: the change as the check answered it (a best place resolved), its hash and when the
+ * day was read. `overrides` present (even empty) = save WITH the issues allowed by hand (the overrides hash),
+ * absent = save keeping every rule (the strict hash).
+ */
+export const planEditSaveSchema = planEditBodyBase
+  .extend({
+    previewHash: z.string().regex(/^[0-9a-f]{64}$/),
+    builtAt: z.string().datetime(),
+    overrides: z.array(overrideSchema).max(200).optional(),
+  })
+  .strict()
+  .refine(oneChange, 'Send move or ops')
+  .refine((b) => !b.overrides || new Set(b.overrides.map((o) => o.id)).size === b.overrides.length, 'An override is listed twice');
 
 export const driverSchema = z.object({
   code: codeSchema,

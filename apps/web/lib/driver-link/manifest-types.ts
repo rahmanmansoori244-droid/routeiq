@@ -191,6 +191,8 @@ export interface ManifestStop {
   carriedFrom: string | null;
   /** The customer data changed after planning (a moved pin: ask the dispatcher). */
   changeNotes: string[];
+  /** Moves by hand, allow anyway: "Allowed by hand: arrives 13:20, after receiving hours ... - <reason>"; absent = none. */
+  allowedNote?: string;
   result: StopResult | null;
 }
 

@@ -29,6 +29,7 @@ import { SMALL_TRUCK_BADGE } from './small-truck';
 import { helpersText } from './load-helpers';
 import { instructionLine, loadInstructions, specialLinesPalletTotal, specialLoadingTitle, stopIsLoaded } from './loading-instruction';
 import { splitByLoadingInstruction } from './loading-split';
+import { allowedBadge, allowedByHandText } from './plan-edit-view';
 
 // ---------------------------------------------------------------------------------------
 // Model (pure)
@@ -75,8 +76,13 @@ export interface SheetStop {
   breakAfter: string | null;
   /** Receiving hours, one line each: "Receives 06:00–14:00", "Best 07:00–10:00" or "Any time". */
   hours: string[];
-  /** The plan arrives outside the customer's hard receiving hours. */
+  /** The plan arrives outside the customer's hard receiving hours (false when that was allowed by hand: see allowedByHand). */
   outsideHours: boolean;
+  /**
+   * Moves by hand, allow anyway: "Allowed by hand: arrives 13:20, after receiving hours 08:00–13:00 (20 min late) -
+   * agreed with customer" (PDF-safe, without the approver's name); absent = none.
+   */
+  allowedByHand?: string;
   cases: number;
   skus: { productCode: string; productName: string; cases: number }[];
   salesOrders: string[];
@@ -101,6 +107,8 @@ export interface DriverSheet {
   carried: boolean;
   /** LOCKED / LOADING / DISPATCHED ..., plus KEPT FROM PREVIOUS VERSION for carried loads. */
   badges: string[];
+  /** Moves by hand, allow anyway: the load-level rules allowed by hand in words (capacity, no driver break), PDF-safe; absent = none. */
+  allowedByHand?: string[];
   driverName: string | null;
   driverPhone: string | null;
   /** "Helper: Saif" / "Helpers: Saif, Omar" (owner request 13 Oct 2026); null = no helper (nothing printed). */
@@ -280,7 +288,9 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
     breakAfter:
       l.break && l.break.where === 'ROAD' && (l.break.afterSequence ?? 0) === s.sequence && s.sequence > 0 ? breakLine(l.break, l.stops.length) : null,
     hours: hoursLines(s.window),
-    outsideHours: s.hardWindowOk === false,
+    // A late arrival allowed by hand is printed as such (agreed with the customer), never as "outside hours".
+    outsideHours: s.hardWindowOk === false && !s.handAllowed,
+    ...(s.handAllowed ? { allowedByHand: t.text(allowedByHandText(s.handAllowed)) } : {}),
     cases: s.cases,
     skus: s.skus.map((k) => ({ productCode: t.text(k.productCode), productName: t.text(k.productName), cases: k.cases })),
     salesOrders: s.salesOrders.map((so) => t.text(so)),
@@ -345,7 +355,10 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
           // Audit E1: the route below starts and ends at the depot pin the load was planned from.
           ...(l.masterChanged.some((c) => c.kind === 'DEPOT') ? ['DEPOT MOVED SINCE PLANNING: ROUTE FROM THE PLANNED DEPOT PIN'] : []),
           ...(l.hired ? ['HIRED TRUCK'] : []),
+          // Moves by hand, allow anyway: a load-level rule allowed by hand (the driver and the loaders must know).
+          ...(l.handAllowed ?? []).map((a) => allowedBadge(a)).filter((b): b is string => !!b),
         ],
+        ...(l.handAllowed?.length ? { allowedByHand: l.handAllowed.map((a) => t.text(allowedByHandText(a))) } : {}),
         driverName: t.maybe(l.driverName),
         driverPhone: t.maybe(l.driverPhone),
         helpersLine: helpersLine((l.helpers ?? []).map((h) => t.maybe(h.name))),

@@ -264,6 +264,83 @@ export interface TruckSnapshot extends TruckFacts {
    * planned before it was kept (a re-plan then stamps the depot of the version that planned them).
    */
   origin?: LoadOrigin;
+  /**
+   * Rules allowed by hand on this load (moves by hand, part 2: "allow anyway", owner feedback 24 Oct 2026):
+   * the issues a SUPERVISOR or TENANT_ADMIN confirmed with a reason when saving a change by hand. Copied with
+   * the snapshot into every later version; dropped when the load is made again (RE-PLAN, Use instead, a later
+   * hand change of the truck, which carries the ones that still apply). Read with readHandAllowances.
+   */
+  handAllowed?: HandAllowance[];
+}
+
+/** The kinds of rule a dispatcher may allow by hand (plan-edit-view.ts OverrideKind). */
+export type HandAllowanceKind = 'LATE' | 'CAPACITY_PALLETS' | 'CAPACITY_CASES' | 'CAPACITY_KG' | 'NO_BREAK';
+
+/** One rule allowed by hand on a load (TruckSnapshot.handAllowed): the evidence the gates and the sheets read. */
+export interface HandAllowance {
+  v: 1;
+  /** The override id of the issue on this load (plan-edit.ts overrideId). */
+  id: string;
+  kind: HandAllowanceKind;
+  /** LATE: the stop's rows (`${orderId}|${lines}`); CAPACITY_*: every row of the load; NO_BREAK: []. */
+  rowKeys: string[];
+  /** Plain order ids of rowKeys (display, audit). */
+  orderIds: string[];
+  /** LATE: the customer as planned. */
+  customerId?: string;
+  stopLabel?: string;
+  /** LATE: the receiving-hours rule, the hours it was allowed past (as planned), the time and minutes late in this version. */
+  rule?: 'START' | 'FINISH';
+  windowStartMin?: number | null;
+  windowEndMin?: number;
+  atMin?: number;
+  lateMin?: number;
+  /** LATE: the most minutes late that was approved (the first approval's; a carried allowance keeps it). */
+  maxLateMin?: number;
+  /** CAPACITY_*: in the kind's unit (pallets, cases, kg), the web's own figures. maxValue: the most that was approved. */
+  value?: number;
+  maxValue?: number;
+  limit?: number;
+  capacity?: number;
+  overPct?: number;
+  /** NO_BREAK: the break rule it was allowed under. */
+  breakMin?: number;
+  breakFromMin?: number;
+  breakToMin?: number;
+  reason: string;
+  byUserId: string;
+  byName: string;
+  byRole: 'SUPERVISOR' | 'TENANT_ADMIN' | 'SUPER_ADMIN';
+  /** ISO, when it was approved. */
+  at: string;
+  /** The version whose save approved it. */
+  runId: string;
+  /** Kept from an earlier approval by a later hand change (no new confirmation). */
+  carriedFrom?: { id: string; runId: string };
+}
+
+const HAND_KINDS: readonly string[] = ['LATE', 'CAPACITY_PALLETS', 'CAPACITY_CASES', 'CAPACITY_KG', 'NO_BREAK'];
+const HAND_ROLES: readonly string[] = ['SUPERVISOR', 'TENANT_ADMIN', 'SUPER_ADMIN'];
+
+/**
+ * The allowances by hand of a load, read from its raw truck snapshot JSON: each entry's shape is checked
+ * (kind, ids, rows, reason, who, when, and the figures of its kind); anything else is dropped, so a damaged
+ * entry never allows anything.
+ */
+export function readHandAllowances(json: unknown): HandAllowance[] {
+  if (!isObj(json) || !Array.isArray(json.handAllowed)) return [];
+  const num = (x: unknown) => typeof x === 'number' && Number.isFinite(x);
+  const strs = (x: unknown) => Array.isArray(x) && x.every((y) => typeof y === 'string');
+  const out: HandAllowance[] = [];
+  for (const a of json.handAllowed as unknown[]) {
+    if (!isObj(a) || a.v !== 1 || typeof a.id !== 'string' || typeof a.kind !== 'string' || !HAND_KINDS.includes(a.kind)) continue;
+    if (!strs(a.rowKeys) || !strs(a.orderIds) || typeof a.reason !== 'string' || typeof a.byUserId !== 'string' || typeof a.byName !== 'string') continue;
+    if (typeof a.byRole !== 'string' || !HAND_ROLES.includes(a.byRole) || typeof a.at !== 'string' || typeof a.runId !== 'string') continue;
+    if (a.kind === 'LATE' && (!num(a.maxLateMin) || !num(a.windowEndMin) || (a.rowKeys as string[]).length === 0)) continue;
+    if (a.kind.startsWith('CAPACITY_') && (!num(a.maxValue) || !num(a.capacity))) continue;
+    out.push(a as unknown as HandAllowance);
+  }
+  return out;
 }
 
 const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);

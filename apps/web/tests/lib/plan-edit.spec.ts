@@ -261,11 +261,11 @@ describe('editTruckDays: the edited trucks\' new loads', () => {
     expect(resolveBestPlace(lone, loneEdit.edit, { truck_id: 'T01', load_index: null, new_load_at: 1, position: 0, loads: [['c1', 'c2', 'c3'], ['c4']] }, planned, 'c4', truckOf)).toEqual({ ok: false, code: 'NO_CHANGE' });
   });
 
-  it("counts the stops a check sends (before, after and a best-place stop once each) against the solver's 80", () => {
+  it("counts the stops a check sends (before, after and a best-place stop once each) against the solver's 120 (v2)", () => {
     const r = run({ kind: 'MOVE', from: { loadId: 'A1', sequence: 3 }, to: { truckId: 'T02', loadId: 'B1', position: 'BEST' } }, 'c3');
     if (!r.ok) throw new Error('no edit');
     expect(retimeStopCount(r.edit)).toBe(6);
-    expect(RETIME_MAX_STOPS).toBe(80);
+    expect(RETIME_MAX_STOPS).toBe(120);
   });
 });
 

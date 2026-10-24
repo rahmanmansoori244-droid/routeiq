@@ -1,27 +1,40 @@
 /**
- * Moves by hand (PR M2): the save of a checked change - POST /api/runs/:id/edit. Server only; the check,
- * the pure helpers and the rules are in plan-edit.ts (read its top first).
+ * Moves by hand (PR M2, part 2 of 24-25 Oct 2026): the save of a checked change - POST /api/runs/:id/edit.
+ * Server only; the check, the pure helpers and the rules are in plan-edit.ts (read its top first).
  *
  * savePlanEdit checks again with the day read as it was at the check (at most 10 minutes later), must
  * find the same preview, and then in ONE transaction, under the intake lock, the day lock and the plan
  * row (the dispatch writers' order, plan-locks.ts):
  *  1. reads the touched trucks again (editBasis): anything of them changed (a load locked, an order in,
- *     another option chosen) answers 409 DAY_CHANGED and nothing is written; a change elsewhere does not;
+ *     another option chosen, an allowance by hand) answers 409 DAY_CHANGED and nothing is written; a
+ *     change elsewhere does not;
  *  2. makes version N+1, MANUAL_ADJUSTMENT (createNextVersionTx: every load copied with its rows,
  *     snapshots, driver and helpers, the option in use with its unserved rows; the parent SUPERSEDED);
  *  3. applyPlanEdit: only the edited trucks' PLANNED loads are deleted and made again from the solver's
- *     timetable (materializeLoads), with fresh snapshots for EVERY row of them (critic M4: they were all
- *     re-timed with today's data); drivers and helpers through planCrew with the other trucks' loads kept
- *     as they are (critic M6); the unserved list (a stop taken off: REMOVED_BY_HAND; an order put on: its
- *     row removed), the order statuses, the option merged (mergeOption) and the plan facts again;
+ *     timetable (materializeLoads) - the relaxed one when rules are allowed by hand, each allowance kept
+ *     on its new load (truckSnapshotJson.handAllowed) - with fresh snapshots for EVERY row of them (critic
+ *     M4: they were all re-timed with today's data); drivers and helpers through planCrew with the other
+ *     trucks' loads kept as they are (critic M6: drivers stay with their trucks); the unserved list (the
+ *     stops taken off: REMOVED_BY_HAND; the orders put on: their rows removed), the order statuses, the
+ *     option merged (mergeOption) and the plan facts again;
  *  4. guards that roll everything back (409 EDIT_CHECK_FAILED): the plan reconciled and no longer does,
- *     the web's own timetable check of an edited truck disagrees with the solver's, or a frozen load moved;
- *  5. the audit ROUTE_MANUALLY_CHANGED (before and after per truck, ids and codes only).
+ *     the web's own timetable check of an edited truck disagrees with the solver's (an allowed issue is a
+ *     warning there), or a frozen load moved;
+ *  5. the audit ROUTE_MANUALLY_CHANGED (before and after per truck, ids and codes only, the change list,
+ *     the rules allowed by hand) and RULE_ALLOWED_BY_HAND when allowances were stored.
  * After the commit, a hire check of the day is stopped and the salesman link's day is read again.
+ *
+ * Allow anyway (design 3.9): `overrides` present (even empty) saves the change with the issues it needs
+ * allowed by hand: the switch must be on (409 OVERRIDES_OFF), new confirmations need SUPERVISOR or above
+ * (403 OVERRIDE_ROLE), the overrides hash must be the check's, the change must still break a rule
+ * (OVERRIDES_CHANGED), everything else must hold (MOVE_REFUSED), the confirmed ids must be exactly the
+ * needed ones not carried (OVERRIDES_CHANGED / OVERRIDE_ROLE), and every needed issue is judged again on
+ * the web's own figures (409 OVERRIDE_NOT_ALLOWED): a solver bug can never store more than allowed.
  */
-import { Prisma, type OrderStatus, type RunPlan } from '@prisma/client';
+import { Prisma, type OrderStatus, type Role, type RunPlan } from '@prisma/client';
 import { prisma } from '../db';
 import { audit } from '../audit';
+import { canApproveOverride } from '../rbac';
 import {
   applyWeightChanges,
   buildDispatchRequest,
@@ -43,10 +56,13 @@ import { DEFAULT_TZ, fmtHhmm, isoOf, localMinutes } from './time';
 import { forgetSalesDay } from '../sales-link/day-read';
 import type { DailySummary } from './summary';
 import type { Reconciliation } from './reconcile';
+import { readHandAllowances, type HandAllowance } from './snapshots';
 import {
+  allowancesOfSave,
   checkPlanEdit,
   EDIT_FROM,
   editBasis,
+  isV1Op,
   manualOf,
   mergeOption,
   PREVIEW_MAX_AGE_MS,
@@ -54,9 +70,10 @@ import {
   refuse,
   type EditCheck,
   type EditLoad,
+  type JudgedIssue,
   type ManualEdit,
 } from './plan-edit';
-import { EDIT_ERROR_TEXT, type PlanEditMove, type PlanEditSaved } from './plan-edit-view';
+import { EDIT_ERROR_TEXT, planEditOverridesOn, type PlanEditMove, type PlanEditOp, type PlanEditSaved } from './plan-edit-view';
 import type { ExpectedDay } from './start-optimize';
 import { PlanError } from './plan-errors';
 
@@ -77,16 +94,49 @@ class EditCheckFailed extends PlanError {
   }
 }
 
+/** A reason typed by hand: trimmed, control characters out (it is printed on the sheets and sent on WhatsApp). */
+export function cleanReason(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+const APPROVER_ROLES = ['SUPERVISOR', 'TENANT_ADMIN', 'SUPER_ADMIN'] as const;
+type ApproverRole = (typeof APPROVER_ROLES)[number];
+
+/** One rule allowed by hand as the audit rows keep it: ids, codes and figures, and the user's own reason. */
+function auditOverride(i: JudgedIssue, reason: string) {
+  return {
+    id: i.id,
+    kind: i.kind,
+    truckId: i.truckId,
+    truckCode: i.truckCode,
+    loadNo: i.loadNo,
+    customerId: i.customerId,
+    orderIds: i.orderIds,
+    unit: i.amount?.unit ?? null,
+    value: i.amount?.value ?? null,
+    limit: i.amount?.limit ?? null,
+    capacity: i.amount?.capacity ?? null,
+    overPct: i.amount?.overPct ?? null,
+    lateMin: i.kind === 'LATE' ? (i.amount?.over ?? null) : null,
+    maxLateMin: i.kind === 'LATE' ? (i.carriedFrom?.maxLateMin ?? i.amount?.over ?? null) : null,
+    maxValue: i.kind?.startsWith('CAPACITY_') ? (i.carriedFrom?.maxValue ?? i.amount?.value ?? null) : null,
+    reason,
+    ...(i.carriedFrom ? { carried: { fromId: i.carriedFrom.id, byName: i.carriedFrom.byName, at: i.carriedFrom.at } } : {}),
+  };
+}
+
 /**
  * Save a checked change as version N+1 (see the top of this file). Refusals are PlanErrors: 409
  * PREVIEW_OLD, PREVIEW_CHANGED (with the new `preview`), MOVE_REFUSED (with the `preview`), ROADS_DOWN,
- * DAY_CHANGED, SUPERSEDED, OPTIMIZING, PLAN_BUSY, EDIT_CHECK_FAILED; and the check's own.
+ * DAY_CHANGED, SUPERSEDED, OPTIMIZING, PLAN_BUSY, EDIT_CHECK_FAILED, OVERRIDES_OFF, OVERRIDES_CHANGED,
+ * OVERRIDE_NOT_ALLOWED; 403 OVERRIDE_ROLE; and the check's own. `move` is the v1 body (one change).
  */
 export async function savePlanEdit(
   tenantId: string,
   runId: string,
-  input: { move: PlanEditMove; expect?: ExpectedDay; previewHash: string; builtAt: string },
-  user: { id: string; name?: string | null },
+  input: { move?: PlanEditMove; ops?: PlanEditOp[]; expect?: ExpectedDay; skipBreak?: string[]; previewHash: string; builtAt: string; overrides?: { id: string; reason: string }[] },
+  user: { id: string; name?: string | null; role?: Role | string | null },
   ip: string | null,
   opts: { now?: Date } = {},
 ): Promise<PlanEditSaved> {
@@ -95,12 +145,43 @@ export async function savePlanEdit(
   const age = now.getTime() - builtAt.getTime();
   // A minute of clock difference is allowed the other way; never a check from the future.
   if (!Number.isFinite(age) || age < -60_000 || age > PREVIEW_MAX_AGE_MS) throw refuse(409, 'PREVIEW_OLD', EDIT_ERROR_TEXT.PREVIEW_OLD);
-  const check = await checkPlanEdit(tenantId, runId, { move: input.move, expect: input.expect, now: builtAt, mode: 'ON' });
-  if (check.preview.previewHash !== input.previewHash) throw refuse(409, 'PREVIEW_CHANGED', EDIT_ERROR_TEXT.PREVIEW_CHANGED, { preview: check.preview });
-  if (!check.answer.ok || !check.answer.scenario) throw refuse(409, 'MOVE_REFUSED', 'This change breaks a rule and cannot be saved.', { preview: check.preview });
-  if (!check.preview.canSave) throw refuse(409, 'ROADS_DOWN', check.preview.saveNote ?? EDIT_ERROR_TEXT.ROADS_DOWN, { preview: check.preview });
+  const withOverrides = input.overrides !== undefined;
+  const role = (user.role ?? null) as Role | null;
+  const canOverride = !!role && canApproveOverride(role);
+  const confirmed = new Map((input.overrides ?? []).map((o) => [o.id, cleanReason(o.reason)]));
+  if (withOverrides) {
+    if (!planEditOverridesOn()) throw refuse(409, 'OVERRIDES_OFF', EDIT_ERROR_TEXT.OVERRIDES_OFF);
+    if (confirmed.size > 0 && !canOverride) throw refuse(403, 'OVERRIDE_ROLE', EDIT_ERROR_TEXT.OVERRIDE_ROLE);
+    for (const [id, reason] of confirmed) if (reason.length < 3) throw refuse(422, 'BAD_REASON', `The reason for ${id} is too short: say why it is allowed.`);
+  }
+  const check = await checkPlanEdit(tenantId, runId, { move: input.move, ops: input.ops, skipBreak: input.skipBreak, expect: input.expect, now: builtAt, mode: 'ON', canOverride });
+  if (!withOverrides) {
+    if (check.preview.previewHash !== input.previewHash) throw refuse(409, 'PREVIEW_CHANGED', EDIT_ERROR_TEXT.PREVIEW_CHANGED, { preview: check.preview });
+    if (!check.answer.ok || !check.answer.scenario) throw refuse(409, 'MOVE_REFUSED', 'This change breaks a rule and cannot be saved.', { preview: check.preview });
+    if (!check.preview.canSave) throw refuse(409, 'ROADS_DOWN', check.preview.saveNote ?? EDIT_ERROR_TEXT.ROADS_DOWN, { preview: check.preview });
+  } else {
+    const ov = check.preview.overrides;
+    // b. It still breaks a rule (else nothing is to be allowed).
+    if (check.answer.ok) throw refuse(409, 'OVERRIDES_CHANGED', 'This change keeps every rule now: save it without allowing anything.', { preview: check.preview });
+    // c. Everything that cannot be allowed holds (a change refused even when allowed is refused whatever the hash).
+    const judged = check.overrides;
+    if (!ov || !ov.ok || !judged || judged.remaining.length || !check.answer.relaxed?.scenario) throw refuse(409, 'MOVE_REFUSED', 'This change breaks a rule that cannot be allowed by hand.', { preview: check.preview });
+    // a. The overrides hash of the check.
+    if (ov.previewHash !== input.previewHash) throw refuse(409, 'PREVIEW_CHANGED', EDIT_ERROR_TEXT.PREVIEW_CHANGED, { preview: check.preview });
+    // d. Exactly the needed issues that are not carried are confirmed.
+    const want = new Set(judged.needed.filter((n) => !n.carried).map((n) => n.id ?? ''));
+    if (want.size && !canOverride) throw refuse(403, 'OVERRIDE_ROLE', EDIT_ERROR_TEXT.OVERRIDE_ROLE);
+    if (want.size !== confirmed.size || [...want].some((id) => !confirmed.has(id))) throw refuse(409, 'OVERRIDES_CHANGED', EDIT_ERROR_TEXT.OVERRIDES_CHANGED, { preview: check.preview });
+    // e. Every needed issue judged again on the web's own figures (a solver bug can never store more than allowed).
+    for (const n of judged.needed) {
+      const bad = !n.kind || !n.id || !n.overridable || (n.kind === 'LATE' && (!n.amount || n.amount.value < n.amount.limit));
+      if (bad) throw refuse(409, 'OVERRIDE_NOT_ALLOWED', `This cannot be allowed by hand: ${n.text}${n.whyNot ? ` (${n.whyNot})` : ''}.`, { preview: check.preview, issueId: n.id });
+    }
+    // f. Roads.
+    if (!ov.canSave && ov.saveNote === EDIT_ERROR_TEXT.ROADS_DOWN) throw refuse(409, 'ROADS_DOWN', EDIT_ERROR_TEXT.ROADS_DOWN, { preview: check.preview });
+  }
   const { run } = check;
-  let saved: { child: RunPlan; reprint: string[]; gone: string[] };
+  let saved: { child: RunPlan; reprint: string[]; gone: string[]; allowed: number; carried: number };
   try {
     saved = await prisma.$transaction(
       async (tx) => {
@@ -119,7 +200,8 @@ export async function savePlanEdit(
         const basisNow = editBasis({ request: again.request, edited: check.edit.edited, stopIds: stopIdsOf(check), loads: loadsNow, chosenScenarioId: locked.chosenScenarioId, unserved: unservedNow });
         if (basisNow !== check.basis) throw new DayChanged();
 
-        const { child } = await createNextVersionTx(tx, tenantId, runId, 'MANUAL_ADJUSTMENT', `By hand: ${check.preview.title}`.slice(0, 500), user.id);
+        const allowedNote = withOverrides && check.overrides?.needed.length ? `; ${check.overrides.needed.length} rule${check.overrides.needed.length === 1 ? '' : 's'} allowed by hand` : '';
+        const { child } = await createNextVersionTx(tx, tenantId, runId, 'MANUAL_ADJUSTMENT', `By hand: ${check.preview.title}`.slice(0, 500 - allowedNote.length) + allowedNote, user.id);
         // The edited orders' kg as the solver was sent them (usually nothing to do).
         const orders = editedOrderIds(check);
         await applyWeightChanges(
@@ -129,9 +211,23 @@ export async function savePlanEdit(
           { lines: check.built.weightChanges.lines.filter((c) => orders.has(c.orderId)), orders: check.built.weightChanges.orders.filter((c) => orders.has(c.orderId)) },
           user.id,
         );
-        const applied = await applyPlanEdit(tx, tenantId, { child, parent: locked, check, user, at: now });
+        const applied = await applyPlanEdit(tx, tenantId, { child, parent: locked, check, user, at: now, overrides: withOverrides ? confirmed : null });
         await audit({ tenantId, userId: user.id, action: 'ROUTE_MANUALLY_CHANGED', entity: 'RunPlan', entityId: child.id, beforeJson: applied.before as never, afterJson: applied.after as never, ip }, tx);
-        return { child, reprint: applied.reprint, gone: applied.gone };
+        if (applied.overrides.length) {
+          await audit(
+            {
+              tenantId,
+              userId: user.id,
+              action: 'RULE_ALLOWED_BY_HAND',
+              entity: 'RunPlan',
+              entityId: child.id,
+              afterJson: { parentRunId: run.id, runId: child.id, version: child.version, byRole: role, confirmed: applied.allowed, carried: applied.carried, overrides: applied.overrides } as never,
+              ip,
+            },
+            tx,
+          );
+        }
+        return { child, reprint: applied.reprint, gone: applied.gone, allowed: applied.allowed, carried: applied.carried };
       },
       { timeout: 60_000, maxWait: 10_000 },
     );
@@ -147,12 +243,14 @@ export async function savePlanEdit(
     reprint: saved.reprint,
     gone: saved.gone,
     trucks: check.edit.edited.map((t) => check.preview.trucks.find((x) => x.truckId === t)?.truckCode ?? t),
+    ...(saved.allowed || saved.carried ? { allowed: saved.allowed, carried: saved.carried } : {}),
   };
 }
 
-/** The request stops the check depended on: the edited trucks' before and after, and the stop moved. */
-export function stopIdsOf(check: Pick<EditCheck, 'movedStop' | 'edit'>): Set<string> {
-  return new Set<string>([check.movedStop, ...[...check.edit.before.values(), ...check.edit.after.values()].flat(2)]);
+/** The request stops the check depended on: the edited trucks' before and after, and the stops moved. */
+export function stopIdsOf(check: Pick<EditCheck, 'edit'>): Set<string> {
+  const best = check.edit.best ? [check.edit.best.stop_id, ...(check.edit.best.more_stop_ids ?? [])] : [];
+  return new Set<string>([...check.edit.movedStops, ...[...check.edit.before.values(), ...check.edit.after.values()].flat(2), ...best]);
 }
 
 /** Every order the change re-times, takes off or puts on. */
@@ -180,16 +278,18 @@ function storedStops(l: EditLoad) {
 }
 
 /**
- * The writes of a save on the new version `child` (step 3 and 4 at the top). Returns the audit row's
- * before and after, and the loads whose sheets must be printed again.
+ * The writes of a save on the new version `child` (step 3 and 4 at the top). `overrides`: the confirmed
+ * reasons by override id when the save allows rules by hand (null: every rule kept). Returns the audit
+ * rows' before and after, the loads whose sheets must be printed again, and the rules allowed by hand.
  */
 export async function applyPlanEdit(
   tx: Tx,
   tenantId: string,
-  args: { child: RunPlan; parent: RunPlan; check: EditCheck; user: { id: string; name?: string | null }; at: Date },
-): Promise<{ before: Record<string, unknown>; after: Record<string, unknown>; reprint: string[]; gone: string[] }> {
+  args: { child: RunPlan; parent: RunPlan; check: EditCheck; user: { id: string; name?: string | null; role?: Role | string | null }; at: Date; overrides?: ReadonlyMap<string, string> | null },
+): Promise<{ before: Record<string, unknown>; after: Record<string, unknown>; reprint: string[]; gone: string[]; allowed: number; carried: number; overrides: ReturnType<typeof auditOverride>[] }> {
   const { child, parent, check, user, at } = args;
-  const sc = check.answer.scenario!;
+  const relaxedSave = !!args.overrides;
+  const sc = relaxedSave ? check.answer.relaxed!.scenario! : check.answer.scenario!;
   const edited = new Set(check.edit.edited);
   const childLoads = await tx.planLoad.findMany({ where: { runId: child.id, tenantId }, select: { id: true, truckId: true, loadNo: true, status: true, departMin: true, returnMin: true, _count: { select: { assignments: true } } } });
   const replaced = childLoads.filter((l) => edited.has(l.truckId) && l.status === 'PLANNED');
@@ -198,23 +298,43 @@ export async function applyPlanEdit(
   const option = await tx.scenarioResult.findFirstOrThrow({ where: { id: child.chosenScenarioId!, runId: child.id } });
   const copied = option.detailsJson as unknown as ScenarioDetails;
 
+  // The rules allowed by hand on the new loads: the needed issues, confirmed now or carried from earlier.
+  const needed = relaxedSave ? (check.overrides?.needed ?? []) : [];
+  const approver: ApproverRole = (APPROVER_ROLES as readonly string[]).includes(String(user.role)) ? (user.role as ApproverRole) : 'SUPERVISOR';
+  const allowances = allowancesOfSave({
+    needed,
+    confirmed: args.overrides ?? new Map(),
+    user: { id: user.id, name: user.name || 'a supervisor', role: approver },
+    at: at.toISOString(),
+    runId: child.id,
+    newLoads: sc.loads,
+    config: check.built.request.config,
+  });
+  const allowedCount = needed.filter((n) => !n.carried).length;
+  const carriedCount = needed.filter((n) => !!n.carried).length;
+
   // The option in use with the edited trucks re-timed (refs mapped back, critic M3).
   const frozenTruckIds = childLoads.filter((l) => l.status !== 'PLANNED').map((l) => l.truckId);
+  const v1 = check.ops.length === 1 && isV1Op(check.ops[0]!) ? (check.ops[0] as PlanEditMove) : null;
   const manual: ManualEdit = {
     v: 1,
     at: at.toISOString(),
     byUserId: user.id,
     parentRunId: parent.id,
     count: (manualOf(copied)?.count ?? 0) + 1,
-    move: check.move,
+    ...(v1 ? { move: v1 } : {}),
+    ops: check.ops,
+    ...(allowedCount ? { allowed: allowedCount } : {}),
+    ...(carriedCount ? { carried: carriedCount } : {}),
     trucks: check.edit.edited,
     builtAt: check.preview.builtAt,
     matrix: check.preview.matrix,
-    previewHash: check.preview.previewHash,
+    previewHash: relaxedSave ? (check.preview.overrides?.previewHash ?? check.preview.previewHash) : check.preview.previewHash,
     preferenceApprox: true,
   };
   const clock = fmtHhmm(localMinutes(at, check.built.settings?.timezone || DEFAULT_TZ));
   const removedWhy = `Taken off the plan by hand (${user.name || 'a dispatcher'}). Put on a truck puts it back; a RE-PLAN plans it again.`;
+  const kept = allowedCount + carriedCount;
   const merged = mergeOption({
     copied,
     sc,
@@ -225,13 +345,14 @@ export async function applyPlanEdit(
     frozenTruckIds,
     truckOrder: check.built.request.trucks.map((t) => t.id),
     manual,
-    warning: `Changed by hand by ${user.name || 'a dispatcher'} at ${clock}: ${check.preview.title}.`,
+    warning: `Changed by hand by ${user.name || 'a dispatcher'} at ${clock}: ${check.preview.title}${kept ? ` (${kept} rule${kept === 1 ? '' : 's'} allowed by hand)` : ''}.`,
     unserved: {
       placedOrderIds: check.placedOrderIds,
-      removed:
-        check.move.kind === 'REMOVE'
-          ? { stop_id: check.movedStop, order_ids: check.built.request.stops.find((s) => s.stop_id === check.movedStop)?.order_ids ?? check.removedRows.map((r) => r.orderId), reason_message: removedWhy }
-          : null,
+      removed: check.removedStops.map((r) => ({
+        stop_id: r.stopId,
+        order_ids: check.built.request.stops.find((s) => s.stop_id === r.stopId)?.order_ids ?? r.rows.map((x) => x.orderId),
+        reason_message: removedWhy,
+      })),
     },
   });
 
@@ -261,6 +382,7 @@ export async function applyPlanEdit(
     orderIds,
     snap: await snapshotSource(tx, tenantId, child.depotId, evalDetails, crew.trucks),
     crew,
+    allowances: (ld) => allowances.get(`${ld.truck_id}:${ld.load_no}`) ?? [],
   });
 
   // The unserved list and the order statuses.
@@ -270,13 +392,12 @@ export async function applyPlanEdit(
     await tx.order.updateMany({ where: { tenantId, id: { in: check.placedOrderIds }, status: movable }, data: { status: 'ASSIGNED' } });
   }
   if (check.removedRows.length) {
-    const why = removedWhy;
     await tx.unservedOrder.createMany({
       data: check.removedRows.map((r) => ({
         scenarioId: option.id,
         orderId: r.orderId,
         reasonCode: 'REMOVED_BY_HAND' as const,
-        reasonMessage: why,
+        reasonMessage: removedWhy,
         portionCases: r.portionCases,
         portionWeightKg: r.portionWeightKg,
         portionLinesJson: readPortionLines(r.portionLinesJson) ? (r.portionLinesJson as Prisma.InputJsonValue) : Prisma.DbNull,
@@ -307,16 +428,19 @@ export async function applyPlanEdit(
   const wrote = await tx.runPlan.updateMany({ where: { id: child.id, tenantId, status: { not: 'SUPERSEDED' }, supersededAt: null }, data: { status: next, finalizedAt: next === 'DISPATCHED' ? (child.finalizedAt ?? new Date()) : null } });
   if (wrote.count !== 1) throw refuse(409, 'SUPERSEDED', 'This plan version was superseded by a newer version. Open the latest version.');
   // The driver and helper notes: the other trucks' as they were, the edited trucks' from this change.
-  const kept = child.summaryJson as unknown as DailySummary | null;
+  const keptSummary = child.summaryJson as unknown as DailySummary | null;
   const facts = await refreshPlanFacts(tx, tenantId, child.id, {
-    driverChanges: [...(kept?.driverChanges ?? []).filter((c) => !edited.has(c.truckId)), ...crew.driverChanges],
-    helperChanges: [...(kept?.helperChanges ?? []).filter((c) => !edited.has(c.truckId)), ...crew.helperChanges],
+    driverChanges: [...(keptSummary?.driverChanges ?? []).filter((c) => !edited.has(c.truckId)), ...crew.driverChanges],
+    helperChanges: [...(keptSummary?.helperChanges ?? []).filter((c) => !edited.has(c.truckId)), ...crew.helperChanges],
   });
 
   // Guards (critic M10): any of them rolls the whole save back.
   const parentRecon = parent.reconciliationJson as unknown as Reconciliation | null;
   if (parentRecon?.ok && facts && !facts.recon.ok) throw new EditCheckFailed('the plan would no longer reconcile with the orders');
-  const loadsAfter = await tx.planLoad.findMany({ where: { runId: child.id, tenantId }, select: { id: true, truckId: true, loadNo: true, status: true, departMin: true, returnMin: true, distanceKm: true, operatingCost: true, cases: true, palletUnits: true, truck: { select: { code: true } }, _count: { select: { assignments: true } } } });
+  const loadsAfter = await tx.planLoad.findMany({
+    where: { runId: child.id, tenantId },
+    select: { id: true, truckId: true, loadNo: true, status: true, departMin: true, returnMin: true, distanceKm: true, operatingCost: true, cases: true, palletUnits: true, truckSnapshotJson: true, truck: { select: { code: true } }, _count: { select: { assignments: true } } },
+  });
   const newIds = new Set(loadsAfter.filter((l) => edited.has(l.truckId) && l.status === 'PLANNED').map((l) => l.id));
   const feas = facts?.feasibility ?? null;
   const disagree = (feas?.violations ?? []).filter((v) => v.severity === 'BLOCK' && !v.frozen && !!v.truckId && edited.has(v.truckId) && (v.loadId === null || newIds.has(v.loadId)));
@@ -327,6 +451,11 @@ export async function applyPlanEdit(
   const frozenAfter = JSON.stringify(loadsAfter.filter((l) => l.status !== 'PLANNED').map((l) => [l.id, l.status, l.departMin, l.returnMin, l._count.assignments]).sort());
   if (frozenAfter !== frozenBefore) throw new EditCheckFailed('a locked or dispatched load would have changed');
   if (kgMismatches.length || palletMismatches.length) console.warn('plan edit: load kg or pallets differ from the optimizer', { runId: child.id, kgMismatches, palletMismatches });
+  // An allowance the web gate does not see as needed: said and audited, never a rollback (design 3.9 step 7).
+  const matched = new Set((feas?.violations ?? []).map((v) => v.allowedByHand?.id).filter((x): x is string => !!x));
+  const stored: HandAllowance[] = loadsAfter.filter((l) => newIds.has(l.id)).flatMap((l) => readHandAllowances(l.truckSnapshotJson));
+  const allowanceUnmatched = [...new Set(stored.filter((a) => !matched.has(a.id)).map((a) => a.id))];
+  if (allowanceUnmatched.length) console.warn('plan edit: an allowance by hand is not needed by the timetable check', { runId: child.id, allowanceUnmatched });
 
   // The audit row: before and after per edited truck (ids, codes, figures).
   const rowsAfter = await tx.routeAssignment.findMany({ where: { runId: child.id, loadId: { in: [...newIds] } }, select: { loadId: true, sequenceInTruck: true, orderId: true, order: { select: { customerId: true } } }, orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }] });
@@ -349,32 +478,45 @@ export async function applyPlanEdit(
       loads: check.loads.filter((l) => l.truckId === t).map((l) => auditLoad({ ...l, stops: storedStops(l) })),
     })),
   };
-  const fromStop = check.move.kind === 'PLACE' ? null : check.loads.find((l) => l.id === (check.move as { from: { loadId: string } }).from.loadId) ?? null;
-  const stopRows = fromStop && check.move.kind !== 'PLACE' ? fromStop.rows.filter((r) => r.sequenceInTruck === (check.move as { from: { sequence: number } }).from.sequence) : [];
-  const movedTo = sc.loads.flatMap((l) => l.stops.filter((s) => s.stop_id === check.movedStop).map((s) => ({ truckId: l.truck_id, truckCode: code(l.truck_id), loadNo: l.load_no, position: s.sequence })))[0] ?? null;
+  // A change of one v1 operation keeps its `move` block (tests and the audit page read it).
+  let move: Record<string, unknown> | null = null;
+  if (v1 && check.movedStop) {
+    const fromStop = v1.kind === 'PLACE' ? null : (check.loads.find((l) => l.id === v1.from.loadId) ?? null);
+    const stopRows = fromStop && v1.kind !== 'PLACE' ? fromStop.rows.filter((r) => r.sequenceInTruck === v1.from.sequence) : [];
+    const movedTo = sc.loads.flatMap((l) => l.stops.filter((s) => s.stop_id === check.movedStop).map((s) => ({ truckId: l.truck_id, truckCode: code(l.truck_id), loadNo: l.load_no, position: s.sequence })))[0] ?? null;
+    move = {
+      kind: v1.kind,
+      orderIds: v1.kind === 'PLACE' ? check.placedOrderIds : stopRows.map((r) => r.orderId),
+      customerId: check.built.request.stops.find((s) => s.stop_id === check.movedStop)?.customer_id ?? null,
+      from: fromStop && v1.kind !== 'PLACE' ? { truckId: fromStop.truckId, truckCode: fromStop.truckCode, loadNo: fromStop.loadNo, sequence: v1.from.sequence } : 'UNSERVED',
+      to: v1.kind === 'REMOVE' ? 'UNSERVED' : movedTo,
+    };
+  }
+  const overrides = needed.map((n) => auditOverride(n, n.carriedFrom ? n.carriedFrom.reason : (args.overrides?.get(n.id ?? '') ?? '')));
   const after = {
     parentRunId: parent.id,
     runId: child.id,
     version: child.version,
     reason: 'MANUAL_ADJUSTMENT',
-    move: {
-      kind: check.move.kind,
-      orderIds: check.move.kind === 'PLACE' ? check.placedOrderIds : stopRows.map((r) => r.orderId),
-      customerId: check.built.request.stops.find((s) => s.stop_id === check.movedStop)?.customer_id ?? null,
-      from: fromStop && check.move.kind !== 'PLACE' ? { truckId: fromStop.truckId, truckCode: fromStop.truckCode, loadNo: fromStop.loadNo, sequence: check.move.from.sequence } : 'UNSERVED',
-      to: check.move.kind === 'REMOVE' ? 'UNSERVED' : movedTo,
-    },
+    ...(move ? { move } : {}),
+    ops: check.ops,
+    byRole: user.role ?? null,
+    skipBreak: check.skipBreak,
+    ...(overrides.length ? { overrides } : {}),
+    ...(allowanceUnmatched.length ? { allowanceUnmatched } : {}),
+    removed: check.removedStops.map((r) => ({ orderIds: [...new Set(r.rows.map((x) => x.orderId))] })),
+    placedOrderIds: check.placedOrderIds,
     trucks: check.edit.edited.map((t) => ({
       truckId: t,
       truckCode: code(t),
       loads: loadsAfter.filter((l) => l.truckId === t).sort((a, b) => a.loadNo - b.loadNo).map((l) => auditLoad({ ...l, stops: newIds.has(l.id) ? stopsAfter(l.id) : [] })),
     })),
-    costDeltaOmr: check.answer.delta_money_omr ?? null,
-    kmDelta: check.answer.delta_km ?? null,
+    costDeltaOmr: (relaxedSave ? check.answer.relaxed?.delta_money_omr : check.answer.delta_money_omr) ?? null,
+    kmDelta: (relaxedSave ? check.answer.relaxed?.delta_km : check.answer.delta_km) ?? null,
     softWarnings: check.preview.warnings.length,
     dataChanged: check.preview.dataChanged.length,
     matrix: check.preview.matrix,
-    previewHash: check.preview.previewHash,
+    previewHash: manual.previewHash,
     builtAt: check.preview.builtAt,
     ...(crew.driverChanges.length ? { driverChanges: crew.driverChanges.map((c) => ({ truckId: c.truckId, loadNo: c.loadNo, from: c.from?.id ?? null, to: c.to?.id ?? null, reason: c.reason })) } : {}),
     ...(kgMismatches.length ? { loadKgMismatches: kgMismatches } : {}),
@@ -388,6 +530,6 @@ export async function applyPlanEdit(
     .map((l) => `${code(l.truckId)} L${l.loadNo}`)
     .filter((t) => !reprint.includes(t))
     .sort();
-  return { before, after, reprint, gone };
+  return { before, after, reprint, gone, allowed: allowedCount, carried: carriedCount, overrides };
 }
 

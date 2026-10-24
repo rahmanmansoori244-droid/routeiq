@@ -71,13 +71,26 @@
  * messages say "(12 bays at 100% fill, one customer)". A load of several customers keeps the Pallet fill.
  * A load planned before the rule keeps the room it was planned with (and its hash).
  *
+ * Rules allowed by hand (moves by hand, part 2: "allow anyway", owner feedback 24 Oct 2026): a load may
+ * carry allowances (TruckSnapshot.handAllowed, FeasLoad.allowances) that a SUPERVISOR or TENANT_ADMIN
+ * confirmed with a reason: a late arrival at a stop (matched by the row's key - order and split lines - so
+ * the allowance of one part of a split order never covers the other part), capacity up to 20 % over the
+ * truck's own (pallets, cases, kg), and the driver break. A finding the allowance covers is a WARN
+ * ("Allowed by hand: ... - <reason>", `allowedByHand`), never a BLOCK - as long as the load is no worse than
+ * what was allowed: later than the minutes allowed, more pallets with today's cases per pallet, more kg with
+ * a case weight entered since, or above the 120 % cap is a BLOCK as before. An allowance above the 120 % cap
+ * of the truck the load was planned with is ignored (a damaged or forged entry never allows anything). So
+ * Lock, Loading and Dispatch pass for an allowed issue; the allowance stays with the load through every
+ * status (design D5).
+ *
  * LOCK, LOADING and DISPATCH of a load are refused while its truck-day is not OK
  * (plan-service.changeStatusTx), unless the operator switch FEASIBILITY_GATE=warn is set.
  */
 import { createHash } from 'node:crypto';
 import type { FeasibilityReport } from '@routeiq/shared-types';
-import { usableWindow, type LoadBreak, type PlanRules } from './snapshots';
-import { KG_ROUNDING_TOL } from './weights';
+import { usableWindow, type HandAllowance, type HandAllowanceKind, type LoadBreak, type PlanRules } from './snapshots';
+import { KG_ROUNDING_TOL, payloadTenths } from './weights';
+import { overrideCapUnits } from './plan-edit-view';
 import { unlockFirstText } from './feasibility-view';
 import { palletText } from './pallets';
 
@@ -117,6 +130,8 @@ export interface PlanViolation {
   shortBy?: number | null;
   /** On a LOCKED or LOADING load: a re-plan keeps it as it is, so it must be put back to Planned first. */
   frozen?: boolean;
+  /** Allowed by hand (a WARN): which allowance, why and by whom. */
+  allowedByHand?: { id: string; reason: string; byName: string };
 }
 
 export type TruckTiming = 'VERIFIED' | 'VIOLATED' | 'UNVERIFIED' | 'STRUCTURAL_ONLY';
@@ -139,6 +154,8 @@ export interface PlanFeasibility {
 
 export interface FeasStop {
   orderId: string;
+  /** The row's identity (`${orderId}|${lines}`): a LATE allowance by hand is matched by it. Not hashed by itself. */
+  rowKey?: string;
   sequence: number;
   label: string;
   cases: number;
@@ -202,6 +219,8 @@ export interface FeasLoad {
   stops: FeasStop[];
   /** The driver break planned with this load (PlanLoad.breakJson); null / absent = none. */
   break?: LoadBreak | null;
+  /** Rules allowed by hand on this load (TruckSnapshot.handAllowed); absent = none. */
+  allowances?: HandAllowance[];
 }
 
 export interface FeasibilityInput {
@@ -271,6 +290,10 @@ export function inputHash(input: FeasibilityInput): string {
             ],
           ]
         : []),
+      // Rules allowed by hand, only when the load has some: every other load keeps its hash.
+      ...(l.allowances?.length
+        ? [['ALLOWED', [...l.allowances].map((a) => [a.id, a.kind, a.maxLateMin ?? a.maxValue ?? null, [...a.rowKeys].sort()]).sort((x, y) => String(x[0]).localeCompare(String(y[0])))]]
+        : []),
     ]);
   const solver = input.solver ? [input.solver.status, input.solver.timing, input.solver.violations.map((v) => [v.code, v.truck_id ?? null, v.load_no ?? null])] : null;
   return createHash('sha256').update(JSON.stringify({ v: FEASIBILITY_VERSION, s: input.scenarioId, solver, loads })).digest('hex');
@@ -286,6 +309,9 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
   const frozen = new Set(input.loads.filter((l) => l.frozen && !l.onRoad).map((l) => l.id));
   const history = ' (the load has already left: shown for the record, it does not block)';
   const frozenMark = (loadId: string | null) => (loadId && frozen.has(loadId) ? { frozen: true } : {});
+  // A finding covered by a rule allowed by hand: a warning that names the allowance and its reason.
+  const allow = (x: Omit<PlanViolation, 'source' | 'severity'>, a: HandAllowance) =>
+    out.push({ source: 'WEB', ...x, severity: 'WARN', message: `Allowed by hand: ${x.message} - ${a.reason}`, allowedByHand: { id: a.id, reason: a.reason, byName: a.byName } });
   const v = (x: Omit<PlanViolation, 'source' | 'severity'> & { severity?: PlanViolation['severity'] }) =>
     out.push(
       x.loadId && onRoad.has(x.loadId) && (x.severity ?? 'BLOCK') === 'BLOCK'
@@ -306,16 +332,34 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
       const units = l.stops.reduce((a, s) => a + (s.palletUnits ?? 0), 0);
       const roomText = (r: number, bays: number | null | undefined, fill: number | null | undefined, one = !!l.capacity?.oneCustomer) =>
         `${palletText(r)}${typeof bays === 'number' && typeof fill === 'number' ? ` (${bays} bays at ${fill}% fill${one ? ', one customer' : ''})` : ''}`;
+      // Capacity allowed by hand: the most allowed, never above 120 % of the truck it was planned with (else ignored).
+      const pa = l.capacity && typeof l.capacity.bays === 'number' ? capAllowance(l, 'CAPACITY_PALLETS', overrideCapUnits(l.capacity.bays * 1000), (a) => Math.round((a.maxValue ?? 0) * 1000)) : null;
+      const ca = l.capacity ? capAllowance(l, 'CAPACITY_CASES', overrideCapUnits(l.capacity.cases), (a) => a.maxValue ?? 0) : null;
+      const ka = l.capacity && l.capacity.kg > 0 ? capAllowance(l, 'CAPACITY_KG', overrideCapUnits(payloadTenths(l.capacity.kg)), (a) => Math.round((a.maxValue ?? 0) * 10)) : null;
       if (l.capacity) {
         if (room !== null) {
           // Bays, never the case capacity, on a truck planned by pallets.
           if (withUnits && units > room) {
-            v({
+            const x = {
               ...at(l),
               code: 'CAPACITY_PALLETS',
               message: `${code} load ${l.loadNo} needs ${palletText(units)} pallets; the truck takes ${roomText(room, l.capacity.bays, l.capacity.fillPct)}.`,
               shortBy: Math.round((units - room) / 100) / 10,
-            });
+            };
+            if (pa && units <= pa.limit) allow(x, pa.a);
+            else v(x);
+            // Allowed by hand: the load with the cases per pallet now must stay within what was allowed.
+            if (pa && units <= pa.limit && l.stops.some((s) => typeof s.palletUnitsNow === 'number')) {
+              const unitsNow = l.stops.reduce((a, s) => a + (s.palletUnitsNow ?? s.palletUnits ?? 0), 0);
+              if (unitsNow > pa.limit) {
+                const message =
+                  `${code} load ${l.loadNo} was planned with ${palletText(units)} pallets; with the cases per pallet corrected under Products since it needs ` +
+                  `${palletText(unitsNow)} pallets - more than allowed by hand (${palletText(pa.limit)} pallets).`;
+                const shortBy = Math.round((unitsNow - pa.limit) / 100) / 10;
+                if (l.frozen && !l.onRoad) v({ ...at(l), severity: 'WARN', code: 'CAPACITY_PALLETS_NEW_FACTOR', message: `${message} ${frozenReplanText(code, l, loads, 'the cases per pallet now')}`, shortBy });
+                else v({ ...at(l), code: 'CAPACITY_PALLETS_NEW_FACTOR', message: `${message} Re-plan to load it by the cases per pallet now.`, shortBy });
+              }
+            }
           } else if (withUnits && l.stops.some((s) => typeof s.palletUnitsNow === 'number')) {
             // A cases per pallet corrected under Products since planning: the load by the figures now.
             const unitsNow = l.stops.reduce((a, s) => a + (s.palletUnitsNow ?? s.palletUnits ?? 0), 0);
@@ -335,11 +379,15 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
             }
           }
         } else if (cases > l.capacity.cases) {
-          v({ ...at(l), code: 'CAPACITY_CASES', message: `${code} load ${l.loadNo} carries ${cases} cases; the truck takes ${l.capacity.cases}.`, shortBy: cases - l.capacity.cases });
+          const x = { ...at(l), code: 'CAPACITY_CASES', message: `${code} load ${l.loadNo} carries ${cases} cases; the truck takes ${l.capacity.cases}.`, shortBy: cases - l.capacity.cases };
+          if (ca && cases <= ca.limit) allow(x, ca.a);
+          else v(x);
         }
         const overPlanned = l.capacity.kg > 0 && kg > l.capacity.kg + KG_TOL;
         if (overPlanned) {
-          v({ ...at(l), code: 'CAPACITY_KG', message: `${code} load ${l.loadNo} weighs ${Math.round(kg)} kg; the truck's payload is ${Math.round(l.capacity.kg)} kg.`, shortBy: r1(kg - l.capacity.kg) });
+          const x = { ...at(l), code: 'CAPACITY_KG', message: `${code} load ${l.loadNo} weighs ${Math.round(kg)} kg; the truck's payload is ${Math.round(l.capacity.kg)} kg.`, shortBy: r1(kg - l.capacity.kg) };
+          if (ka && kg <= ka.limit / 10 + KG_TOL) allow(x, ka.a);
+          else v(x);
         }
         const unknown = l.stops.filter((s) => s.kgUnknown);
         if (l.capacity.kg > 0 && unknown.length) {
@@ -347,12 +395,17 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
           const laterKg = r1(unknown.reduce((a, s) => a + (s.unknownKgNow ?? 0), 0));
           const withLater = r1(kg + laterKg);
           const names = `${unknown.map((s) => s.label).slice(0, 3).join(', ')}${unknown.length > 3 ? ', ...' : ''}`;
-          if (laterKg > 0 && !overPlanned && withLater > l.capacity.kg + KG_TOL) {
+          // Allowed by hand over the payload: the weight now must stay within what was allowed (whether or not
+          // the load was over as planned, review F3).
+          const kgLimit = ka ? ka.limit / 10 + KG_TOL : l.capacity.kg + KG_TOL;
+          if (laterKg > 0 && (ka ? true : !overPlanned) && withLater > kgLimit) {
             v({
               ...at(l),
               code: 'CAPACITY_KG_NEW_WEIGHT',
-              message: `${code} load ${l.loadNo} was planned with cases that had no weight (counted as 0 kg: ${names}); with the case weight entered under Products since, it weighs about ${Math.round(withLater)} kg - over the truck's payload of ${Math.round(l.capacity.kg)} kg.`,
-              shortBy: r1(withLater - l.capacity.kg),
+              message:
+                `${code} load ${l.loadNo} was planned with cases that had no weight (counted as 0 kg: ${names}); with the case weight entered under Products since, it weighs about ${Math.round(withLater)} kg - over the truck's payload of ${Math.round(l.capacity.kg)} kg` +
+                (ka ? ` - more than allowed by hand (${(ka.limit / 10).toLocaleString('en-US')} kg).` : '.'),
+              shortBy: r1(withLater - (ka ? ka.limit / 10 : l.capacity.kg)),
             });
           } else {
             v({
@@ -418,24 +471,30 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
         // Planned under the finish-by-closing rule: unloading must be FINISHED by closing.
         const finishedLate =
           !outside && l.rules?.windowRule === 'FINISH' && he !== undefined && he !== null && s.departureMin !== null && s.departureMin > he + TOL_MIN;
+        // A late arrival allowed by hand on this row: no later than allowed, never early.
+        const late = outside || finishedLate ? lateAllowance(l, s, hs, he) : null;
         if (finishedLate) {
-          v({
+          const x = {
             ...at(l),
             code: 'HARD_WINDOW',
             message: `${code} load ${l.loadNo}: ${s.label} finishes unloading at ${hhmm(s.departureMin!)}, after its receiving hours end (${hhmm(he!)}).`,
-          });
+          };
+          if (late) allow(x, late);
+          else v(x);
         }
         if (outside) {
           const w = hs !== undefined || he !== undefined ? ` ${hs === null || hs === undefined ? '--:--' : hhmm(hs)}-${he === null || he === undefined ? '--:--' : hhmm(he)}` : '';
           // Planned under the latest-arrival rule and starting after closing: say it in the rule's words.
           const lateArrival = l.rules?.windowRule === 'START' && start !== null && he !== undefined && he !== null && start > he;
-          v({
+          const x = {
             ...at(l),
             code: 'HARD_WINDOW',
             message: lateArrival
               ? `${code} load ${l.loadNo}: ${s.label} starts unloading at ${hhmm(start!)}, after its latest arrival ${hhmm(he!)} (receiving hours${w}).`
               : `${code} load ${l.loadNo}: ${s.label} is served at ${start === null ? '--:--' : hhmm(start)}, outside its receiving hours${w}.`,
-          });
+          };
+          if (late) allow(x, late);
+          else v(x);
         }
         if (start !== null && s.departureMin !== null && s.departureMin < start) {
           v({ ...at(l), code: 'STOP_TIMES', message: `${code} load ${l.loadNo}: ${s.label} leaves (${hhmm(s.departureMin)}) before it is served (${hhmm(start)}).` });
@@ -537,14 +596,18 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
       // under the rule is flagged frozen (unlock first); a planned load under the rule blocks.
       // warnOnly (the solver's NOT_POSSIBLE): no break can be added now - never blocks.
       const legacy = !target.rules?.break;
-      v({
-        ...at(target),
-        code: 'BREAK',
-        ...(legacy || brk.warnOnly ? { severity: 'WARN' as const } : {}),
-        message:
-          brk.message +
-          (legacy ? ' (planned before the driver break rule: shown, it does not block)' : brk.warnOnly ? ' (shown, it does not block)' : ' Re-plan to add it.'),
-      });
+      // No driver break allowed by hand on the load the missing break is put on, under the same break rule.
+      const nb = !legacy && !brk.warnOnly ? breakAllowance(target) : null;
+      if (nb) allow({ ...at(target), code: 'BREAK', message: brk.message }, nb);
+      else
+        v({
+          ...at(target),
+          code: 'BREAK',
+          ...(legacy || brk.warnOnly ? { severity: 'WARN' as const } : {}),
+          message:
+            brk.message +
+            (legacy ? ' (planned before the driver break rule: shown, it does not block)' : brk.warnOnly ? ' (shown, it does not block)' : ' Re-plan to add it.'),
+        });
     }
   }
 
@@ -554,6 +617,26 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
     const truckId = sv.truck_id ?? null;
     const load = truckId !== null ? input.loads.find((l) => l.truckId === truckId && l.loadNo === sv.load_no) : undefined;
     const past = !!load && load.onRoad;
+    // A finding the load carries an allowance by hand for (normally the solver lists those under `allowed`).
+    const kind: HandAllowanceKind | null =
+      sv.code === 'HARD_WINDOW' ? 'LATE' : sv.code === 'BREAK' ? 'NO_BREAK' : sv.code === 'CAPACITY_PALLETS' || sv.code === 'CAPACITY_CASES' || sv.code === 'CAPACITY_KG' ? sv.code : null;
+    const pool = load ? (load.allowances ?? []) : kind === 'NO_BREAK' ? input.loads.filter((l) => l.truckId === truckId).flatMap((l) => l.allowances ?? []) : [];
+    const covering = kind ? pool.find((a) => a.kind === kind) : undefined;
+    if (covering && !past) {
+      out.push({
+        code: sv.code,
+        severity: 'WARN',
+        source: 'SOLVER',
+        truckId,
+        truckCode: truckId !== null ? (codeOf.get(truckId) ?? truckId) : null,
+        loadId: load?.id ?? null,
+        loadNo: sv.load_no ?? null,
+        message: `Allowed by hand: ${sv.message} - ${covering.reason}`,
+        shortBy: sv.short_by_min ?? null,
+        allowedByHand: { id: covering.id, reason: covering.reason, byName: covering.byName },
+      });
+      continue;
+    }
     out.push({
       code: sv.code,
       severity: past ? 'WARN' : 'BLOCK',
@@ -602,6 +685,44 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
     inputHash: inputHash(input),
     checkedAt: now.toISOString(),
   };
+}
+
+/**
+ * A capacity allowance by hand of load `l` (`kind`), with the most it allows in whole units (`unitsOf`):
+ * never above `cap` (120 % of the truck it was planned with) - an allowance whose maximum is above the cap is
+ * ignored altogether, so the finding stays a BLOCK.
+ */
+function capAllowance(l: FeasLoad, kind: HandAllowanceKind, cap: number, unitsOf: (a: HandAllowance) => number): { a: HandAllowance; limit: number } | null {
+  const a = (l.allowances ?? []).find((x) => x.kind === kind && typeof x.maxValue === 'number');
+  if (!a) return null;
+  const units = unitsOf(a);
+  if (!(units > 0) || units > cap) return null;
+  return { a, limit: Math.min(units, cap) };
+}
+
+/**
+ * The LATE allowance by hand that covers row `s` of load `l`, or null: matched by the row's key (so one part
+ * of a split order never covers the other), the row served after its hours (never early), and no later than
+ * the minutes allowed (+ the 1-minute tolerance), by the rule it was allowed under (FINISH: unloading end).
+ */
+function lateAllowance(l: FeasLoad, s: FeasStop, hs: number | null | undefined, he: number | null | undefined): HandAllowance | null {
+  if (!s.rowKey || !l.allowances?.length || he === null || he === undefined) return null;
+  const start = s.serviceStartMin;
+  if (start !== null && hs !== null && hs !== undefined && start < hs) return null;
+  for (const a of l.allowances) {
+    if (a.kind !== 'LATE' || !a.rowKeys.includes(s.rowKey) || typeof a.maxLateMin !== 'number') continue;
+    const atMin = a.rule === 'FINISH' ? s.departureMin : start;
+    if (atMin === null) continue;
+    if (Math.max(0, atMin - he) <= a.maxLateMin + TOL_MIN) return a;
+  }
+  return null;
+}
+
+/** The NO_BREAK allowance by hand of the load a missing break is put on, under the same break rule. */
+function breakAllowance(target: FeasLoad): HandAllowance | null {
+  const r = target.rules?.break;
+  if (!r) return null;
+  return (target.allowances ?? []).find((a) => a.kind === 'NO_BREAK' && a.breakMin === r.lengthMin && a.breakFromMin === r.startFromMin && a.breakToMin === r.startToMin) ?? null;
 }
 
 /**

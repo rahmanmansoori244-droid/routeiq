@@ -606,3 +606,15 @@ export function readPortionLines(json: unknown): { lineId: string; cases: number
   }
   return out;
 }
+
+/** A part's lines as one key ("*" = the whole order): `${lineId}:${cases}`, sorted. */
+export const portionLinesKey = (lines: readonly { lineId: string; cases: number }[] | null): string => (lines ? lines.map((l) => `${l.lineId}:${l.cases}`).sort().join(',') : '*');
+
+/**
+ * A stored row's identity: its order and, for a split part, its lines and cases (`${orderId}|${lines}`, "*" =
+ * the whole order). Moves by hand match stops by it (plan-edit.ts), and an allowance by hand is matched to its
+ * rows by it (feasibility.ts), so the allowance of one part of a split order never covers the other part.
+ */
+export function rowKeyOf(orderId: string, portionLinesJson: unknown): string {
+  return `${orderId}|${portionLinesKey(readPortionLines(portionLinesJson))}`;
+}

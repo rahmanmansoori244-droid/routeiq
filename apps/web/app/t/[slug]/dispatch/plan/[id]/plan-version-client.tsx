@@ -10,6 +10,7 @@ export function PlanVersionClient({
   canPlan,
   canDispatch,
   canEditProducts,
+  canOverride = false,
   phoneCountryCode,
   dayHref,
 }: {
@@ -18,6 +19,8 @@ export function PlanVersionClient({
   canPlan: boolean;
   canDispatch: boolean;
   canEditProducts: boolean;
+  /** Moves by hand: may allow rules by hand (SUPERVISOR or above). */
+  canOverride?: boolean;
   phoneCountryCode: string | null;
   dayHref: string;
 }) {
@@ -34,6 +37,7 @@ export function PlanVersionClient({
         canDispatch={canDispatch}
         canResetStuck={canDispatch}
         canEditProducts={canEditProducts}
+        canOverride={canOverride}
         phoneCountryCode={phoneCountryCode}
         onChanged={(newRunId) => {
           if (newRunId && newRunId !== runId) router.push(`/t/${slug}/dispatch/plan/${newRunId}`);

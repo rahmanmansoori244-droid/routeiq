@@ -496,7 +496,8 @@ export interface PlannedBreak {
   after_sequence?: number | null;
 }
 
-export type BreakStatus = 'PLANNED' | 'NOT_NEEDED' | 'IN_FROZEN_LOAD' | 'NOT_POSSIBLE';
+/** SKIPPED_BY_HAND (retime v2): only in a relaxed answer - the truck-day was timed without its driver break because the break was allowed by hand. */
+export type BreakStatus = 'PLANNED' | 'NOT_NEEDED' | 'IN_FROZEN_LOAD' | 'NOT_POSSIBLE' | 'SKIPPED_BY_HAND';
 
 export interface UnservedStop {
   stop_id: string;
@@ -578,6 +579,19 @@ export interface FeasibilityViolation {
   stop_id?: string | null;
   message: string;
   short_by_min?: number | null;
+  /**
+   * v2 figures (retime v2 design 4.2): HARD_WINDOW clock min (service start, or unloading end under FINISH; early:
+   * service start); CAPACITY_PALLETS pallets; _CASES cases; _KG kg.
+   */
+  value?: number | null;
+  /** HARD_WINDOW: receiving hours end (early: start), clock min; CAPACITY_*: the planning limit. */
+  limit?: number | null;
+  /** CAPACITY_*: the truck's own capacity (bays, cases, payload kg). */
+  capacity?: number | null;
+  /** HARD_WINDOW, retime only: seconds after the end of the hours (always > 0); null = not late or not judged. */
+  late_s?: number | null;
+  /** Retime with `relax` only: can be allowed by hand under the policy sent (null: not judged). */
+  overridable?: boolean | null;
 }
 
 /** The solver's independent re-check of a scenario's timetable (apps/solver/feasibility.py). */
@@ -588,6 +602,8 @@ export interface FeasibilityReport {
   checked_at_version?: number;
   travel_checked?: boolean;
   note?: string | null;
+  /** v2: issues allowed by the relaxations (retime only). */
+  allowed?: FeasibilityViolation[];
 }
 
 export interface DispatchScenario {
@@ -739,7 +755,7 @@ export interface HireCheck {
  * Web -> solver `POST /retime-truck-days` (moves by hand, PR M1; apps/solver/retime.py). Mirrors the Retime* models
  * of apps/solver/dispatch_models.py field for field. The solver re-times only the edited trucks' NEW loads, exactly,
  * from the fresh request; it never searches. 422: an unknown truck or stop, a stop twice, an empty load, more than
- * 6 trucks or 80 stops (`detail` says which); 503: the solver's checks are all busy (Retry-After 5 s); 404: a solver
+ * 6 trucks or 120 stops (v2; 80 before) (`detail` says which); 503: the solver's checks are all busy (Retry-After 5 s); 404: a solver
  * older than this endpoint.
  */
 export interface RetimeTruckDay {
@@ -754,6 +770,30 @@ export interface RetimeBest {
   truck_id: string;
   /** Every position in that truck's loads[load_index]; absent / null = the stop alone as a new load at every place. */
   load_index?: number | null;
+  /** v2: more stops placed with stop_id (several at once). */
+  more_stop_ids?: string[];
+  /** v2, load_index null only: the stops are one new load in this order (a whole load moved). */
+  keep_order?: boolean;
+  /** v2, load_index null only: the new load goes here (0 = first) instead of every place. */
+  new_load_at?: number | null;
+}
+
+/** v2: what the web may allow by hand. The solver relaxes only these kinds, only where the strict timing fails. */
+export interface RetimeRelaxPolicy {
+  late?: boolean;
+  /** The web sends 1.2 (20 % over the truck's own capacity). */
+  capacity_factor?: number | null;
+  no_break?: boolean;
+  /** Trucks (of truck_days) the user asked to time without their break. */
+  seed_no_break?: string[];
+}
+
+/** v2: relaxations in force - what a relaxed answer was timed with, or (before_relax) what the current loads already carry. */
+export interface RetimeRelaxations {
+  late_stop_ids?: string[];
+  over_capacity_truck_ids?: string[];
+  capacity_factor?: number | null;
+  no_break_truck_ids?: string[];
 }
 
 export interface RetimeRequest {
@@ -764,6 +804,10 @@ export interface RetimeRequest {
   /** The same trucks' new loads now, timed in the same call (the like-for-like cost change). */
   before?: RetimeTruckDay[] | null;
   best?: RetimeBest | null;
+  /** v2 */
+  relax?: RetimeRelaxPolicy | null;
+  /** v2: time `before` with the allowances its loads already have. */
+  before_relax?: RetimeRelaxations | null;
 }
 
 /** A truck's current new loads timed now; the money, soft cost and km are null when they no longer keep the rules. */
@@ -776,6 +820,8 @@ export interface RetimeTruckBefore {
   km?: number | null;
   first_depart_min?: number | null;
   last_return_min?: number | null;
+  /** v2: issues allowed by before_relax. */
+  allowed?: FeasibilityViolation[];
 }
 
 /**
@@ -799,6 +845,31 @@ export interface RetimeTruckOut {
   delta_soft_omr?: number | null;
   delta_km?: number | null;
   delta_last_return_min?: number | null;
+  /** v2: issues allowed (relaxed answer only). */
+  allowed?: FeasibilityViolation[];
+}
+
+/**
+ * v2: the change with the issues it needs allowed. ok: nothing that cannot be allowed remains, every truck is timed
+ * and the independent check is VERIFIED (with `allowed`). `loads`: the edited trucks' explicit layout this answer is
+ * for (with best: the place it picked) - what the web resolves and a save sends back.
+ */
+export interface RetimeRelaxed {
+  ok: boolean;
+  relaxations: RetimeRelaxations;
+  loads: RetimeTruckDay[];
+  /** The same layout timed with every rule (violations carry overridable / late_s). */
+  strict: RetimeTruckOut[];
+  /** With the relaxations: violations = what still breaks; allowed = what is allowed. */
+  trucks: RetimeTruckOut[];
+  /** VERIFIED + allowed when ok; hard_window_ok false on a late stop; no driver_break and break_status SKIPPED_BY_HAND on a no-break truck. */
+  scenario?: DispatchScenario | null;
+  delta_money_omr?: number | null;
+  delta_soft_omr?: number | null;
+  delta_km?: number | null;
+  /** Trucks not timed even with the allowed issues, but timed without their break. */
+  break_alternative?: string[];
+  warnings: string[];
 }
 
 /** A place for the best-place stop that keeps every rule (best first, at most 3). `loads` is what a save sends back. */
@@ -838,4 +909,10 @@ export interface RetimeResponse {
   timings?: number;
   seconds?: number;
   warnings?: string[];
+  /** v2: the web tells an older solver by its absence. */
+  retime_version?: number;
+  /** v2: the edited trucks' layout the strict answer is for (explicit: truck_days; best: the option or the fallback). */
+  loads?: RetimeTruckDay[];
+  /** v2: only with `relax`. */
+  relaxed?: RetimeRelaxed | null;
 }

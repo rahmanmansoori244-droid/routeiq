@@ -149,6 +149,14 @@ function instructionBox(s: LoadSheet): string {
   return `<div class="instr" data-kind="loading-instruction"><div class="instr-h">${esc(SPECIAL_LOADING_HEADING)}</div><div class="instr-sub">${esc(specialLoadingLead(list.length))}</div><ul>${items}</ul></div>\n`;
 }
 
+/** The ALLOWED BY HAND box (moves by hand, allow anyway): every rule allowed by hand on the load; '' without one. */
+function allowedBox(s: LoadSheet): string {
+  const list = s.allowedByHand ?? [];
+  if (!list.length) return '';
+  return `<div class="instr" data-kind="allowed-by-hand"><div class="instr-h">ALLOWED BY HAND</div><ul>${list.map((t) => `<li><bdi>${esc(t)}</bdi></li>`).join('')}</ul></div>
+`;
+}
+
 const productRow = (p: ProductCases) => `<tr><td>${esc(p.productCode)}</td><td>${esc(p.productName)}</td><td class="n">${p.cases}</td><td class="box"></td></tr>`;
 
 /**
@@ -198,7 +206,7 @@ function loadSheetHtml(h: SheetHead, s: LoadSheet): string {
   const box = instructionBox(s);
   return `<section class="sheet">
 <h1>LOAD SHEET · ${esc(s.truckCode)} · trip ${s.trip} of ${s.trips}</h1>
-${h.superseded ? '' : box}${headCells(h, [
+${h.superseded ? '' : box}${allowedBox(s)}${headCells(h, [
   ['Status', s.statusText],
   ['Driver', s.driverName ?? 'not set'],
   ['Helper(s)', s.helpers ?? 'none'],

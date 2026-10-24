@@ -237,6 +237,11 @@ export interface FactStop {
   plannedServiceMin: number | null;
   windowStartMin: number | null;
   windowEndMin: number | null;
+  /**
+   * Moves by hand, allow anyway: a late arrival allowed by hand on this stop (its load's LATE allowance), in minutes
+   * after the end of the window: the latest time agreed is the window end + this (AFTER_CLOSING fires only after it).
+   */
+  allowedLateMin?: number;
   /** The best (lowest) priority of the stop's orders; null = unknown. */
   priority: number | null;
   /** The customer's pin is verified and not on the "Pin may be wrong" list (R9). */
@@ -474,7 +479,11 @@ function farArrival(v: FactVisit): boolean {
   return has(v.arrivalDistanceM) && v.arrivalDistanceM > UNLOAD_ARRIVAL_FAR_M && has(v.arrivalAccuracyM) && v.arrivalAccuracyM <= ALERT_EVIDENCE_MAX_ACCURACY_M;
 }
 
-const windowEndOf = (s: FactStop) => (s.visit?.windowEndMin ?? null) ?? s.windowEndMin;
+const windowEndOf = (s: FactStop) => {
+  const end = (s.visit?.windowEndMin ?? null) ?? s.windowEndMin;
+  // A late arrival allowed by hand: the latest time agreed with the customer.
+  return end === null ? null : end + (s.allowedLateMin ?? 0);
+};
 // windowStartOf, plannedServiceOf, phonePhoto and firstPhotoAt: load-eta.ts (shared with the salesman link, 19 Oct 2026).
 const stopsWithoutResult = (l: FactLoad) => l.stops.filter((s) => !s.visit?.outcome).length;
 
@@ -1305,7 +1314,7 @@ function afterClosing(out: Out, c: LoadCtx): void {
           threshold: T,
           text: `${label}: arrived ${clockText(v.arrivedAt, l.date, tz)}${gpsTag}, after its delivery window ended at ${planTime(end)} (${fmtDuration(over)} late).`,
           occurredAt: v.arrivedAt,
-          facts: { arrivedMin: arr, windowEndMin: end, ...(gpsArr ? { gps: true } : {}) },
+          facts: { arrivedMin: arr, windowEndMin: end, ...(gpsArr ? { gps: true } : {}), ...(s.allowedLateMin ? { allowedByHand: true } : {}) },
         });
       } else out.end(rule, key, `${label}: arrived ${clockText(v.arrivedAt, l.date, tz)}${gpsTag}, inside its delivery window (ends ${planTime(end)}).`);
       continue;
@@ -1364,7 +1373,7 @@ function afterClosing(out: Out, c: LoadCtx): void {
         const j = q?.sequence === s.sequence ? windowJudgedMin(c, q) : null;
         return has(j) ? j - end : null;
       }),
-      facts: { projectedMin: judged, windowEndMin: end, windowRule: l.windowRule },
+      facts: { projectedMin: judged, windowEndMin: end, windowRule: l.windowRule, ...(s.allowedLateMin ? { allowedByHand: true } : {}) },
     });
   }
 }

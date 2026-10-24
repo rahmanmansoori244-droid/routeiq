@@ -140,6 +140,7 @@ function StopRow({ st }: { st: SheetStop }) {
           </T>
         ))}
         {st.outsideHours ? <T style={{ fontFamily: BOLD, fontSize: 7.5 }}>Outside receiving hours - call ahead</T> : null}
+        {st.allowedByHand ? <T style={{ fontFamily: BOLD, fontSize: 7 }}>{st.allowedByHand}</T> : null}
       </View>
       <View style={[s.cell, { width: W.cases }]}>
         <T style={{ fontFamily: BOLD, fontSize: 10 }}>{st.cases} cases</T>
@@ -234,6 +235,11 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
               </T>
             ))}
           </View>
+          {(sh.allowedByHand ?? []).map((a) => (
+            <T key={a} style={{ fontFamily: BOLD, fontSize: 7.5 }}>
+              {a}
+            </T>
+          ))}
           <T style={s.small}>
             {m.tenantName ? `${m.tenantName} · ` : ''}Depot {m.depot.code} - {m.depot.name} · Delivery {m.runDate} · Plan v{m.version}
           </T>

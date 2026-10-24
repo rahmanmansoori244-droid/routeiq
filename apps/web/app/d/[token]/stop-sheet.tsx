@@ -235,6 +235,11 @@ export function StopSheet({
         <p className="ps-7 text-sm text-slate-700">{fmtHours(lang, stop.hours, stop.promised)}</p>
         {stop.split ? <p className="text-sm font-semibold">{t(lang, 'partOf', { n: stop.split.part, m: stop.split.parts })}</p> : null}
         {stop.carriedFrom ? <p className="text-sm font-semibold">{t(lang, 'carriedFrom', { date: day(stop.carriedFrom) })}</p> : null}
+        {stop.allowedNote ? (
+          <p className="mt-2 rounded-lg bg-violet-50 p-2 text-sm font-semibold" dir="auto">
+            {stop.allowedNote}
+          </p>
+        ) : null}
         {stop.changeNotes.length ? (
           <div className="mt-2 rounded-lg bg-amber-50 p-2 text-sm">
             <p className="font-semibold">{t(lang, 'changedAfterPlanning')}</p>

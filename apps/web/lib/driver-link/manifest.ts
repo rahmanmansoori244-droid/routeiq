@@ -22,6 +22,7 @@ import { getPlanDetail, type DetailLoad, type DetailStop, type PlanDetail } from
 import { coordText, telUrl } from '../dispatch/driver-links';
 import { phoneCountryCode } from '../dispatch/customer-attrs';
 import { DEFAULT_TZ } from '../dispatch/time';
+import { allowedByHandText } from '../dispatch/plan-edit-view';
 import { truckDayResults } from '../delivery/event-service';
 import { truckDayLoads } from './service';
 import { dispatcherPhoneFor } from './dispatcher-phone';
@@ -83,6 +84,7 @@ function stopOf(depotId: string, l: DetailLoad, s: DetailStop, callingCode: stri
     split: s.split ? { part: s.split.part, parts: s.split.parts } : null,
     carriedFrom: s.carriedFrom,
     changeNotes: s.masterChanged.map((c) => c.text),
+    ...(s.handAllowed ? { allowedNote: allowedByHandText(s.handAllowed) } : {}),
     result: null,
   };
 }

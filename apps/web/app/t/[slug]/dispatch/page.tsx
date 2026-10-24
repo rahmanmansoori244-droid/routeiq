@@ -1,6 +1,6 @@
 import { getCurrentTenant } from '@/lib/tenant';
 import { prisma } from '@/lib/db';
-import { canManageMasterData, canPlan } from '@/lib/rbac';
+import { canApproveOverride, canManageMasterData, canPlan } from '@/lib/rbac';
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
 import { readIvmsEnv } from '@/lib/ivms/env';
 import { ivmsModeAtLeast, ivmsModeOf } from '@/lib/ivms/settings';
@@ -30,6 +30,8 @@ export default async function DispatchPage({ params, searchParams }: { params: {
         // Owner decision 4 (5 Oct 2026): the dispatcher (PLANNER) dispatches, completes and resets a stuck plan.
         canDispatch={canPlan(user.role)}
         canEditProducts={canManageMasterData(user.role)}
+        // Moves by hand, allow anyway: a supervisor or company admin may allow rules by hand (the server checks it again).
+        canOverride={canApproveOverride(user.role)}
         initialDate={searchParams.date ?? null}
         initialDepot={searchParams.depot ?? null}
         phoneCountryCode={phoneCountryCode(tenant.country)}
