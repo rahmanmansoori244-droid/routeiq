@@ -25,9 +25,13 @@ import main
 import retime
 from dispatch_models import (
     FeasibilityReport,
+    FeasibilityViolation,
     FrozenTrip,
     RetimeBest,
     RetimeOption,
+    RetimeRelaxations,
+    RetimeRelaxed,
+    RetimeRelaxPolicy,
     RetimeRequest,
     RetimeResponse,
     RetimeTruckBefore,
@@ -593,7 +597,8 @@ def _many_trucks():
 
 
 def _many_stops():
-    return req([stop(f"S{i:02d}", 23.60 + 0.001 * i, 58.40) for i in range(81)], [truck("T1")])
+    # v2 raised the limit from 80 to 120 stops (a swap or several stops at once re-time two to six full truck days).
+    return req([stop(f"S{i:03d}", 23.60 + 0.001 * i, 58.40) for i in range(121)], [truck("T1")])
 
 
 # (request, truck_days, other fields, words of the 422's detail)
@@ -603,7 +608,7 @@ BAD = [
     (town, {"T1": [["S0"]], "T2": [["S0"]]}, {}, "Stop S0 is on more than one load"),
     (town, {"T1": [["S0"], []]}, {}, "load 2 in truck_days has no stop"),
     (_many_trucks, {f"T{i}": [] for i in range(1, 8)}, {}, "At most 6 trucks"),
-    (_many_stops, {"T1": [[f"S{i:02d}" for i in range(81)]]}, {}, "At most 80 stops"),
+    (_many_stops, {"T1": [[f"S{i:03d}" for i in range(121)]]}, {}, "At most 120 stops"),
     (town, {"T1": [["S0"]]}, {"best": RetimeBest(stop_id="S1", truck_id="T2")}, "not in truck_days"),
     (town, {"T1": [["S0"]]}, {"best": RetimeBest(stop_id="S0", truck_id="T1")}, "Stop S0 is on more than one load"),
     (town, {"T1": [["S0"]]}, {"best": RetimeBest(stop_id="S1", truck_id="T1", load_index=1)}, "has no load 2"),
@@ -646,9 +651,10 @@ def test_ready_and_the_startup_line_name_the_limits(monkeypatch):
     monkeypatch.delenv("OSRM_URL", raising=False)
     got = TestClient(main.app).get("/ready", headers=HEADERS).json()
     assert got["ok"] is True
-    assert got["retime"] == {"version": 1, "max_concurrent": main.RETIME_MAX_CONCURRENT, "budget_sec": 10.0, "matrix_sec": 6.0,
+    # v2 (25 Oct 2026): several stops at once, whole loads and "allow anyway"; the web tells an older solver by it.
+    assert got["retime"] == {"version": 2, "max_concurrent": main.RETIME_MAX_CONCURRENT, "budget_sec": 10.0, "matrix_sec": 6.0,
                              "best_tries": 24}
-    assert retime.startup_line() == ("Re-timing for moves by hand (/retime-truck-days v1): max 4 at once, budget 10 s, road matrix "
+    assert retime.startup_line() == ("Re-timing for moves by hand (/retime-truck-days v2): max 4 at once, budget 10 s, road matrix "
                                      "6 s, best place 24 tries")
     monkeypatch.setenv("RETIME_BUDGET_SEC", "fast")
     monkeypatch.setenv("RETIME_BEST_TRIES", "500")
@@ -664,10 +670,15 @@ def test_the_typescript_mirror_has_every_field_of_the_contract():
         pytest.skip("shared-types is not next to the solver (image build)")
     with open(p, encoding="utf-8") as f:
         ts = f.read().replace("\r\n", "\n")
-    for model in (RetimeTruckDay, RetimeBest, RetimeRequest, RetimeTruckBefore, RetimeTruckOut, RetimeOption, RetimeResponse):
+    for model in (RetimeTruckDay, RetimeBest, RetimeRequest, RetimeTruckBefore, RetimeTruckOut, RetimeOption, RetimeResponse,
+                  RetimeRelaxPolicy, RetimeRelaxations, RetimeRelaxed, FeasibilityViolation, FeasibilityReport):
         block = ts.split(f"export interface {model.__name__} {{", 1)[1].split("\n}", 1)[0]
         assert set(re.findall(r"^\s+(\w+)\??:", block, re.M)) == set(model.model_fields), model.__name__
     assert "| 'NO_TIMETABLE'" in ts
-    # The web refuses a check over the stop limit before calling (TOO_MANY_STOPS): the same number.
+    assert "| 'SKIPPED_BY_HAND'" in ts
+    # The web refuses a check over the stop limit before calling (TOO_MANY_STOPS): never more than the solver takes.
+    # (v2 raised the solver's limit to 120 first; the web that was deployed then still refused above 80 - test S-1 -
+    # and the web of v2 uses the same 120.)
     with open(os.path.join(SOLVER_DIR, "..", "web", "lib", "dispatch", "plan-edit.ts"), encoding="utf-8") as f:
-        assert f"export const RETIME_MAX_STOPS = {retime.RETIME_MAX_STOPS};" in f.read()
+        m = re.search(r"export const RETIME_MAX_STOPS = (\d+);", f.read())
+    assert m is not None and int(m.group(1)) <= retime.RETIME_MAX_STOPS

@@ -495,7 +495,9 @@ class TruckDayCostOut(BaseModel):
     # PLANNED: on one of its new loads; NOT_NEEDED: back for good by the end of the break window,
     # or first departure at its start or later; IN_FROZEN_LOAD: a locked or dispatched load holds
     # it; NOT_POSSIBLE: its locked or dispatched loads run through the window with none recorded.
-    break_status: Literal["PLANNED", "NOT_NEEDED", "IN_FROZEN_LOAD", "NOT_POSSIBLE"] | None = None
+    # SKIPPED_BY_HAND (/retime-truck-days v2, only ever in a relaxed answer): the truck-day was timed without its
+    # driver break because the break was allowed by hand (moves by hand, "allow anyway").
+    break_status: Literal["PLANNED", "NOT_NEEDED", "IN_FROZEN_LOAD", "NOT_POSSIBLE", "SKIPPED_BY_HAND"] | None = None
     break_start_min: int | None = None
 
 
@@ -553,6 +555,20 @@ class FeasibilityViolation(BaseModel):
     stop_id: str | None = None
     message: str
     short_by_min: float | None = None  # how many minutes (or cases / kg for capacity) it is short
+    # The figures of the rule (feasibility.check_scenario fills them for every caller; pure additions, CHECK_VERSION
+    # unchanged). HARD_WINDOW: value = the clock minute of the service start (FINISH: of the end of unloading; early:
+    # of the service start), limit = the end of the receiving hours (early: their start). CAPACITY_PALLETS: pallets,
+    # the planning room (bays at the fill, or the one-customer room) and the bays; CAPACITY_CASES: cases and the case
+    # capacity (limit = capacity); CAPACITY_KG: kg and the payload (limit = capacity).
+    value: float | None = None
+    limit: float | None = None
+    capacity: float | None = None
+    # HARD_WINDOW, /retime-truck-days only: the seconds after the end of the hours (START: the service start after
+    # closing; FINISH: the end of unloading after closing), always > 0; None = not late, or not judged.
+    late_s: int | None = None
+    # /retime-truck-days with ``relax`` only: whether this issue can be allowed by hand under the policy sent (None:
+    # not judged).
+    overridable: bool | None = None
 
 
 class FeasibilityReport(BaseModel):
@@ -572,6 +588,9 @@ class FeasibilityReport(BaseModel):
     # False when no road matrix was available to the check: drive times were not re-checked.
     travel_checked: bool = True
     note: str | None = None
+    # /retime-truck-days v2: the issues the relaxations allowed (moves by hand, "allow anyway"); never on a plan the
+    # optimizer made.
+    allowed: list[FeasibilityViolation] = Field(default_factory=list)
 
 
 class DispatchScenario(BaseModel):
@@ -986,10 +1005,10 @@ class GeometryResponse(BaseModel):
 # POST /retime-truck-days (moves by hand, PR M1; retime.py). Mirrored in packages/shared-types/src/dispatch.ts.
 # ---------------------------------------------------------------------------------------------
 
-# At most this many trucks, and stops on them (truck_days, best and before together), per check: a move touches
-# one or two trucks; the web sends at most 4.
+# At most this many trucks, and stops on them (truck_days, best with its more stops, and before together), per check:
+# a move touches one or two trucks; a swap or several stops at once (v2) re-time two to six full truck days.
 RETIME_MAX_TRUCKS = 6
-RETIME_MAX_STOPS = 80
+RETIME_MAX_STOPS = 120  # 80 in v1
 
 
 class RetimeTruckDay(BaseModel):
@@ -1003,11 +1022,42 @@ class RetimeTruckDay(BaseModel):
 
 class RetimeBest(BaseModel):
     """"Best place" for one stop (not on any load of truck_days) on one truck of truck_days: every position in
-    loads[load_index], or - load_index None - the stop alone as a new load at every place of the truck's day."""
+    loads[load_index], or - load_index None - the stop alone as a new load at every place of the truck's day.
+
+    v2 (several stops at once, a whole load moved): ``more_stop_ids`` are placed with ``stop_id``, each at its best
+    place in loads[load_index], or - load_index None - together as ONE new load (its order chosen here, or with
+    ``keep_order`` the order sent: stop_id then more_stop_ids), at ``new_load_at`` (0 = first) or at every place. A
+    best without any v2 field is exactly v1."""
 
     stop_id: str
     truck_id: str
     load_index: int | None = Field(default=None, ge=0)
+    more_stop_ids: list[str] = Field(default_factory=list)
+    keep_order: bool = False
+    new_load_at: int | None = Field(default=None, ge=0)
+
+
+class RetimeRelaxPolicy(BaseModel):
+    """v2: what the web may allow by hand ("allow anyway"). The solver relaxes only these kinds, and only where the
+    timing with every rule fails: a stop's end of receiving hours (``late``: lateness paid by a large penalty per
+    second, so never later than needed; arriving early is never relaxed), a truck's capacity up to
+    ``capacity_factor`` x its own (bays, cases, payload), and a truck-day's driver break (``no_break``: only when
+    the break alone has no place, or for the trucks of ``seed_no_break`` the user asked to time without it)."""
+
+    late: bool = False
+    capacity_factor: float | None = Field(default=None, gt=1.0, le=1.5)  # the web sends 1.2
+    no_break: bool = False
+    seed_no_break: list[str] = Field(default_factory=list)  # trucks of truck_days timed without their break
+
+
+class RetimeRelaxations(BaseModel):
+    """v2: relaxations in force - what a relaxed answer was timed with (RetimeRelaxed.relaxations: the stops actually
+    late), or what the current loads already carry (RetimeRequest.before_relax: the stops allowed late)."""
+
+    late_stop_ids: list[str] = Field(default_factory=list)
+    over_capacity_truck_ids: list[str] = Field(default_factory=list)
+    capacity_factor: float | None = Field(default=None, gt=1.0, le=1.5)
+    no_break_truck_ids: list[str] = Field(default_factory=list)
 
 
 class RetimeRequest(BaseModel):
@@ -1020,6 +1070,10 @@ class RetimeRequest(BaseModel):
     truck_days: list[RetimeTruckDay] = Field(min_length=1)
     before: list[RetimeTruckDay] | None = None
     best: RetimeBest | None = None
+    # v2: what may be allowed by hand (RetimeResponse.relaxed is built only with it), and the allowances the current
+    # loads (``before``) already carry (they are timed with them).
+    relax: RetimeRelaxPolicy | None = None
+    before_relax: RetimeRelaxations | None = None
 
 
 class RetimeTruckBefore(BaseModel):
@@ -1034,6 +1088,8 @@ class RetimeTruckBefore(BaseModel):
     km: float | None = None
     first_depart_min: int | None = None
     last_return_min: int | None = None
+    # v2: the issues before_relax allowed (feasible then means: only allowed issues remain).
+    allowed: list[FeasibilityViolation] = Field(default_factory=list)
 
 
 class RetimeTruckOut(BaseModel):
@@ -1057,6 +1113,8 @@ class RetimeTruckOut(BaseModel):
     delta_soft_omr: float | None = None
     delta_km: float | None = None
     delta_last_return_min: int | None = None
+    # v2, RetimeRelaxed.trucks: the issues the relaxations allowed (violations: what still breaks).
+    allowed: list[FeasibilityViolation] = Field(default_factory=list)
 
 
 class RetimeOption(BaseModel):
@@ -1101,3 +1159,37 @@ class RetimeResponse(BaseModel):
     timings: int = 0
     seconds: float = 0.0
     warnings: list[str] = Field(default_factory=list)
+    # v2 (an older solver sends none of these: the web tells it by the absence of retime_version).
+    retime_version: int = 2
+    # The edited trucks' layout the strict answer is for: truck_days, or with best the best truck's options[0].loads
+    # (else the fallback layout its violations are about) and truck_days for the others.
+    loads: list[RetimeTruckDay] = Field(default_factory=list)
+    # Only with ``relax``: the change with the issues it needs allowed by hand.
+    relaxed: RetimeRelaxed | None = None
+
+
+class RetimeRelaxed(BaseModel):
+    """v2, "allow anyway": the change with the issues it needs allowed by hand. ok: nothing that cannot be allowed
+    remains, every truck is timed and the independent check is VERIFIED (with ``allowed``). ``loads``: the edited
+    trucks' explicit layout this answer is for (with best: the place it picked) - what the web resolves and a save
+    sends back as truck_days, which gives exactly this answer again. ``strict``: the same layout timed with every rule
+    (its violations carry overridable / late_s). ``trucks``: with the relaxations - violations = what still breaks,
+    allowed = what is allowed. ``scenario``: VERIFIED + allowed when ok; hard_window_ok False on a late stop; no
+    driver_break and break_status SKIPPED_BY_HAND on a no-break truck. ``break_alternative``: trucks that cannot be
+    timed even with the issues allowed, but can without their driver break (never chosen here: the user asks for it
+    with seed_no_break)."""
+
+    ok: bool
+    relaxations: RetimeRelaxations
+    loads: list[RetimeTruckDay]
+    strict: list[RetimeTruckOut]
+    trucks: list[RetimeTruckOut]
+    scenario: DispatchScenario | None = None
+    delta_money_omr: float | None = None
+    delta_soft_omr: float | None = None
+    delta_km: float | None = None
+    break_alternative: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+RetimeResponse.model_rebuild()

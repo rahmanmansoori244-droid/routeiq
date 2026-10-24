@@ -37,7 +37,10 @@ seconds to minutes in dispatch_solver._min_of):
   the break window and whose last return is after it holds one break of break_min, starting in the
   window, at the depot between loads or on the road between two unloadings - never over one.
 
-Violation messages are for the dispatcher: plain words, clock times, minutes short.
+Violation messages are for the dispatcher: plain words, clock times, minutes short. CAPACITY_* and HARD_WINDOW
+also carry their figures (FeasibilityViolation.value / limit / capacity; moves by hand part 2, 25 Oct 2026: what the
+web shows and judges when a rule may be allowed by hand). They are pure additions: no rule changed, so CHECK_VERSION
+did not.
 """
 from __future__ import annotations
 
@@ -101,9 +104,11 @@ def check_scenario(
     node_of = {s.stop_id: k + 1 for k, s in enumerate(solvable)} if (solvable is not None and mx is not None) else None
     out: list[FeasibilityViolation] = []
 
-    def add(code: str, message: str, *, truck_id=None, load_no=None, stop_id=None, short=None) -> None:
+    def add(code: str, message: str, *, truck_id=None, load_no=None, stop_id=None, short=None, value=None, limit=None,
+            capacity=None) -> None:
         out.append(FeasibilityViolation(code=code, message=message, truck_id=truck_id, load_no=load_no, stop_id=stop_id,  # type: ignore[arg-type]
-                                        short_by_min=_short(short) if short is not None else None))
+                                        short_by_min=_short(short) if short is not None else None,
+                                        value=value, limit=limit, capacity=capacity))
 
     def drive_min(a: str | None, b: str | None) -> float | None:
         """Drive time in minutes between two stops (None = depot); None when not checkable."""
@@ -194,13 +199,15 @@ def check_scenario(
                 if units > room:
                     add("CAPACITY_PALLETS", f"{code} load {lno} needs {pallet_text(units)} pallets; the truck takes "
                                             f"{pallet_text(room)} ({t.bays} bays at {pct}% fill{', one customer' if solo else ''}).",
-                        truck_id=tid, load_no=lno, short=(units - room) / 1000)
+                        truck_id=tid, load_no=lno, short=(units - room) / 1000, value=units / 1000, limit=room / 1000,
+                        capacity=t.bays)
             elif cases > t.capacity_cases:
                 add("CAPACITY_CASES", f"{code} load {lno} carries {cases} cases; the truck takes {t.capacity_cases}.",
-                    truck_id=tid, load_no=lno, short=cases - t.capacity_cases)
+                    truck_id=tid, load_no=lno, short=cases - t.capacity_cases, value=cases, limit=t.capacity_cases,
+                    capacity=t.capacity_cases)
             if cap_u > 0 and kg_u > cap_u:
                 add("CAPACITY_KG", f"{code} load {lno} weighs {kg_text(kg_u / 10)} kg; the truck's payload is {kg_text(cap_u / 10)} kg.",
-                    truck_id=tid, load_no=lno, short=(kg_u - cap_u) / 10)
+                    truck_id=tid, load_no=lno, short=(kg_u - cap_u) / 10, value=kg_u / 10, limit=cap_u / 10, capacity=cap_u / 10)
 
             # Departure: after the truck is ready (turnaround) and inside its day. On a plan made on
             # its delivery day loading starts no earlier than then: the later of the two counts.
@@ -245,12 +252,22 @@ def check_scenario(
                     if finish_rule and s.hard_end_min is not None and st.departure_min > he:
                         add("HARD_WINDOW", f"{code} load {lno}: {st.stop_id} finishes unloading at {_hhmm(st.departure_min)}, "
                                            f"after its receiving hours end ({_hhmm(s.hard_end_min)}).",
-                            truck_id=tid, load_no=lno, stop_id=st.stop_id, short=st.departure_min - he)
+                            truck_id=tid, load_no=lno, stop_id=st.stop_id, short=st.departure_min - he,
+                            value=st.departure_min, limit=s.hard_end_min)
                     elif not (hs <= st.service_start_min <= he) or not st.hard_window_ok:
+                        # The figures: early (before opening) -> the service start against the opening; late -> the
+                        # service start (FINISH: the end of unloading, also when it is late by under 30 s and so only
+                        # hard_window_ok says it) against the closing.
+                        if st.service_start_min < hs:
+                            value, limit = st.service_start_min, s.hard_start_min
+                        elif finish_rule:
+                            value, limit = st.departure_min, s.hard_end_min
+                        else:
+                            value, limit = st.service_start_min, s.hard_end_min
                         add("HARD_WINDOW", f"{code} load {lno}: {st.stop_id} is served at {_hhmm(st.service_start_min)}, outside its "
                                            f"receiving hours {_hhmm(s.hard_start_min)}-{_hhmm(s.hard_end_min)}.",
                             truck_id=tid, load_no=lno, stop_id=st.stop_id,
-                            short=max(hs - st.service_start_min, st.service_start_min - he, 0))
+                            short=max(hs - st.service_start_min, st.service_start_min - he, 0), value=value, limit=limit)
                     if st.departure_min - st.service_start_min != s.service_min:
                         add("SERVICE_TIME", f"{code} load {lno}: {st.stop_id} is given {st.departure_min - st.service_start_min} min to "
                                             f"unload; its service time is {s.service_min} min.",

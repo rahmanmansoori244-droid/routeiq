@@ -86,6 +86,12 @@ log = logging.getLogger("routeiq.dispatch.repack")
 
 HORIZON_S = 2 * DAY_MIN * 60
 NO_END_S = DAY_MIN * 2 * 60  # hard_end_min None = open until the end of the horizon
+# Moves by hand, "allow anyway" (retime.py v2, Day.late_soft): a stop whose end of receiving hours may be missed is
+# timed with this penalty per minute after it, so the timing goes late only when nothing else works and never later
+# than needed (the default preferred-hours penalty is 0.05 OMR a minute; a driver hour about 2.5 OMR). A constant on
+# purpose, not a setting.
+RELAX_LATE_OMR_PER_MIN = 5.0
+LATE_SOFT_PER_S = int(round(RELAX_LATE_OMR_PER_MIN * costing.COST_SCALE / 60))  # objective units per second late
 
 
 # --------------------------------------------------------------------------------------------
@@ -223,6 +229,10 @@ class Day:
     frozen_trucks: frozenset[int] = field(default_factory=frozenset)
     # config.window_rule: "FINISH" = unloading finished by closing (latest_start_s).
     window_rule: str = "START"
+    # Moves by hand, "allow anyway" (retime.py v2 only; empty on every other day): stop index -> its latest service
+    # start with its real hours (latest_start_s). Such a stop is given without its end of hours (it still waits for
+    # opening), and every second it starts after that bound costs LATE_SOFT_PER_S (_soft_terms / _soft_cost).
+    late_soft: dict[int, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.by_idx = {td.idx: td for td in self.trucks}
@@ -498,6 +508,10 @@ def _soft_cost(day: Day, pricing: Pricing, k: int, start_s: int) -> int:
         c += early * max(0, start_s - pricing.shift_start_s)
     if s.pref_start_min is not None and pricing.pref > 0:
         c += pricing.pref * max(0, s.pref_start_min * 60 - start_s)
+    soft = getattr(day, "late_soft", None)
+    late = soft.get(k) if soft else None
+    if late is not None:
+        c += LATE_SOFT_PER_S * max(0, start_s - late)
     return c
 
 
@@ -769,6 +783,10 @@ def _soft_terms(day: Day, pricing: Pricing, k: int) -> Iterable[tuple[int, int, 
         yield early, pricing.shift_start_s, 1
     if s.pref_start_min is not None and pricing.pref > 0:
         yield pricing.pref, s.pref_start_min * 60, -1
+    soft = getattr(day, "late_soft", None)
+    late = soft.get(k) if soft else None
+    if late is not None:  # moves by hand, "allow anyway": the end of the receiving hours as a large penalty
+        yield LATE_SOFT_PER_S, late, 1
 
 
 def timing_ok(day: Day, td: "TruckDay", loads: list[TimedLoad]) -> bool:
