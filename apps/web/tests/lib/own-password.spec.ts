@@ -262,6 +262,8 @@ describe('POST /api/account/password (withAccountApi)', () => {
     const route = await import('@/app/api/account/password/route');
     const res = await route.POST(send({ currentPassword: CURRENT, newPassword: NEW }));
     expect(res.status).toBe(401);
+    // withAccountApi marks every answer no-store, its own 401 too (password review N4).
+    expect(res.headers.get('cache-control')).toBe('no-store');
     expect(prismaFake.user).toBeUndefined();
   });
 
@@ -315,6 +317,7 @@ describe('POST /api/account/password (withAccountApi)', () => {
     for (const bad of [{ currentPassword: CURRENT }, { newPassword: NEW }, { currentPassword: '', newPassword: NEW }, 'not json', { currentPassword: 7, newPassword: NEW }]) {
       const res = await route.POST(send(bad));
       expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(res.headers.get('cache-control'), JSON.stringify(bad)).toBe('no-store');
       const text = await res.text();
       expect(text).not.toContain(CURRENT);
       expect(text).not.toContain(NEW);

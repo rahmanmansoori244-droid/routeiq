@@ -28,6 +28,9 @@ export function UserMenu({ name, email, role }: UserMenuProps) {
   // Opening the dialog from the menu: the menu must not move the focus back to its button while it
   // closes, or it takes the focus away from the dialog.
   const openingDialog = useRef(false);
+  // ... and when the dialog closes, the focus goes back to the menu's button (the menu item that
+  // opened it is gone by then), not to the page body.
+  const menuButton = useRef<HTMLButtonElement>(null);
   const initials = name
     .split(/\s+/)
     .map((p) => p[0])
@@ -40,7 +43,7 @@ export function UserMenu({ name, email, role }: UserMenuProps) {
     <>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon" aria-label="User menu" className="h-9 w-9 rounded-full">
+          <Button ref={menuButton} variant="ghost" size="icon" aria-label="User menu" className="h-9 w-9 rounded-full">
             <Avatar className="h-9 w-9">
               <AvatarFallback>{initials || <UserIcon className="h-4 w-4" />}</AvatarFallback>
             </Avatar>
@@ -79,7 +82,15 @@ export function UserMenu({ name, email, role }: UserMenuProps) {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-      <ChangePasswordDialog open={changingPassword} onOpenChange={setChangingPassword} email={email} />
+      <ChangePasswordDialog
+        open={changingPassword}
+        onOpenChange={setChangingPassword}
+        email={email}
+        onCloseAutoFocus={(e) => {
+          e.preventDefault();
+          menuButton.current?.focus();
+        }}
+      />
     </>
   );
 }

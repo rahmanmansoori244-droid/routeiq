@@ -13,7 +13,8 @@
  *
  * Answers: 200 { changed: true, signInAgain: true }; 400 WEAK_PASSWORD / WRONG_PASSWORD (and a body
  * that is not { currentPassword, newPassword }); 401 no session (or the account is gone or
- * inactive); 409 CHANGED_MEANWHILE; 429 THROTTLED or too many requests. Never cached.
+ * inactive); 409 CHANGED_MEANWHILE; 429 THROTTLED or too many requests. Never cached: withAccountApi
+ * sets Cache-Control: no-store on every answer, errors included.
  */
 import { z } from 'zod';
 import { withAccountApi, ok, fail, parseBody } from '@/lib/api';
@@ -28,17 +29,12 @@ const schema = z.object({
   newPassword: z.string().max(1000),
 });
 
-const noStore = (res: Response) => {
-  res.headers.set('Cache-Control', 'no-store');
-  return res;
-};
-
 export const POST = withAccountApi(
   async (req, { user, ip }) => {
     const body = await parseBody(req, schema);
     const result = await changeOwnPassword({ userId: user.id, currentPassword: body.currentPassword, newPassword: body.newPassword, ip });
-    if (!result.ok) return noStore(fail({ error: result.message, code: result.code }, result.status));
-    return noStore(ok({ changed: true, signInAgain: true }));
+    if (!result.ok) return fail({ error: result.message, code: result.code }, result.status);
+    return ok({ changed: true, signInAgain: true });
   },
   // Every attempt, right or wrong, per user: bounds the bcrypt work one session can ask for.
   { rateLimitKey: 'account-password', rateLimitLimit: 20, rateLimitWindowMs: 60 * 60_000 },

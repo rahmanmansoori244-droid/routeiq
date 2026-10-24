@@ -7,7 +7,11 @@
  * - it sends { currentPassword, newPassword } to POST /api/account/password, and after the change
  *   signs out to /login?reason=password (every session ended, this one too);
  * - a refusal shows the server's words and keeps the user signed in; no answer says so;
- * - one request at a time, and the dialog cannot be closed while it runs.
+ * - a session the server no longer accepts (401), or a password an admin reset / reset link changed
+ *   meanwhile (409 CHANGED_MEANWHILE), never shows a bare "Unauthorized": the dialog says so and
+ *   goes to the end-session page, back to this page after signing in (password review N1);
+ * - one request at a time, and the dialog cannot be closed while it runs;
+ * - closing the dialog puts the focus back on the menu's button (password review N2).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Host, elements, textOf, typeName } from './hook-host';
@@ -37,11 +41,16 @@ vi.stubGlobal(
     ),
 );
 
-const { ChangePasswordDialog, CHANGE_PASSWORD_API, PASSWORD_CHANGED_LOGIN, NOT_THE_SAME, NO_ANSWER } = await import('@/components/change-password-dialog');
+const assigned: string[] = [];
+vi.stubGlobal('window', { location: { pathname: '/t/acme/dispatch', search: '?date=2026-10-25', assign: (url: string) => assigned.push(url) } });
+
+const { ChangePasswordDialog, CHANGE_PASSWORD_API, PASSWORD_CHANGED_LOGIN, NOT_THE_SAME, NO_ANSWER, SESSION_ENDED } = await import('@/components/change-password-dialog');
 const { UserMenu } = await import('@/components/user-menu');
+const { endSessionUrl } = await import('@/lib/safe-redirect');
 
 beforeEach(() => {
   sent.length = 0;
+  assigned.length = 0;
   signOut.mockClear();
 });
 
@@ -103,6 +112,20 @@ describe('the user menu offers Change password', () => {
     dlg().props.onOpenChange(false);
     host.flush();
     expect(dlg().props.open).toBe(false);
+  });
+
+  it('closing the dialog puts the focus back on the menu button, not on the page body', () => {
+    const host: Host<any> = new Host(UserMenu as any, { name: 'Pat Planner', email: 'planner@a.example', role: 'PLANNER' });
+    host.render();
+    const els = () => elements(host.tree);
+    const button = els().find((e) => typeName(e) === 'Button' && e.props?.['aria-label'] === 'User menu');
+    const focus = vi.fn();
+    button.ref.current = { focus };
+    const dlg = els().find((e) => e.type === ChangePasswordDialog);
+    const closing = { preventDefault: vi.fn() };
+    dlg.props.onCloseAutoFocus(closing);
+    expect(closing.preventDefault).toHaveBeenCalledTimes(1);
+    expect(focus).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -177,6 +200,36 @@ describe('ChangePasswordDialog', () => {
     await p;
     await d.host.settle();
     expect(d.errorText()).toBe(NO_ANSWER);
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it('a session the server no longer accepts (401): says so and goes to end-session, back to this page; no bare "Unauthorized"', async () => {
+    const d = dialog();
+    d.fill('Current-Password-1', 'A-brand-new-password-24');
+    const p = d.submit();
+    sent[0]!.answer(401, { data: null, error: 'Unauthorized' });
+    await p;
+    await d.host.settle();
+    expect(assigned).toEqual([endSessionUrl('/t/acme/dispatch?date=2026-10-25')]);
+    expect(d.description()).toBe(SESSION_ENDED);
+    expect(d.errorText()).toBe('');
+    // Nothing typed is kept, the dialog cannot be closed while the page is replaced, next-auth is not asked.
+    expect(d.field('pw-current')).toBeUndefined();
+    d.dialogEl().props.onOpenChange(false);
+    expect(d.closed).toEqual([]);
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it('changed meanwhile by an admin reset or a reset link (409 CHANGED_MEANWHILE): shows the server words and goes to end-session', async () => {
+    const d = dialog();
+    d.fill('Current-Password-1', 'A-brand-new-password-24');
+    const p = d.submit();
+    const words = 'Your password was changed meanwhile (by an admin or a reset link), so it was not changed here. Sign in again with the newest password.';
+    sent[0]!.answer(409, { data: null, error: { error: words, code: 'CHANGED_MEANWHILE' } });
+    await p;
+    await d.host.settle();
+    expect(d.description()).toBe(words);
+    expect(assigned).toEqual([endSessionUrl('/t/acme/dispatch?date=2026-10-25')]);
     expect(signOut).not.toHaveBeenCalled();
   });
 

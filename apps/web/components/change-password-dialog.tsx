@@ -9,6 +9,12 @@
  * After the change every session of the user has ended, this one included (the session carries a
  * fingerprint of the password hash), so the dialog says so and signs out to the sign-in page, which
  * says "Your password is changed" (/login?reason=password).
+ *
+ * When the server no longer accepts this session (401: the 12-hour limit, signed out elsewhere, or a
+ * retry after "No answer" when the change did go through) or an admin reset / reset link changed the
+ * password meanwhile (409 CHANGED_MEANWHILE, which ended the session too), the dialog says so and
+ * goes to the end-session page as the dispatch screen does (lib/safe-redirect.ts endSessionUrl): the
+ * cookie is cleared and the user signs in again, then comes back to this page.
  */
 import { useState } from 'react';
 import { signOut } from 'next-auth/react';
@@ -18,29 +24,51 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { errorMessage } from '@/lib/error-message';
 import { newPasswordProblem, PASSWORD_MIN_CHARS } from '@/lib/password-rules';
+import { endSessionUrl } from '@/lib/safe-redirect';
 
 export const CHANGE_PASSWORD_API = '/api/account/password';
 export const PASSWORD_CHANGED_LOGIN = '/login?reason=password';
 
 export const NOT_THE_SAME = 'The two new passwords are not the same.';
 export const NO_ANSWER = 'No answer from RouteIQ. If your password was changed, you will be asked to sign in again; otherwise try again.';
+export const PASSWORD_CHANGED = 'Your password is changed. Signing you out: sign in again with your new password.';
+export const SESSION_ENDED = 'Your session has ended. Taking you to the sign-in page: sign in again.';
+
+/** The server's error code, if the answer carries one ({ error: { error, code } }). */
+function errorCode(body: unknown): string | null {
+  const err = (body as { error?: unknown } | null)?.error;
+  const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : null;
+  return typeof code === 'string' ? code : null;
+}
+
+/** Clear the session the server no longer accepts and sign in again, then come back to this page. */
+function goEndSession() {
+  if (typeof window === 'undefined') return;
+  window.location.assign(endSessionUrl(window.location.pathname + window.location.search));
+}
 
 export function ChangePasswordDialog({
   open,
   onOpenChange,
   email,
+  onCloseAutoFocus,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** The signed-in user's email (the new password must not be it). */
   email: string;
+  /** Where the focus goes when the dialog closes (UserMenu: back to its button). */
+  onCloseAutoFocus?: (e: Event) => void;
 }) {
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [again, setAgain] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
+  // Set once the dialog is leaving the page (password changed, or the session has ended): what it says
+  // meanwhile. The form is gone and the dialog cannot be closed.
+  const [leaving, setLeaving] = useState<string | null>(null);
+  const done = leaving !== null;
 
   function clear() {
     setCurrent('');
@@ -50,7 +78,7 @@ export function ChangePasswordDialog({
   }
 
   function onOpen(o: boolean) {
-    // Not while the request runs, and not after the change (the dialog is signing out).
+    // Not while the request runs, and not once the dialog is leaving the page (signing out).
     if (busy || done) return;
     if (!o) clear();
     onOpenChange(o);
@@ -79,13 +107,22 @@ export function ChangePasswordDialog({
       return;
     }
     const body: unknown = await res.json().catch(() => ({}));
+    if (res.status === 401 || (res.status === 409 && errorCode(body) === 'CHANGED_MEANWHILE')) {
+      // This session is over (409: the admin reset or reset link that won ended it too). Never a bare
+      // "Unauthorized": say so and sign in again.
+      clear();
+      setLeaving(res.status === 409 ? errorMessage(body, SESSION_ENDED) : SESSION_ENDED);
+      setBusy(false);
+      goEndSession();
+      return;
+    }
     if (!res.ok) {
       setBusy(false);
       setError(errorMessage(body, 'The password was not changed.'));
       return;
     }
     clear();
-    setDone(true);
+    setLeaving(PASSWORD_CHANGED);
     setBusy(false);
     // This session has ended with the others: clear its cookie and go to the sign-in page. Should the
     // sign-out request fail, the next page finds the session ended and sends the browser to sign in.
@@ -98,12 +135,12 @@ export function ChangePasswordDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpen}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-md" onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>Change password</DialogTitle>
           <DialogDescription>
-            {done
-              ? 'Your password is changed. Signing you out: sign in again with your new password.'
+            {leaving !== null
+              ? leaving
               : `At least ${PASSWORD_MIN_CHARS} characters, not your current password and not your email. After the change you are signed out everywhere, here too, and sign in again with the new password.`}
           </DialogDescription>
         </DialogHeader>
