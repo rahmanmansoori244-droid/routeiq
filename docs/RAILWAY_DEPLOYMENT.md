@@ -50,7 +50,7 @@ Follow-ups:
    - Since audit P5 (each uploaded file is read in its own short-lived process): optional `UPLOAD_WORKER_MAX_HEAP_MB` (default 512), `UPLOAD_PARSE_TIMEOUT_MS` (default 15000) and `UPLOAD_PARSE_CONCURRENCY` (default 2) on web; leave them unset unless the owner decides other values. **Memory:** while files are read, the web service needs its own memory plus, for each file read at once, about the heap cap + 150 MB: with the defaults up to about 1.3 GB more (NMWC's real files need about 60-70 MB each). The web process itself also holds the rows of each file being handled: at most 200 cells a row and 2,500,000 cells per file, kept compact (since the P5 second review; the parser's 128 MB answer cap alone did not bound them). Measured: 20-26 MB for the largest legal files, well under 1 MB for NMWC's files; so with two files at once, about 50 MB more at most. This does not bound the upload request itself (P5 third review): the web process reads a whole request body before the 10 MB check, about twice its size in memory, even without a session (a 300 MB request: 500-620 MB more). Unless something in front of the web service caps request bodies (not recorded in the repo), one very large request can take the web service to its memory limit; the cap is an owner question (handbook 7.5). Before the deploy, check the web service's memory limit and its usage in Railway (web → Metrics); if the limit is lower, raise it, or set `UPLOAD_PARSE_CONCURRENCY=1`. The build also makes `apps/web/.next/upload-parser/parse.cjs` (the file reader), and the start command must run in `apps/web`, as `pnpm --filter @routeiq/web start` does. After the deploy the web log shows `[upload-parse] the file reader works (startup check)`; a `[config]` error about the upload file reader means every upload is refused: redeploy with the build command above. No migration; rollback is a redeploy of the previous commit.
    - Since review M3 (the driver sheets are made in their own short-lived process, like uploads): optional `PDF_RENDER_MAX_HEAP_MB` (default 1024), `PDF_RENDER_TIMEOUT_MS` (default 120000) and `PDF_RENDER_CONCURRENCY` (default 2) on web; leave them unset unless the owner decides other values. **Memory:** each pack being made needs about 130 MB for one load and 460-560 MB for a whole day of 300-400 stops (measured), so two whole-day packs next to two large uploads need about 2.5 GB beside the web's own; if the web service's limit is lower, raise it or set `PDF_RENDER_CONCURRENCY=1`. The build also makes `apps/web/.next/pdf-renderer/render.cjs` (`scripts/build-pdf-renderer.mjs`), found by `next start` run in `apps/web`. After the deploy the web log shows `[pdf-render] the driver sheet maker works (startup check)`; a `[config]` error about the driver sheet maker means every driver sheet is refused: redeploy with the build command above. Check one "Driver sheets (PDF)" on the plan screen: the web log shows `[pdf-render] made <n> driver sheet(s), <KB> KB, in <ms> ms, renderer peak <MB> MB (process <pid>)`, and `GET /api/health/live` keeps answering while it is made. No migration; rollback is a redeploy of the previous commit.
 3. **solver** redeploys from `main` with the new OR-Tools engine. `OSRM_URL` is already set.
-   - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools worker processes plus 1 for the PyVRP second search - and K-1 more with best-of-N, `SOLVER_BEST_OF`, off by default - more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
+   - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools worker processes plus 1 for the PyVRP second search - and K-1 more with best-of-N, `SOLVER_BEST_OF`, off by default, and 1 for the far-area search, `SOLVER_FAR_AREA`, off by default - more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
    - Never set `SOLVER_PARALLEL` on the solver: `0` disables every deadline and the time budget (the solver logs an error at startup on Railway when it is set). The same for `SOLVER_ALLOW_INPROCESS_FALLBACK` (rule 22, see "The planner cannot start its worker processes" below).
    - Since stabilization PR4 the solver adds an optional `feasibility` report to every option. Deploy order does not matter: the web treats a missing report as "not checked by the optimizer" and blocks such a plan only on a concrete problem it finds itself.
    - Web and solver build independently. Until the new solver is live, an optimize answers "The route optimizer is being updated. Try again in a minute."
@@ -384,6 +384,41 @@ reason and warning texts changed, where they were untrue).
   dispatch from it, and tell the engineer the run id.
 - **Rollback:** unset the variables (or set `SOLVER_BEST_OF=1`, `SOLVER_BEST_OF_QUICK=1` and `SOLVER_PRIORITY_REPAIR=off`);
   no code change.
+
+## Far-area grouping (21 Oct 2026, off by default)
+
+Owner request: "sometimes the model sends 2 or 3 trucks to one far away area - why can't it send one whole truck?". One
+solver switch, `SOLVER_FAR_AREA`, ships **off**; with it off every plan is the one from before and nothing new runs.
+
+- **What it does.** `report`: each plan says, on RECOMMENDED, why a far area (stops 30 km or more from the depot, away
+  from the rest of the day; named by km and compass only) is on two or more loads, and the response has
+  `search.far_area`; plans unchanged. `thorough`: Thorough solves also run one more route search beside the main one,
+  with each far area's stops allowed only on the fewest trucks that can carry it; an option takes that plan only when it
+  is not worse on the option's own goal (service by priority first), leaves out no other order of the same priority,
+  puts the area on fewer loads while still delivering every area stop the plan without it delivers, never goes below
+  the fewest loads the area needs, and passes the planner's own checks (its note starts "Far area: ..."). Quick solves get the
+  notes only. `on`: both modes. See `docs/PROJECT_HANDBOOK.md` 2.9 and 4.11. `SOLVER_FAR_AREA_KM` (default 30) and
+  `SOLVER_FAR_AREA_SLACK_MIN` (default 0: the same timing rules as every plan) are the owner's settings.
+- **What it costs.** On a day with a far area to group: up to 1 s of route check, one more busy worker process during
+  RECOMMENDED's search (only when a CPU is left after best-of's searches: 24 CPUs at 2 solves leave plenty), its own copy
+  of the day's matrices, and on Thorough up to `SOLVER_BEST_OF_JOIN_SEC` (60 s) of waiting after the main search, always
+  inside the cap. RECOMMENDED's own time and the load re-check's are unchanged. Measure peak memory on a 600-stop day
+  before `on`.
+- **Rollout.** `report` may go on at once with the owner's OK (notes only). `thorough` only after the offline replay of
+  saved real days and the bench gate: `scripts/bench_search.py ... --arms base,far_thorough --modes THOROUGH` (above;
+  presets `far_report`, `far_thorough`, `far_on`; `all_on` includes `SOLVER_FAR_AREA=on`) passes its pre-written rule.
+  `on` later. Never during the evening's planning: a variable change restarts the solver.
+- **Verify after the deploy or a change** (`railway logs --service solver`): the startup line
+  `Far-area grouping: off (the default; SOLVER_FAR_AREA unset or off)` (or `Far-area grouping: thorough (...; core 30 km,
+  slack 0 min)`); a value it cannot read is named there and counts as off. `GET /ready` has `far_area` (`mode`,
+  `thorough`, `quick`, `unread`). After a solve: `search.far_area` in `RunJob.responseJson` (`status` USED / NOT_USED /
+  SKIPPED / FAILED and `reason`; the areas with `min_loads` and `loads_main` / `loads_far` / `loads_final`; `results` per
+  option) and the log lines `far-area run=<id> mode=... status=...` (one per solve, per area) and
+  `far-area run=<id> RECOMMENDED: GROUPED ...` (per option judged).
+- **Roll back at once** (no code change) on any of: an optimization answering 503 or 504; a Thorough solve whose
+  `search.used_sec` is above its cap minus 60 s; the far-area search `TIMEOUT` or `LOST` (`search.far_area.search.status`)
+  on two nights; RECOMMENDED's cost above the median of the 7 nights before at the same service by priority.
+- **Rollback:** set `SOLVER_FAR_AREA=off` (or unset it); no code change.
 
 ## Private networking notes
 

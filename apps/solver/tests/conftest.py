@@ -30,10 +30,11 @@ def _second_search_off_by_default(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _search_upgrade_settings_at_defaults(monkeypatch):
-    """Best-of-N (best_of.py) and the priority repair start at their production defaults (off) whatever
-    the shell running the tests has set; a test that needs one sets it itself."""
+    """Best-of-N (best_of.py), the priority repair and far-area grouping (far_area.py) start at their production
+    defaults (off) whatever the shell running the tests has set; a test that needs one sets it itself."""
     for name in ("SOLVER_BEST_OF", "SOLVER_BEST_OF_QUICK", "SOLVER_BEST_OF_SOURCES", "SOLVER_BEST_OF_JOIN_SEC",
-                 "SOLVER_BEST_OF_STRATEGIES", "SOLVER_PRIORITY_REPAIR"):
+                 "SOLVER_BEST_OF_STRATEGIES", "SOLVER_PRIORITY_REPAIR", "SOLVER_FAR_AREA", "SOLVER_FAR_AREA_KM",
+                 "SOLVER_FAR_AREA_SLACK_MIN"):
         monkeypatch.delenv(name, raising=False)
 
 

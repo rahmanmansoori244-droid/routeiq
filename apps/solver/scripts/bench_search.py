@@ -1,5 +1,6 @@
 """Replay saved dispatch requests through the optimizer, arm against arm: the gate for switching on the solver
-search upgrade's flags (best-of-N route search, PyVRP on small-truck-only days, the priority repair).
+search upgrade's flags (best-of-N route search, PyVRP on small-truck-only days, the priority repair, far-area
+grouping).
 
 Every one of those flags ships off. docs/RAILWAY_DEPLOYMENT.md: none goes on until this tool's pre-written rule
 (RULE below, written before any replay ran) passes on saved real requests.
@@ -8,7 +9,7 @@ How each solve runs: as the solver service runs it. The saved request is validat
 optimize_dispatch runs in a solve thread with its own SolveControl (main.py does the same), its route searches
 in spawned worker pools (SOLVER_PARALLEL=1, never in this process). An ARM is a set of environment variables.
 The solver reads each of them on every solve (best_of.py, pyvrp_candidate.allowed_setting,
-dispatch_solver.priority_repair_on), so the bench sets them just before each run and restores them after it.
+dispatch_solver.priority_repair_on, far_area.py), so the bench sets them just before each run and restores them after it.
 Each record keeps the settings exactly as the solver read them during that run. The arms are interleaved per
 repetition, request and mode (A B C, then B C A, ...). So the runs of a pair (same request, mode and repetition)
 ran minutes apart on the same machine.
@@ -25,7 +26,10 @@ default) or presets separated by commas ("base,best_of;k4=SOLVER_BEST_OF=4"). Th
     best_of      SOLVER_BEST_OF=3, SOLVER_BEST_OF_QUICK=3
     pyvrp_model  SOLVER_PYVRP_ALLOWED=model
     repair_on    SOLVER_PRIORITY_REPAIR=on
-    all_on       all three
+    far_report   SOLVER_FAR_AREA=report (far-area notes only; plans unchanged)
+    far_thorough SOLVER_FAR_AREA=thorough (the far-area search on THOROUGH solves)
+    far_on       SOLVER_FAR_AREA=on (the far-area search on every solve)
+    all_on       best_of, pyvrp_model, repair_on and far_on
 Before each run, every flag in FLAG_VARS is unset, then the arm's own values are set. Every other variable
 comes from the shell, and the header of the summary lists it. --base names the arm that the others are paired
 against ("base" when there is one, else the first arm).
@@ -87,14 +91,18 @@ TOOL_VERSION = 1
 
 # The solver search upgrade's flags: unset before every run (each arm starts from production defaults).
 FLAG_VARS = ("SOLVER_BEST_OF", "SOLVER_BEST_OF_QUICK", "SOLVER_BEST_OF_SOURCES", "SOLVER_BEST_OF_JOIN_SEC",
-             "SOLVER_BEST_OF_STRATEGIES", "SOLVER_PYVRP_ALLOWED", "SOLVER_PRIORITY_REPAIR")
+             "SOLVER_BEST_OF_STRATEGIES", "SOLVER_PYVRP_ALLOWED", "SOLVER_PRIORITY_REPAIR", "SOLVER_FAR_AREA",
+             "SOLVER_FAR_AREA_KM", "SOLVER_FAR_AREA_SLACK_MIN")
 PRESETS: dict[str, dict[str, str]] = {
     "base": {},
     "best_of": {"SOLVER_BEST_OF": "3", "SOLVER_BEST_OF_QUICK": "3"},
     "pyvrp_model": {"SOLVER_PYVRP_ALLOWED": "model"},
     "repair_on": {"SOLVER_PRIORITY_REPAIR": "on"},
+    "far_report": {"SOLVER_FAR_AREA": "report"},
+    "far_thorough": {"SOLVER_FAR_AREA": "thorough"},
+    "far_on": {"SOLVER_FAR_AREA": "on"},
     "all_on": {"SOLVER_BEST_OF": "3", "SOLVER_BEST_OF_QUICK": "3", "SOLVER_PYVRP_ALLOWED": "model",
-               "SOLVER_PRIORITY_REPAIR": "on"},
+               "SOLVER_PRIORITY_REPAIR": "on", "SOLVER_FAR_AREA": "on"},
 }
 DEFAULT_ARMS = "base,best_of,pyvrp_model,repair_on,all_on"
 MODES = ("QUICK", "THOROUGH")
@@ -105,7 +113,7 @@ SHOWN_ENV = re.compile(r"^(SOLVER_|THOROUGH_|MATRIX_BUDGET_SEC$|OSRM_TABLE_TILE$
 SECRET_ENV = re.compile(r"TOKEN|KEY|SECRET|PASSWORD", re.I)
 # The solver's source files: an arm may only set a variable one of them reads (catches typos such as
 # SOLVER_BESTOF, which the solver would silently ignore).
-SOLVER_SOURCES = ("dispatch_solver.py", "best_of.py", "pyvrp_candidate.py", "load_repack.py", "providers.py", "main.py",
+SOLVER_SOURCES = ("dispatch_solver.py", "best_of.py", "far_area.py", "pyvrp_candidate.py", "load_repack.py", "providers.py", "main.py",
                   "feasibility.py", "costing.py")
 
 CAP_MARGIN_SEC = 60  # rule 4: every run answers within its cap minus this
@@ -154,6 +162,12 @@ def _solver():
     import pyvrp_candidate as PV
     from dispatch_models import DispatchRequest
     return ds, BO, PV, DispatchRequest
+
+
+def _far():
+    """far_area.py, imported on first use (as _solver)."""
+    import far_area as FA
+    return FA
 
 
 # ---------------------------------------------------------------------------------------------
@@ -360,6 +374,8 @@ def _effective(mode: str) -> dict:
             "best_of_join_sec": BO.join_sec(), "best_of_strategies": list(BO.strategies()),
             "pyvrp": PV.setting(), "pyvrp_on": pyvrp_on, "pyvrp_off_why": pyvrp_why, "pyvrp_allowed": PV.allowed_setting(),
             "pyvrp_models_limits": PV.limits_modelled(mode), "priority_repair": ds.priority_repair_on(),
+            "far_area": _far().mode(), "far_area_search": _far().groups(mode), "far_area_km": _far().core_km(),
+            "far_area_slack_min": _far().slack_min(),
             "parallel": ds._parallel(), "max_concurrent": BO.max_concurrent(), "cpus": PV.effective_cpus()}
 
 
@@ -370,7 +386,7 @@ def check_arm_values(arms: list[Arm], max_concurrent: int) -> None:
     for a in arms:
         saved = _apply(a, max_concurrent)
         try:
-            bad = [f"{n}={raw!r} ({what})" for n, raw, what in BO.unread()]
+            bad = [f"{n}={raw!r} ({what})" for n, raw, what in [*BO.unread(), *_far().unread()]]
             repair = os.environ.get("SOLVER_PRIORITY_REPAIR")
             if repair is not None and repair.strip().lower() not in ("on", "1", "true", "yes", "off", "0", "false", "no"):
                 bad.append(f"SOLVER_PRIORITY_REPAIR={repair!r} (on or off)")
@@ -600,6 +616,16 @@ def _from_response(resp, rf: RequestFile, ds) -> dict:
             out["best_of"] = bo
         else:
             out["best_of"] = None
+        # Far-area grouping: what it did, per area (km and compass, never an id: the label names no stop).
+        fa = getattr(s, "far_area", None)
+        out["far_area"] = None if fa is None else {
+            "status": fa.status, "reason": fa.reason, "sent": fa.sent, "chosen_for": list(fa.chosen_for),
+            "search": fa.search.status if fa.search is not None else None,
+            "areas": [{"label": a.label, "min_loads": a.min_loads, "min_loads_reason": a.min_loads_reason,
+                       "pinned": a.pinned, "loads_main": a.loads_main, "loads_far": a.loads_far,
+                       "loads_final": a.loads_final} for a in fa.areas],
+            "results": [{"option": x.option, "outcome": x.outcome, "gain_omr": x.gain_omr, "gain_km": x.gain_km}
+                        for x in fa.results]}
     hc = getattr(resp, "hire_check", None)
     if hc is not None:
         out["hire_check"] = {"to_rent": len(hc.used), "solves": hc.solves, "complete": hc.complete}
@@ -680,6 +706,9 @@ def robustness_failures(rec: dict) -> list[str]:
     pv = rec.get("pyvrp") or {}
     if pv.get("status") == "FAILED":
         out.append(f"PyVRP FAILED {pv.get('reason')}")
+    fa = rec.get("far_area") or {}
+    if fa.get("search") in SEARCH_FAILURES:
+        out.append(f"far-area search {fa['search']}")
     if rec.get("children_left"):
         out.append(f"{rec['children_left']} worker process(es) left")
     return out
@@ -695,6 +724,8 @@ def exercised(rec: dict) -> dict[str, bool]:
             (rec.get("pyvrp") or {}).get("status") in ("CHOSEN", "NOT_CHOSEN")
     if eff.get("priority_repair"):
         out["priority repair"] = any(sum(o["repair"].values()) > 0 for o in (rec.get("options") or {}).values())
+    if eff.get("far_area_search"):
+        out["far-area grouping"] = (rec.get("far_area") or {}).get("search") is not None
     return out
 
 
@@ -1115,10 +1146,11 @@ def describe(plan: Plan, args) -> str:
                              + ", PyVRP " + ("off" if not e["pyvrp_on"] else "on, models small-truck-only days"
                                              if e["pyvrp_models_limits"] else "on"))
             repair = "on" if _effective("QUICK")["priority_repair"] else "off"
+            far = _effective("QUICK")["far_area"]
         finally:
             _restore(saved)
         L.append(f"  {a.name:12} {a.describe()}")
-        L.append(f"  {'':12} as read: {'; '.join(parts)}; priority repair {repair}")
+        L.append(f"  {'':12} as read: {'; '.join(parts)}; priority repair {repair}; far-area grouping {far}")
     n = len(plan.schedule)
     worst = 0.0
     for _p, rf, mode, _a, _rep in plan.schedule:

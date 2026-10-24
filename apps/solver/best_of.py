@@ -98,6 +98,10 @@ class SearchVariant:
     index: int
     order_seed: int
     first_solution: str = DEFAULT_STRATEGY
+    # Far-area grouping's twin search (far_area.py): RECOMMENDED's search with each far area pinned to its fewest
+    # trucks, in the other searches' pool. Never one of best-of's searches: never ranked among them, never a
+    # source of theirs, never the main plan nor the alternatives' start.
+    far: bool = False
 
     @property
     def source(self) -> str:
@@ -169,9 +173,15 @@ def effective(mode: str, *, parallel: bool, pyvrp_on: bool) -> tuple[int, str | 
         return 1, None
     if not parallel:
         return 1, "IN_PROCESS"
-    room = PV.effective_cpus() // max_concurrent() - (1 if pyvrp_on else 0)
-    used = max(1, min(k, room))
+    used = max(1, min(k, room(pyvrp_on)))
     return used, ("CPU_GATE" if used < k else None)
+
+
+def room(pyvrp_on: bool) -> int:
+    """Route searches one solve may run at once: effective_cpus // MAX_CONCURRENT_DISPATCH, less one for the
+    second search (PyVRP) when it runs. Best-of's CPU gate (effective) and far-area grouping's twin search (one
+    more process, only when a CPU is left after best-of's K) use it."""
+    return PV.effective_cpus() // max_concurrent() - (1 if pyvrp_on else 0)
 
 
 # ---------------------------------------------------------------------------------------------
