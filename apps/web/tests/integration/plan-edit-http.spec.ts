@@ -88,14 +88,17 @@ describe.skipIf(!ON)('moves by hand, part 2, through the routes and the real sol
     const p = await plan();
     const [a, b] = p.loads.filter((l: any) => l.status === 'PLANNED');
     expect(a && b).toBeTruthy();
+    const order = (l: any) => l.stops.map((s: any) => s.customerId).join(',');
     const c = await check(t.cookieJar, { ops: [{ kind: 'SWAP_LOADS', a: a.id, b: b.id }] });
     expect(c.status).toBe(200);
-    if (c.body.data.ok) {
-      const s = await save(t.cookieJar, { ops: c.body.data.ops, previewHash: c.body.data.previewHash, builtAt: c.body.data.builtAt });
-      expect(s.status).toBe(200);
-      runId = s.body.data.runId;
-    }
+    expect(c.body.data.ok).toBe(true);
+    const s = await save(t.cookieJar, { ops: c.body.data.ops, previewHash: c.body.data.previewHash, builtAt: c.body.data.builtAt });
+    expect(s.status).toBe(200);
+    runId = s.body.data.runId;
     const q = await plan();
+    // Each load keeps its stop order and takes the other's place.
+    expect(q.loads.find((x: any) => order(x) === order(a))).toMatchObject({ truckId: b.truckId, loadNo: b.loadNo });
+    expect(q.loads.find((x: any) => order(x) === order(b))).toMatchObject({ truckId: a.truckId, loadNo: a.loadNo });
     const l = q.loads.find((x: any) => x.status === 'PLANNED' && x.stops.length > 1);
     const v1 = await check(t.cookieJar, { move: { kind: 'MOVE', from: { loadId: l.id, sequence: 1 }, to: { truckId: l.truckId, loadId: l.id, position: l.stops.length - 1 } } });
     expect(v1.status).toBe(200);
@@ -104,30 +107,38 @@ describe.skipIf(!ON)('moves by hand, part 2, through the routes and the real sol
 
   it('several stops at their best place: Check resolves them to an order; the resolved list saves', async () => {
     const p = await plan();
-    const [from, to] = p.loads.filter((l: any) => l.status === 'PLANNED');
-    const stops = from.stops.slice(0, 2).map((s: any) => ({ loadId: from.id, sequence: s.sequence }));
-    const c = await check(t.cookieJar, { ops: [{ kind: 'MOVE_STOPS', stops, to: { truckId: to.truckId, loadId: to.id } }] });
+    // The day's loads are full (3 x 80 cases of 300): the two stops go to a new load of T02, at its best place.
+    const from = p.loads.filter((l: any) => l.status === 'PLANNED').sort((x: any, y: any) => y.stops.length - x.stops.length)[0];
+    const t02 = await prisma.truck.findFirstOrThrow({ where: { tenantId: t.tenantId, code: 'T02' }, select: { id: true } });
+    const moved = from.stops.slice(0, 2);
+    const stops = moved.map((s: any) => ({ loadId: from.id, sequence: s.sequence }));
+    const c = await check(t.cookieJar, { ops: [{ kind: 'MOVE_STOPS', stops, to: { truckId: t02.id, loadId: null, before: 'BEST' } }] });
     expect(c.status).toBe(200);
-    expect(c.body.data.ops[0].to.order).toBeTruthy();
-    if (c.body.data.ok) {
-      const s = await save(t.cookieJar, { ops: c.body.data.ops, previewHash: c.body.data.previewHash, builtAt: c.body.data.builtAt });
-      expect(s.status).toBe(200);
-      runId = s.body.data.runId;
-    }
+    expect(c.body.data.ok).toBe(true);
+    expect(c.body.data.ops[0].to.order).toHaveLength(2);
+    expect(c.body.data.ops[0].to.before).not.toBe('BEST');
+    const s = await save(t.cookieJar, { ops: c.body.data.ops, previewHash: c.body.data.previewHash, builtAt: c.body.data.builtAt });
+    expect(s.status).toBe(200);
+    runId = s.body.data.runId;
+    const q = await plan();
+    const onT02 = q.loads.filter((l: any) => l.truckId === t02.id).flatMap((l: any) => l.stops.map((x: any) => x.customerId));
+    expect(onT02.sort()).toEqual(moved.map((x: any) => x.customerId).sort());
   });
 
   it('stops exchanged between two loads as a list of two (F11)', async () => {
     const p = await plan();
-    const [a, b] = p.loads.filter((l: any) => l.status === 'PLANNED');
+    const [a, b] = p.loads.filter((l: any) => l.status === 'PLANNED' && l.stops.length >= 2);
     const one = await check(t.cookieJar, { ops: [{ kind: 'MOVE_STOPS', stops: [{ loadId: a.id, sequence: 1 }], to: { truckId: b.truckId, loadId: b.id, position: 0 } }] });
     expect(one.body.data.draftable).toBe(true);
     const both = await check(t.cookieJar, { ops: [...one.body.data.ops, { kind: 'MOVE_STOPS', stops: [{ loadId: b.id, sequence: 1 }], to: { truckId: a.truckId, loadId: a.id, position: 0 } }] });
     expect(both.status).toBe(200);
-    if (both.body.data.ok) {
-      const s = await save(t.cookieJar, { ops: both.body.data.ops, previewHash: both.body.data.previewHash, builtAt: both.body.data.builtAt });
-      expect(s.status).toBe(200);
-      runId = s.body.data.runId;
-    }
+    expect(both.body.data.ok).toBe(true);
+    const s = await save(t.cookieJar, { ops: both.body.data.ops, previewHash: both.body.data.previewHash, builtAt: both.body.data.builtAt });
+    expect(s.status).toBe(200);
+    runId = s.body.data.runId;
+    const q = await plan();
+    expect(q.loads.find((l: any) => l.truckId === b.truckId && l.loadNo === b.loadNo).stops[0].customerId).toBe(a.stops[0].customerId);
+    expect(q.loads.find((l: any) => l.truckId === a.truckId && l.loadNo === a.loadNo).stops[0].customerId).toBe(b.stops[0].customerId);
   });
 
   it('a late arrival: allowed by a supervisor from a best-place check (the hashes agree); a planner gets 403; Lock answers 200', async () => {
@@ -136,7 +147,9 @@ describe.skipIf(!ON)('moves by hand, part 2, through the routes and the real sol
     const last = target.stops[target.stops.length - 1];
     // Its last customer must now be served before the planned arrival: a stop moved in front makes it late.
     await prisma.customer.update({ where: { id: last.customerId }, data: { hardWindowStartMin: 0, hardWindowEndMin: Math.max(1, (last.etaMin ?? 600) - 1) } });
-    const other = p.loads.find((l: any) => l.status === 'PLANNED' && l.id !== target.id);
+    // A stop of ANOTHER truck: one taken from an earlier load of the same truck could let the target leave earlier
+    // (that load shorter or gone) and arrive on time.
+    const other = p.loads.find((l: any) => l.status === 'PLANNED' && l.truckId !== target.truckId) ?? p.loads.find((l: any) => l.status === 'PLANNED' && l.id !== target.id);
     const c = await check(supervisor.jar, { ops: [{ kind: 'MOVE_STOPS', stops: [{ loadId: other.id, sequence: 1 }], to: { truckId: target.truckId, loadId: target.id } }] });
     expect(c.status).toBe(200);
     const pv = c.body.data;
@@ -152,8 +165,12 @@ describe.skipIf(!ON)('moves by hand, part 2, through the routes and the real sol
     const q = await plan();
     const l = q.loads.find((x: any) => x.truckId === target.truckId && x.stops.some((st: any) => st.handAllowed));
     expect(l).toBeTruthy();
-    await withDriver(t.tenantId, [l.id]);
-    const lock = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runId}/loads/${l.id}`, j({ status: 'LOCKED' }, 'PATCH'));
-    expect(lock.status).toBe(200);
+    // Loads are locked in order: the truck's earlier loads first.
+    const earlier = q.loads.filter((x: any) => x.truckId === l.truckId && x.loadNo < l.loadNo).sort((x: any, y: any) => x.loadNo - y.loadNo);
+    await withDriver(t.tenantId, [...earlier.map((x: any) => x.id), l.id]);
+    for (const e of [...earlier, l]) {
+      const lock = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runId}/loads/${e.id}`, j({ status: 'LOCKED' }, 'PATCH'));
+      expect(lock.status).toBe(200);
+    }
   });
 });
