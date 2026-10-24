@@ -38,7 +38,7 @@ import { defaultSearchMode, searchOptionOf, thoroughMaxSec, type SearchOption } 
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers, roundKg } from './weights';
 import { DEFAULT_TZ, fmtWindow, isoOf, todayIso } from './time';
 import { carriedLoadShows } from './carry-view';
-import { shownTruckCode } from './hire';
+import { shownTruckCode, trucksOfDayWhere } from './hire';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
 import { withPlainSolverCodes } from './solver-status';
 import { isDispatchPlanShape } from './legacy-runs';
@@ -52,6 +52,7 @@ import { loadingInstructionText } from './loading-instruction';
 import { echoedWindowRule, windowRuleAskedText, type WindowRule } from './window-rule';
 import { keptStopLive, type KeptReport } from './kept-changes';
 import { keptChangesMode, keptChangesOrNull } from './kept-changes-server';
+import { manualOf, planEditMode } from './plan-edit-view';
 
 export interface DetailStop {
   sequence: number;
@@ -482,6 +483,15 @@ export interface PlanDetail {
   feasibilityGate?: 'enforce' | 'warn';
   /** The tenant settings the plan in use was built with (null: an option from before they were kept). */
   planSettings?: PlanSettings | null;
+  /** The option in use was changed by hand (its `details.manual`, never the version's reason): the header says "adjusted by hand". */
+  manual?: { count: number; at: string } | null;
+  /**
+   * Moves by hand (PLAN_EDIT check or on, lib/dispatch/plan-edit-view.ts): the mode and the trucks of the
+   * day the Move dialog offers (the depot's active trucks, a one-day hired truck of that date included),
+   * each with its loads a day. Null / absent when the switch is off, the version is not the live, applied
+   * dispatch plan, or its day is over (every check would be refused).
+   */
+  edit?: { mode: 'CHECK' | 'ON'; trucks: { id: string; code: string; bays: number | null; capacityCases: number; maxTrips: number }[] } | null;
   /** PR9: orders of this plan (on its loads or unserved) brought forward from earlier days. */
   carriedIn?: CarrySummary | null;
   /** PR9: orders of this plan brought forward to later days since: not delivered on this day, planned there. */
@@ -1069,6 +1079,17 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     };
     return { s, d, frozenLoads: frozen.length, frozenCost, dayKm, trucksUsed, pref, facts };
   });
+  // Moves by hand: the trucks of the day for the Move dialog, only on the live applied plan of a day not over, with the switch on.
+  const editMode = planEditMode();
+  const edit =
+    editMode !== 'OFF' && live && chosenDetails && isoOf(run.runDate) >= today
+      ? {
+          mode: editMode,
+          trucks: (
+            await db.truck.findMany({ where: trucksOfDayWhere(run.depotId, run.runDate), orderBy: { code: 'asc' }, select: { id: true, code: true, bays: true, capacityCases: true, maxTripsPerDay: true } })
+          ).map((t) => ({ id: t.id, code: t.code, bays: t.bays ?? null, capacityCases: t.capacityCases, maxTrips: t.maxTripsPerDay || cfg?.maxTripsPerTruck || 1 })),
+        }
+      : null;
   const tradeoffs = optionTradeoffs(
     options.map((o) => o.facts),
     early.map((p) => `P${p}`).join('/'),
@@ -1192,6 +1213,11 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     feasibility,
     feasibilityGate: feasibilityGateMode(),
     planSettings: inputs?.settings ?? null,
+    manual: (() => {
+      const m = manualOf(chosenDetails);
+      return m ? { count: m.count, at: m.at } : null;
+    })(),
+    edit,
     carriedIn,
     carriedOut,
     today: todayIso(cfg?.timezone || DEFAULT_TZ, clock.now ?? new Date()),

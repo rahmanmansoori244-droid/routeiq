@@ -30,7 +30,9 @@ export type DispatchUnservedReason =
   | 'NO_ALLOWED_TRUCK'
   | 'ROUTING_PROVIDER_FAILURE'
   | 'INFEASIBLE'
-  | 'UNKNOWN';
+  | 'UNKNOWN'
+  /** Web only (moves by hand, PR M2): a stop the dispatcher took off the plan; the solver never sends it. */
+  | 'REMOVED_BY_HAND';
 
 export interface DispatchDepot {
   id: string;
@@ -492,7 +494,9 @@ export type FeasibilityCode =
   | 'FROZEN_OVERLAP'
   | 'BREAK'
   /** A stop on a truck that is not in its allowed_truck_ids. */
-  | 'TRUCK_NOT_ALLOWED';
+  | 'TRUCK_NOT_ALLOWED'
+  /** /retime-truck-days only (moves by hand): no timetable keeps every rule and no code above names the rule. */
+  | 'NO_TIMETABLE';
 
 export interface FeasibilityViolation {
   code: FeasibilityCode;
@@ -656,4 +660,109 @@ export interface HireCheck {
   complete: boolean;
   note?: string | null;
   one_fewer?: { without: string; unserved: string[] } | null;
+}
+
+/**
+ * Web -> solver `POST /retime-truck-days` (moves by hand, PR M1; apps/solver/retime.py). Mirrors the Retime* models
+ * of apps/solver/dispatch_models.py field for field. The solver re-times only the edited trucks' NEW loads, exactly,
+ * from the fresh request; it never searches. 422: an unknown truck or stop, a stop twice, an empty load, more than
+ * 6 trucks or 80 stops (`detail` says which); 503: the solver's checks are all busy (Retry-After 5 s); 404: a solver
+ * older than this endpoint.
+ */
+export interface RetimeTruckDay {
+  truck_id: string;
+  /** The truck's new (PLANNED) loads in trip order, each the request's stop ids in delivery order. [] = none left. */
+  loads: string[][];
+}
+
+/** "Best place" for one stop (on no load of truck_days) on one truck of truck_days. */
+export interface RetimeBest {
+  stop_id: string;
+  truck_id: string;
+  /** Every position in that truck's loads[load_index]; absent / null = the stop alone as a new load at every place. */
+  load_index?: number | null;
+}
+
+export interface RetimeRequest {
+  /** The version's request built fresh (today's data). Plan continuity is never priced in a move. */
+  request: DispatchRequest;
+  /** 1-6 trucks: their new loads after the move. */
+  truck_days: RetimeTruckDay[];
+  /** The same trucks' new loads now, timed in the same call (the like-for-like cost change). */
+  before?: RetimeTruckDay[] | null;
+  best?: RetimeBest | null;
+}
+
+/** A truck's current new loads timed now; the money, soft cost and km are null when they no longer keep the rules. */
+export interface RetimeTruckBefore {
+  feasible: boolean;
+  violations: FeasibilityViolation[];
+  loads: number;
+  money_omr?: number | null;
+  soft_omr?: number | null;
+  km?: number | null;
+  first_depart_min?: number | null;
+  last_return_min?: number | null;
+}
+
+/**
+ * One edited truck after the move: feasible (every hard rule), why not (violations, with short_by_min), its money
+ * (the plan's cost model), soft cost (time preferences, not money), km and times, and after - before from the same
+ * call (null without `before` or when either side cannot be timed).
+ */
+export interface RetimeTruckOut {
+  truck_id: string;
+  feasible: boolean;
+  violations: FeasibilityViolation[];
+  loads: number;
+  money_omr?: number | null;
+  soft_omr?: number | null;
+  km?: number | null;
+  first_depart_min?: number | null;
+  last_return_min?: number | null;
+  break_start_min?: number | null;
+  before?: RetimeTruckBefore | null;
+  delta_money_omr?: number | null;
+  delta_soft_omr?: number | null;
+  delta_km?: number | null;
+  delta_last_return_min?: number | null;
+}
+
+/** A place for the best-place stop that keeps every rule (best first, at most 3). `loads` is what a save sends back. */
+export interface RetimeOption {
+  truck_id: string;
+  /** The load it goes in (as sent); null = a new load, at new_load_at among the truck's loads. */
+  load_index?: number | null;
+  new_load_at?: number | null;
+  /** Its index in that load (0 = first). */
+  position: number;
+  loads: string[][];
+  money_omr: number;
+  soft_omr: number;
+  km: number;
+  last_return_min: number;
+}
+
+export interface RetimeResponse {
+  /** Every edited truck keeps every hard rule (and, with best, a place was found). */
+  ok: boolean;
+  matrix_provider: string;
+  distance_quality: 'ROAD' | 'MIXED' | 'ESTIMATED';
+  distance_is_estimated: boolean;
+  /**
+   * The edited trucks' new loads: VERIFIED / EXACT when ok; else the earliest timetable of the trucks that break a
+   * rule (VIOLATED, for the screen only). Its totals and truck counts are the edited trucks'; no day-level warning.
+   */
+  scenario?: DispatchScenario | null;
+  trucks: RetimeTruckOut[];
+  options?: RetimeOption[];
+  best_total?: number | null;
+  best_tried?: number | null;
+  delta_money_omr?: number | null;
+  delta_soft_omr?: number | null;
+  delta_km?: number | null;
+  /** Truck timings this answer asked for, and its seconds. */
+  timings?: number;
+  seconds?: number;
+  warnings?: string[];
 }

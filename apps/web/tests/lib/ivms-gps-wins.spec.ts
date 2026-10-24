@@ -609,7 +609,8 @@ describe('migration 20261022090000_gps_times_win', () => {
     const folders = readdirSync(dir).filter((x) => statSync(path.join(dir, x)).isDirectory() && /^\d{14}_/.test(x)).sort();
     expect(folders.indexOf(NAME)).toBeGreaterThan(folders.indexOf('20261020000000_alert_notes'));
     expect(folders.indexOf('20261020000000_alert_notes')).toBeGreaterThan(-1);
-    expect(folders.at(-1)).toBe(NAME);
+    // Newer migrations come after it (moves by hand, 24 Oct 2026, added the first one).
+    expect(folders.indexOf('20261024120000_unserved_removed_by_hand')).toBeGreaterThan(folders.indexOf(NAME));
   });
 
   it('adds nine nullable columns (no default: no row rewritten) and nothing else; schema.prisma and the code agree', () => {

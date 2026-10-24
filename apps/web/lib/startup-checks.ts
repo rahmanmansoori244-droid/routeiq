@@ -8,6 +8,7 @@ import { TOKEN_CANNOT_BE_SENT, URL_EXPECTED, URL_NOT_USABLE, solverEnv, solverUr
 import { uploadParseConfigProblems } from './upload-parse/config';
 import { ivmsConfigProblems } from './ivms/env';
 import { keptChangesConfigProblem } from './dispatch/kept-changes-server';
+import { planEditConfigNote } from './dispatch/plan-edit-view';
 
 export interface ConfigProblem {
   level: 'error' | 'warn';
@@ -34,6 +35,9 @@ export function configProblems(env: NodeJS.ProcessEnv = process.env): ConfigProb
   // The kept-load warning's kill switch (KEPT_CHANGES=off), or a value it does not read.
   const kept = keptChangesConfigProblem(env);
   if (kept) out.push({ level: 'warn', message: kept });
+  // Moves by hand (24 Oct 2026): PLAN_EDIT check or on is said once; a value it does not know is a warning (it stays off).
+  const planEdit = planEditConfigNote(env);
+  if (planEdit) out.push({ level: 'warn', message: planEdit });
   if (env.NODE_ENV !== 'production') return out;
 
   // Audit F15: without these every optimization fails; /api/health answers 503 for the same reason.

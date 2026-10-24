@@ -163,6 +163,8 @@ export const REASON_TEXT: Record<string, string> = {
   LATE_ORDER_NO_CAPACITY: 'Late order - no capacity left',
   // Owner request 13 Oct 2026: a "small truck only" customer no small truck could take.
   NO_ALLOWED_TRUCK: 'Needs a small truck',
+  // Moves by hand (24 Oct 2026): the dispatcher took the stop off the plan; Put on a truck puts it back.
+  REMOVED_BY_HAND: 'Taken off the plan by hand',
   // One code for fleet shortage, not placed by the time-limited search and left out for loading
   // time: the message under the label says which (the label must be true for all three).
   SOLVER_DROPPED_LOW_PRIORITY: 'Not planned by the optimizer - see reason',

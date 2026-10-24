@@ -887,9 +887,9 @@ export function hireSuggestionText(s: HireSummary, currency = 'OMR'): { headline
 // ---------------------------------------------------------------------------------------------
 
 /** Config fields that move with the clock or the search, never with the day's data. */
-const VOLATILE_CONFIG = new Set(['shift_start_min', 'loading_from_min', 'search_mode', 'max_search_sec', 'scenarios', 'time_limit_sec', 'osrm_url']);
+export const VOLATILE_CONFIG = new Set(['shift_start_min', 'loading_from_min', 'search_mode', 'max_search_sec', 'scenarios', 'time_limit_sec', 'osrm_url']);
 
-function canonical(x: unknown): unknown {
+export function canonical(x: unknown): unknown {
   if (Array.isArray(x)) return x.map(canonical);
   if (x && typeof x === 'object') {
     return Object.fromEntries(

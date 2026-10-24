@@ -91,6 +91,8 @@ import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
 import { PhotoViewer } from './photo-viewer';
 import { CameraExceptions } from './camera-exceptions';
 import { HireSuggestionBox } from './hire-suggestion';
+import { MoveStopDialog, type MoveSubject } from './move-stop-dialog';
+import { LOCKED_MOVE_TITLE, savedText } from '@/lib/dispatch/plan-edit-view';
 import { CAMERA_ALERT_PER_DAY } from '@/lib/delivery/camera-exceptions';
 import { addDaysIso } from '@/lib/dispatch/time';
 import { LiveTrucksBar, useLiveTrucks } from './live-trucks';
@@ -299,6 +301,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const [reissueAsk, setReissueAsk] = useState<{ link: DriverLinkView; text: string } | null>(null);
   // The salesman link of the plan's date (owner request 19 Oct 2026): one per company and date, for every depot.
   const [salesLinkOpen, setSalesLinkOpen] = useState(false);
+  // Moves by hand (PLAN_EDIT check or on): the stop or unserved customer the Move dialog is open for.
+  const [moveFor, setMoveFor] = useState<MoveSubject | null>(null);
   const loadLinks = useCallback(async () => {
     if (!canPlan) return;
     const r = await api<DriverLinkView[]>(`/api/dispatch/driver-links?runId=${encodeURIComponent(runId)}`);
@@ -817,6 +821,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // Nothing to plan only because the rest was brought forward (the title says so, never "unlock a load").
   const onlyCarriedLeft = nothingToPlan && !nothingToReplan({ loadStatuses: d.loads.map((l) => l.status), unservedOrders: d.unserved.length, pendingOrders: d.pendingOrders ?? 1 });
   const applied = !!d.run.chosenScenario;
+  // Moves by hand: on the live applied plan, for the dispatcher (PLAN_EDIT check or on: d.edit is set).
+  const canMove = !!d.edit && canPlan && applied && !superseded && !running;
   // Review F04: the timetable check. With the gate on (the default), a truck whose times break a
   // rule cannot be locked, loaded or dispatched. The remedy is Re-plan - except for a problem on a
   // LOCKED or LOADING load, which a re-plan carries over unchanged: that load, and every later locked
@@ -841,7 +847,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           </h2>
           <Badge variant={superseded ? 'secondary' : d.run.status === 'FAILED' ? 'destructive' : d.run.status === 'DISPATCHED' ? 'success' : 'outline'}>{superseded ? 'SUPERSEDED' : d.run.status}</Badge>
           {d.run.reason !== 'INITIAL' ? <Badge variant="warning">{d.run.reason.replace('_', ' ')}</Badge> : null}
-          {d.run.chosenScenario ? <Badge variant="secondary">{d.run.chosenScenario === 'RECOMMENDED' ? 'RECOMMENDED PLAN' : `${d.run.chosenScenario} (alternative)`}</Badge> : null}
+          {d.run.chosenScenario ? <Badge variant="secondary">{d.run.chosenScenario === 'RECOMMENDED' ? 'RECOMMENDED PLAN' : `${d.run.chosenScenario} (alternative)`}{d.manual ? ' · adjusted by hand' : ''}</Badge> : null}
         </div>
         <div className="flex flex-wrap gap-2">
           {/* The dispatch workbook for every dispatch plan, also one in which every order is unserved
@@ -1572,6 +1578,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                             })
                           }
                           onPhotos={(st, ov) => setPhotosFor({ title: `${l.truckCode} L${l.loadNo} stop ${st.sequence} · ${st.customerName}`, photos: ov.photos })}
+                          move={canMove && (l.status === 'PLANNED' || l.status === 'LOCKED') ? { disabled: l.status !== 'PLANNED' || !!busy, onMove: (st) => setMoveFor({ kind: 'MOVE', load: l, stop: st }) } : null}
                         />
                       </td>
                     </tr>
@@ -1606,6 +1613,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   <th className="p-2">Cases</th>
                   <th className="p-2">Sales orders</th>
                   <th className="p-2">Reason</th>
+                  {canMove ? <th className="p-2" /> : null}
                 </tr>
               </thead>
               <tbody>
@@ -1646,6 +1654,24 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         </>
                       )}
                     </td>
+                    {canMove ? (
+                      <td className="p-2">
+                        {!u.partial && !u.cancelled && !u.carriedTo ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={!!busy}
+                            data-testid="unserved-place"
+                            onClick={() => {
+                              const same = d.unserved.filter((x) => x.customerId === u.customerId && !x.partial && !x.cancelled && !x.carriedTo);
+                              setMoveFor({ kind: 'PLACE', unserved: u, orders: new Set(same.map((x) => x.orderId)).size, cases: same.reduce((a, x) => a + x.cases, 0) });
+                            }}
+                          >
+                            Put on a truck…
+                          </Button>
+                        ) : null}
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>
@@ -1717,6 +1743,21 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           driverPhone={dialogLoad?.driverPhone ?? null}
           phoneCountryCode={phoneCountryCode}
           onChanged={keepLink}
+        />
+      ) : null}
+      {canMove ? (
+        <MoveStopDialog
+          subject={moveFor}
+          plan={d}
+          runId={runId}
+          onOpenChange={(o) => {
+            if (!o) setMoveFor(null);
+          }}
+          run={(key, fn) => runPlanAction(lock, key, fn, failed)}
+          afterSave={async (saved) => {
+            toast.success(savedText(saved), { duration: 20_000 });
+            await onChanged?.(saved.runId);
+          }}
         />
       ) : null}
       <CasualDriverDialog
@@ -2205,9 +2246,12 @@ function LoadDetail({
   canRecord = false,
   onRecord,
   onPhotos,
+  move = null,
 }: {
   l: DetailLoad;
   depotCode: string;
+  /** Moves by hand: the Move… button of each stop (disabled on a LOCKED load: unlock it first); null = none. */
+  move?: { disabled: boolean; onMove: (st: DetailLoad['stops'][number]) => void } | null;
   /** The delivery results (spec section 10.2); the extra columns show for loads that left. */
   overlay?: OutcomeOverlay | null;
   canRecord?: boolean;
@@ -2218,7 +2262,7 @@ function LoadDetail({
   const kgNote = manifestKgNote(l);
   const results = ON_ROAD.has(l.status) && !!overlay;
   const tz = overlay?.tz ?? 'Asia/Muscat';
-  const span = results ? 15 : 9;
+  const span = (results ? 15 : 9) + (move ? 1 : 0);
   // A load planned by pallets: each product's "3 pallets + 12 cases" and the TOTAL in pallets too.
   const pallets = loadPallets(l);
   // Owner request 20 Oct 2026: the special-loading customers' products in their own block(s), as on the sheets.
@@ -2370,6 +2414,7 @@ function LoadDetail({
                   <th />
                 </>
               ) : null}
+              {move ? <th /> : null}
             </tr>
           </thead>
           <tbody>
@@ -2476,6 +2521,21 @@ function LoadDetail({
                 <td>{st.legKm}</td>
                 <td>{st.cumulativeKm ?? '—'}</td>
                 {results ? <StopResultCells o={overlay!.stops[`${l.id}:${st.sequence}`] ?? null} tz={tz} canRecord={canRecord} onRecord={(o) => onRecord?.(st, o)} onPhotos={(o) => onPhotos?.(st, o)} /> : null}
+                {move ? (
+                  <td>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-6 px-2 text-xs"
+                      disabled={move.disabled}
+                      title={l.status === 'LOCKED' ? LOCKED_MOVE_TITLE : 'Move this stop to another load or position, or take it off the plan'}
+                      data-testid="stop-move"
+                      onClick={() => move.onMove(st)}
+                    >
+                      Move…
+                    </Button>
+                  </td>
+                ) : null}
               </tr>
               {l.break && l.break.where === 'ROAD' && (l.break.afterSequence ?? 0) === st.sequence ? <BreakRow l={l} /> : null}
               </Fragment>

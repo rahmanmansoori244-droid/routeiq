@@ -320,9 +320,10 @@ export function describeMissingPalletFactors(list: MissingPalletFactor[], max = 
 /**
  * The PALLET_FACTOR_REQUIRED refusal (no override): "Cannot plan by pallets: 3 product(s) on this
  * day's orders have no cases per pallet: TN1.5L (120 cases), ... Enter the cases per pallet under
- * Products (company admins can edit products), then optimize again."
+ * Products (company admins can edit products), then optimize again." A move by hand (plan-edit.ts) names
+ * only the products of the trucks it re-times and ends "then check the move again".
  */
-export function palletFactorRefusal(list: MissingPalletFactor[], verb: 'optimize' | 're-plan' = 'optimize'): string {
+export function palletFactorRefusal(list: MissingPalletFactor[], verb: 'optimize' | 're-plan' | 'check the move' = 'optimize'): string {
   return (
     `Cannot plan by pallets: ${list.length} product(s) on this day's orders have no cases per pallet: ${describeMissingPalletFactors(list)}. ` +
     `Enter the cases per pallet under Products (company admins can edit products), then ${verb} again.`
@@ -336,7 +337,7 @@ export function palletFactorRefusal(list: MissingPalletFactor[], verb: 'optimize
  */
 export function palletFactorGate(
   built: { missingPalletFactors?: MissingPalletFactor[] },
-  verb: 'optimize' | 're-plan' = 'optimize',
+  verb: 'optimize' | 're-plan' | 'check the move' = 'optimize',
 ): { status: number; body: Record<string, unknown> } | null {
   const missing = built.missingPalletFactors ?? [];
   if (!missing.length) return null;

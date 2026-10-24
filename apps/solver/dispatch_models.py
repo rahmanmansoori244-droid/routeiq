@@ -538,6 +538,9 @@ FeasibilityCode = Literal[
     "BREAK",
     # A stop on a truck that is not in its allowed_truck_ids (a "small truck only" customer on a big truck).
     "TRUCK_NOT_ALLOWED",
+    # /retime-truck-days only (moves by hand): no timetable keeps every rule for a truck's loads, and none of the
+    # codes above names the rule (feasibility.check_scenario never gives it).
+    "NO_TIMETABLE",
 ]
 
 
@@ -896,3 +899,124 @@ class GeometryResponse(BaseModel):
     is_estimated: bool
     coordinates: list[list[float]]  # [lng, lat]
     warning: str | None = None
+
+
+# ---------------------------------------------------------------------------------------------
+# POST /retime-truck-days (moves by hand, PR M1; retime.py). Mirrored in packages/shared-types/src/dispatch.ts.
+# ---------------------------------------------------------------------------------------------
+
+# At most this many trucks, and stops on them (truck_days, best and before together), per check: a move touches
+# one or two trucks; the web sends at most 4.
+RETIME_MAX_TRUCKS = 6
+RETIME_MAX_STOPS = 80
+
+
+class RetimeTruckDay(BaseModel):
+    """One truck's NEW loads (the PLANNED ones the move may change), in trip order: each load the request's stop ids
+    in delivery order. [] = no new load left. Its frozen loads (locked, loading, dispatched, completed) are the
+    request's frozen_trips: never sent here, never changed."""
+
+    truck_id: str
+    loads: list[list[str]] = Field(default_factory=list)
+
+
+class RetimeBest(BaseModel):
+    """"Best place" for one stop (not on any load of truck_days) on one truck of truck_days: every position in
+    loads[load_index], or - load_index None - the stop alone as a new load at every place of the truck's day."""
+
+    stop_id: str
+    truck_id: str
+    load_index: int | None = Field(default=None, ge=0)
+
+
+class RetimeRequest(BaseModel):
+    """``request``: the plan version's request built FRESH by the web (today's customers, trucks, settings,
+    frozen loads and same-day clock; every stop of the day). ``truck_days``: the edited trucks' new loads after the
+    move. ``before``: the same trucks' new loads as they are now (the cost change, timed in the same call). Plan
+    continuity is never priced in a move (change_penalty_per_stop is taken as 0)."""
+
+    request: DispatchRequest
+    truck_days: list[RetimeTruckDay] = Field(min_length=1)
+    before: list[RetimeTruckDay] | None = None
+    best: RetimeBest | None = None
+
+
+class RetimeTruckBefore(BaseModel):
+    """The truck's current new loads (RetimeRequest.before) timed now, with today's data and the same matrix
+    and prices as the move. money_omr / soft_omr / km are None when they can no longer be timed (violations)."""
+
+    feasible: bool
+    violations: list[FeasibilityViolation] = Field(default_factory=list)
+    loads: int
+    money_omr: float | None = None
+    soft_omr: float | None = None
+    km: float | None = None
+    first_depart_min: int | None = None
+    last_return_min: int | None = None
+
+
+class RetimeTruckOut(BaseModel):
+    """One edited truck after the move. feasible: every hard rule holds (violations: which do not, and by how
+    much). money_omr: the new loads' money (costing.truck_day_costs, exactly what the plan stores, unrounded per
+    load); soft_omr: preferred hours and the early-arrival push (OMR-equivalent, not money). The deltas are
+    after - before, both timed in this call (None without ``before`` or when either side cannot be timed)."""
+
+    truck_id: str
+    feasible: bool
+    violations: list[FeasibilityViolation] = Field(default_factory=list)
+    loads: int
+    money_omr: float | None = None
+    soft_omr: float | None = None
+    km: float | None = None
+    first_depart_min: int | None = None
+    last_return_min: int | None = None
+    break_start_min: int | None = None
+    before: RetimeTruckBefore | None = None
+    delta_money_omr: float | None = None
+    delta_soft_omr: float | None = None
+    delta_km: float | None = None
+    delta_last_return_min: int | None = None
+
+
+class RetimeOption(BaseModel):
+    """One place for RetimeRequest.best's stop that keeps every rule, best first. load_index: the load it goes in
+    (as sent); None = a new load, at new_load_at among the truck's loads (0 = first). position: its index in that
+    load (0 = first; 0 for a new load). loads: the truck's new loads with the stop there - what a save sends back."""
+
+    truck_id: str
+    load_index: int | None = None
+    new_load_at: int | None = None
+    position: int
+    loads: list[list[str]]
+    money_omr: float
+    soft_omr: float
+    km: float
+    last_return_min: int
+
+
+class RetimeResponse(BaseModel):
+    """ok: every edited truck keeps every hard rule (and, with best, a place was found); scenario is then the
+    edited trucks' new loads, timed exactly and VERIFIED / EXACT by the independent check. Not ok: scenario (when it
+    could be built) holds the earliest timetable of the trucks that break a rule (VIOLATED: for the screen, never
+    to save) and trucks[].violations say why. The scenario covers the edited trucks only: its totals, trucks_used,
+    frozen_trucks and frozen_loads are theirs, and it carries no day-level warning."""
+
+    ok: bool
+    matrix_provider: str
+    distance_quality: Literal["ROAD", "MIXED", "ESTIMATED"]
+    distance_is_estimated: bool
+    scenario: DispatchScenario | None = None
+    trucks: list[RetimeTruckOut]
+    options: list[RetimeOption] = Field(default_factory=list)
+    # best: the places for its stop and how many were timed (at most RETIME_BEST_TRIES, within the budget).
+    best_total: int | None = None
+    best_tried: int | None = None
+    # Over every edited truck, after - before (None unless every truck has both).
+    delta_money_omr: float | None = None
+    delta_soft_omr: float | None = None
+    delta_km: float | None = None
+    # Truck timings this answer asked for (load_repack.time_truck calls, counted here: not LP_STATS, which is
+    # process-wide), and its seconds.
+    timings: int = 0
+    seconds: float = 0.0
+    warnings: list[str] = Field(default_factory=list)

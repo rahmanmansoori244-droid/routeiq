@@ -151,6 +151,9 @@ enum UnservedReasonCode {
   // Owner request 13 Oct 2026: a "small truck only" order no small truck could take (the optimizer's
   // NO_ALLOWED_TRUCK: none today, none big enough, or none with room or time).
   NO_ALLOWED_TRUCK
+  // Moves by hand (owner decision 24 Oct 2026): the dispatcher took the stop off the plan (Move, "Take off
+  // the plan"); a RE-PLAN plans it again, "Put on a truck" puts it back on a load.
+  REMOVED_BY_HAND
 }
 
 enum DistanceProvider {
