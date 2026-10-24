@@ -11,7 +11,8 @@
  * request (the password fingerprint no longer matches).
  *
  * - A platform admin (SUPER_ADMIN) is managed by the owner-run script: 403 unless the caller is one.
- * - Not for your own account: your session would end with the dialog still open.
+ * - Not for your own account: your session would end with the dialog still open. Your own password
+ *   is changed with "Change password" in the user menu (POST /api/account/password).
  * - An inactive user can be reset (e.g. before reactivating them); it does not reactivate them.
  */
 import { Role } from '@prisma/client';
@@ -40,7 +41,7 @@ export const POST = (req: Request, { params }: Params) =>
         return fail('This user is a platform admin; only a platform admin can reset their password.', 403);
       }
       if (target.id === user.id) {
-        return fail('You cannot reset your own password here. Ask another admin of your company, or use "Forgot your password?" on the sign-in page.', 400);
+        return fail('You cannot reset your own password here. Use "Change password" in your user menu (top right).', 400);
       }
 
       const tempPassword = generateTempPassword();
