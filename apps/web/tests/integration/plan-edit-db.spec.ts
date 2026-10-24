@@ -16,7 +16,9 @@
  *  - refusals: a LOCKED source (unlock, then it works), a move over a truck's cases (refused at Check and at
  *    Save, also with FEASIBILITY_GATE=warn); Best place where the stop already is (409 NO_CHANGE, never a solver
  *    failure); Put on a truck of an order on a load or moved to another day; a product without cases per pallet
- *    only on the trucks it re-times; the solver outdated, busy, not configured or failing (503);
+ *    only on the trucks it re-times; a cases per pallet corrected after a day planned by pallets (409
+ *    PALLET_FACTOR_CHANGED for a move, a take off and a put on; with the planned figure the saved load reads
+ *    as stored, release review F1); the solver outdated, busy, not configured or failing (503);
  *  - races: a stale preview hash (PREVIEW_CHANGED with the new preview), a load of an edited truck locked
  *    between Check and Save (DAY_CHANGED, nothing written), a load of ANOTHER truck locked meanwhile (the
  *    save goes through: the stale check covers the touched trucks only, critic M2), a second save of the
@@ -91,6 +93,8 @@ vi.mock('@/lib/solver-client', () => {
     return {
       truck_id: truckId, load_no: loadNo, depart_min: depart, return_min: ret, distance_km: cum + 5, duration_min: ret - depart, cases, kg: stops.reduce((a, s) => a + (s.demand_kg ?? 0), 0),
       utilization_pct: 10, fuel_litres: 1, fuel_cost: 0.5, distance_cost: 1, time_cost: 1, fixed_cost: 2, total_cost: 5 + 2 * stops.length, return_leg_km: 5, stops: out,
+      // A day planned by pallets: the load's units as the optimizer echoes them (the sum of its stops').
+      ...(stops.some((s) => typeof s.demand_pallet_units === 'number') ? { pallet_units: stops.reduce((a, s) => a + (s.demand_pallet_units ?? 0), 0) } : {}),
     } as PlannedLoad;
   }
   function truckDay(req: DispatchRequest, truckId: string, loads: string[][]) {
@@ -120,6 +124,8 @@ vi.mock('@/lib/solver-client', () => {
       fuel_litres: 0, fuel_cost: 0, operating_cost: loads.reduce((a, l) => a + l.total_cost, 0), loads, unserved: [], warnings: [],
       truck_days: [...new Set(loads.map((l) => l.truck_id))].map((t) => ({ truck_id: t, loads: loads.filter((l) => l.truck_id === t).length, frozen_loads: 0, day_start_min: 360, paid_from_min: 360, last_return_min: 600, paid_min: 240, overtime_min: 0, fixed_cost: 2, trip_cost: 0, distance_cost: 1, fuel_cost: 0.5, driver_cost: 1, overtime_cost: 0, total_cost: 5 })),
       feasibility: { status: feasible ? 'VERIFIED' : 'VIOLATED', timing: 'EXACT', violations: violations as never },
+      // By pallets: the pallet rule the optimizer echoes (units of 1/1000 pallet, bays filled to 100%).
+      ...(loads.some((l) => typeof l.pallet_units === 'number') ? { pallet_unit: 0.001, pallet_fill_pct: 100 } : {}),
     } as unknown as DispatchScenario;
   }
   return {
@@ -268,7 +274,7 @@ async function jobsDone(runId: string) {
 }
 
 /** A planned day: T01 two stops, T02 two stops, T03 one stop (with a hand-set driver), one order unserved. */
-async function plannedDay(label: string, opts: { t02Cases?: number; bigFirst?: boolean; dayOffset?: number } = {}) {
+async function plannedDay(label: string, opts: { t02Cases?: number; bigFirst?: boolean; dayOffset?: number; pallets?: boolean } = {}) {
   const slug = `pe-${label}-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
   slugs.push(slug);
   const t = await prisma.tenant.create({ data: { slug, name: `PE ${label}`, country: 'Oman' } });
@@ -279,10 +285,11 @@ async function plannedDay(label: string, opts: { t02Cases?: number; bigFirst?: b
   const depot = await prisma.depot.create({ data: { tenantId: t.id, code: 'D1', name: 'Depot', lat: 23.5, lng: 58.3 } });
   const trucks: Record<string, string> = {};
   for (const [code, cases] of [['T01', 200], ['T02', opts.t02Cases ?? 200], ['T03', 200]] as const) {
-    trucks[code] = (await prisma.truck.create({ data: { tenantId: t.id, depotId: depot.id, code, capacityCases: cases, capacityWeightKg: 3000, fixedCostPerDay: 20, costPerKm: 0.1 } })).id;
+    trucks[code] = (await prisma.truck.create({ data: { tenantId: t.id, depotId: depot.id, code, capacityCases: cases, capacityWeightKg: 3000, fixedCostPerDay: 20, costPerKm: 0.1, ...(opts.pallets ? { bays: 12 } : {}) } })).id;
   }
   const driver = await prisma.driver.create({ data: { tenantId: t.id, code: 'DR3', name: 'Driver Three' }, select: { id: true } });
-  const product = await prisma.product.create({ data: { tenantId: t.id, code: 'P-1', name: 'Product One', weightPerCaseKg: 10 } });
+  // pallets: the day is planned by pallets (trucks with 12 bays, 50 cases a pallet).
+  const product = await prisma.product.create({ data: { tenantId: t.id, code: 'P-1', name: 'Product One', weightPerCaseKg: 10, ...(opts.pallets ? { casesPerPallet: 50 } : {}) } });
   const day = isoPlus(opts.dayOffset ?? 2);
   const orderIds: string[] = [];
   // bigFirst: the first customer is bigger than any truck (300 cases on 200-case trucks): delivered in two parts.
@@ -555,6 +562,40 @@ describe('refusals a dispatcher sees at Check (review F1/M-01, M-03)', () => {
     const r = await refusal(check(f, { kind: 'MOVE', from: { loadId: f.loadOf('T01').id, sequence: 1 }, to: { truckId: f.trucks.T03!, loadId: f.loadOf('T03').id, position: 0 } }));
     expect(r).toMatchObject({ status: 409, code: 'PALLET_FACTOR_REQUIRED' });
     expect(r.message).toMatch(/^Cannot plan by pallets: 1 product\(s\) .*: P-2 \(2 cases\)\. .*then check the move again\.$/);
+  });
+
+  it('a cases per pallet corrected after a day planned by pallets: a change re-timing its loads is refused (re-plan first); with the planned figure the saved load reads as stored (release review F1)', async () => {
+    const f = await plannedDay('pfactor', { pallets: true });
+    const t02 = f.loadOf('T02');
+    expect(typeof t02.palletUnits).toBe('number');
+    const move = { kind: 'MOVE' as const, from: { loadId: f.loadOf('T01').id, sequence: 1 }, to: { truckId: f.trucks.T02!, loadId: t02.id, position: 0 } };
+    // An admin corrects the product's cases per pallet under Products after planning (50 to 20).
+    await prisma.product.updateMany({ where: { tenantId: f.tenantId, code: 'P-1' }, data: { casesPerPallet: 20 } });
+    const calls = fake.retimeCalls;
+    const r = await refusal(check(f, move));
+    expect(r).toMatchObject({ status: 409, code: 'PALLET_FACTOR_CHANGED' });
+    expect(r.message).toBe(
+      'The cases per pallet changed under Products since this plan: P-1 (Product One) is now 20 (planned with 50). This change re-times loads that carry it: RE-PLAN the day first, so every load uses the new figure.',
+    );
+    expect(r.details.palletFactorChanges).toEqual([{ code: 'P-1', name: 'Product One', planned: 50, now: 20 }]);
+    // Refused before the solver is asked; a take off and a put on the same way; Save checks again, so nothing is written.
+    expect(fake.retimeCalls).toBe(calls);
+    expect((await refusal(check(f, { kind: 'REMOVE', from: { loadId: f.loadOf('T03').id, sequence: 1 } }))).code).toBe('PALLET_FACTOR_CHANGED');
+    expect((await refusal(check(f, { kind: 'PLACE', orderId: f.unservedOrderId, to: { truckId: f.trucks.T03!, loadId: f.loadOf('T03').id, position: 1 } }))).code).toBe('PALLET_FACTOR_CHANGED');
+    const atSave = await refusal(apply.savePlanEdit(f.tenantId, f.runId, { move, expect: expectOf(f), previewHash: 'x'.repeat(64), builtAt: new Date().toISOString() }, { id: f.planner.id }, null));
+    expect(atSave).toMatchObject({ status: 409, code: 'PALLET_FACTOR_CHANGED' });
+    expect(await versions(f)).toBe(1);
+
+    // The figure as planned again: the move checks and saves, and the edited load reads exactly as it is stored.
+    await prisma.product.updateMany({ where: { tenantId: f.tenantId, code: 'P-1' }, data: { casesPerPallet: 50 } });
+    const c = await check(f, move);
+    expect(c.preview.ok).toBe(true);
+    const saved = await save(f, c);
+    const { getPlanDetail } = await import('@/lib/dispatch/plan-detail');
+    const after = (await getPlanDetail(f.tenantId, saved.runId))!.loads.find((l) => l.truckCode === 'T02')!;
+    expect(typeof after.palletUnits).toBe('number');
+    expect(after.manifest.reduce((a, m) => a + (m.palletUnits ?? 0), 0)).toBe(after.palletUnits);
+    expect(after.palletNotes ?? []).toEqual([]);
   });
 
   it('the solver outdated, busy, not configured or failing: 503 with its words, nothing written', async () => {

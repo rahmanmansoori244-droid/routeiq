@@ -13,7 +13,7 @@ interface Params { params: { id: string } }
 // (lib/dispatch/plan-edit-view.ts PlanEditPreview: before and after per truck, the rules it breaks, the
 // soft warnings, what changed since planning, previewHash). Writes nothing. 404 FEATURE_OFF with
 // PLAN_EDIT off; 409 LOAD_FROZEN / STOP_CHANGED / SUPERSEDED / OPTIMIZING / NOT_APPLIED / DAY_OVER /
-// DAY_MISMATCH / NO_CHANGE ...; 503 SOLVER_OUTDATED / SOLVER_BUSY / SOLVER_FAILED. 30 checks a minute per user.
+// DAY_MISMATCH / NO_CHANGE / PALLET_FACTOR_REQUIRED / PALLET_FACTOR_CHANGED ...; 503 SOLVER_OUTDATED / SOLVER_BUSY / SOLVER_FAILED. 30 checks a minute per user.
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { user }) => {

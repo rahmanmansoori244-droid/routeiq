@@ -4,7 +4,8 @@
  * the edited trucks' new loads (editTruckDays: move, reorder, new load, best place, take off, put on),
  * a best place resolved for the save, the merged option (critic M3: every ref resolves to its row; M5
  * and M7) and its solver report, the stale check scoped to the touched trucks (critic M2), the preview
- * hash and the words. Synthetic data only.
+ * hash and the words, the cases per pallet corrected since planning (PALLET_FACTOR_CHANGED, release
+ * review F1). Synthetic data only.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RunPlan } from '@prisma/client';
@@ -16,6 +17,8 @@ import {
   mapStops,
   mergeOption,
   mergeSolverReport,
+  palletFactorChangedText,
+  palletFactorsChangedSince,
   planStopsOf,
   previewHash,
   previewOf,
@@ -656,5 +659,44 @@ describe('the dialog\'s "after" title (review M-08)', () => {
     expect(afterTitle({ truckCode: 'T08', deltaCostOmr: -6.156, deltaLastReturnMin: null })).toBe('T08 after (−6.16 OMR)');
     expect(afterTitle({ truckCode: 'T08', deltaCostOmr: null, deltaLastReturnMin: 15 })).toBe('T08 after (back +15 min)');
     expect(afterTitle({ truckCode: 'T08', deltaCostOmr: null, deltaLastReturnMin: null })).toBe('T08 after');
+  });
+});
+
+describe('a cases per pallet corrected since planning (PALLET_FACTOR_CHANGED, release review F1)', () => {
+  const line = (id: string, orderId: string, cases: number, code: string, casesPerPallet: number | null) => ({ id, orderId, cases, product: { code, name: `Product ${code}`, casesPerPallet } });
+  const whole = (orderId: string) => ({ orderId, portionLinesJson: null });
+
+  it('a whole order: its lines against the factors the option was planned with', () => {
+    const lines = [line('l1', 'o1', 35, 'P-1', 20), line('l2', 'o1', 10, 'P-2', 12)];
+    expect(palletFactorsChangedSince({ rows: [whole('o1')], lines, plannedFactors: { 'P-1': 50, 'P-2': 12 } })).toEqual([{ code: 'P-1', name: 'Product P-1', planned: 50, now: 20 }]);
+    expect(palletFactorsChangedSince({ rows: [whole('o1')], lines, plannedFactors: { 'P-1': 20, 'P-2': 12 } })).toEqual([]);
+  });
+
+  it("a split part: the factor it was cut with first, then the option's; only its own lines with cases", () => {
+    const lines = [line('l1', 'o1', 300, 'P-1', 20), line('l2', 'o1', 40, 'P-2', 8)];
+    const part = (cpp: number | null, extra: unknown[] = []) => ({ orderId: 'o1', portionLinesJson: [{ lineId: 'l1', cases: 150, ...(cpp ? { casesPerPallet: cpp } : {}) }, ...extra] });
+    // Cut with today's figure: nothing to say, although the option was planned with another one.
+    expect(palletFactorsChangedSince({ rows: [part(20)], lines, plannedFactors: { 'P-1': 50, 'P-2': 10 } })).toEqual([]);
+    // Cut with the old figure.
+    expect(palletFactorsChangedSince({ rows: [part(50)], lines, plannedFactors: {} })).toEqual([{ code: 'P-1', name: 'Product P-1', planned: 50, now: 20 }]);
+    // No cut figure kept: the option's. P-2 is not on this part (or has no cases on it): never named.
+    expect(palletFactorsChangedSince({ rows: [part(null, [{ lineId: 'l2', cases: 0 }])], lines, plannedFactors: { 'P-1': 50, 'P-2': 10 } })).toEqual([{ code: 'P-1', name: 'Product P-1', planned: 50, now: 20 }]);
+  });
+
+  it("no factor now (PALLET_FACTOR_REQUIRED says so) or none planned (it reads with today's anyway): nothing; one entry per product, by code", () => {
+    const lines = [line('a', 'o1', 5, 'P-9', null), line('b', 'o1', 5, 'P-8', 6), line('c', 'o2', 5, 'P-3', 4), line('d', 'o3', 5, 'P-3', 4), line('e', 'o3', 5, 'P-2', 7)];
+    const rows = [whole('o1'), whole('o2'), whole('o3'), whole('o-gone')];
+    expect(palletFactorsChangedSince({ rows, lines, plannedFactors: { 'P-9': 10, 'P-3': 5, 'P-2': 9 } })).toEqual([
+      { code: 'P-2', name: 'Product P-2', planned: 9, now: 7 },
+      { code: 'P-3', name: 'Product P-3', planned: 5, now: 4 },
+    ]);
+  });
+
+  it('the words name the products (at most five) and say to re-plan', () => {
+    const one = palletFactorChangedText([{ code: 'P-1', name: 'Product One', planned: 50, now: 20 }]);
+    expect(one).toBe('The cases per pallet changed under Products since this plan: P-1 (Product One) is now 20 (planned with 50). This change re-times loads that carry it: RE-PLAN the day first, so every load uses the new figure.');
+    const many = palletFactorChangedText(Array.from({ length: 7 }, (_, i) => ({ code: `P-${i}`, name: '', planned: 10, now: 12 })));
+    expect(many).toContain('P-4 is now 12 (planned with 10) and 2 more. This change re-times loads that carry them');
+    expect(many).not.toContain('P-5');
   });
 });

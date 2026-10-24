@@ -10,7 +10,10 @@
  *  3. the stops of those trucks' PLANNED loads are matched to the request's stops (mapStops: the same
  *     orders and the same parts; a new, cancelled or postponed order of one of them, or parts cut
  *     differently, is STOP_CHANGED: re-plan first); on a day planned by pallets, the products of the
- *     orders re-timed (only those) must have their cases per pallet; at most 80 stops are re-timed;
+ *     orders re-timed (only those) must have their cases per pallet, and a cases per pallet corrected
+ *     since planning on one of them is PALLET_FACTOR_CHANGED (re-plan first: the re-timed loads would be
+ *     stored with today's figure while the plan reads them with the planned one, release review F1);
+ *     at most 80 stops are re-timed;
  *  4. the change gives each edited truck its new loads (editTruckDays), and the solver re-times them
  *     exactly (POST /retime-truck-days, apps/solver/retime.py): every hard rule (bays 98% / 100% one
  *     customer, cases, kg, small truck only, receiving hours, latest return, shift, loads per day, the
@@ -35,8 +38,8 @@ import { isSupersededRun } from './plan-status';
 import { canonical, VOLATILE_CONFIG } from './hire';
 import { companyToday } from './hire-whatif';
 import { dayMismatch, type ExpectedDay } from './start-optimize';
-import { orderIdOf, portionId, readPortionLines, type PortionRecord } from './split';
-import { groupMissingPalletFactors, palletFactorGate } from './pallets';
+import { orderIdOf, portionId, readPortionLines, readPortionPalletFactors, type PortionRecord } from './split';
+import { groupMissingPalletFactors, palletFactorGate, validPalletFactor } from './pallets';
 import { parseLoadBreak, readPlanInputs, readStopSnapshot, readTruckSnapshot, stopMasterChanges, truckMasterChanges } from './snapshots';
 import { fmtDayMonth, fmtHhmm, isoOf } from './time';
 import {
@@ -795,6 +798,55 @@ export function dataChangedSince(input: {
   return out;
 }
 
+/** A product whose cases per pallet was corrected under Products since the plan was made. */
+export interface PalletFactorChange {
+  code: string;
+  name: string;
+  planned: number;
+  now: number;
+}
+
+/**
+ * The cases per pallet corrected since planning on the rows a change re-times (release review F1). A save
+ * re-creates the edited trucks' PLANNED loads from the solver's re-timing, which used TODAY's factor, but
+ * the plan screen, the sheets and the day overview read a row with the factor it was planned with (a split
+ * part's own cut factor, else the option's `inputs.palletFactors`): the manifest, the "Changed after
+ * planning" note and RE-PLAN would then all be wrong for that load. So such a change is refused (re-plan
+ * first). A line counts when it has cases on the row, a factor it was planned with and a different usable
+ * factor now; a product with no factor now is PALLET_FACTOR_REQUIRED's, one with no planned factor reads
+ * with today's anyway. Pure; one entry per product code, by code.
+ */
+export function palletFactorsChangedSince(input: {
+  rows: readonly { orderId: string; portionLinesJson: unknown }[];
+  lines: readonly { id: string; orderId: string; cases: number; product: { code: string; name: string; casesPerPallet: number | null } }[];
+  plannedFactors: Readonly<Record<string, number>>;
+}): PalletFactorChange[] {
+  const byId = new Map(input.lines.map((l) => [l.id, l]));
+  const ofOrder = new Map<string, { lineId: string; cases: number }[]>();
+  for (const l of input.lines) ofOrder.set(l.orderId, [...(ofOrder.get(l.orderId) ?? []), { lineId: l.id, cases: l.cases }]);
+  const out = new Map<string, PalletFactorChange>();
+  for (const row of input.rows) {
+    const cut = readPortionPalletFactors(row.portionLinesJson);
+    for (const x of readPortionLines(row.portionLinesJson) ?? ofOrder.get(row.orderId) ?? []) {
+      if (!(x.cases > 0)) continue;
+      const l = byId.get(x.lineId);
+      if (!l) continue;
+      const now = validPalletFactor(l.product.casesPerPallet);
+      const planned = cut.get(x.lineId) ?? validPalletFactor(input.plannedFactors[l.product.code]);
+      if (now === null || planned === null || now === planned || out.has(l.product.code)) continue;
+      out.set(l.product.code, { code: l.product.code, name: l.product.name, planned, now });
+    }
+  }
+  return [...out.values()].sort((a, b) => a.code.localeCompare(b.code));
+}
+
+/** The PALLET_FACTOR_CHANGED refusal's words: the products (at most 5 named) and what to do. */
+export function palletFactorChangedText(changes: readonly PalletFactorChange[]): string {
+  const named = changes.slice(0, 5).map((c) => `${c.code}${c.name ? ` (${c.name})` : ''} is now ${c.now} (planned with ${c.planned})`);
+  const more = changes.length > 5 ? ` and ${changes.length - 5} more` : '';
+  return `The cases per pallet changed under Products since this plan: ${named.join('; ')}${more}. This change re-times loads that carry ${changes.length === 1 ? 'it' : 'them'}: RE-PLAN the day first, so every load uses the new figure.`;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Check
 // ---------------------------------------------------------------------------------------------
@@ -958,6 +1010,20 @@ export async function checkPlanEdit(
   if (pallets) {
     const { error, ...rest } = pallets.body;
     throw new PlanError(String(error), pallets.status, rest);
+  }
+  // A cases per pallet corrected since planning on those orders (release review F1): their loads would be
+  // stored with today's figure and read with the planned one. Only on a day planned by pallets.
+  if (built.palletFactors) {
+    const rows = [...plannedOfEdited.flatMap((l) => l.rows), ...placedOrderIds.map((orderId) => ({ orderId, portionLinesJson: null }))];
+    const orderIds = [...new Set(rows.map((r) => r.orderId))];
+    const lines = orderIds.length
+      ? await prisma.orderLine.findMany({
+          where: { orderId: { in: orderIds }, order: { tenantId } },
+          select: { id: true, orderId: true, cases: true, product: { select: { code: true, name: true, casesPerPallet: true } } },
+        })
+      : [];
+    const changed = palletFactorsChangedSince({ rows, lines, plannedFactors: readPlanInputs(details.inputs)?.palletFactors ?? {} });
+    if (changed.length) throw refuse(409, 'PALLET_FACTOR_CHANGED', palletFactorChangedText(changed), { palletFactorChanges: changed });
   }
 
   const truckOfLoad = (id: string) => loadById.get(id)?.truckId ?? null;
