@@ -2387,7 +2387,8 @@ describe('a driver on leave that day: Lock, Loading and Dispatch ask first (demo
   it('the route takes the answer (leaveConfirmed) and passes it on', () => {
     const route = readFileSync(path.resolve(__dirname, '../../app/api/runs/[id]/loads/[loadId]/route.ts'), 'utf8');
     expect(route).toContain('leaveConfirmed: z.boolean().optional()');
-    expect(route).toMatch(/updateLoad\(user\.tenantId, params\.id, params\.loadId, \{ status, driverId, helperIds, leaveConfirmed \}/);
+    // `via`: an unlock from the kept-load warning (its audit row says so), passed on with it.
+    expect(route).toMatch(/updateLoad\(user\.tenantId, params\.id, params\.loadId, \{ status, driverId, helperIds, leaveConfirmed, via \}/);
   });
 });
 

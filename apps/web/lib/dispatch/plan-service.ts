@@ -126,11 +126,12 @@ import { planHelpers, type HelperChangeNote } from './load-helpers';
 import { copyLoadHelpers, deleteHelpersOfLoads, helperEvidenceOf, setHelpersTx, writeLoadHelpers } from './load-helpers-service';
 import { lockWarningsOf } from '../delivery/carry-conflicts';
 import { windowRuleOf } from './window-rule';
+import { keptAudit, type KeptAuditRow } from './kept-changes';
+import { keptChangesMode, keptChangesOrNull } from './kept-changes-server';
+import { stopsAtReplacedPoints } from './replaced-pin';
 import {
-  distanceM,
   loadBreakJson,
   parseLoadBreak,
-  PIN_MOVED_M,
   plannedTruckFacts,
   readLoadOrigin,
   readPlanInputs,
@@ -2464,12 +2465,13 @@ export async function createNextVersion(
   reason: 'LATE_ORDER' | 'MANUAL_ADJUSTMENT' | 'REOPTIMIZE',
   note: string | null,
   userId: string,
+  extra?: NextVersionAudit,
 ) {
   try {
     return await prisma.$transaction(
       async (tx) => {
         await setLockTimeout(tx);
-        return await createNextVersionTx(tx, tenantId, parentRunId, reason, note, userId);
+        return await createNextVersionTx(tx, tenantId, parentRunId, reason, note, userId, extra);
       },
       { timeout: 60_000, maxWait: 10_000 },
     );
@@ -2479,10 +2481,20 @@ export async function createNextVersion(
 }
 
 /**
+ * What the PLAN_VERSION_CREATED row adds (the re-plan): the locked and loading loads it keeps although
+ * their customer data changed since they were planned (kept-changes.ts keptAudit: codes and kinds only,
+ * at most 50 stops; `keptTruncated` beyond). Absent: nothing to add (the hire path passes none).
+ */
+export interface NextVersionAudit {
+  keptChanged?: KeptAuditRow[];
+  keptTruncated?: number;
+}
+
+/**
  * createNextVersion inside the caller's transaction (the hire suggestion's "Use this plan" makes the
  * version, its one-day trucks and the plan applied to it in one transaction). The caller sets the
  * lock timeout. `newLoadId`: each parent load's copy (the caller renames the frozen loads its option
- * was computed around, as the copied option's scope is renamed here).
+ * was computed around, as the copied option's scope is renamed here). `extra`: added to the audit row.
  */
 export async function createNextVersionTx(
   tx: Tx,
@@ -2491,6 +2503,7 @@ export async function createNextVersionTx(
   reason: 'LATE_ORDER' | 'MANUAL_ADJUSTMENT' | 'REOPTIMIZE',
   note: string | null,
   userId: string,
+  extra?: NextVersionAudit,
 ) {
   const head = await tx.runPlan.findFirst({ where: { id: parentRunId, tenantId }, select: { depotId: true, runDate: true } });
   if (!head) throw new PlanError('Plan not found.', 404);
@@ -2613,6 +2626,7 @@ export async function createNextVersionTx(
         frozenLoadsCarried,
         loadsCopied: loads.length,
         planCopied: !!chosenCopyId,
+        ...(extra?.keptChanged?.length ? { keptChanged: extra.keptChanged, ...(extra.keptTruncated ? { keptTruncated: extra.keptTruncated } : {}) } : {}),
       } as never,
     },
     tx,
@@ -2664,6 +2678,11 @@ export interface LoadChange {
    * of a load whose driver is on leave that day goes through (else 409 DRIVER_ON_LEAVE; leaveGate).
    */
   leaveConfirmed?: boolean;
+  /**
+   * An unlock (PLANNED) from the kept-load warning: the LOAD_PLANNED audit row adds `via` and what changed
+   * on the load (keptChanges, read by the server before the load moves). Ignored with any other status.
+   */
+  via?: 'KEPT_DATA_CHANGED';
 }
 
 /**
@@ -2686,7 +2705,7 @@ export async function updateLoad(
     let load: Awaited<ReturnType<typeof setDriverTx>> | null = null;
     if (change.driverId !== undefined) load = await setDriverTx(tx, tenantId, run, loadId, change.driverId, user);
     if (change.helperIds !== undefined) load = await setHelpersTx(tx, tenantId, run, loadId, change.helperIds, user);
-    if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole, opts.now ?? new Date(), change.leaveConfirmed === true);
+    if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole, opts.now ?? new Date(), change.leaveConfirmed === true, change.via);
     // Delivery outcome (spec section 9.4): Lock of a load holding a brought-forward order whose original
     // result changed after the carry warns in the answer ("may not be needed"); it is never refused.
     if (load && change.status === 'LOCKED') {
@@ -2711,8 +2730,19 @@ export function noPlanApplied(loadStatuses: readonly string[]): PlanError {
   return new PlanError(`This plan version has no optimized plan yet, so its loads cannot be locked, loaded or dispatched. ${advice}`, 409, { code: 'NO_PLAN_APPLIED' });
 }
 
-async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, user: { id: string }, hasRole: RoleCheck, now: Date, leaveConfirmed = false) {
-  return changeStatusCore(tx, tenantId, run, loadId, to, { userId: user.id, label: null }, hasRole, now, leaveConfirmed);
+async function changeStatusTx(
+  tx: Tx,
+  tenantId: string,
+  run: OpenRun,
+  loadId: string,
+  to: LoadStatusName,
+  user: { id: string },
+  hasRole: RoleCheck,
+  now: Date,
+  leaveConfirmed = false,
+  via?: LoadChange['via'],
+) {
+  return changeStatusCore(tx, tenantId, run, loadId, to, { userId: user.id, label: null }, hasRole, now, leaveConfirmed, via);
 }
 
 /**
@@ -2729,7 +2759,7 @@ export interface StatusActor {
  * The status change of one load, shared by the dispatcher's buttons (changeStatusTx) and the driver's
  * Back at depot (completeLoadAsDriver). `hasRole` null skips the role check: only the driver path,
  * which completes a DISPATCHED load whose every stop has a result. `leaveConfirmed`: the dispatcher's
- * answer about a driver on leave that day (leaveGate).
+ * answer about a driver on leave that day (leaveGate). `via`: an unlock from the kept-load warning.
  */
 async function changeStatusCore(
   tx: Tx,
@@ -2741,6 +2771,7 @@ async function changeStatusCore(
   hasRole: RoleCheck | null,
   now: Date,
   leaveConfirmed = false,
+  via?: LoadChange['via'],
 ) {
   const runId = run.id;
   const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId } });
@@ -2756,6 +2787,10 @@ async function changeStatusCore(
     throw noPlanApplied((await tx.planLoad.findMany({ where: { runId }, select: { status: true } })).map((l) => l.status));
   }
   if (hasRole && !hasRole(check.role)) throw new PlanError(`Only a ${check.role.toLowerCase()} (or above) can do this.`, 403);
+  // An unlock from the kept-load warning: what changed on this load since it was planned, read by the
+  // server (never the screen's text) NOW, while the load is still locked - the report reads only locked
+  // and loading loads, so after the move below it would be empty (review W2). Off: as before.
+  const keptChanges = to === 'PLANNED' && via === 'KEPT_DATA_CHANGED' && keptChangesMode() === 'on' ? keptAudit(await keptChangesOrNull(tx, tenantId, runId, { loadId, now }, 'unlock')).rows : null;
   const recon = run.reconciliationJson as unknown as Reconciliation | null;
   if (to === 'DISPATCHED' && !recon?.ok) throw new PlanError('Cases do not reconcile for this plan - fix before dispatching.', 409);
   // PR4 (review F04): locking and loading freeze what later re-plans build on, so they need the
@@ -2857,6 +2892,7 @@ async function changeStatusCore(
         // The dispatcher's answer: this driver drives although he is on leave that day.
         ...(driverOnLeave ? { driverOnLeave } : {}),
         ...(leavingRemoved ? { leavingTapsRemoved: leavingRemoved } : {}),
+        ...(keptChanges ? { via, keptChanges } : {}),
       } as never,
       // A row without a user (the driver link, the janitor) keeps no IP: a driver's IP is erased with
       // the stop events after the location retention, audit rows are kept for good.
@@ -3113,93 +3149,6 @@ export function replacedPinRemedy(status: string): string {
   if (status === 'PLANNED') return 'RE-PLAN so the stops go to the new pins.';
   if (status === 'LOADING') return 'Put this load Back to locked, then Unlock it (put it back to Planned), then RE-PLAN so the stops go to the new pins.';
   return 'Unlock this load (put it back to Planned), then RE-PLAN so the stops go to the new pins.';
-}
-
-/** A customer's point as a location change recorded it before the change (CUSTOMER_LOCATION_SET beforeJson). */
-function replacedPoint(json: unknown): { lat: number; lng: number; locationVerified: boolean; geocodeConfidence: string | null } | null {
-  if (!json || typeof json !== 'object') return null;
-  const b = json as Record<string, unknown>;
-  if (typeof b.lat !== 'number' || typeof b.lng !== 'number') return null;
-  return { lat: b.lat, lng: b.lng, locationVerified: b.verified === true, geocodeConfidence: typeof b.confidence === 'string' ? b.confidence : null };
-}
-
-/** The point a location change set (CUSTOMER_LOCATION_SET afterJson), or null when the row does not say. */
-function setPoint(json: unknown): { lat: number; lng: number } | null {
-  if (!json || typeof json !== 'object') return null;
-  const a = json as Record<string, unknown>;
-  return typeof a.lat === 'number' && typeof a.lng === 'number' ? { lat: a.lat, lng: a.lng } : null;
-}
-
-/**
- * The customers of `stops` whose stop is still planned at a point that was NOT usable when a new
- * pin replaced it (A5 third review): the stop's planned pin (stopSnapshotJson) is more than
- * PIN_MOVED_M from the customer's point now, and the recorded location change (CUSTOMER_LOCATION_SET:
- * a pin or reading saved in ADD LOCATION or Set location, or a customer import that wrote a new pair
- * over it) that last moved the customer off exactly that point did so while the point blocked
- * delivery (`locationBlocksDelivery`: LOW or outside the area and never confirmed, 0,0). The stop, its
- * links and the driver's texts still go to the planned point until a re-plan. An ordinary correction
- * of a usable point is not refused: the sheets show the planned stop with the new pin noted (frozen
- * plan facts, owner default, F08).
- * A5 fourth review: only the change that replaced the planned point counts. A change that confirmed
- * the point where it was moves nothing, and of the changes off the point only the newest is the one
- * that replaced it (an older one was undone when the customer came back to it). Before, any recorded
- * "before" at the planned point while it was flagged refused the load, so an ordinary correction of a
- * point confirmed where it was got "its old point, which was not usable" and a locked load was sent
- * through unlock and RE-PLAN. Changes made in the same millisecond count as the newest together
- * (refused when one of them blocked). A move off a usable point by a customer import writes no row;
- * the newest recorded change then stands for it, which can only refuse more, never less.
- * A5 fifth review: "the planned point" is its place, PIN_MOVED_M around it - the distance at which
- * this gate (above) and the sheets' "New pin" note count a pin as the same place. A change counts
- * when it started there and moved the customer out of it; one that ended there too (a flagged point
- * confirmed where it is: its coordinates typed, or a hand pin a few metres off, which is the only way
- * a pin can confirm it - a pin exactly on a flagged saved point is refused, PIN_REQUIRED) moved
- * nothing. Before, a change had to start exactly at the planned point (within 5 cm): the correction
- * of such a pin was never counted, so the older flagged row refused an ordinary correction.
- */
-async function stopsAtReplacedPoints(
-  tx: Tx,
-  tenantId: string,
-  stops: { customerId: string; stopSnapshotJson: unknown }[],
-  customers: Map<string, { lat: number | null; lng: number | null }>,
-  area: ServiceArea,
-): Promise<Set<string>> {
-  const moved = new Map<string, { lat: number; lng: number }[]>();
-  for (const s of stops) {
-    const snap = readStopSnapshot(s.stopSnapshotJson);
-    const now = customers.get(s.customerId);
-    if (!snap || snap.lat === null || snap.lng === null || !now || now.lat === null || now.lng === null) continue;
-    const planned = { lat: snap.lat, lng: snap.lng };
-    if (distanceM(planned, { lat: now.lat, lng: now.lng }) <= PIN_MOVED_M) continue;
-    moved.set(s.customerId, [...(moved.get(s.customerId) ?? []), planned]);
-  }
-  const out = new Set<string>();
-  if (!moved.size) return out;
-  const changes = await tx.auditLog.findMany({
-    where: { tenantId, entity: 'Customer', action: 'CUSTOMER_LOCATION_SET', entityId: { in: [...moved.keys()] } },
-    select: { entityId: true, beforeJson: true, afterJson: true, createdAt: true },
-  });
-  // Per customer and planned point: the newest change that moved the customer out of that point's
-  // place, and whether it (or one made in the same millisecond) did so while the point it started
-  // from blocked delivery.
-  const newest = new Map<string, { at: number; blocked: boolean }>();
-  for (const ch of changes) {
-    const before = replacedPoint(ch.beforeJson);
-    const planned = ch.entityId ? moved.get(ch.entityId) : undefined;
-    if (!before || !planned) continue;
-    const after = setPoint(ch.afterJson);
-    const at = ch.createdAt.getTime();
-    const blocked = locationBlocksDelivery(before, area);
-    planned.forEach((p, i) => {
-      if (distanceM(p, before) > PIN_MOVED_M) return; // started elsewhere
-      if (after && distanceM(p, after) <= PIN_MOVED_M) return; // ended there too: nothing moved out
-      const key = `${ch.entityId}\u0000${i}`;
-      const seen = newest.get(key);
-      if (!seen || at > seen.at) newest.set(key, { at, blocked });
-      else if (at === seen.at && blocked) seen.blocked = true;
-    });
-  }
-  for (const [key, { blocked }] of newest) if (blocked) out.add(key.slice(0, key.indexOf('\u0000')));
-  return out;
 }
 
 /**

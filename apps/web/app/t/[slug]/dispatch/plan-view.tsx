@@ -56,6 +56,24 @@ import { fullAndLooseText, loadPallets, manifestPalletTotals, manifestTotalText,
 import { api, askOverride, durH, hhmm, isPalletFactorRefusal, palletRefusalToast, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 import { useSearchModeChoice } from './search-mode-dialog';
+import {
+  keptEchoText,
+  keptQuestion,
+  keptReplanBody,
+  keptReplanNote,
+  keptSeenAfter,
+  mergeUnlocks,
+  replanNotStartedText,
+  unlockConfirmText,
+  unlockStoppedText,
+  unlockedNextText,
+  unlockedReplanText,
+  type KeptEcho,
+  type KeptLoadRef,
+  type KeptReport,
+} from '@/lib/dispatch/kept-changes';
+import { KeptChangesBox } from './kept-changes-box';
+import { readKept, unlockKept } from './kept-client';
 import { useTicker } from './use-ticker';
 import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
 import type { DriverLinkView } from '@/lib/driver-link/manifest-types';
@@ -77,6 +95,13 @@ import { CAMERA_ALERT_PER_DAY } from '@/lib/delivery/camera-exceptions';
 import { addDaysIso } from '@/lib/dispatch/time';
 import { LiveTrucksBar, useLiveTrucks } from './live-trucks';
 import { truckDayHref } from '@/lib/ivms/truck-day';
+
+/** A re-plan's answers before it starts: Quick or Thorough, the kept loads ticked to unlock first, and the kept-load report the dialog showed. */
+interface ReplanChoice {
+  mode: SearchMode;
+  unlock: KeptLoadRef[];
+  kept: KeptReport | null;
+}
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -159,9 +184,14 @@ interface Props {
    * the user is PLANNER or above (the page decides). Off or absent: nothing is fetched or shown.
    */
   liveMap?: boolean;
+  /**
+   * The "Locked loads planned with older customer data" box above the warnings (default on). Off on the
+   * day screen, whose Step 3 shows the same box right above the plan.
+   */
+  showKeptBox?: boolean;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today, liveMap = false }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today, liveMap = false, showKeptBox = true }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -621,37 +651,61 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
    * a plan screen left open across midnight must not suggest Thorough on the delivery day (skeptic
    * review of the long-search PR).
    */
-  function askSearchMode(note?: string): Promise<SearchMode | null> {
-    if (!d) return Promise.resolve(null);
+  async function askSearchMode(note?: string): Promise<ReplanChoice | null> {
+    if (!d) return null;
     const stops = new Set([...d.loads.flatMap((l) => l.stops.map((s) => s.customerId)), ...d.unserved.map((u) => u.customerId)]).size + (d.pendingOrders ?? 0);
     const { defaultMode, deliveryDay } = searchModeNow(d.run.runDate, { timezone: d.timezone, today: today ?? d.today }, new Date());
-    return searchChoice.ask({
+    // The locked and loading loads planned with older customer data, read fresh (a READY plan does not
+    // poll): listed with their Unlock first, unticked. A failed read lists nothing (never blocks a re-plan).
+    const kept = await readKept(runId);
+    const keptQ = keptQuestion(kept);
+    const a = await searchChoice.askFull({
       verb: 'Re-plan',
       defaultMode,
       stops: stops || null,
       capSec: d.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT,
       deliveryDay,
-      note: note ?? 'Locked and dispatched loads stay exactly as they are.',
+      // `note`: what asked (the late order); then what the re-plan keeps.
+      note: `${note ? `${note} ` : ''}${keptReplanNote(keptQ)}`,
+      ...(keptQ ? { kept: keptQ } : {}),
     });
+    return a ? { mode: a.mode, unlock: mergeUnlocks(a.unlock), kept } : null;
   }
 
-  // The mode chosen with "Late order saved. Re-plan now?" (one dialog for both).
-  const lateOrderMode = useRef<SearchMode | null>(null);
+  // The choice made with "Late order saved. Re-plan now?" (one dialog for both).
+  const lateOrderMode = useRef<ReplanChoice | null>(null);
 
-  async function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE', preset?: SearchMode) {
-    const searchMode = preset ?? (await askSearchMode());
-    if (!searchMode) return;
+  async function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE', preset?: ReplanChoice) {
+    const choice = preset ?? (await askSearchMode());
+    if (!choice) return;
+    const searchMode = choice.mode;
     const expect = d ? { date: d.run.runDate, depotId: d.run.depot.id } : undefined;
     const capSec = d?.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT;
     return runPlanAction(
       lock,
       'replan',
       async () => {
+        // The ticked kept loads go back to Planned first, latest first; a refusal stops here (no re-plan).
+        let unlocked: KeptLoadRef[] = [];
+        if (choice.unlock.length) {
+          const res = await unlockKept(runId, choice.unlock);
+          unlocked = res.unlocked;
+          if (res.failed) {
+            toast.error(unlockStoppedText({ unlocked, failed: res.failed }));
+            await load();
+            await onChanged?.();
+            return;
+          }
+        }
+        // After an unlock: a manual adjustment (the unlocked stops prefer their truck), named in its note.
+        const body = keptReplanBody(reason, unlocked);
+        // What the dialog showed, without the loads now back to Planned (the re-plan reads the list again).
+        const keptSeen = keptSeenAfter(choice.kept, unlocked);
         let overrides: OptimizeOverrides = {};
         for (;;) {
-          const r = await api<{ runId: string; version?: number; reason?: string } & StartedAnswer>(`/api/runs/${runId}/replan`, {
+          const r = await api<{ runId: string; version?: number; reason?: string; kept?: KeptEcho } & StartedAnswer>(`/api/runs/${runId}/replan`, {
             method: 'POST',
-            json: { reason, expect, searchMode, ...overrides },
+            json: { ...body, expect, searchMode, ...(keptSeen ? { keptSeen } : {}), ...overrides },
           });
           if (r.ok && r.data?.alreadyRunning) {
             // A version with no plan yet is optimized in place: another dispatcher's job may already
@@ -666,11 +720,18 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             const how =
               r.data.reason === 'LATE_ORDER'
                 ? 'Late order added; the other orders stay on their trucks where possible.'
-                : 'Full re-optimize: orders may move to other trucks.';
+                : r.data.reason === 'MANUAL_ADJUSTMENT'
+                  ? 'The other orders stay on their trucks where possible.'
+                  : 'Full re-optimize: orders may move to other trucks.';
             const long = searchMode === 'THOROUGH' ? ` Thorough search: up to ${fmtSearchTime(capSec)}, stops early when the plan stops improving.` : '';
+            const keptNow = [unlocked.length ? unlockedReplanText(unlocked) : '', keptEchoText(r.data.kept) ?? '']
+              .filter(Boolean)
+              .join(' ');
             toast.success(
-              `Plan version ${r.data.version ?? ''} is ${r.data.queued ? 'queued behind other optimizations' : 'being optimized'}. ${how}${long} Locked and dispatched loads are kept; if the optimization fails, the previous plan stays in use.`,
+              `Plan version ${r.data.version ?? ''} is ${r.data.queued ? 'queued behind other optimizations' : 'being optimized'}. ${how}${long} Locked and dispatched loads are kept; if the optimization fails, the previous plan stays in use.${keptNow ? ` ${keptNow}` : ''}`,
             );
+            // The list changed between the dialog and the start (another dispatcher, a customer saved).
+            if (r.data.kept?.unseen) toast.warning(`Locked loads with older customer data changed meanwhile: ${r.data.kept.lines.join('; ')}`);
             await onChanged?.(r.data.runId);
             return;
           }
@@ -680,13 +741,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             overrides = { ...overrides, ...more };
             continue;
           }
+          // The unlock went through but the re-plan did not start (review W7): say both, and show the loads as they are.
+          const notStarted = unlocked.length ? replanNotStartedText(unlocked, r.error) : null;
           if (isPalletFactorRefusal(r.errorBody)) {
             // Refused, no question: the products to fix, with the Products link (the previous plan stays).
-            toast.error(r.error ?? 'Cannot plan by pallets: products have no cases per pallet.', palletRefusalToast(slug));
+            toast.error(notStarted ?? r.error ?? 'Cannot plan by pallets: products have no cases per pallet.', palletRefusalToast(slug));
+            if (notStarted) await load();
           } else if (r.errorBody?.code !== 'LOCATION_REQUIRED' && r.errorBody?.code !== 'WEIGHT_REQUIRED') {
-            toast.error(r.error ?? 'Re-plan failed.');
+            toast.error(notStarted ?? r.error ?? 'Re-plan failed.');
             // The plan may have changed meanwhile (superseded by another re-plan, a new version kept
             // after a refused start): reload it and the day instead of keeping stale buttons.
+            await load();
+          } else if (notStarted) {
+            toast.error(notStarted);
             await load();
           }
           // Not re-planned (also when a question was declined): the day as it is now - after a
@@ -694,6 +761,23 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           await onChanged?.();
           return;
         }
+      },
+      failed,
+    );
+  }
+
+  /** The box's Unlock: the load and its truck's later frozen loads back to Planned, latest first (one action at a time). */
+  function unlockFromBox(loads: KeptLoadRef[]) {
+    if (!window.confirm(unlockConfirmText(loads))) return;
+    return runPlanAction(
+      lock,
+      'kept-unlock',
+      async () => {
+        const res = await unlockKept(runId, loads);
+        if (res.failed) toast.error(unlockStoppedText({ unlocked: res.unlocked, failed: res.failed }, false));
+        else toast.success(unlockedNextText(res.unlocked));
+        await load();
+        await onChanged?.();
       },
       failed,
     );
@@ -956,6 +1040,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm" data-testid="change-summary">
           <b>Changes vs version {d.change.parentVersion}:</b> {d.change.text}.
         </div>
+      ) : null}
+      {showKeptBox && d.kept?.loads.length && !superseded && !running ? (
+        <KeptChangesBox report={d.kept} canPlan={canPlan} busy={!!busy} onUnlock={(loads) => void unlockFromBox(loads)} testId="kept-changed-box" />
       ) : null}
       {d.warnings.length ? (
         <div className="space-y-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm">
@@ -1665,7 +1752,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             weightFix: weightFixText(canEditProducts),
             // "Re-plan now?" and Quick or Thorough in one dialog (Cancel = not now).
             confirmReplan: async () => {
-              lateOrderMode.current = await askSearchMode('Late order saved. Re-plan now? Locked and dispatched loads stay exactly as they are.');
+              lateOrderMode.current = await askSearchMode('Late order saved. Re-plan now?');
               return lateOrderMode.current !== null;
             },
             replan: async () => {

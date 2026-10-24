@@ -4,6 +4,7 @@ import { useCallback, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { defaultModeReason, searchChoices, type SearchMode } from '@/lib/dispatch/search-mode';
+import { KEPT_DIALOG_LEAD, type KeptLoadRef, type KeptQuestion } from '@/lib/dispatch/kept-changes';
 
 /** What the OPTIMIZE / RE-PLAN confirmation asks about. */
 export interface SearchModeQuestion {
@@ -22,33 +23,62 @@ export interface SearchModeQuestion {
   deliveryDay?: boolean;
   /** A line above the choice (e.g. what a re-plan keeps). */
   note?: string;
+  /**
+   * A re-plan: the locked and loading loads planned with older customer data (kept-changes.ts keptQuestion),
+   * listed with one "Unlock ... first" choice per load, unticked (a locked load may be on its truck already).
+   */
+  kept?: KeptQuestion;
+}
+
+/** The dialog's answer: the mode, and the unlock chains of the ticked loads (empty: none). */
+export interface SearchModeAnswer {
+  mode: SearchMode;
+  unlock: KeptLoadRef[][];
 }
 
 interface Pending extends SearchModeQuestion {
-  resolve: (mode: SearchMode | null) => void;
+  resolve: (answer: SearchModeAnswer | null) => void;
 }
 
 /**
  * The Quick / Thorough choice before an optimization starts (owner decision 29 Sep 2026). `ask`
- * resolves with the mode, or null when the dispatcher cancels; render `dialog` once.
+ * resolves with the mode, or null when the dispatcher cancels; `askFull` also with the kept loads ticked
+ * to unlock first; render `dialog` once.
  */
-export function useSearchModeChoice(): { ask: (q: SearchModeQuestion) => Promise<SearchMode | null>; dialog: JSX.Element | null } {
+export function useSearchModeChoice(): {
+  ask: (q: SearchModeQuestion) => Promise<SearchMode | null>;
+  askFull: (q: SearchModeQuestion) => Promise<SearchModeAnswer | null>;
+  dialog: JSX.Element | null;
+} {
   const [pending, setPending] = useState<Pending | null>(null);
-  const ask = useCallback((q: SearchModeQuestion) => new Promise<SearchMode | null>((resolve) => setPending({ ...q, resolve })), []);
+  const askFull = useCallback((q: SearchModeQuestion) => new Promise<SearchModeAnswer | null>((resolve) => setPending({ ...q, resolve })), []);
+  const ask = useCallback((q: SearchModeQuestion) => askFull(q).then((a) => a?.mode ?? null), [askFull]);
   const done = useCallback(
-    (mode: SearchMode | null) => {
+    (answer: SearchModeAnswer | null) => {
       setPending((p) => {
-        p?.resolve(mode);
+        p?.resolve(answer);
         return null;
       });
     },
     [],
   );
-  return { ask, dialog: pending ? <SearchModeDialog question={pending} onDone={done} /> : null };
+  return { ask, askFull, dialog: pending ? <SearchModeDialog question={pending} onDone={done} /> : null };
 }
 
-function SearchModeDialog({ question, onDone }: { question: SearchModeQuestion; onDone: (mode: SearchMode | null) => void }) {
+/** The dialog itself (exported for its spec: the kept-load choices start unticked). */
+export function SearchModeDialog({ question, onDone }: { question: SearchModeQuestion; onDone: (answer: SearchModeAnswer | null) => void }) {
   const [mode, setMode] = useState<SearchMode>(question.defaultMode);
+  // Every unlock choice starts unticked (owner decision: NMWC loads trucks the night before).
+  const [ticked, setTicked] = useState<ReadonlySet<string>>(new Set());
+  const kept = question.kept;
+  const toggle = (id: string) =>
+    setTicked((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const unlock = (kept?.offers ?? []).filter((o) => !o.blocked && ticked.has(o.id)).map((o) => o.loads);
   const choices = searchChoices(question.defaultMode, question.stops, question.capSec, !!question.deliveryDay);
   return (
     <Dialog open onOpenChange={(open) => (open ? null : onDone(null))}>
@@ -80,11 +110,35 @@ function SearchModeDialog({ question, onDone }: { question: SearchModeQuestion; 
             stopped.
           </p>
         </div>
+        {kept ? (
+          <div className="space-y-1 rounded-md border border-amber-300 bg-amber-50 p-2 text-sm" data-testid="kept-in-dialog">
+            <p className="font-medium text-amber-900">Locked loads planned with older customer data</p>
+            <ul className="list-disc space-y-0.5 pl-5 text-xs">
+              {kept.lines.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+              {kept.more ? <li>and {kept.more} more on the plan screen</li> : null}
+            </ul>
+            <p className="text-xs text-muted-foreground">{KEPT_DIALOG_LEAD}</p>
+            {kept.offers.map((o) =>
+              o.blocked ? (
+                <p key={o.id} className="text-xs text-amber-800" data-testid={`kept-offer-blocked-${o.id}`}>
+                  {o.blocked}
+                </p>
+              ) : (
+                <label key={o.id} className="flex cursor-pointer items-start gap-2 text-xs" data-testid={`kept-offer-${o.id}`}>
+                  <input type="checkbox" className="mt-0.5" checked={ticked.has(o.id)} onChange={() => toggle(o.id)} />
+                  <span>{o.label}</span>
+                </label>
+              ),
+            )}
+          </div>
+        ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={() => onDone(null)}>
             Cancel
           </Button>
-          <Button onClick={() => onDone(mode)} data-testid="search-mode-start">
+          <Button onClick={() => onDone({ mode, unlock })} data-testid="search-mode-start">
             {question.verb} ({mode === 'THOROUGH' ? 'Thorough' : 'Quick'})
           </Button>
         </DialogFooter>

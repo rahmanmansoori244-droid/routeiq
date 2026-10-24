@@ -385,6 +385,23 @@ reason and warning texts changed, where they were untrue).
 - **Rollback:** unset the variables (or set `SOLVER_BEST_OF=1`, `SOLVER_BEST_OF_QUICK=1` and `SOLVER_PRIORITY_REPAIR=off`);
   no code change.
 
+## The kept-load warning (24 Oct 2026, web only, on by default)
+
+Daily dispatch (step 3), the plan screen and the RE-PLAN dialog list the locked and loading loads whose customer data
+(receiving hours, pin, small-truck mark, a deactivated customer, cancelled or moved orders, new orders) changed after
+they were planned, with an **Unlock** for each. It only adds information: nothing is refused, no migration, no solver
+change. See `docs/PROJECT_HANDBOOK.md` 3.5, 3.7, 3.8 and 3.11, and `docs/DISPATCHER_GUIDE.md`.
+
+- `KEPT_CHANGES` on **web** stays **unset** (on). `off` (also `0`, `false`, `no`) is the **kill switch**: every screen
+  answers as before the warning (no `kept` field, no box, the dialog as before, no audit fields, and the plan screen's and
+  the sheets' "Changed after planning" hours note of a locked stop as before; the RE-PLAN buttons still ask the server once,
+  which answers nothing). It is read on every request, so no restart is needed. The web logs a startup warning while it
+  is off, or set to a value it does not read (it then stays on).
+- **Verify after the deploy** (a test day, never a live one): optimize, lock a load, change the receiving hours of a
+  customer on it under Customers, then reload Daily dispatch: the box *Locked loads planned with older customer data*
+  lists the load under step 3, and **RE-PLAN** shows it with an unticked *Unlock ... first*.
+- **Rollback:** set `KEPT_CHANGES=off` on web (no code change, no restart).
+
 ## Private networking notes
 
 - Service addresses are `<service>.railway.internal`. This environment resolves over **IPv4 and IPv6**.

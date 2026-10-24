@@ -33,6 +33,8 @@ import type { ServiceArea } from './location-input';
 import { dayDeliveries, type DayDeliveries } from '../delivery/day-results';
 import { shownTruckCode } from './hire';
 import { orderActionReasonText } from './order-cancel-rules';
+import { keptChangesOrNull } from './kept-changes-server';
+import type { KeptReport } from './kept-changes';
 
 export interface IssueCustomer {
   customerId: string;
@@ -296,7 +298,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     depot,
   };
   if (!depot) {
-    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, cancelled: [] as CancelledOrder[], customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], productsWithoutPalletFactor: [] as PalletFactorGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, unserved: { orders: 0, cases: 0, replan: 0 } as DayUnserved, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0, withBays: 0, bays: 0, casesWithoutBays: 0, withPayload: 0 }, batches: [] };
+    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, cancelled: [] as CancelledOrder[], customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], productsWithoutPalletFactor: [] as PalletFactorGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, unserved: { orders: 0, cases: 0, replan: 0 } as DayUnserved, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, kept: null as KeptReport | null, trucks: { active: 0, capacityCases: 0, withBays: 0, bays: 0, casesWithoutBays: 0, withPayload: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -672,6 +674,10 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       reconciliationOk: (plan.reconciliationJson as { ok?: boolean } | null)?.ok ?? null,
     };
   }
+  // Locked and loading loads planned with older customer data (kept-changes.ts): their own field, never a
+  // key of `outdated` - a re-plan changes no kept load, so it never turns RE-PLAN on. Not read while the
+  // plan is optimizing (the screen polls every few seconds then; review W8).
+  const kept = plan?.chosenScenarioId && plan.status !== 'OPTIMIZING' ? await keptChangesOrNull(prisma, tenantId, plan.id, { cfg, profiles, area }, 'day overview') : null;
   // PR9: brought forward from earlier days (the day screen's order list marks them), and orders of
   // this day brought forward to later days (no longer open here; the plan versions keep them).
   const pendingIds = new Set(pending.orderIds);
@@ -895,6 +901,14 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * loads whose truck is not small now (smallTruckBlocked). RE-PLAN applies them all.
      */
     outdated: plan?.chosenScenarioId ? outdated : { ...UP_TO_DATE },
+    /**
+     * Locked and loading loads of the plan in use planned with customer data that changed since (receiving
+     * hours, pin, small-truck mark, a deactivated customer, cancelled or moved orders, new orders of the
+     * same customer): Step 3's "Locked loads planned with older customer data" box, also when RE-PLAN is
+     * off. Not part of `outdated` (a re-plan keeps those loads as they are). null: KEPT_CHANGES=off, no
+     * applied plan, optimizing, or a day that is over.
+     */
+    kept,
     trucks: {
       active: trucks.length,
       capacityCases: trucks.reduce((a, t) => a + t.capacityCases, 0),

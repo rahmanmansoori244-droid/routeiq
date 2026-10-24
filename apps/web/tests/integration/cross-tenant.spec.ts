@@ -224,6 +224,15 @@ const PROBES: ProbeCase[] = [
     },
   },
   {
+    // The kept-load warning (locked loads planned with older customer data): another company's version is 404.
+    label: 'GET /api/runs/{id-B}/kept-changes',
+    method: 'GET',
+    build: async () => {
+      const r = await prisma.runPlan.findFirstOrThrow({ where: { tenantId: tenantB.tenantId } });
+      return `${BASE}/api/runs/${r.id}/kept-changes`;
+    },
+  },
+  {
     label: 'GET /api/runs/{id-B}/status',
     method: 'GET',
     build: async () => {
