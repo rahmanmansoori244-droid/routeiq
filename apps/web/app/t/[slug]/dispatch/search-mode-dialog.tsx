@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { defaultModeReason, searchChoices, type SearchMode } from '@/lib/dispatch/search-mode';
 import { KEPT_DIALOG_LEAD, type KeptLoadRef, type KeptQuestion } from '@/lib/dispatch/kept-changes';
+import { ALLOWANCES_DROPPED_TEXT } from '@/lib/dispatch/plan-edit-view';
 
 /** What the OPTIMIZE / RE-PLAN confirmation asks about. */
 export interface SearchModeQuestion {
@@ -28,6 +29,11 @@ export interface SearchModeQuestion {
    * listed with one "Unlock ... first" choice per load, unticked (a locked load may be on its truck already).
    */
   kept?: KeptQuestion;
+  /**
+   * Moves by hand, allow anyway: the rules allowed by hand on PLANNED loads (allowancesOnPlannedText). A re-plan
+   * plans those loads again with every rule, so it drops them; the dialog lists them (lock a load to keep it).
+   */
+  allowances?: string[];
 }
 
 /** The dialog's answer: the mode, and the unlock chains of the ticked loads (empty: none). */
@@ -110,6 +116,16 @@ export function SearchModeDialog({ question, onDone }: { question: SearchModeQue
             stopped.
           </p>
         </div>
+        {question.allowances?.length ? (
+          <div className="space-y-1 rounded-md border border-violet-300 bg-violet-50 p-2 text-sm" data-testid="allowances-in-dialog">
+            <p className="font-medium text-violet-900">{ALLOWANCES_DROPPED_TEXT}</p>
+            <ul className="list-disc space-y-0.5 pl-5 text-xs">
+              {question.allowances.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {kept ? (
           <div className="space-y-1 rounded-md border border-amber-300 bg-amber-50 p-2 text-sm" data-testid="kept-in-dialog">
             <p className="font-medium text-amber-900">Locked loads planned with older customer data</p>

@@ -37,7 +37,8 @@ import { prisma } from '../db';
 import { findInParts, inParts } from '../in-parts';
 import { addDaysIso, dateOnly, isoOf, todayIso, zonedDayStart } from '../dispatch/time';
 import { echoedWindowRule } from '../dispatch/window-rule';
-import { parseLoadBreak, readTruckSnapshot } from '../dispatch/snapshots';
+import { parseLoadBreak, readHandAllowances, readTruckSnapshot } from '../dispatch/snapshots';
+import { rowKeyOf } from '../dispatch/split';
 import { backAtDepot, backKey, keyOfVisit, leftDepotTaps, liveRunsInRange, loadOrigins, loadsOfRuns, stopsOfLoads, visitKey, visitsInRange } from '../delivery/day-results';
 import { previousTrip } from '../delivery/turnaround';
 import { PIN_FAR_M } from '../delivery/pin-check';
@@ -88,7 +89,7 @@ export async function readAlertFacts(
     findInParts(loadIds, (part) =>
       db.routeAssignment.findMany({
         where: { loadId: { in: part } },
-        select: { loadId: true, sequenceInTruck: true, orderId: true, orderInStop: true, etaMin: true, serviceStartMin: true, departureMin: true },
+        select: { loadId: true, sequenceInTruck: true, orderId: true, orderInStop: true, etaMin: true, serviceStartMin: true, departureMin: true, portionLinesJson: true },
         orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
       }),
     ),
@@ -197,6 +198,9 @@ export async function readAlertFacts(
           // GPS alerts: the planned pin (the visit's, else the plan's, as the stop detector) for "at the stop" and the live ETA,
           // and the customer's site radius (owner request 19 Oct 2026: "at the stop" reaches that far, gps.ts atStopRadiusOf).
           const site = pinOf.get(s.customerId)?.siteRadiusM ?? null;
+          // A late arrival allowed by hand on this stop (its rows covered by a LATE allowance of the load).
+          const keys = at.map((r) => rowKeyOf(r.orderId, r.portionLinesJson));
+          const late = keys.length ? readHandAllowances(x?.truckSnapshotJson ?? null).find((a) => a.kind === 'LATE' && keys.every((k) => a.rowKeys.includes(k))) : undefined;
           const gpsStop = gpsRead ? { pin: row && row.plannedLat !== null && row.plannedLng !== null ? { lat: row.plannedLat, lng: row.plannedLng } : s.pin, ...(site ? { siteRadiusM: site } : {}) } : {};
           return {
             sequence: s.sequence,
@@ -210,6 +214,7 @@ export async function readAlertFacts(
             plannedServiceMin: s.plannedServiceMin,
             windowStartMin: s.windowStartMin,
             windowEndMin: s.windowEndMin,
+            ...(late && typeof late.maxLateMin === 'number' ? { allowedLateMin: late.maxLateMin } : {}),
             priority: prios.length ? Math.min(...prios) : null,
             pinVerified: verified.has(s.customerId) && !flagged.has(s.customerId),
             pinMoved: pinMovedSince(v ?? null, pinOf.get(s.customerId) ?? null),

@@ -65,6 +65,7 @@ import {
   portionPlannedKgPerCase,
   portionsOfPart,
   readPortionLines,
+  rowKeyOf,
   rowPalletUnitsNow,
   splitIntoParts,
   type FleetTruck,
@@ -133,6 +134,7 @@ import {
   loadBreakJson,
   parseLoadBreak,
   plannedTruckFacts,
+  readHandAllowances,
   readLoadOrigin,
   readPlanInputs,
   readStopSnapshot,
@@ -141,6 +143,7 @@ import {
   SNAPSHOT_VERSION,
   truckOutOfService,
   usableWindow,
+  type HandAllowance,
   type LoadOrigin,
   type PlanInputs,
   type PlanRules,
@@ -1649,6 +1652,11 @@ export async function planCrew(
   return { trucks, driverOf, helpersOf, driverChanges, helperChanges, plannedIds: helperEv.plannedIds };
 }
 
+/** A load's truck snapshot with its rules allowed by hand (only when there are some: every other snapshot unchanged). */
+function withHandAllowed<T>(snapshot: T, list: HandAllowance[]): T | (T & { handAllowed: HandAllowance[] }) {
+  return list.length && snapshot && typeof snapshot === 'object' ? { ...snapshot, handAllowed: list } : snapshot;
+}
+
 /**
  * Create the PlanLoads, their helper rows and RouteAssignments of `loads` (an option's new loads) on version
  * `runId`: applyScenario for a whole option, a hand move (plan-edit-apply.ts) for the trucks it re-timed. `d`
@@ -1663,7 +1671,13 @@ export async function materializeLoads(
   runId: string,
   d: ScenarioDetails,
   loads: readonly DispatchScenario['loads'][number][],
-  ctx: { orderIds: string[]; snap: Awaited<ReturnType<typeof snapshotSource>>; crew: Pick<CrewPlan, 'driverOf' | 'helpersOf'> },
+  ctx: {
+    orderIds: string[];
+    snap: Awaited<ReturnType<typeof snapshotSource>>;
+    crew: Pick<CrewPlan, 'driverOf' | 'helpersOf'>;
+    /** Moves by hand: the rules allowed by hand on each new load (kept in its truck snapshot, `handAllowed`). */
+    allowances?: (ld: DispatchScenario['loads'][number]) => HandAllowance[];
+  },
 ) {
   const orderIds = ctx.orderIds;
   const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { id: true, totalCases: true, totalWeightKg: true } });
@@ -1721,7 +1735,8 @@ export async function materializeLoads(
         returnLegKm: ld.return_leg_km,
         // Per load (review F18): estimated when the whole matrix was, or any of its own legs is.
         distanceIsEstimated: d.distance_is_estimated || (ld.estimated_legs ?? 0) > 0,
-        truckSnapshotJson: snap.truck(ld.truck_id) as unknown as Prisma.InputJsonValue,
+        // A rule allowed by hand on this load (a hand change) is kept with the truck and rules it was timed with.
+        truckSnapshotJson: withHandAllowed(snap.truck(ld.truck_id), ctx.allowances?.(ld) ?? []) as unknown as Prisma.InputJsonValue,
         // The driver break planned with this load (the solver's timetable), NULL when none.
         breakJson: (loadBreakJson(ld.driver_break) ?? Prisma.DbNull) as Prisma.InputJsonValue | typeof Prisma.DbNull,
         // Pallets planned (1/1000 pallet), NULL when the load was planned by cases.
@@ -2255,6 +2270,7 @@ export function feasibilityInputFromRows(
     const fillNow = opts.palletFillPctNow ?? ts?.palletFillPct ?? null;
     const bayNow = typeof t.bays === 'number' ? t.bays : null;
     // The room now: the Pallet fill now, and the one-customer rule (fixed) for a load that was planned with it.
+    const allowed = readHandAllowances(l.truckSnapshotJson);
     const now = bayNow !== null && fillNow !== null ? plannedLoadRoom({ bays: bayNow, palletFillPct: fillNow, palletRoomUnits: palletRoomUnits(bayNow, fillNow), singleCustomerFillPct: planned?.palletOneCustomer ? SINGLE_CUSTOMER_FILL_PCT : null }, customers) : null;
     return {
       id: l.id,
@@ -2281,6 +2297,8 @@ export function feasibilityInputFromRows(
           : null,
       rules: ts ? ts.rules : own && legacy ? legacy.rules(l.truckId) : null,
       break: parseLoadBreak(l.breakJson),
+      // Rules allowed by hand on the load (moves by hand): only when it has some, so every other hash is unchanged.
+      ...(allowed.length ? { allowances: allowed } : {}),
       stops: l.assignments.map((a) => {
         const snap = readStopSnapshot(a.stopSnapshotJson);
         const c = a.order.customer;
@@ -2289,6 +2307,8 @@ export function feasibilityInputFromRows(
         const now = room !== null ? rowPalletUnitsNow(a.order.lines, a.portionLinesJson, a.palletUnits, plannedFactors) : null;
         return {
           orderId: a.orderId,
+          // The row's identity (order and split lines): an allowance by hand is matched to its rows by it.
+          rowKey: rowKeyOf(a.orderId, a.portionLinesJson),
           sequence: a.sequenceInTruck,
           label: snap ? snap.name || snap.code : c.name || c.code,
           cases: a.portionCases ?? a.order.totalCases,

@@ -31,7 +31,7 @@ import { helperChangeWarnings, isHandSetHelpers } from './load-helpers';
 import { driverChangeWarnings, noteParts } from './driver-links';
 import { leaveOnDay, loadLeaveNote } from './driver-leave';
 import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
-import { orderIdOf, portionPlannedKgPerCase, readPortionLines, readPortionPalletFactors, rowLines, rowLinesKg, splitPartLabels } from './split';
+import { orderIdOf, portionPlannedKgPerCase, readPortionLines, readPortionPalletFactors, rowKeyOf, rowLines, rowLinesKg, splitPartLabels } from './split';
 import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, planSignature, preferenceFigures, type OptionFacts } from './plan-options';
 import type { PreferencePenalties, SearchMode, SearchReport } from '@routeiq/shared-types';
 import { defaultSearchMode, searchOptionOf, thoroughMaxSec, type SearchOption } from './search-mode';
@@ -52,7 +52,8 @@ import { loadingInstructionText } from './loading-instruction';
 import { echoedWindowRule, windowRuleAskedText, type WindowRule } from './window-rule';
 import { keptStopLive, type KeptReport } from './kept-changes';
 import { keptChangesMode, keptChangesOrNull } from './kept-changes-server';
-import { manualOf, planEditMode } from './plan-edit-view';
+import { allowedByHandText, manualOf, OVERRIDE_CAPACITY_MAX_PCT, planEditMode, planEditOverridesOn, type PlanAllowanceLine } from './plan-edit-view';
+import { readHandAllowances, type HandAllowance } from './snapshots';
 
 export interface DetailStop {
   sequence: number;
@@ -80,6 +81,11 @@ export interface DetailStop {
   cumulativeKm: number | null;
   hardWindowOk: boolean | null;
   prefWindowOk: boolean | null;
+  /**
+   * Moves by hand, allow anyway: the late arrival allowed by hand at this stop (a LATE allowance of its load
+   * whose rows cover every row of the stop). The screen and the sheets show it instead of a plain red.
+   */
+  handAllowed?: HandAllowance;
   late: boolean;
   orderIds: string[];
   salesOrders: string[];
@@ -251,6 +257,8 @@ export interface DetailLoad {
   returnLegKm: number;
   distanceIsEstimated: boolean;
   stops: DetailStop[];
+  /** Moves by hand, allow anyway: the load-level rules allowed by hand (capacity, no driver break); absent = none. */
+  handAllowed?: HandAllowance[];
   manifest: ManifestRow[];
   /**
    * Pallets (owner decision 4 Oct 2026), set only on a load planned by pallets (its truck had bays
@@ -411,7 +419,8 @@ export interface PlanDetail {
     tradeoff: string | null;
     chosen: boolean;
     /** The optimizer's own timetable check of this option (null: an option from before the check existed). */
-    feasibility: { status: string; timing: string; violations: number } | null;
+    /** `allowed`: findings allowed by hand (moves by hand, part 2); absent = none. */
+    feasibility: { status: string; timing: string; violations: number; allowed?: number } | null;
     /** The kg unit every weight check of this option used (0.1, audit F08); null: an optimizer before it (whole kg, rounded up). */
     weightUnitKg: number | null;
     /** true: only new overtime counted when this option chose trucks (audit E4); null: an optimizer before it. */
@@ -484,14 +493,24 @@ export interface PlanDetail {
   /** The tenant settings the plan in use was built with (null: an option from before they were kept). */
   planSettings?: PlanSettings | null;
   /** The option in use was changed by hand (its `details.manual`, never the version's reason): the header says "adjusted by hand". */
-  manual?: { count: number; at: string } | null;
+  manual?: { count: number; at: string; allowed?: number } | null;
+  /**
+   * Every rule allowed by hand on the loads of this version (moves by hand, allow anyway), in words: the
+   * RE-PLAN and hire confirmations list the ones on PLANNED loads (allowancesOnPlannedText). Absent = none.
+   */
+  allowedByHand?: PlanAllowanceLine[];
   /**
    * Moves by hand (PLAN_EDIT check or on, lib/dispatch/plan-edit-view.ts): the mode and the trucks of the
    * day the Move dialog offers (the depot's active trucks, a one-day hired truck of that date included),
    * each with its loads a day. Null / absent when the switch is off, the version is not the live, applied
    * dispatch plan, or its day is over (every check would be refused).
    */
-  edit?: { mode: 'CHECK' | 'ON'; trucks: { id: string; code: string; bays: number | null; capacityCases: number; maxTrips: number }[] } | null;
+  edit?: {
+    mode: 'CHECK' | 'ON';
+    trucks: { id: string; code: string; bays: number | null; capacityCases: number; maxTrips: number }[];
+    /** Allow anyway (PLAN_EDIT_OVERRIDES): on, and how far over capacity a load may be allowed. */
+    overrides?: { on: boolean; capacityMaxPct: number };
+  } | null;
   /** PR9: orders of this plan (on its loads or unserved) brought forward from earlier days. */
   carriedIn?: CarrySummary | null;
   /** PR9: orders of this plan brought forward to later days since: not delivered on this day, planned there. */
@@ -673,7 +692,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     const unitsByCode = new Map<string, number>();
     const factorByCode = new Map<string, number>();
     const liveFactorByCode = new Map<string, number | null>();
+    const rowKeysBySeq = new Map<number, string[]>();
     for (const a of l.assignments) {
+      rowKeysBySeq.set(a.sequenceInTruck, [...(rowKeysBySeq.get(a.sequenceInTruck) ?? []), rowKeyOf(a.orderId, a.portionLinesJson)]);
       const o = a.order;
       const c = o.customer;
       const eff = effectiveAttrs(c, profiles, { serviceTimeMin: cfg?.defaultServiceTimeMin ?? 10 });
@@ -832,6 +853,13 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       });
     }
     const stopList = [...stops.values()].sort((a, b) => a.sequence - b.sequence);
+    // Rules allowed by hand (moves by hand): a late arrival on the stop whose rows it covers, the rest on the load.
+    const handAllowed = readHandAllowances(l.truckSnapshotJson);
+    for (const s of stopList) {
+      const keys = rowKeysBySeq.get(s.sequence) ?? [];
+      const late = handAllowed.find((a) => a.kind === 'LATE' && keys.length > 0 && keys.every((k) => a.rowKeys.includes(k)));
+      if (late) s.handAllowed = late;
+    }
     for (const s of stopList) {
       s.weightKg = Math.round(s.weightKg * 10) / 10;
       const carried = carriedByStop.get(s.sequence);
@@ -890,6 +918,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       returnLegKm: l.returnLegKm,
       distanceIsEstimated: l.distanceIsEstimated,
       stops: stopList,
+      ...(handAllowed.some((a) => a.kind !== 'LATE') ? { handAllowed: handAllowed.filter((a) => a.kind !== 'LATE') } : {}),
       manifest,
       // Pallets only on a load planned by pallets (loadPallets); null = cases only.
       palletUnits: pallets ? pallets.units : null,
@@ -1088,8 +1117,25 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
           trucks: (
             await db.truck.findMany({ where: trucksOfDayWhere(run.depotId, run.runDate), orderBy: { code: 'asc' }, select: { id: true, code: true, bays: true, capacityCases: true, maxTripsPerDay: true } })
           ).map((t) => ({ id: t.id, code: t.code, bays: t.bays ?? null, capacityCases: t.capacityCases, maxTrips: t.maxTripsPerDay || cfg?.maxTripsPerTruck || 1 })),
+          overrides: { on: planEditOverridesOn(), capacityMaxPct: OVERRIDE_CAPACITY_MAX_PCT },
         }
       : null;
+  // A driver break allowed by hand is kept on every load of its truck-day: shown and counted once (review F8).
+  showBreakAllowanceOnce(detailLoads);
+  // Every rule allowed by hand on this version's loads (moves by hand): the screen's yellow line, the RE-PLAN confirmation.
+  const tz = cfg?.timezone || DEFAULT_TZ;
+  const allowedByHand: PlanAllowanceLine[] = detailLoads.flatMap((l) =>
+    [...(l.handAllowed ?? []), ...l.stops.flatMap((s) => (s.handAllowed ? [s.handAllowed] : []))].map((a) => ({
+      loadId: l.id,
+      status: l.status,
+      truckCode: l.truckCode,
+      loadNo: l.loadNo,
+      kind: a.kind,
+      text: allowedByHandText(a, { tz }),
+      byName: a.byName,
+      at: a.at,
+    })),
+  );
   const tradeoffs = optionTradeoffs(
     options.map((o) => o.facts),
     early.map((p) => `P${p}`).join('/'),
@@ -1138,7 +1184,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         preferredHoursCost: pref.preferredHours,
         tradeoff: tradeoffs[s.name]?.text || null,
         chosen: s.id === run.chosenScenarioId,
-        feasibility: d.feasibility ? { status: d.feasibility.status, timing: d.feasibility.timing, violations: d.feasibility.violations?.length ?? 0 } : null,
+        feasibility: d.feasibility ? { status: d.feasibility.status, timing: d.feasibility.timing, violations: d.feasibility.violations?.length ?? 0, ...(d.feasibility.allowed?.length ? { allowed: d.feasibility.allowed.length } : {}) } : null,
         weightUnitKg: typeof d.weight_unit_kg === 'number' ? d.weight_unit_kg : null,
         newOvertimeOnly: typeof d.new_overtime_only === 'boolean' ? d.new_overtime_only : null,
         windowRule: echoedWindowRule(d.window_rule),
@@ -1188,6 +1234,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
             ...new Set([
               ...outdated,
               ...(live ? masterChangedNotes(detailLoads) : []),
+              ...(allowedByHand.length ? [allowedByHandNote(allowedByHand)] : []),
               // A driver the applied plan changed is never silent. Read with each row's marker, so a
               // note ends once the dispatcher sets that trip's driver (a driver, Keep or "No driver").
               ...driverChangeWarnings(
@@ -1215,8 +1262,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     planSettings: inputs?.settings ?? null,
     manual: (() => {
       const m = manualOf(chosenDetails);
-      return m ? { count: m.count, at: m.at } : null;
+      return m ? { count: m.count, at: m.at, ...(allowedByHand.length ? { allowed: allowedByHand.length } : {}) } : null;
     })(),
+    ...(allowedByHand.length ? { allowedByHand } : {}),
     edit,
     carriedIn,
     carriedOut,
@@ -1438,4 +1486,55 @@ export function outdatedNotes(loads: OutdatedLoad[]): string[] {
     );
   }
   return out;
+}
+
+/**
+ * A driver break allowed by hand (NO_BREAK) is stored on every load of its truck-day - the gate reads it on the
+ * load the missing break is put on - but it is ONE allowance: shown and counted once per truck-day (review F8), on
+ * the load the break window falls in (its time overlaps the window the break may start in), else the last load that
+ * leaves before the window ends, else the first. The other loads' copies are left out of `handAllowed` (display
+ * only: the gate and the sheets' badges read this list; the stored snapshots are unchanged). In place.
+ */
+export function showBreakAllowanceOnce<L extends { truckId: string; loadNo: number; departMin: number; returnMin: number; handAllowed?: HandAllowance[] }>(loads: L[]): L[] {
+  const byKey = new Map<string, L[]>();
+  for (const l of loads) {
+    for (const a of l.handAllowed ?? []) {
+      if (a.kind !== 'NO_BREAK') continue;
+      const key = `${l.truckId}|${a.id}|${a.at}`;
+      const list = byKey.get(key) ?? [];
+      if (!list.includes(l)) list.push(l);
+      byKey.set(key, list);
+    }
+  }
+  for (const [key, list] of byKey) {
+    if (list.length < 2) continue;
+    const id = key.split('|')[1]!;
+    const a = list[0]!.handAllowed!.find((x) => x.kind === 'NO_BREAK' && x.id === id)!;
+    const sorted = [...list].sort((x, y) => x.departMin - y.departMin || x.loadNo - y.loadNo);
+    const from = a.breakFromMin;
+    const to = a.breakToMin;
+    const shown =
+      (typeof from === 'number' && typeof to === 'number' ? sorted.find((l) => l.departMin <= to && l.returnMin >= from) : undefined) ??
+      (typeof to === 'number' ? [...sorted].reverse().find((l) => l.departMin <= to) : undefined) ??
+      sorted[0]!;
+    for (const l of list) {
+      if (l === shown) continue;
+      const rest = (l.handAllowed ?? []).filter((x) => !(x.kind === 'NO_BREAK' && x.id === id));
+      if (rest.length) l.handAllowed = rest;
+      else delete l.handAllowed;
+    }
+  }
+  return loads;
+}
+
+const ALLOWED_KIND_WORD: Record<PlanAllowanceLine['kind'], string> = { LATE: 'receiving hours', CAPACITY_PALLETS: 'pallets', CAPACITY_CASES: 'cases', CAPACITY_KG: 'weight', NO_BREAK: 'driver break' };
+
+/** "Rules allowed by hand on this plan: T08 L2 (receiving hours), T03 L1 (pallets)." */
+export function allowedByHandNote(list: readonly PlanAllowanceLine[]): string {
+  const by = new Map<string, Set<string>>();
+  for (const a of list) {
+    const key = `${a.truckCode} L${a.loadNo}`;
+    by.set(key, new Set([...(by.get(key) ?? []), ALLOWED_KIND_WORD[a.kind]]));
+  }
+  return `Rules allowed by hand on this plan: ${[...by.entries()].map(([k, v]) => `${k} (${[...v].join(', ')})`).join(', ')}.`;
 }

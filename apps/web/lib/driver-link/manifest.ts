@@ -22,6 +22,7 @@ import { getPlanDetail, type DetailLoad, type DetailStop, type PlanDetail } from
 import { coordText, telUrl } from '../dispatch/driver-links';
 import { phoneCountryCode } from '../dispatch/customer-attrs';
 import { DEFAULT_TZ } from '../dispatch/time';
+import { allowedByHandText } from '../dispatch/plan-edit-view';
 import { truckDayResults } from '../delivery/event-service';
 import { truckDayLoads } from './service';
 import { dispatcherPhoneFor } from './dispatcher-phone';
@@ -83,6 +84,7 @@ function stopOf(depotId: string, l: DetailLoad, s: DetailStop, callingCode: stri
     split: s.split ? { part: s.split.part, parts: s.split.parts } : null,
     carriedFrom: s.carriedFrom,
     changeNotes: s.masterChanged.map((c) => c.text),
+    ...(s.handAllowed ? { allowedNote: allowedByHandText(s.handAllowed) } : {}),
     result: null,
   };
 }
@@ -137,6 +139,8 @@ export function projectManifest(details: readonly PlanDetail[], input: ManifestI
     cases: l.cases,
     backAtDepotAt: null,
     leftDepotAt: null,
+    // The load-level rules allowed by hand (a driver break skipped, a load over capacity): the driver must know (review F2).
+    ...(l.handAllowed?.length ? { allowedNotes: l.handAllowed.map((a) => allowedByHandText(a)) } : {}),
     stops: [...l.stops].sort((a, b) => a.sequence - b.sequence).map((s) => stopOf(d.run.depot.id, l, s, input.callingCode ?? null)),
   }));
   return {

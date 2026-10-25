@@ -12,6 +12,7 @@ import { isSupersededRun } from './plan-status';
 import { stopCancelledText } from './order-cancel-rules';
 import type { DriverChangeNote } from './summary';
 import { fmtDayMonth, fmtHhmm } from './time';
+import { allowedByHandText } from './plan-edit-view';
 
 /** A Google Maps directions URL takes at most 9 waypoints, so longer trips get several links. */
 export const MAX_WAYPOINTS = 9;
@@ -130,6 +131,8 @@ export type MessageLoad = Pick<DetailLoad, 'truckCode' | 'loadNo' | 'departMin' 
   palletUnits?: DetailLoad['palletUnits'];
   palletRoomUnits?: DetailLoad['palletRoomUnits'];
   bays?: DetailLoad['bays'];
+  /** Moves by hand, allow anyway: the load-level rules allowed by hand (printed after the header); absent = none. */
+  handAllowed?: DetailLoad['handAllowed'];
   stops: (Pick<DetailStop, 'sequence' | 'etaMin' | 'customerName' | 'customerCode' | 'branchCode' | 'cases' | 'lat' | 'lng' | 'split'> & {
     /** Customer data corrected after planning (review F08): printed under the stop, like the PDF sheet. */
     masterChanged?: DetailStop['masterChanged'];
@@ -142,6 +145,8 @@ export type MessageLoad = Pick<DetailLoad, 'truckCode' | 'loadNo' | 'departMin' 
     orderIds?: DetailStop['orderIds'];
     cancelledOrderIds?: DetailStop['cancelledOrderIds'];
     orderLines?: DetailStop['orderLines'];
+    /** Moves by hand, allow anyway: a late arrival allowed by hand at this stop (printed under it); absent = none. */
+    handAllowed?: DetailStop['handAllowed'];
   })[];
 };
 
@@ -180,6 +185,8 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
     // Pallets in addition to the cases, only for a load planned by pallets (a truck with bays).
     `Depart ${fmtHhmm(load.departMin)} · ${stops.length} stops · ${load.cases} cases${pallets ? ` · ${palletText(pallets.units)} pallets` : ''}`,
     ...(depotMoved ? [`! ${depotMoved.text}`] : []),
+    // Moves by hand, allow anyway: what was allowed for this load (capacity, no driver break).
+    ...(load.handAllowed ?? []).map((a) => `! ${allowedByHandText(a)}`),
     // The truck-day's driver link (owner request 4 Oct 2026): only an active link (not revoked or expired).
     ...(opts.driverLinkUrl ? [`${DRIVER_LINK_LINE}: ${opts.driverLinkUrl}`] : []),
     '',
@@ -193,6 +200,7 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
     lines.push(pinUrl(s) ?? 'No location - call dispatcher');
     // Cancel order (owner request 12 Oct 2026): a planned load's message can be sent before the re-plan.
     if (s.cancelled) lines.push(`! ${stopCancelledText(s)}`);
+    if (s.handAllowed) lines.push(`! ${allowedByHandText(s.handAllowed)}`);
     for (const c of s.masterChanged ?? []) {
       lines.push(`! ${c.text}`);
       const moved = c.kind === 'LOCATION' ? pinUrl({ lat: c.newLat ?? null, lng: c.newLng ?? null }) : null;

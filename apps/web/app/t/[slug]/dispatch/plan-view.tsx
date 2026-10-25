@@ -91,8 +91,8 @@ import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
 import { PhotoViewer } from './photo-viewer';
 import { CameraExceptions } from './camera-exceptions';
 import { HireSuggestionBox } from './hire-suggestion';
-import { MoveStopDialog, type MoveSubject } from './move-stop-dialog';
-import { LOCKED_MOVE_TITLE, savedText } from '@/lib/dispatch/plan-edit-view';
+import { draftLoadIds, MoveStopDialog, type EditDraft, type EditSubject, type SelectedStop } from './move-stop-dialog';
+import { ALLOWANCES_DROPPED_TEXT, allowancesOnPlannedText, allowedByHandText, LOCKED_MOVE_TITLE, savedText } from '@/lib/dispatch/plan-edit-view';
 import { CAMERA_ALERT_PER_DAY } from '@/lib/delivery/camera-exceptions';
 import { addDaysIso } from '@/lib/dispatch/time';
 import { LiveTrucksBar, useLiveTrucks } from './live-trucks';
@@ -142,6 +142,8 @@ interface Props {
   slug: string;
   runId: string;
   canPlan: boolean;
+  /** Moves by hand, allow anyway: the user may allow rules by hand (SUPERVISOR or above; the server checks it again). */
+  canOverride?: boolean;
   canDispatch: boolean;
   /** Company admin: can enter case weights under Products (the weight question says whom to ask). */
   canEditProducts?: boolean;
@@ -193,7 +195,7 @@ interface Props {
   showKeptBox?: boolean;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today, liveMap = false, showKeptBox = true }: Props) {
+export function PlanView({ slug, runId, canPlan, canOverride = false, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today, liveMap = false, showKeptBox = true }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -301,8 +303,18 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const [reissueAsk, setReissueAsk] = useState<{ link: DriverLinkView; text: string } | null>(null);
   // The salesman link of the plan's date (owner request 19 Oct 2026): one per company and date, for every depot.
   const [salesLinkOpen, setSalesLinkOpen] = useState(false);
-  // Moves by hand (PLAN_EDIT check or on): the stop or unserved customer the Move dialog is open for.
-  const [moveFor, setMoveFor] = useState<MoveSubject | null>(null);
+  // Moves by hand (PLAN_EDIT check or on): what the Move dialog is open for (a stop, an unserved customer, the
+  // selected stops, a whole load, a swap, or the change list kept so far).
+  const [moveFor, setMoveFor] = useState<EditSubject | null>(null);
+  // Several stops at once (owner feedback 24 Oct 2026): the stops ticked, keyed `s:<loadId>:<sequence>` or
+  // `u:<customerId>` (an unserved customer visit: all its whole unserved orders), cleared with the version.
+  const [sel, setSel] = useState<Record<string, SelectedStop>>({});
+  // A change list checked and kept ("Add another change"): saved together as one version.
+  const [draft, setDraft] = useState<EditDraft | null>(null);
+  useEffect(() => {
+    setSel({});
+    setDraft(null);
+  }, [runId]);
   const loadLinks = useCallback(async () => {
     if (!canPlan) return;
     const r = await api<DriverLinkView[]>(`/api/dispatch/driver-links?runId=${encodeURIComponent(runId)}`);
@@ -594,6 +606,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   }
 
   function chooseScenario(id: string, name: string) {
+    // "Use instead" makes the Planned loads again from the other option: the rules allowed by hand on them go (design D7).
+    const dropped = allowancesOnPlannedText(d?.allowedByHand);
+    if (dropped.length && !window.confirm(`Use ${name} instead?\n\n${ALLOWANCES_DROPPED_TEXT}\n${dropped.map((x) => `- ${x}`).join('\n')}`)) return Promise.resolve();
     return runPlanAction(
       lock,
       id,
@@ -672,6 +687,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       // `note`: what asked (the late order); then what the re-plan keeps.
       note: `${note ? `${note} ` : ''}${keptReplanNote(keptQ)}`,
       ...(keptQ ? { kept: keptQ } : {}),
+      // Rules allowed by hand on Planned loads: a re-plan plans them again with every rule (design D7).
+      ...(allowancesOnPlannedText(d.allowedByHand).length ? { allowances: allowancesOnPlannedText(d.allowedByHand) } : {}),
     });
     return a ? { mode: a.mode, unlock: mergeUnlocks(a.unlock), kept } : null;
   }
@@ -823,6 +840,38 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const applied = !!d.run.chosenScenario;
   // Moves by hand: on the live applied plan, for the dispatcher (PLAN_EDIT check or on: d.edit is set).
   const canMove = !!d.edit && canPlan && applied && !superseded && !running;
+  const selected = Object.values(sel);
+  const toggleStop = (l: DetailLoad, st: DetailLoad['stops'][number]) =>
+    setSel((x) => {
+      const k = `s:${l.id}:${st.sequence}`;
+      const next = { ...x };
+      if (next[k]) delete next[k];
+      else next[k] = { ref: { loadId: l.id, sequence: st.sequence }, label: `${st.customerName} (${st.customerCode})`, cases: st.cases, from: `${l.truckCode} L${l.loadNo}` };
+      return next;
+    });
+  const toggleAllOf = (l: DetailLoad) =>
+    setSel((x) => {
+      const keys = l.stops.map((st) => `s:${l.id}:${st.sequence}`);
+      const next = { ...x };
+      if (keys.every((k) => next[k])) for (const k of keys) delete next[k];
+      else for (const st of l.stops) next[`s:${l.id}:${st.sequence}`] = { ref: { loadId: l.id, sequence: st.sequence }, label: `${st.customerName} (${st.customerCode})`, cases: st.cases, from: `${l.truckCode} L${l.loadNo}` };
+      return next;
+    });
+  // Ticking one unserved row ticks the customer's visit (every whole unserved order: one stop, as Put on a truck).
+  const toggleUnserved = (u: (typeof d.unserved)[number]) =>
+    setSel((x) => {
+      const k = `u:${u.customerId}`;
+      const next = { ...x };
+      if (next[k]) delete next[k];
+      else {
+        const same = d.unserved.filter((y) => y.customerId === u.customerId && !y.partial && !y.cancelled && !y.carriedTo);
+        next[k] = { ref: { orderId: [...same.map((y) => y.orderId)].sort()[0] ?? u.orderId }, label: `${u.customerName} (${u.customerCode})`, cases: same.reduce((a, y) => a + y.cases, 0), from: 'unserved' };
+      }
+      return next;
+    });
+  const allowedCount = d.allowedByHand?.length ?? 0;
+  // The loads the change list kept so far names (not saved yet): marked on the plan (review F3).
+  const inDraft = draft ? draftLoadIds(draft.ops) : new Set<string>();
   // Review F04: the timetable check. With the gate on (the default), a truck whose times break a
   // rule cannot be locked, loaded or dispatched. The remedy is Re-plan - except for a problem on a
   // LOCKED or LOADING load, which a re-plan carries over unchanged: that load, and every later locked
@@ -847,7 +896,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           </h2>
           <Badge variant={superseded ? 'secondary' : d.run.status === 'FAILED' ? 'destructive' : d.run.status === 'DISPATCHED' ? 'success' : 'outline'}>{superseded ? 'SUPERSEDED' : d.run.status}</Badge>
           {d.run.reason !== 'INITIAL' ? <Badge variant="warning">{d.run.reason.replace('_', ' ')}</Badge> : null}
-          {d.run.chosenScenario ? <Badge variant="secondary">{d.run.chosenScenario === 'RECOMMENDED' ? 'RECOMMENDED PLAN' : `${d.run.chosenScenario} (alternative)`}{d.manual ? ' · adjusted by hand' : ''}</Badge> : null}
+          {d.run.chosenScenario ? <Badge variant="secondary">{d.run.chosenScenario === 'RECOMMENDED' ? 'RECOMMENDED PLAN' : `${d.run.chosenScenario} (alternative)`}{d.manual ? ' · adjusted by hand' : ''}{allowedCount ? ` · ${allowedCount} rule${allowedCount === 1 ? '' : 's'} allowed by hand` : ''}</Badge> : null}
         </div>
         <div className="flex flex-wrap gap-2">
           {/* The dispatch workbook for every dispatch plan, also one in which every order is unserved
@@ -999,6 +1048,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm">Optimization failed: {d.job?.message}</div>
         )
       ) : null}
+      {feas && feas.violations.some((v) => v.allowedByHand) && !superseded ? (
+        <div className="space-y-1 rounded-md border border-violet-300 bg-violet-50 p-3 text-sm" data-testid="allowed-by-hand">
+          <p className="font-medium text-violet-900">Allowed by hand (they do not block Lock, Loading or Dispatch):</p>
+          {feas.violations
+            .filter((v) => v.allowedByHand)
+            .slice(0, 8)
+            .map((v, i) => (
+              <p key={`${v.code}-${v.loadId ?? ''}-${i}`} className="text-violet-900">
+                <b>{v.truckCode ?? 'Plan'}{v.loadNo ? ` L${v.loadNo}` : ''}:</b> {v.message} ({v.allowedByHand!.byName})
+              </p>
+            ))}
+        </div>
+      ) : null}
       {feas && !feas.ok && !superseded && !running ? (
         <div className="space-y-1 rounded-md border border-red-400 bg-red-50 p-3 text-sm" data-testid="timing-violations">
           <p className="flex items-center gap-2 font-medium text-red-800">
@@ -1069,6 +1131,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           busy={!!busy}
           expect={{ date: d.run.runDate, depotId: d.run.depot.id }}
           canEditProducts={canEditProducts}
+          allowances={allowancesOnPlannedText(d.allowedByHand)}
           onUsed={async (newRunId) => {
             await load();
             await onChanged?.(newRunId);
@@ -1272,7 +1335,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                       ) : !sc.feasibility ? (
                         <span className="text-muted-foreground" title="Made before the optimizer checked its own times">not checked</span>
                       ) : sc.feasibility.status === 'VERIFIED' ? (
-                        <span className="text-green-700">Yes</span>
+                        <span className="text-green-700">Yes{sc.feasibility.allowed ? ` (${sc.feasibility.allowed} allowed by hand)` : ''}</span>
                       ) : sc.feasibility.status === 'VIOLATED' ? (
                         <span className="font-medium text-red-700" title="Not dispatchable: re-plan, or choose another option">
                           No - {sc.feasibility.violations} rule(s) broken
@@ -1375,6 +1438,26 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         l.truckCode
                       )}{' '}
                       · L{l.loadNo}
+                      {l.handAllowed?.length || l.stops.some((st) => st.handAllowed) ? (
+                        <Badge
+                          variant="outline"
+                          className="ml-1 border-violet-400 text-[10px] text-violet-800"
+                          title={[...(l.handAllowed ?? []), ...l.stops.flatMap((st) => (st.handAllowed ? [st.handAllowed] : []))].map((a) => allowedByHandText(a, { who: true, tz: d.timezone || undefined })).join('\n')}
+                          data-testid={`load-allowed-${l.truckCode}-${l.loadNo}`}
+                        >
+                          ALLOWED BY HAND
+                        </Badge>
+                      ) : null}
+                      {inDraft.has(l.id) ? (
+                        <Badge
+                          variant="outline"
+                          className="ml-1 border-dashed border-violet-400 text-[10px] text-violet-800"
+                          title="A change checked and kept in the list below names this load: it is not saved yet (Open the list to save it, or Discard it)."
+                          data-testid={`load-in-draft-${l.truckCode}-${l.loadNo}`}
+                        >
+                          IN THE CHANGE LIST
+                        </Badge>
+                      ) : null}
                       {l.hired ? (
                         <Badge variant="outline" className="ml-1 text-[10px]" title={hiredLoadBadgeTitle(l.oneDay)} data-testid={`load-hired-${l.truckCode}-${l.loadNo}`}>
                           {l.oneDay ? 'hired · 1 day' : 'hired'}
@@ -1579,6 +1662,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           }
                           onPhotos={(st, ov) => setPhotosFor({ title: `${l.truckCode} L${l.loadNo} stop ${st.sequence} · ${st.customerName}`, photos: ov.photos })}
                           move={canMove && (l.status === 'PLANNED' || l.status === 'LOCKED') ? { disabled: l.status !== 'PLANNED' || !!busy, onMove: (st) => setMoveFor({ kind: 'MOVE', load: l, stop: st }) } : null}
+                          select={
+                            canMove && l.status === 'PLANNED'
+                              ? { on: (seq) => !!sel[`s:${l.id}:${seq}`], toggle: (st) => toggleStop(l, st), allOn: l.stops.every((st) => !!sel[`s:${l.id}:${st.sequence}`]), toggleAll: () => toggleAllOf(l) }
+                              : null
+                          }
+                          loadActions={
+                            canMove && (l.status === 'PLANNED' || l.status === 'LOCKED')
+                              ? { disabled: l.status !== 'PLANNED' || !!busy, onMoveLoad: () => setMoveFor({ kind: 'MOVE_LOAD', load: l }), onSwap: () => setMoveFor({ kind: 'SWAP_LOADS', load: l }) }
+                              : null
+                          }
                         />
                       </td>
                     </tr>
@@ -1614,6 +1707,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   <th className="p-2">Sales orders</th>
                   <th className="p-2">Reason</th>
                   {canMove ? <th className="p-2" /> : null}
+                  {canMove ? <th className="p-2 text-center" title="Select to move several stops at once">Select</th> : null}
                 </tr>
               </thead>
               <tbody>
@@ -1669,6 +1763,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           >
                             Put on a truck…
                           </Button>
+                        ) : null}
+                      </td>
+                    ) : null}
+                    {canMove ? (
+                      <td className="p-2 text-center">
+                        {!u.partial && !u.cancelled && !u.carriedTo ? (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${u.customerName} (${u.customerCode}), unserved`}
+                            checked={!!sel[`u:${u.customerId}`]}
+                            onChange={() => toggleUnserved(u)}
+                            data-testid="unserved-select"
+                          />
                         ) : null}
                       </td>
                     ) : null}
@@ -1747,6 +1854,48 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           onChanged={keepLink}
         />
       ) : null}
+      {canMove && draft ? (
+        <div className="sticky bottom-14 z-20 flex w-fit max-w-full flex-wrap items-center gap-2 rounded-md border border-dashed border-violet-400 bg-violet-50 p-2 text-sm shadow" data-testid="edit-draft-banner">
+          <b>Changes checked, not saved yet:</b>
+          {draft.steps.map((x, i) => (
+            <span key={i}>
+              {i + 1}) {x.title}
+              {x.red ? <span className="text-red-700"> (red on its own)</span> : null}
+            </span>
+          ))}
+          <Button size="sm" variant="outline" className="h-7" disabled={!!busy} onClick={() => setMoveFor({ kind: 'DRAFT' })} data-testid="edit-draft-open">
+            Open
+          </Button>
+          <Button size="sm" variant="ghost" className="h-7" onClick={() => setDraft(null)} data-testid="edit-draft-discard">
+            Discard
+          </Button>
+        </div>
+      ) : null}
+      {canMove && selected.length ? (
+        <div className="sticky bottom-2 z-20 flex w-fit max-w-full flex-wrap items-center gap-2 rounded-md border bg-background p-2 text-sm shadow-lg" data-testid="selection-bar">
+          <span>
+            <b>{selected.length} stop{selected.length === 1 ? '' : 's'} selected</b> · {selected.reduce((a, x) => a + x.cases, 0)} cases — from{' '}
+            {[...new Set(selected.map((x) => x.from))].map((f) => `${f} (${selected.filter((x) => x.from === f).length})`).join(', ')}
+          </span>
+          <Button size="sm" className="h-7" disabled={!!busy} onClick={() => setMoveFor({ kind: 'STOPS', refs: selected })} data-testid="selection-move">
+            Move to…
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7"
+            disabled={!!busy || !selected.some((x) => 'loadId' in x.ref)}
+            title={selected.some((x) => 'loadId' in x.ref) ? 'Take the selected stops of loads off the plan (unserved)' : 'Only stops on a load can be taken off the plan'}
+            onClick={() => setMoveFor({ kind: 'REMOVE_STOPS', refs: selected })}
+            data-testid="selection-remove"
+          >
+            Take off the plan
+          </Button>
+          <Button size="sm" variant="ghost" className="h-7" onClick={() => setSel({})} data-testid="selection-clear">
+            Clear
+          </Button>
+        </div>
+      ) : null}
       {canMove ? (
         <MoveStopDialog
           subject={moveFor}
@@ -1756,7 +1905,15 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             if (!o) setMoveFor(null);
           }}
           run={(key, fn) => runPlanAction(lock, key, fn, failed)}
+          draft={draft}
+          canOverride={canOverride}
+          onAddToDraft={(next) => {
+            setDraft(next);
+            setSel({});
+          }}
           afterSave={async (saved) => {
+            setSel({});
+            setDraft(null);
             toast.success(savedText(saved), { duration: 20_000 });
             await onChanged?.(saved.runId);
           }}
@@ -2249,11 +2406,17 @@ function LoadDetail({
   onRecord,
   onPhotos,
   move = null,
+  select = null,
+  loadActions = null,
 }: {
   l: DetailLoad;
   depotCode: string;
   /** Moves by hand: the Move… button of each stop (disabled on a LOCKED load: unlock it first); null = none. */
   move?: { disabled: boolean; onMove: (st: DetailLoad['stops'][number]) => void } | null;
+  /** Several stops at once: a tick per stop and Select all stops (PLANNED loads only); null = none. */
+  select?: { on: (sequence: number) => boolean; toggle: (st: DetailLoad['stops'][number]) => void; allOn: boolean; toggleAll: () => void } | null;
+  /** A whole load: Move this load… and Swap with another load… (disabled on a LOCKED load); null = none. */
+  loadActions?: { disabled: boolean; onMoveLoad: () => void; onSwap: () => void } | null;
   /** The delivery results (spec section 10.2); the extra columns show for loads that left. */
   overlay?: OutcomeOverlay | null;
   canRecord?: boolean;
@@ -2264,7 +2427,7 @@ function LoadDetail({
   const kgNote = manifestKgNote(l);
   const results = ON_ROAD.has(l.status) && !!overlay;
   const tz = overlay?.tz ?? 'Asia/Muscat';
-  const span = (results ? 15 : 9) + (move ? 1 : 0);
+  const span = (results ? 15 : 9) + (move ? 1 : 0) + (select ? 1 : 0);
   // A load planned by pallets: each product's "3 pallets + 12 cases" and the TOTAL in pallets too.
   const pallets = loadPallets(l);
   // Owner request 20 Oct 2026: the special-loading customers' products in their own block(s), as on the sheets.
@@ -2392,7 +2555,29 @@ function LoadDetail({
         ) : null}
       </div>
       <div className="lg:col-span-2">
-        <p className="mb-1 text-xs font-semibold uppercase text-muted-foreground">Delivery route</p>
+        <div className="mb-1 flex flex-wrap items-center gap-2">
+          <p className="text-xs font-semibold uppercase text-muted-foreground">Delivery route</p>
+          {select ? (
+            <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={select.toggleAll} data-testid="load-select-all">
+              {select.allOn ? 'Clear the stops' : 'Select all stops'}
+            </Button>
+          ) : null}
+          {loadActions ? (
+            <>
+              <Button size="sm" variant="outline" className="h-6 px-2 text-xs" disabled={loadActions.disabled} title={l.status === 'LOCKED' ? LOCKED_MOVE_TITLE : 'Move this whole load to a truck (it keeps its stop order)'} onClick={loadActions.onMoveLoad} data-testid="load-move">
+                Move this load…
+              </Button>
+              <Button size="sm" variant="outline" className="h-6 px-2 text-xs" disabled={loadActions.disabled} title={l.status === 'LOCKED' ? LOCKED_MOVE_TITLE : 'Swap this load with another Planned load'} onClick={loadActions.onSwap} data-testid="load-swap">
+                Swap with another load…
+              </Button>
+            </>
+          ) : null}
+        </div>
+        {(l.handAllowed ?? []).map((a) => (
+          <p key={a.id} className="mb-1 text-xs font-medium text-violet-800" data-testid="load-allowed-line">
+            {allowedByHandText(a, { who: true })}
+          </p>
+        ))}
         <table className="w-full text-xs">
           <thead className="text-left text-muted-foreground">
             <tr>
@@ -2417,6 +2602,7 @@ function LoadDetail({
                 </>
               ) : null}
               {move ? <th /> : null}
+              {select ? <th className="text-center">Select</th> : null}
             </tr>
           </thead>
           <tbody>
@@ -2511,8 +2697,13 @@ function LoadDetail({
                   {!st.snapshot ? <span className="block text-muted-foreground" title="Planned before stop details were kept with the plan">current customer data</span> : null}
                 </td>
                 <td>P{st.priority}</td>
-                <td className={st.hardWindowOk === false ? 'text-red-600' : ''}>
+                <td
+                  className={st.hardWindowOk === false ? (st.handAllowed ? 'text-violet-700' : 'text-red-600') : ''}
+                  title={st.handAllowed ? allowedByHandText(st.handAllowed, { who: true }) : undefined}
+                  data-allowed={st.handAllowed ? 'yes' : undefined}
+                >
                   {hhmm(st.etaMin)}
+                  {st.handAllowed ? <span className="block text-[10px] font-semibold text-violet-700">allowed by hand</span> : null}
                   {st.departureMin !== null ? <span className="block text-muted-foreground">unloading until {hhmm(st.departureMin)}</span> : null}
                   {st.waitMin ? <span className="block text-muted-foreground">wait {st.waitMin}m</span> : null}
                 </td>
@@ -2536,6 +2727,17 @@ function LoadDetail({
                     >
                       Move…
                     </Button>
+                  </td>
+                ) : null}
+                {select ? (
+                  <td className="text-center">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${st.customerName} (${st.customerCode}${st.branchCode ? `/${st.branchCode}` : ''}) on ${l.truckCode} L${l.loadNo}, stop ${st.sequence}`}
+                      checked={select.on(st.sequence)}
+                      onChange={() => select.toggle(st)}
+                      data-testid="stop-select"
+                    />
                   </td>
                 ) : null}
               </tr>

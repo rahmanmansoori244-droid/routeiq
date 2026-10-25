@@ -102,6 +102,11 @@ export interface KeptStopInput {
   /** The stop's planned unloading (its first row). */
   serviceStartMin: number | null;
   departureMin: number | null;
+  /**
+   * A late arrival allowed by hand on this stop (moves by hand, allow anyway: the LATE allowance of its load whose
+   * rows cover the stop's): the hours now are judged against what was agreed, never only against the hours.
+   */
+  allowance?: { maxLateMin: number; windowEndMin: number; reason: string; rule?: 'START' | 'FINISH' };
   /** The customer as the stop is judged now (keptStopLive). */
   live: LiveStopFacts;
   /**
@@ -140,6 +145,8 @@ export interface TruckLoadRef {
 export const keptLoadLabel = (truckCode: string, loadNo: number) => `${truckCode} L${loadNo}`;
 
 const at = (m: number | null) => (m === null ? '--:--' : clockText(m));
+/** The gate's tolerance (feasibility.ts TOL_MIN): the solver rounds seconds to minutes. */
+const KEPT_TOL_MIN = 1;
 const windowText = (s: number | null, e: number | null) => (s === null && e === null ? 'any time' : `${at(s)}–${at(e)}`);
 const far = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`);
 const list = (names: string[]) => (names.length <= 1 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
@@ -192,6 +199,19 @@ function hoursChange(m: MasterChange, stop: KeptStopInput, load: KeptLoadInput):
   } else if (!hardWindowMiss(start, stop.departureMin, now.start, now.end, load.rules?.windowRule ?? null)) {
     effect = 'STILL_OK';
     means = `The planned unloading at ${at(start)} still keeps them.`;
+  } else if (stop.allowance && now.end !== null && !(now.start !== null && start < now.start)) {
+    // A late arrival was allowed by hand (agreed with the customer): judged against what was agreed.
+    const a = stop.allowance;
+    const atMin = a.rule === 'FINISH' && stop.departureMin !== null ? stop.departureMin : start;
+    const late = Math.max(1, Math.round(atMin - now.end));
+    const agreed = `Allowed by hand to arrive up to ${a.maxLateMin} min late (${a.reason}); with the hours now it is ${late} min late`;
+    if (late <= a.maxLateMin + KEPT_TOL_MIN) {
+      effect = 'CHECK';
+      means = `${agreed}: check with the customer.`;
+    } else {
+      effect = 'BREAKS';
+      means = `${agreed}, more than the ${a.maxLateMin} min allowed by hand.`;
+    }
   } else if ((now.start !== null && start < now.start) || (now.end !== null && start > now.end)) {
     effect = 'BREAKS';
     means = `The planned unloading at ${at(start)} is outside them.`;

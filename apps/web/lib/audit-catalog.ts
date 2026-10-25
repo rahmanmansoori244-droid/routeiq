@@ -116,6 +116,9 @@ export const AUDIT_ACTIONS = {
   // (entity RunPlan); legacy runs (lib/route-adjust.ts) still write it with entity RouteAssignment, so the
   // label names neither.
   ROUTE_MANUALLY_CHANGED: { label: 'Stops moved by hand' },
+  // A save of a change by hand that stores rules allowed by hand (a late arrival, capacity up to 20 % over,
+  // the driver break), confirmed or carried from an earlier approval (lib/dispatch/plan-edit-apply.ts).
+  RULE_ALLOWED_BY_HAND: { label: 'Rules allowed by hand (move by hand)' },
   SECURITY_CLEANUP: { label: 'Security clean-up (migration)' },
   DEPOT_BACKFILL: { label: 'Depot filled in for orders and order files without one (migration)' },
   LOGOUT: { label: 'Signed out', legacy: true },
@@ -168,7 +171,7 @@ export const AUDIT_ENTITY_NAMES = Object.keys(AUDIT_ENTITIES) as [AuditEntity, .
 export function auditActionTone(action: string): 'default' | 'success' | 'warning' | 'secondary' | 'destructive' | 'outline' {
   if (action === 'DELETE' || action === 'OPTIMIZE_FAILED' || action === 'LOGIN_THROTTLED' || action === 'TEST_DATA_CLEARED') return 'destructive';
   if (action === 'CREATE' || action === 'OPTIMIZE_SUCCEEDED' || action === 'LOAD_DISPATCHED' || action === 'LOAD_COMPLETED' || action === 'DISPATCH') return 'success';
-  if (action === 'OVERRIDE' || action === 'ROUTE_MANUALLY_CHANGED' || action === 'LOAD_PLANNED' || action === 'PLAN_RESET' || action === 'CROSS_TENANT_VIEW' || action.startsWith('PLATFORM_ADMIN')) return 'warning';
+  if (action === 'OVERRIDE' || action === 'ROUTE_MANUALLY_CHANGED' || action === 'RULE_ALLOWED_BY_HAND' || action === 'LOAD_PLANNED' || action === 'PLAN_RESET' || action === 'CROSS_TENANT_VIEW' || action.startsWith('PLATFORM_ADMIN')) return 'warning';
   if (action === 'DRIVER_LINK_REVOKED' || action === 'DRIVER_LINK_REISSUED' || action === 'DELIVERY_CARRY_CONFLICT' || action === 'ORDER_CANCELLED') return 'warning';
   if (action === 'SALES_LINK_REVOKED' || action === 'SALES_LINK_REISSUED') return 'warning';
   if (action === 'LOGIN' || action === 'SIGNUP' || action === 'LOAD_LOCKED' || action === 'LOAD_LOADING') return 'secondary';

@@ -150,8 +150,13 @@ describe('owner decision 4 (5 Oct 2026): the dispatcher (PLANNER) does every Dai
     expect(run).toContain('canDispatch={canPlan(user.role)}');
     expect(run).toContain('canDownloadDebug={canApproveOverride(user.role)}');
     expect(read('app/t/[slug]/runs/[id]/run-detail.tsx')).toContain('canDownloadDebug={canDownloadDebug}');
-    // No screen grants dispatch work with the SUPERVISOR check any more.
-    for (const p of ['app/t/[slug]/dispatch/page.tsx', 'app/t/[slug]/dispatch/plan/[id]/page.tsx']) expect(read(p)).not.toContain('canApproveOverride');
+    // No screen grants dispatch work with the SUPERVISOR check any more: only allowing rules by hand (moves by hand,
+    // part 2, design D1) uses it, as the permission it is.
+    for (const p of ['app/t/[slug]/dispatch/page.tsx', 'app/t/[slug]/dispatch/plan/[id]/page.tsx']) {
+      const src = read(p);
+      expect(src).toContain('canOverride={canApproveOverride(user.role)}');
+      expect(src.replace('canOverride={canApproveOverride(user.role)}', '').replace(/import \{[^}]*\} from '@\/lib\/rbac';/, '')).not.toContain('canApproveOverride');
+    }
   });
 
   it('the role helpers: PLANNER plans and dispatches, VIEWER does neither, only an admin manages master data', () => {

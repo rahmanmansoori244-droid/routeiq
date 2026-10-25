@@ -381,10 +381,11 @@ def retime_truck_days_endpoint(
     body: RetimeRequest,
     x_solver_token: Annotated[str | None, Header(alias="X-Solver-Token")] = None,
 ) -> RetimeResponse:
-    """A move by hand (PR M1): the edited trucks' new loads re-timed exactly from the fresh request the web sends
-    (retime.py). 422: the request names an unknown truck or stop, a stop twice, an empty load, more than 6 trucks
-    or 80 stops; 503: RETIME_MAX_CONCURRENT checks already running (taken without waiting). It never optimizes,
-    starts no worker process and takes no dispatch slot: a check answers while solves run."""
+    """A move by hand (PR M1; v2 25 Oct 2026: several stops at once, whole loads, "allow anyway"): the edited trucks'
+    new loads re-timed exactly from the fresh request the web sends (retime.py). 422: the request names an unknown
+    truck or stop, a stop twice, an empty load, more than 6 trucks or 120 stops, or v2 fields that do not fit it;
+    503: RETIME_MAX_CONCURRENT checks already running (taken without waiting). It never optimizes, starts no worker
+    process and takes no dispatch slot: a check answers while solves run."""
     _check_token(x_solver_token)
     try:
         retime.check_request(body)

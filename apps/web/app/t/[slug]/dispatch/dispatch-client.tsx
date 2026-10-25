@@ -198,6 +198,8 @@ interface Props {
   canDispatch: boolean;
   /** Company admin: can enter case weights under Products. */
   canEditProducts: boolean;
+  /** Moves by hand, allow anyway: may allow rules by hand (SUPERVISOR or above; the server checks it again). */
+  canOverride?: boolean;
   initialDate: string | null;
   initialDepot: string | null;
   /** Calling code for drivers' phones saved without one (WhatsApp links); null = unknown. */
@@ -208,7 +210,7 @@ interface Props {
   alertsEnabled?: boolean;
 }
 
-export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, initialDate, initialDepot, phoneCountryCode, liveMap = false, alertsEnabled = false }: Props) {
+export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, canOverride = false, initialDate, initialDepot, phoneCountryCode, liveMap = false, alertsEnabled = false }: Props) {
   const router = useRouter();
   const [date, setDate] = useState<string | null>(initialDate);
   const [depotId, setDepotId] = useState<string | null>(initialDepot);
@@ -879,6 +881,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             canResetStuck={canDispatch && dayReady}
             showCameraList={false}
             canEditProducts={canEditProducts}
+            canOverride={canOverride}
             phoneCountryCode={phoneCountryCode}
             externalBusy={optimizing}
             // Step 3 above shows the kept-load box for this plan already.

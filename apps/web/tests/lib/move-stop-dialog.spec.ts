@@ -15,7 +15,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Host, elements, textOf } from './hook-host';
+import { Host, elements, textOf, typeName } from './hook-host';
 import type { PlanEditPreview } from '@/lib/dispatch/plan-edit-view';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
@@ -58,7 +58,7 @@ const preview = (over: Partial<PlanEditPreview> = {}): PlanEditPreview => ({
   ok: true, canSave: true, saveNote: null, mode: 'ON', version: 3, previewHash: 'a'.repeat(64), builtAt: '2026-10-24T15:00:00.000Z',
   move: { kind: 'MOVE', from: { loadId: 'A1', sequence: 2 }, to: { truckId: 'T02', loadId: 'B1', position: 1 } },
   title: 'Move Customer C2 (C2) from T01 L1, stop 2 to T02 L1, stop 2', trucks: [], warnings: [], dataChanged: [], options: [], deltaCostOmr: -1.5, deltaKm: -2,
-  matrix: { provider: 'HAVERSINE', quality: 'ESTIMATED' }, ...over,
+  matrix: { provider: 'HAVERSINE', quality: 'ESTIMATED' }, ops: [], draftable: false, issues: [], overrides: null, ...over,
 });
 
 async function mount(subject: any, opts: { mode?: 'CHECK' | 'ON'; busy?: boolean } = {}) {
@@ -187,5 +187,183 @@ describe('the plan screen\'s entry points (plan-view.tsx)', () => {
     expect(src).toMatch(/run=\{\(key, fn\) => runPlanAction\(lock, key, fn, failed\)\}/);
     expect(src).toMatch(/toast\.success\(savedText\(saved\), \{ duration: 20_000 \}\);\s+await onChanged\?\.\(saved\.runId\);/);
     expect(src).toMatch(/\{d\.manual \? ' · adjusted by hand' : ''\}/);
+  });
+});
+
+describe('part 2: several stops, whole loads, the change list and allow by hand (owner feedback 24 Oct 2026)', () => {
+  it('opOfChoices for every subject: several stops (best place for each), take off, a whole load, a swap', async () => {
+    const { opOfChoices } = await import('@/app/t/[slug]/dispatch/move-stop-dialog');
+    const refs = [{ ref: { loadId: 'A1', sequence: 1 }, label: 'C1', cases: 10, from: 'T01 L1' }, { ref: { orderId: 'o9' }, label: 'C9', cases: 5, from: 'unserved' }];
+    expect(opOfChoices({ kind: 'STOPS', refs }, 'T02', 'load:B1', 1)).toEqual({ kind: 'MOVE_STOPS', stops: [{ loadId: 'A1', sequence: 1 }, { orderId: 'o9' }], to: { truckId: 'T02', loadId: 'B1' } });
+    expect(opOfChoices({ kind: 'STOPS', refs: [refs[0]!] }, 'T02', 'load:B1', 1)).toMatchObject({ to: { position: 1 } });
+    expect(opOfChoices({ kind: 'STOPS', refs }, 'T02', 'new:best', 'BEST')).toMatchObject({ to: { truckId: 'T02', loadId: null, before: 'BEST' } });
+    expect(opOfChoices({ kind: 'REMOVE_STOPS', refs }, '', '', 'BEST')).toEqual({ kind: 'REMOVE_STOPS', stops: [{ loadId: 'A1', sequence: 1 }] });
+    const l = plan().loads[0];
+    expect(opOfChoices({ kind: 'MOVE_LOAD', load: l }, 'T02', 'new:before:B1', 'BEST')).toEqual({ kind: 'MOVE_LOAD', loadId: 'A1', to: { truckId: 'T02', before: 'B1' } });
+    expect(opOfChoices({ kind: 'MOVE_LOAD', load: l }, 'T02', 'new:end', 'BEST')).toEqual({ kind: 'MOVE_LOAD', loadId: 'A1', to: { truckId: 'T02', before: null } });
+    expect(opOfChoices({ kind: 'SWAP_LOADS', load: l }, '', 'swap:B1', 'BEST')).toEqual({ kind: 'SWAP_LOADS', a: 'A1', b: 'B1' });
+    expect(opOfChoices({ kind: 'SWAP_LOADS', load: l }, '', '', 'BEST')).toBeNull();
+    expect(opOfChoices({ kind: 'DRAFT' }, '', '', 'BEST')).toBeNull();
+  });
+
+  const issue = (id: string, over: Record<string, unknown> = {}) => ({
+    id, code: 'HARD_WINDOW', kind: 'LATE', overridable: true, whyNot: null, truckId: 'T01', truckCode: 'T01', loadNo: 1, stopLabel: 'C2', customerId: 'c', orderIds: ['o2'],
+    amount: { unit: 'min', value: 800, limit: 780, over: 20 }, text: `late ${id}`, carried: null, previous: null, ...over,
+  });
+  const allowable = (needed: ReturnType<typeof issue>[], over: Record<string, unknown> = {}, top: Partial<PlanEditPreview> = {}) =>
+    preview({
+      ok: false, canSave: false, saveNote: 'Cannot be saved: it breaks the rules above.', ops: [{ kind: 'SWAP_LOADS', a: 'A1', b: 'B1' }], draftable: true, issues: needed as never,
+      overrides: { ok: true, canSave: true, saveNote: null, needed: needed as never, remaining: [], previewHash: 'c'.repeat(64), trucks: [], warnings: [], deltaCostOmr: null, deltaKm: null, skipBreak: [], breakAlternative: [], ...over } as never,
+      ...top,
+    });
+  const swapSubject = () => ({ kind: 'SWAP_LOADS', load: plan().loads[0] });
+  async function mountWith(p: PlanEditPreview, canOverride: boolean) {
+    const saved: unknown[] = [];
+    const drafts: unknown[] = [];
+    const host: Host<any> = new Host(MoveStopDialog as any, {
+      subject: swapSubject(),
+      plan: plan(),
+      runId: 'R',
+      onOpenChange: () => undefined,
+      run: async (_k: string, fn: () => Promise<void>) => {
+        await fn();
+        return true;
+      },
+      afterSave: (x: unknown) => void saved.push(x),
+      canOverride,
+      onAddToDraft: (x: unknown) => void drafts.push(x),
+    });
+    host.render();
+    await host.settle();
+    const byId = (id: string) => elements(host.tree).find((e) => e.props?.['data-testid'] === id);
+    byId('move-swap')!.props.onChange({ target: { value: 'swap:B1' } });
+    host.flush();
+    net.reply = () => ({ ok: true, status: 200, data: p, error: null, errorBody: null });
+    byId('move-check')!.props.onClick();
+    host.flush();
+    await host.settle();
+    const panel = () => elements(host.tree).find((e) => e.props?.overrides && e.props?.onTick);
+    const act = async (fn: () => void) => {
+      fn();
+      host.flush();
+      await host.settle();
+    };
+    return { host, byId, panel, act, saved, drafts };
+  }
+
+  it('a supervisor ticks each rule with a reason (Allow all, Use this reason for all), then saves the list with the overrides hash', async () => {
+    const d = await mountWith(allowable([issue('ovr_a'), issue('ovr_b')]), true);
+    expect(net.calls.at(-1)!.json).toEqual({ ops: [{ kind: 'SWAP_LOADS', a: 'A1', b: 'B1' }], expect: { date: '2026-10-25', depotId: 'D1' } });
+    expect(textOf(d.byId('move-save'))).toBe('Allow 2 rules and save as version 4');
+    expect(d.byId('move-save')!.props.disabled).toBe(true);
+    await d.act(() => d.panel()!.props.onAllowAll());
+    expect(d.byId('move-save')!.props.disabled).toBe(true); // ticked, no reasons yet
+    await d.act(() => d.panel()!.props.onReasonForAll('agreed with the customers'));
+    expect(d.byId('move-save')!.props.disabled).toBe(false);
+    net.reply = () => ({ ok: true, status: 200, data: { runId: 'R2', version: 4, reprint: [], gone: [], trucks: [], allowed: 2 }, error: null, errorBody: null });
+    await d.act(() => d.byId('move-save')!.props.onClick());
+    expect(net.calls.at(-1)).toEqual({
+      url: '/api/runs/R/edit',
+      method: 'POST',
+      json: {
+        ops: [{ kind: 'SWAP_LOADS', a: 'A1', b: 'B1' }],
+        expect: { date: '2026-10-25', depotId: 'D1' },
+        previewHash: 'c'.repeat(64),
+        builtAt: '2026-10-24T15:00:00.000Z',
+        overrides: [
+          { id: 'ovr_a', reason: 'agreed with the customers' },
+          { id: 'ovr_b', reason: 'agreed with the customers' },
+        ],
+      },
+    });
+    expect(d.saved).toHaveLength(1);
+  });
+
+  it('OVERRIDES_CHANGED: the new result, the ticks cleared and the reasons kept by issue; a previous reason pre-fills', async () => {
+    const d = await mountWith(allowable([issue('ovr_a', { previous: { reason: 'agreed last week', byName: 'A', at: '' } })]), true);
+    expect(d.panel()!.props.reasons).toEqual({ ovr_a: 'agreed last week' });
+    await d.act(() => d.panel()!.props.onTick('ovr_a', true));
+    const fresh = allowable([issue('ovr_a'), issue('ovr_c')], { previewHash: 'd'.repeat(64) });
+    net.reply = () => ({ ok: false, status: 409, data: null, error: 'The rules this change breaks changed since your check: confirm them again.', errorBody: { code: 'OVERRIDES_CHANGED', preview: fresh } });
+    await d.act(() => d.byId('move-save')!.props.onClick());
+    expect(textOf(d.byId('move-error'))).toBe('The rules this change breaks changed since your check: confirm them again.');
+    expect(d.panel()!.props.ticks).toEqual({});
+    expect(d.panel()!.props.reasons).toEqual({ ovr_a: 'agreed last week' });
+    expect(textOf(d.byId('move-save'))).toBe('Allow 2 rules and save as version 4');
+  });
+
+  it('a PLANNER sees the panel but cannot save new allowances; only carried ones save for any role', async () => {
+    const d = await mountWith(allowable([issue('ovr_a')], { canSave: false, saveNote: 'Only a supervisor or company admin can allow rules by hand: ask one to make this change (it is not saved).' }), false);
+    expect(d.panel()!.props.canOverride).toBe(false);
+    expect(d.byId('move-save')!.props.disabled).toBe(true);
+    expect(textOf(d.byId('move-save-note'))).toBe('Only a supervisor or company admin can allow rules by hand: ask one to make this change (it is not saved).');
+    const carried = await mountWith(allowable([issue('ovr_a', { carried: { fromId: 'ovr_0', reason: 'agreed', byName: 'Ahmed', byRole: 'SUPERVISOR', at: '2026-10-24T17:40:00.000Z' } })]), false);
+    expect(textOf(carried.byId('move-save'))).toBe('Save as version 4 (keeps 1 rule allowed earlier)');
+    expect(carried.byId('move-save')!.props.disabled).toBe(false);
+    net.reply = () => ({ ok: true, status: 200, data: { runId: 'R2', version: 4, reprint: [], gone: [], trucks: [], carried: 1 }, error: null, errorBody: null });
+    await carried.act(() => carried.byId('move-save')!.props.onClick());
+    expect(net.calls.at(-1)!.json.overrides).toEqual([]);
+  });
+
+  it('Add another change keeps a red step that is explicit (draftable), and is not offered for one that is not', async () => {
+    const d = await mountWith(allowable([issue('ovr_a')]), true);
+    await d.act(() => d.byId('move-add-change')!.props.onClick());
+    expect(d.drafts).toEqual([{ ops: [{ kind: 'SWAP_LOADS', a: 'A1', b: 'B1' }], steps: [{ title: 'Move Customer C2 (C2) from T01 L1, stop 2 to T02 L1, stop 2', red: true }] }]);
+    const no = await mountWith(allowable([issue('ovr_a')], {}, { draftable: false }), true);
+    expect(no.byId('move-add-change')).toBeUndefined();
+  });
+
+  it('F1: the red list shows the figures that would be saved (the allow box\'s), and the strict timetable is labelled as breaking the rules', async () => {
+    const { redIssuesOf } = await import('@/app/t/[slug]/dispatch/move-stop-dialog');
+    const strict = issue('ovr_a', { text: 'C15 on T02 L2 arrives 10:42, after its receiving hours 07:00–10:00: 42 min late', amount: { unit: 'min', value: 642, limit: 600, over: 42 } });
+    const saved = issue('ovr_a', { text: 'C15 on T02 L2 arrives 11:42, after its receiving hours 07:00–10:00: 102 min late', amount: { unit: 'min', value: 702, limit: 600, over: 102 } });
+    const p = allowable([saved], {}, { issues: [strict, issue('x', { id: null, code: 'NO_TIMETABLE', kind: null, overridable: false, text: 'No timetable' })] as never });
+    expect(redIssuesOf(p)).toEqual({ issues: [saved], asSaved: true });
+    // Nothing can be allowed: the strict issues as they are.
+    const refused = { ...p, overrides: { ...p.overrides!, ok: false, needed: [] } };
+    expect(redIssuesOf(refused).asSaved).toBe(false);
+    expect(redIssuesOf(refused).issues.map((i) => i.text)).toEqual([strict.text, 'No timetable']);
+    const { PreviewPanel } = await import('@/app/t/[slug]/dispatch/move-stop-dialog');
+    const tree = elements(PreviewPanel({ preview: p, onOption: () => undefined, busy: false }));
+    const lines = tree.filter((e) => typeName(e) === 'IssueLine').map((e) => e.props.i.text);
+    expect(lines).toEqual([saved.text]);
+    const byId = (id: string) => tree.find((e) => e.props?.['data-testid'] === id);
+    expect(textOf(byId('move-issues-as-saved'))).toBe('As it would be saved with them allowed by hand:');
+    expect(textOf(byId('move-strict-timetable'))).toBe('Timetable as checked, without allowing anything (it breaks the rules above)');
+  });
+
+  it('a reason needs 3 letters or digits (zero-width spaces or dots never pass); the change list marks the loads it names', async () => {
+    const { overridesToSend, draftLoadIds } = await import('@/app/t/[slug]/dispatch/move-stop-dialog');
+    const ov = allowable([issue('ovr_a')]).overrides;
+    const ticks = { ovr_a: true };
+    expect(overridesToSend(ov, ticks, { ovr_a: '​​​' }).complete).toBe(false);
+    expect(overridesToSend(ov, ticks, { ovr_a: '...' }).complete).toBe(false);
+    expect(overridesToSend(ov, ticks, { ovr_a: 'ok1' }).complete).toBe(true);
+    expect([
+      ...draftLoadIds([
+        { kind: 'MOVE_LOAD', loadId: 'A1', to: { truckId: 'T03', before: 'C1' } },
+        { kind: 'SWAP_LOADS', a: 'A2', b: 'B1' },
+        { kind: 'MOVE_STOPS', stops: [{ loadId: 'D1', sequence: 1 }, { orderId: 'o9' }], to: { truckId: 'T05', loadId: 'E1', order: [{ loadId: 'E1', sequence: 1 }] } },
+        { kind: 'REMOVE', from: { loadId: 'F1', sequence: 2 } },
+        { kind: 'PLACE', orderId: 'o8', to: { truckId: 'T06', loadId: null, before: 'BEST' } },
+      ]),
+    ].sort()).toEqual(['A1', 'A2', 'B1', 'C1', 'D1', 'E1', 'F1']);
+  });
+
+  it('the plan screen: a tick per stop and per unserved customer, the selection bar, the load actions, the change list banner, allowances shown', () => {
+    const src = readFileSync(path.resolve(__dirname, '../../app/t/[slug]/dispatch/plan-view.tsx'), 'utf8');
+    expect(src).toMatch(/data-testid="stop-select"/);
+    expect(src).toMatch(/data-testid="unserved-select"/);
+    expect(src).toMatch(/data-testid="selection-bar"/);
+    expect(src).toMatch(/onMoveLoad: \(\) => setMoveFor\(\{ kind: 'MOVE_LOAD', load: l \}\)/);
+    expect(src).toMatch(/onSwap: \(\) => setMoveFor\(\{ kind: 'SWAP_LOADS', load: l \}\)/);
+    expect(src).toMatch(/data-testid="edit-draft-banner"/);
+    expect(src).toMatch(/canOverride=\{canOverride\}/);
+    expect(src).toMatch(/st\.handAllowed \? 'text-violet-700' : 'text-red-600'/);
+    expect(src).toMatch(/allowances: allowancesOnPlannedText\(d\.allowedByHand\)/);
+    // Review F3 and F11: the loads the change list names are marked; the ticks say which stop; take-off gets the whole selection.
+    expect(src).toMatch(/data-testid=\{`load-in-draft-\$\{l\.truckCode\}-\$\{l\.loadNo\}`\}/);
+    expect(src).toMatch(/aria-label=\{`Select \$\{st\.customerName\}/);
+    expect(src).toMatch(/setMoveFor\(\{ kind: 'REMOVE_STOPS', refs: selected \}\)/);
   });
 });

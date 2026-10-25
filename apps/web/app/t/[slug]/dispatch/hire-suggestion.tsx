@@ -24,6 +24,7 @@ import type { HireView } from '@/lib/dispatch/hire-whatif';
 import { hireUseConfirmText } from '@/lib/dispatch/hire';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { api, askOverride, type OptimizeOverrides } from './client-api';
+import { ALLOWANCES_DROPPED_TEXT } from '@/lib/dispatch/plan-edit-view';
 
 const POLL_MS = 4_000;
 /** Failed reads in a row before the box says it could not refresh (it keeps trying). */
@@ -39,6 +40,8 @@ interface Props {
   busy: boolean;
   expect: { date: string; depotId: string } | null;
   canEditProducts: boolean;
+  /** Moves by hand: the rules allowed by hand on Planned loads (the plan the hire makes drops them; the confirmation lists them). */
+  allowances?: string[];
   onUsed: (newRunId: string) => void | Promise<void>;
 }
 
@@ -56,7 +59,7 @@ export function forViewer(text: string, canAct: boolean): string {
     .trim();
 }
 
-export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, expect, canEditProducts, onUsed }: Props) {
+export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, expect, canEditProducts, allowances = [], onUsed }: Props) {
   const [view, setView] = useState<HireView | null>(null);
   const [working, setWorking] = useState<'use' | 'check' | null>(null);
   // Every poll's timer fire counts (review: a failed read changed nothing the effect watched, so
@@ -140,7 +143,8 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
     if (!s?.summary) return;
     // The day as the rest of the screen says it ("11 Oct"; sixth review of the hire branch).
     const day = expect?.date ? fmtDayMonth(expect.date) : 'this day';
-    if (!window.confirm(hireUseConfirmText(s.summary, expect?.date ?? null))) {
+    const dropped = allowances.length ? `\n\n${ALLOWANCES_DROPPED_TEXT}\n${allowances.map((x) => `- ${x}`).join('\n')}` : '';
+    if (!window.confirm(hireUseConfirmText(s.summary, expect?.date ?? null) + dropped)) {
       return;
     }
     setWorking('use');

@@ -17,9 +17,9 @@ import type { ServiceArea } from './location-input';
 import { NOT_CANCELLED } from './order-cancel-rules';
 import type { OrderPlacement, OrderTimeColumns } from './order-window';
 import { isSupersededRun } from './plan-status';
-import { readStopSnapshot, readTruckSnapshot } from './snapshots';
+import { readHandAllowances, readStopSnapshot, readTruckSnapshot } from './snapshots';
 import { isSmallTruck, smallTruckMaxBaysOf } from './small-truck';
-import { readPortionLines, splitPartLabels } from './split';
+import { readPortionLines, rowKeyOf, splitPartLabels } from './split';
 import { shownTruckCode } from './hire';
 import { stopsAtReplacedPoints } from './replaced-pin';
 import { DEFAULT_TZ, isoOf, todayIso } from './time';
@@ -203,6 +203,7 @@ export async function keptChangesOf(db: Db, tenantId: string, runId: string, opt
 
   const inputs: KeptLoadInput[] = keptLoads.map((l) => {
     const stops: KeptStopInput[] = [];
+    const lateAllowed = readHandAllowances(l.truckSnapshotJson).filter((a) => a.kind === 'LATE');
     for (const [key, group] of stopsOf) {
       if (group[0]!.loadId !== l.id) continue;
       const first = group[0]!;
@@ -213,6 +214,9 @@ export async function keptChangesOf(db: Db, tenantId: string, runId: string, opt
       const own = new Map(group.map((a) => [a.order.id, a.order]));
       const at = Date.parse(snap.capturedAt);
       const cameAfter = (d: Date | null) => !!d && Number.isFinite(at) && d.getTime() > at;
+      // A late arrival allowed by hand on this stop (matched by its rows: order and split lines).
+      const keys = group.map((a) => rowKeyOf(a.orderId, a.portionLinesJson));
+      const allowed = lateAllowed.find((a) => keys.every((k) => a.rowKeys.includes(k)) && typeof a.maxLateMin === 'number' && typeof a.windowEndMin === 'number');
       stops.push({
         sequence: first.sequenceInTruck,
         customerId: c.id,
@@ -220,6 +224,7 @@ export async function keptChangesOf(db: Db, tenantId: string, runId: string, opt
         split: partOf.get(key) ?? null,
         serviceStartMin: first.serviceStartMin,
         departureMin: first.departureMin,
+        ...(allowed ? { allowance: { maxLateMin: allowed.maxLateMin!, windowEndMin: allowed.windowEndMin!, reason: allowed.reason, ...(allowed.rule ? { rule: allowed.rule } : {}) } } : {}),
         live: keptStopLive(c, eff, [...(visit.get(c.id)?.values() ?? [first.order])], placements, snap.capturedAt),
         customer: {
           code: snap.code || c.code,

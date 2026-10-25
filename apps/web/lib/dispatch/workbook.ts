@@ -28,6 +28,7 @@ import { searchAssumptions, searchOptionOf, searchResultText, type SearchOption,
 import { loadPallets, manifestPalletTotals, manifestTotalText, palletLimitText, palletsExact, palletsOverBays, palletText, type LoadPallets } from './pallets';
 import { helpersText } from './load-helpers';
 import { windowRuleText, type WindowRule } from './window-rule';
+import { allowedByHandText } from './plan-edit-view';
 import {
   instructionLine,
   loadInstructions,
@@ -548,6 +549,16 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     }
   }
 
+  // Moves by hand, allow anyway: every rule allowed by hand on this plan - where, what, by how much, why, who, when.
+  if (d.allowedByHand?.length) {
+    head('RULES ALLOWED BY HAND');
+    for (const a of d.allowedByHand) {
+      put(ws, r, 2, `${a.truckCode} L${a.loadNo}`);
+      put(ws, r, 3, `${a.text} (${a.byName}, ${localDateIso(new Date(a.at), tz)} ${fmtHhmm(localMinutes(new Date(a.at), tz))})`);
+      r++;
+    }
+  }
+
   // PR9: orders brought forward from earlier days (not delivered on their own day) and, on an
   // earlier day's plan, the orders brought forward from it since (planned on the later day now).
   const carryRows = carriedOverRows(d);
@@ -993,7 +1004,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     r++,
     ['', 'DEPOT', '', `${depot.code} - ${depot.name} (depart)`, '', '', fmtHhmm(l.departMin), '', '', null, null, null, '', '', null, 0,
       { text: 'Map', hyperlink: depotMap }, '',
-      `Departure ${fmtHhmm(l.departMin)}${(l.masterChanged ?? []).filter((c) => c.kind === 'DEPOT').map((c) => ` · ${c.text}`).join('')}`, '', ''],
+      `Departure ${fmtHhmm(l.departMin)}${(l.masterChanged ?? []).filter((c) => c.kind === 'DEPOT').map((c) => ` · ${c.text}`).join('')}${(l.handAllowed ?? []).map((a) => ` · ${allowedByHandText(a)}`).join('')}`, '', ''],
     fmts,
   );
   // The driver break as its own row, where it is taken (never while unloading).
@@ -1008,7 +1019,8 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
       s.late ? 'LATE ORDER' : null,
       carriedStopText(s),
       s.split ? `SPLIT DELIVERY part ${s.split.part} of ${s.split.parts}${s.split.restUnserved ? ' (rest unserved)' : ''}` : null,
-      s.hardWindowOk === false ? 'HARD WINDOW MISSED' : null,
+      // A late arrival allowed by hand (agreed with the customer) is said as such, never as a missed window.
+      s.hardWindowOk === false ? (s.handAllowed ? `ALLOWED BY HAND: LATE (${s.handAllowed.reason})` : 'HARD WINDOW MISSED') : null,
       s.prefWindowOk === false ? 'Outside preferred window' : null,
       s.waitMin ? `Wait ${Math.round(s.waitMin)} min` : null,
       s.mapsUrl ? null : 'No coordinates',
