@@ -977,6 +977,11 @@ function TripCard({
             ) : null}
             {load.backAt ? <span className="text-sm">{t(lang, 'backAt', { time: clockTime(new Date(load.backAt).toISOString(), manifest.tz) })}</span> : null}
           </div>
+          {(load.allowedNotes ?? []).map((n, i) => (
+            <p key={i} className="mt-2 rounded-lg bg-violet-50 p-2 text-sm font-semibold" dir="auto" data-testid={`trip-allowed-${load.loadNo}`}>
+              {n}
+            </p>
+          ))}
         </div>
         <ChevronDown className={`h-6 w-6 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} aria-hidden />
       </button>

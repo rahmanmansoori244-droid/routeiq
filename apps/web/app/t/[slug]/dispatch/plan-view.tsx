@@ -91,7 +91,7 @@ import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
 import { PhotoViewer } from './photo-viewer';
 import { CameraExceptions } from './camera-exceptions';
 import { HireSuggestionBox } from './hire-suggestion';
-import { MoveStopDialog, type EditDraft, type EditSubject, type SelectedStop } from './move-stop-dialog';
+import { draftLoadIds, MoveStopDialog, type EditDraft, type EditSubject, type SelectedStop } from './move-stop-dialog';
 import { ALLOWANCES_DROPPED_TEXT, allowancesOnPlannedText, allowedByHandText, LOCKED_MOVE_TITLE, savedText } from '@/lib/dispatch/plan-edit-view';
 import { CAMERA_ALERT_PER_DAY } from '@/lib/delivery/camera-exceptions';
 import { addDaysIso } from '@/lib/dispatch/time';
@@ -870,6 +870,8 @@ export function PlanView({ slug, runId, canPlan, canOverride = false, canDispatc
       return next;
     });
   const allowedCount = d.allowedByHand?.length ?? 0;
+  // The loads the change list kept so far names (not saved yet): marked on the plan (review F3).
+  const inDraft = draft ? draftLoadIds(draft.ops) : new Set<string>();
   // Review F04: the timetable check. With the gate on (the default), a truck whose times break a
   // rule cannot be locked, loaded or dispatched. The remedy is Re-plan - except for a problem on a
   // LOCKED or LOADING load, which a re-plan carries over unchanged: that load, and every later locked
@@ -1446,6 +1448,16 @@ export function PlanView({ slug, runId, canPlan, canOverride = false, canDispatc
                           ALLOWED BY HAND
                         </Badge>
                       ) : null}
+                      {inDraft.has(l.id) ? (
+                        <Badge
+                          variant="outline"
+                          className="ml-1 border-dashed border-violet-400 text-[10px] text-violet-800"
+                          title="A change checked and kept in the list below names this load: it is not saved yet (Open the list to save it, or Discard it)."
+                          data-testid={`load-in-draft-${l.truckCode}-${l.loadNo}`}
+                        >
+                          IN THE CHANGE LIST
+                        </Badge>
+                      ) : null}
                       {l.hired ? (
                         <Badge variant="outline" className="ml-1 text-[10px]" title={hiredLoadBadgeTitle(l.oneDay)} data-testid={`load-hired-${l.truckCode}-${l.loadNo}`}>
                           {l.oneDay ? 'hired · 1 day' : 'hired'}
@@ -1759,7 +1771,7 @@ export function PlanView({ slug, runId, canPlan, canOverride = false, canDispatc
                         {!u.partial && !u.cancelled && !u.carriedTo ? (
                           <input
                             type="checkbox"
-                            aria-label={`Select ${u.customerName}`}
+                            aria-label={`Select ${u.customerName} (${u.customerCode}), unserved`}
                             checked={!!sel[`u:${u.customerId}`]}
                             onChange={() => toggleUnserved(u)}
                             data-testid="unserved-select"
@@ -1843,7 +1855,7 @@ export function PlanView({ slug, runId, canPlan, canOverride = false, canDispatc
         />
       ) : null}
       {canMove && draft ? (
-        <div className="sticky bottom-14 z-20 flex flex-wrap items-center gap-2 rounded-md border border-dashed border-violet-400 bg-violet-50 p-2 text-sm shadow" data-testid="edit-draft-banner">
+        <div className="sticky bottom-14 z-20 flex w-fit max-w-full flex-wrap items-center gap-2 rounded-md border border-dashed border-violet-400 bg-violet-50 p-2 text-sm shadow" data-testid="edit-draft-banner">
           <b>Changes checked, not saved yet:</b>
           {draft.steps.map((x, i) => (
             <span key={i}>
@@ -1860,7 +1872,7 @@ export function PlanView({ slug, runId, canPlan, canOverride = false, canDispatc
         </div>
       ) : null}
       {canMove && selected.length ? (
-        <div className="sticky bottom-2 z-20 flex flex-wrap items-center gap-2 rounded-md border bg-background p-2 text-sm shadow-lg" data-testid="selection-bar">
+        <div className="sticky bottom-2 z-20 flex w-fit max-w-full flex-wrap items-center gap-2 rounded-md border bg-background p-2 text-sm shadow-lg" data-testid="selection-bar">
           <span>
             <b>{selected.length} stop{selected.length === 1 ? '' : 's'} selected</b> · {selected.reduce((a, x) => a + x.cases, 0)} cases — from{' '}
             {[...new Set(selected.map((x) => x.from))].map((f) => `${f} (${selected.filter((x) => x.from === f).length})`).join(', ')}
@@ -1874,7 +1886,7 @@ export function PlanView({ slug, runId, canPlan, canOverride = false, canDispatc
             className="h-7"
             disabled={!!busy || !selected.some((x) => 'loadId' in x.ref)}
             title={selected.some((x) => 'loadId' in x.ref) ? 'Take the selected stops of loads off the plan (unserved)' : 'Only stops on a load can be taken off the plan'}
-            onClick={() => setMoveFor({ kind: 'REMOVE_STOPS', refs: selected.filter((x) => 'loadId' in x.ref) })}
+            onClick={() => setMoveFor({ kind: 'REMOVE_STOPS', refs: selected })}
             data-testid="selection-remove"
           >
             Take off the plan
@@ -2719,7 +2731,13 @@ function LoadDetail({
                 ) : null}
                 {select ? (
                   <td className="text-center">
-                    <input type="checkbox" aria-label={`Select stop ${st.sequence}`} checked={select.on(st.sequence)} onChange={() => select.toggle(st)} data-testid="stop-select" />
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${st.customerName} (${st.customerCode}${st.branchCode ? `/${st.branchCode}` : ''}) on ${l.truckCode} L${l.loadNo}, stop ${st.sequence}`}
+                      checked={select.on(st.sequence)}
+                      onChange={() => select.toggle(st)}
+                      data-testid="stop-select"
+                    />
                   </td>
                 ) : null}
               </tr>

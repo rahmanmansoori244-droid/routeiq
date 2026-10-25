@@ -21,7 +21,9 @@ export default async function TenantLayout({
   return (
     <div className="flex min-h-screen">
       <Sidebar slug={tenant.slug} tenantName={tenant.name} role={user.role} alertsOn={!!alertCfg?.alertsEnabled} />
-      <div className="flex flex-1 flex-col">
+      {/* min-w-0: the column may be narrower than its widest content (a wide table scrolls inside its own
+          overflow-x-auto box), so on a phone the page, its sticky bars and dialogs stay at the screen width (review F6). */}
+      <div className="flex min-w-0 flex-1 flex-col">
         <TopBar
           slug={tenant.slug}
           tenantName={tenant.name}

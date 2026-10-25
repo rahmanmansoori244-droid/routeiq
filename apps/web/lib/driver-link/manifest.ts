@@ -139,6 +139,8 @@ export function projectManifest(details: readonly PlanDetail[], input: ManifestI
     cases: l.cases,
     backAtDepotAt: null,
     leftDepotAt: null,
+    // The load-level rules allowed by hand (a driver break skipped, a load over capacity): the driver must know (review F2).
+    ...(l.handAllowed?.length ? { allowedNotes: l.handAllowed.map((a) => allowedByHandText(a)) } : {}),
     stops: [...l.stops].sort((a, b) => a.sequence - b.sequence).map((s) => stopOf(d.run.depot.id, l, s, input.callingCode ?? null)),
   }));
   return {

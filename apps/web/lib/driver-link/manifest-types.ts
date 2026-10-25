@@ -218,6 +218,12 @@ export interface ManifestLoad {
    * null = not yet. Absent on a manifest kept on the phone from before.
    */
   leftDepotAt?: string | null;
+  /**
+   * Moves by hand, allow anyway: the load-level rules allowed by hand ("Allowed by hand: no driver break today (60
+   * min, to start 12:00–14:00) - driver agreed", capacity over the truck) shown with the trip (review F2); absent =
+   * none (and on a manifest kept on the phone from before).
+   */
+  allowedNotes?: string[];
   stops: ManifestStop[];
 }
 

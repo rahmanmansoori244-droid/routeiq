@@ -1120,6 +1120,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
           overrides: { on: planEditOverridesOn(), capacityMaxPct: OVERRIDE_CAPACITY_MAX_PCT },
         }
       : null;
+  // A driver break allowed by hand is kept on every load of its truck-day: shown and counted once (review F8).
+  showBreakAllowanceOnce(detailLoads);
   // Every rule allowed by hand on this version's loads (moves by hand): the screen's yellow line, the RE-PLAN confirmation.
   const tz = cfg?.timezone || DEFAULT_TZ;
   const allowedByHand: PlanAllowanceLine[] = detailLoads.flatMap((l) =>
@@ -1484,6 +1486,45 @@ export function outdatedNotes(loads: OutdatedLoad[]): string[] {
     );
   }
   return out;
+}
+
+/**
+ * A driver break allowed by hand (NO_BREAK) is stored on every load of its truck-day - the gate reads it on the
+ * load the missing break is put on - but it is ONE allowance: shown and counted once per truck-day (review F8), on
+ * the load the break window falls in (its time overlaps the window the break may start in), else the last load that
+ * leaves before the window ends, else the first. The other loads' copies are left out of `handAllowed` (display
+ * only: the gate and the sheets' badges read this list; the stored snapshots are unchanged). In place.
+ */
+export function showBreakAllowanceOnce<L extends { truckId: string; loadNo: number; departMin: number; returnMin: number; handAllowed?: HandAllowance[] }>(loads: L[]): L[] {
+  const byKey = new Map<string, L[]>();
+  for (const l of loads) {
+    for (const a of l.handAllowed ?? []) {
+      if (a.kind !== 'NO_BREAK') continue;
+      const key = `${l.truckId}|${a.id}|${a.at}`;
+      const list = byKey.get(key) ?? [];
+      if (!list.includes(l)) list.push(l);
+      byKey.set(key, list);
+    }
+  }
+  for (const [key, list] of byKey) {
+    if (list.length < 2) continue;
+    const id = key.split('|')[1]!;
+    const a = list[0]!.handAllowed!.find((x) => x.kind === 'NO_BREAK' && x.id === id)!;
+    const sorted = [...list].sort((x, y) => x.departMin - y.departMin || x.loadNo - y.loadNo);
+    const from = a.breakFromMin;
+    const to = a.breakToMin;
+    const shown =
+      (typeof from === 'number' && typeof to === 'number' ? sorted.find((l) => l.departMin <= to && l.returnMin >= from) : undefined) ??
+      (typeof to === 'number' ? [...sorted].reverse().find((l) => l.departMin <= to) : undefined) ??
+      sorted[0]!;
+    for (const l of list) {
+      if (l === shown) continue;
+      const rest = (l.handAllowed ?? []).filter((x) => !(x.kind === 'NO_BREAK' && x.id === id));
+      if (rest.length) l.handAllowed = rest;
+      else delete l.handAllowed;
+    }
+  }
+  return loads;
 }
 
 const ALLOWED_KIND_WORD: Record<PlanAllowanceLine['kind'], string> = { LATE: 'receiving hours', CAPACITY_PALLETS: 'pallets', CAPACITY_CASES: 'cases', CAPACITY_KG: 'weight', NO_BREAK: 'driver break' };

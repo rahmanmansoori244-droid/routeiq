@@ -81,7 +81,10 @@
  * a case weight entered since, or above the 120 % cap is a BLOCK as before. An allowance above the 120 % cap
  * of the truck the load was planned with is ignored (a damaged or forged entry never allows anything). So
  * Lock, Loading and Dispatch pass for an allowed issue; the allowance stays with the load through every
- * status (design D5).
+ * status (design D5). A finding of the solver's own report (which lists allowed issues under `allowed`, not
+ * as violations) is covered only where this check judged the same rule allowed on the same load (capacity)
+ * or truck-day (the break), and a late arrival there never: the gate never allows more than the web's own
+ * figures do (review RA-1).
  *
  * LOCK, LOADING and DISPATCH of a load are refused while its truck-day is not OK
  * (plan-service.changeStatusTx), unless the operator switch FEASIBILITY_GATE=warn is set.
@@ -617,12 +620,12 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
     const truckId = sv.truck_id ?? null;
     const load = truckId !== null ? input.loads.find((l) => l.truckId === truckId && l.loadNo === sv.load_no) : undefined;
     const past = !!load && load.onRoad;
-    // A finding the load carries an allowance by hand for (normally the solver lists those under `allowed`).
-    const kind: HandAllowanceKind | null =
-      sv.code === 'HARD_WINDOW' ? 'LATE' : sv.code === 'BREAK' ? 'NO_BREAK' : sv.code === 'CAPACITY_PALLETS' || sv.code === 'CAPACITY_CASES' || sv.code === 'CAPACITY_KG' ? sv.code : null;
-    const pool = load ? (load.allowances ?? []) : kind === 'NO_BREAK' ? input.loads.filter((l) => l.truckId === truckId).flatMap((l) => l.allowances ?? []) : [];
-    const covering = kind ? pool.find((a) => a.kind === kind) : undefined;
-    if (covering && !past) {
+    // A finding allowed by hand (the solver lists those under `allowed`, never here): covered only where the web's
+    // own check above judged the same rule allowed on the same load (capacity: within the allowance and the cap)
+    // or truck-day (the break: the same break rule), never more (review RA-1). A late arrival is never covered
+    // here: the web judges each stop itself (rows, minutes, rule).
+    const covering = past ? null : solverFindingAllowance(sv.code, truckId, load?.id ?? null, out);
+    if (covering) {
       out.push({
         code: sv.code,
         severity: 'WARN',
@@ -685,6 +688,29 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
     inputHash: inputHash(input),
     checkedAt: now.toISOString(),
   };
+}
+
+/**
+ * The allowance by hand that covers one finding of the solver's report (review RA-1), or null: a CAPACITY_* finding
+ * of a load only when the web's own check of that load found the same rule allowed by hand (so within the allowance
+ * and the 120 % cap) and did not block it; a BREAK finding of a truck only when the web's own check found the
+ * truck-day's break allowed by hand (the same break rule) and did not block it. HARD_WINDOW and every other code:
+ * never (a late arrival is judged per stop by the web; the solver lists allowed ones under `allowed`).
+ */
+function solverFindingAllowance(code: string, truckId: string | null, loadId: string | null, web: readonly PlanViolation[]): PlanViolation['allowedByHand'] | null {
+  if (truckId === null) return null;
+  const mine = web.filter((x) => x.source === 'WEB' && x.code === code && x.truckId === truckId);
+  if (code === 'CAPACITY_PALLETS' || code === 'CAPACITY_CASES' || code === 'CAPACITY_KG') {
+    if (loadId === null) return null;
+    const onLoad = mine.filter((x) => x.loadId === loadId);
+    if (onLoad.some((x) => x.severity === 'BLOCK')) return null;
+    return onLoad.find((x) => x.allowedByHand)?.allowedByHand ?? null;
+  }
+  if (code === 'BREAK') {
+    if (mine.some((x) => x.severity === 'BLOCK')) return null;
+    return mine.find((x) => x.allowedByHand)?.allowedByHand ?? null;
+  }
+  return null;
 }
 
 /**

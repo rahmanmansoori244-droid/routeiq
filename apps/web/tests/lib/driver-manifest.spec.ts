@@ -5,6 +5,8 @@
  * the plan detail's additive fields (orderLines, plannedHours, promisedWindow), which getPlanDetail
  * builds from the row lines with no aggregation.
  */
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fixture } from './plan-detail-fixture';
 import { resetDb, tables } from './fake-plan-db';
@@ -122,6 +124,23 @@ describe('projectManifest', () => {
     expect(projectManifest([d], input({ truckId: 't2', callingCode: '968' })).loads[0].stops[0]).toMatchObject({ customerPhone: '2456 7890', customerTel: 'tel:+96824567890' });
     // No calling code (a company outside Oman and the UAE): the number is dialled as written.
     expect(projectManifest([d], input()).loads[0].stops[0].customerTel).toBe('tel:91234567');
+  });
+
+  it('rules allowed by hand: a load-level one (no driver break, capacity) with the trip, a late arrival with its stop (review F2)', () => {
+    const d = fixture();
+    const base = { v: 1 as const, orderIds: [], reason: 'driver agreed, short day', byUserId: 'u1', byName: 'Sara', byRole: 'SUPERVISOR' as const, at: '2026-09-25T03:00:00.000Z', runId: 'r1' };
+    const l = d.loads.find((x) => x.truckId === 't1' && x.loadNo === 2)!;
+    l.handAllowed = [{ ...base, id: 'ovr_nb', kind: 'NO_BREAK', rowKeys: [], breakMin: 60, breakFromMin: 600, breakToMin: 660 }];
+    l.stops[0]!.handAllowed = { ...base, id: 'ovr_l', kind: 'LATE', rowKeys: ['o|*'], rule: 'START', windowStartMin: 420, windowEndMin: 600, atMin: 620, lateMin: 20, maxLateMin: 20, reason: 'agreed with customer' };
+    const m = projectManifest([d], input());
+    const trip = m.loads.find((x) => x.loadNo === 2)!;
+    expect(trip.allowedNotes).toEqual(['Allowed by hand: no driver break today (60 min, to start 10:00–11:00) - driver agreed, short day']);
+    expect(trip.stops[0]!.allowedNote).toBe('Allowed by hand: arrives 10:20, after receiving hours 07:00–10:00 (20 min late) - agreed with customer');
+    expect(m.loads.find((x) => x.loadNo === 1)).not.toHaveProperty('allowedNotes');
+    // Shown on the page: the trip card and the stop sheet.
+    const page = readFileSync(path.resolve(__dirname, '../../app/d/[token]/driver-page.tsx'), 'utf8');
+    expect(page).toMatch(/\(load\.allowedNotes \?\? \[\]\)\.map/);
+    expect(readFileSync(path.resolve(__dirname, '../../app/d/[token]/stop-sheet.tsx'), 'utf8')).toMatch(/\(load\.allowedNotes \?\? \[\]\)\.map/);
   });
 
   it('a stop without a location has no Navigate link', () => {

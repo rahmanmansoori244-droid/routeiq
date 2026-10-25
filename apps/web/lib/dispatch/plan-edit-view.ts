@@ -343,6 +343,19 @@ export interface PlanEditSaved {
   carried?: number;
 }
 
+/**
+ * The rules a save allowed by hand, in words (review F7: one kept from an earlier approval is not one allowed
+ * now): "2 rules allowed by hand", "1 rule kept from an earlier approval", "1 rule allowed by hand and 1 kept
+ * from an earlier approval". Empty when none.
+ */
+export function allowedCountText(allowed: number, carried: number): string {
+  const n = (k: number) => `${k} rule${k === 1 ? '' : 's'}`;
+  if (allowed && carried) return `${n(allowed)} allowed by hand and ${carried} kept from an earlier approval`;
+  if (allowed) return `${n(allowed)} allowed by hand`;
+  if (carried) return `${n(carried)} kept from an earlier approval`;
+  return '';
+}
+
 /** The Save toast (20 s). */
 export function savedText(s: PlanEditSaved): string {
   const todo = [
@@ -353,10 +366,30 @@ export function savedText(s: PlanEditSaved): string {
   const one = (s.gone ?? []).length === 1;
   const gone = s.gone?.length ? ` ${s.gone.join(', ')} ${one ? 'is' : 'are'} no longer in the plan: throw away ${one ? 'its' : 'their'} printed sheets.` : '';
   const kept = (s.allowed ?? 0) + (s.carried ?? 0);
-  const allowed = kept
-    ? ` ${kept} rule${kept === 1 ? ' was' : 's were'} allowed by hand: they are printed on the load sheet and the driver sheet. A RE-PLAN plans the Planned loads again with every rule: lock them to keep this.`
-    : '';
-  return `Saved as version ${s.version}.${first}${gone}${allowed} A RE-PLAN plans unlocked loads again and may undo this change: lock the load to keep it.`;
+  // One sentence about a RE-PLAN (review F10), naming what was allowed by hand when there is some.
+  const allowed = kept ? ` ${allowedCountText(s.allowed ?? 0, s.carried ?? 0)}: ${kept === 1 ? 'it is' : 'they are'} printed on the load sheet and the driver sheet.` : '';
+  const replan = kept
+    ? ' A RE-PLAN plans unlocked loads again with every rule and may undo this change and what was allowed by hand: lock the load to keep it.'
+    : ' A RE-PLAN plans unlocked loads again and may undo this change: lock the load to keep it.';
+  return `Saved as version ${s.version}.${first}${gone}${allowed}${replan}`;
+}
+
+/**
+ * A reason typed for a rule allowed by hand, as it is stored and printed (sheets, WhatsApp, audit): control and
+ * Unicode format characters out (zero-width spaces, bidi overrides and isolates: review RA-2), spaces folded,
+ * trimmed.
+ */
+export function cleanOverrideReason(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\p{Cf}+/gu, '').replace(/\s+/g, ' ').trim();
+}
+
+/** The fewest letters or digits a reason needs (after cleaning), so "..." or invisible characters never pass. */
+export const OVERRIDE_REASON_MIN = 3;
+
+/** A reason is usable: at least 3 letters or digits once cleaned (any script). */
+export function overrideReasonOk(raw: string): boolean {
+  return (cleanOverrideReason(raw).match(/[\p{L}\p{N}]/gu) ?? []).length >= OVERRIDE_REASON_MIN;
 }
 
 /** The words of the dialog's refusals that are not a broken rule (409 / 404 / 503 from the routes). */
@@ -382,6 +415,8 @@ export const EDIT_ERROR_TEXT = {
   OVERRIDES_CHANGED: 'The rules this change breaks changed since your check: confirm them again.',
   OVERRIDES_NEED_SOLVER: 'Allowing rules by hand needs the updated route optimizer.',
   OVERRIDES_OUT_OF_TIME: 'Out of time while checking what can be allowed by hand: try again.',
+  /** A planner's check that needs a new approval (review F9: nothing is stored or shared). */
+  ASK_APPROVER: 'Only a supervisor or company admin can allow rules by hand: ask one to make this change (it is not saved).',
 } as const;
 
 /** The codes whose words the dialog shows from EDIT_ERROR_TEXT (for the others the server's own message names more). */

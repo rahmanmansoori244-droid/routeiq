@@ -240,6 +240,11 @@ export function StopSheet({
             {stop.allowedNote}
           </p>
         ) : null}
+        {(load.allowedNotes ?? []).map((n, i) => (
+          <p key={`l${i}`} className="mt-2 rounded-lg bg-violet-50 p-2 text-sm font-semibold" dir="auto" data-testid="stop-trip-allowed">
+            {n}
+          </p>
+        ))}
         {stop.changeNotes.length ? (
           <div className="mt-2 rounded-lg bg-amber-50 p-2 text-sm">
             <p className="font-semibold">{t(lang, 'changedAfterPlanning')}</p>

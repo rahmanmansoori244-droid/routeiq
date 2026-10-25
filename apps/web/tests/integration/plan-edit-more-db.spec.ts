@@ -568,6 +568,34 @@ describe('several stops at once (owner item 2)', () => {
     expect(await prisma.auditLog.count({ where: { tenantId: f.tenantId, entityId: saved.runId, action: 'ROUTE_MANUALLY_CHANGED' } })).toBe(1);
   });
 
+  it('D-24 (review F3) a load moved to another truck by step 1 is still named by step 2 (swapped, stops put in it), and saved as one version', async () => {
+    const f = await plannedDay('movedlater');
+    const t01 = await loadOf(f, 'T01');
+    const t02 = await loadOf(f, 'T02');
+    const t03 = await loadOf(f, 'T03');
+    // Step 1: T01 L1 moved to T03 after its last load. Step 2: a stop of T02 into it, named as the plan screen names it.
+    const c = await check(f, [
+      { kind: 'MOVE_LOAD', loadId: t01.id, to: { truckId: f.trucks.T03!, before: null } },
+      { kind: 'MOVE_STOPS', stops: [{ loadId: t02.id, sequence: 1 }], to: { truckId: f.trucks.T01!, loadId: t01.id, position: 0 } },
+    ]);
+    expect(c.preview.ok).toBe(true);
+    expect(c.preview.title).toBe('Move T01 L1 to T03, after its last load; Move Customer C2 (C2) to T01 L1, stop 1');
+    const saved = await save(f, c, f.planner);
+    expect(await codesOf(f, 'T03', 1, saved.runId)).toEqual(['C3']);
+    expect(await codesOf(f, 'T03', 2, saved.runId)).toEqual(['C2', 'C1', 'C4']);
+    expect(await codesOf(f, 'T02', 1, saved.runId)).toEqual(['C5']);
+    // Swapped after it was moved: found where it is now (never "no stop left").
+    const t03b = await loadOf(f, 'T03', 1, saved.runId);
+    const moved = await loadOf(f, 'T03', 2, saved.runId);
+    const sw = await check(f, [{ kind: 'MOVE_LOAD', loadId: moved.id, to: { truckId: f.trucks.T01!, before: null } }, { kind: 'SWAP_LOADS', a: moved.id, b: t03b.id }], { runId: saved.runId });
+    expect(sw.preview.ok).toBe(true);
+    expect(sw.preview.trucks.map((t) => [t.truckCode, (t.after?.loads ?? []).map((l) => l.stops.map((x) => x.label.replace(/^Customer (C\d).*$/, '$1')))])).toEqual([
+      ['T03', [['C2', 'C1', 'C4']]],
+      ['T01', [['C3']]],
+    ]);
+    void t03;
+  });
+
   it('D-19 stops exchanged between two full loads: step 1 alone is red but can be kept; the two steps check and save as one version', async () => {
     const f = await plannedDay('exchange');
     // T01 and T02 can take no more than their two stops each.
@@ -613,7 +641,7 @@ describe('allow anyway (owner item 3)', () => {
     expect((await refusal(save(f, c, f.supervisor))).code).toBe('MOVE_REFUSED');
     const saved = await save(f, c, f.supervisor, [{ id: issue.id!, reason: 'agreed with customer' }]);
     expect(saved).toMatchObject({ version: 2, allowed: 1, carried: 0 });
-    expect(view.savedText(saved)).toContain('1 rule was allowed by hand: they are printed on the load sheet and the driver sheet.');
+    expect(view.savedText(saved)).toContain('1 rule allowed by hand: it is printed on the load sheet and the driver sheet.');
     const l1 = await loadOf(f, 'T01', 1, saved.runId);
     const [a] = (await allowancesOf(l1.id))!;
     expect(a).toMatchObject({ kind: 'LATE', id: issue.id, reason: 'agreed with customer', byName: f.supervisor.name, byRole: 'SUPERVISOR', rule: 'START', windowEndMin: 420, atMin: 440, lateMin: 20, maxLateMin: 20, runId: saved.runId, orderIds: f.orderOf.C4 });
@@ -624,7 +652,7 @@ describe('allow anyway (owner item 3)', () => {
     const audits = await prisma.auditLog.findMany({ where: { tenantId: f.tenantId, entityId: child.id }, select: { action: true, afterJson: true } });
     expect(audits.map((x) => x.action).sort()).toEqual(['PLAN_VERSION_CREATED', 'ROUTE_MANUALLY_CHANGED', 'RULE_ALLOWED_BY_HAND']);
     const rule = audits.find((x) => x.action === 'RULE_ALLOWED_BY_HAND')!.afterJson as { confirmed: number; carried: number; byRole: string; overrides: { kind: string; reason: string; lateMin: number }[] };
-    expect(rule).toMatchObject({ confirmed: 1, carried: 0, byRole: 'SUPERVISOR', overrides: [{ kind: 'LATE', reason: 'agreed with customer', lateMin: 20 }] });
+    expect(rule).toMatchObject({ confirmed: 1, carried: 0, keptOnly: false, byRole: 'SUPERVISOR', overrides: [{ kind: 'LATE', reason: 'agreed with customer', lateMin: 20 }] });
     expect(child.reasonNote).toMatch(/; 1 rule allowed by hand$/);
     // The plan detail says so, and the stop carries the allowance.
     const d = (await detail.getPlanDetail(f.tenantId, saved.runId))!;
@@ -655,7 +683,7 @@ describe('allow anyway (owner item 3)', () => {
     const asPlanner = await check(f, ops, { canOverride: false });
     const issue = asPlanner.preview.overrides!.needed[0]!;
     expect(issue).toMatchObject({ kind: 'CAPACITY_CASES', overridable: true, amount: { unit: 'cases', value: 35, limit: 30, capacity: 30, overPct: 17 } });
-    expect(asPlanner.preview.overrides).toMatchObject({ ok: true, canSave: false, saveNote: 'Only a supervisor or company admin can allow rules by hand. Ask one to open this change.' });
+    expect(asPlanner.preview.overrides).toMatchObject({ ok: true, canSave: false, saveNote: 'Only a supervisor or company admin can allow rules by hand: ask one to make this change (it is not saved).' });
     // The v1 single move keeps its v1 shape for an old browser tab.
     expect(asPlanner.preview.move).toEqual(ops[0]);
     const refused = await refusal(save(f, asPlanner, f.planner, [{ id: issue.id!, reason: 'one day only' }]));
@@ -718,7 +746,7 @@ describe('allow anyway (owner item 3)', () => {
     fake.lie = true;
     const c = await check(f, ops);
     const n = c.preview.overrides!.needed[0]!;
-    expect(n).toMatchObject({ kind: 'CAPACITY_CASES', overridable: false, whyNot: '25% over the truck\'s 28 cases: more than the 20% that can be allowed by hand.' });
+    expect(n).toMatchObject({ kind: 'CAPACITY_CASES', overridable: false, whyNot: '25% over the truck\'s 28 cases: at most 33 cases (20% over) can be allowed by hand on this truck.' });
     expect(c.preview.overrides!.canSave).toBe(false);
     expect((await refusal(save(f, c, f.supervisor, [{ id: n.id!, reason: 'one day only' }]))).code).toBe('OVERRIDE_NOT_ALLOWED');
     fake.lie = false;
@@ -780,7 +808,10 @@ describe('allow anyway (owner item 3)', () => {
     const kept = (await allowancesOf((await loadOf(f, 'T02', 1, v3.runId)).id))![0]!;
     expect(kept).toMatchObject({ value: 80, maxValue: 85, byName: f.supervisor.name, byRole: 'SUPERVISOR', reason: 'no other truck', carriedFrom: { id: n.id, runId: v2.runId } });
     const audit = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: f.tenantId, entityId: v3.runId, action: 'RULE_ALLOWED_BY_HAND' } });
-    expect(audit.afterJson).toMatchObject({ confirmed: 0, carried: 1, overrides: [{ kind: 'CAPACITY_CASES', carried: { fromId: n.id } }] });
+    expect(audit.afterJson).toMatchObject({ confirmed: 0, carried: 1, keptOnly: true, byRole: 'PLANNER', overrides: [{ kind: 'CAPACITY_CASES', carried: { fromId: n.id } }] });
+    // The plan's line and the version note say it was kept, not allowed now (review F7).
+    const v3run = await prisma.runPlan.findUniqueOrThrow({ where: { id: v3.runId } });
+    expect(v3run.reasonNote).toMatch(/; 1 rule kept from an earlier approval$/);
     // Worse than allowed (90 cases): not carried, the earlier reason pre-filled, a supervisor needed.
     const t03 = await loadOf(f, 'T03', 1, v3.runId);
     const worse = await check(f, [{ kind: 'MOVE_STOPS', stops: [{ loadId: t03.id, sequence: 1 }], to: { truckId: f.trucks.T02!, loadId: (await loadOf(f, 'T02', 1, v3.runId)).id, position: 0 } }], { runId: v3.runId, canOverride: false });
@@ -834,16 +865,33 @@ describe('allowances through later versions and races', () => {
     expect(view.allowancesOnPlannedText((await detail.getPlanDetail(f.tenantId, v3.runId))!.allowedByHand)).toEqual([]);
     await status(f, v3.runId, l1.id, 'PLANNED');
     expect((await allowancesOf(l1.id))!.length).toBe(1);
-    // D-16: a check on that truck with the switch off: no panel (and nothing carried).
-    const off = await check(f, [{ kind: 'MOVE', from: { loadId: l1.id, sequence: 1 }, to: { truckId: f.trucks.T01!, loadId: l1.id, position: 1 } }], { runId: v3.runId });
-    expect(off.preview.overrides).toBeNull();
+    // D-16 (review F5): with the switch off a change on that truck still keeps what was allowed when it is the same
+    // and no worse (the solver is asked with the allowance), so the truck stays editable by hand; nothing new can be
+    // allowed (no "skip the break" either).
+    const same = await check(f, [{ kind: 'MOVE', from: { loadId: l1.id, sequence: 1 }, to: { truckId: f.trucks.T01!, loadId: l1.id, position: 1 } }], { runId: v3.runId, canOverride: false });
+    expect(fake.calls.at(-1)!.relax).toMatchObject({ late: true, seed_no_break: [] });
+    expect(fake.calls.at(-1)!.before_relax).toMatchObject({ late_stop_ids: [expect.any(String)] });
+    expect(same.preview.overrides).toMatchObject({ ok: true, canSave: true, saveNote: null, breakAlternative: [] });
+    expect(same.preview.overrides!.needed).toEqual([expect.objectContaining({ id, carried: expect.objectContaining({ reason: 'agreed with customer' }) })]);
+    // Worse (C4 a stop later): not carried, and it cannot be allowed with the switch off.
+    const t02v3 = await loadOf(f, 'T02', 1, v3.runId);
+    const worse = await check(f, [{ kind: 'MOVE', from: { loadId: t02v3.id, sequence: 1 }, to: { truckId: f.trucks.T01!, loadId: l1.id, position: 2 } }], { runId: v3.runId });
+    const w = worse.preview.overrides!.needed.find((n) => n.kind === 'LATE')!;
+    expect(w).toMatchObject({ carried: null, overridable: false, whyNot: 'Allowing rules by hand is switched off.' });
+    expect(worse.preview.overrides).toMatchObject({ canSave: false, saveNote: 'Allowing rules by hand is switched off.' });
+    expect(worse.preview.issues.filter((i) => i.overridable)).toEqual([]);
+    expect((await refusal(save(f, worse, f.supervisor, [{ id: w.id!, reason: 'agreed again' }], v3.runId))).code).toBe('OVERRIDES_OFF');
+    // The same-and-no-worse change saves (a planner: nothing new is confirmed).
+    const v4 = await save(f, same, f.planner, [], v3.runId);
+    expect(v4).toMatchObject({ allowed: 0, carried: 1 });
+    expect((await allowancesOf((await loadOf(f, 'T01', 1, v4.runId)).id))!.map((a) => [a.id, a.reason, a.byName])).toEqual([[id, 'agreed with customer', f.supervisor.name]]);
     delete process.env.PLAN_EDIT_OVERRIDES;
     // A RE-PLAN plans the Planned loads again with every rule: the allowance is gone with them.
-    const rp = await start.replan(f.tenantId, v3.runId, 'REOPTIMIZE', null, { id: f.admin.id }, null);
+    const rp = await start.replan(f.tenantId, v4.runId, 'REOPTIMIZE', null, { id: f.admin.id }, null);
     expect(rp.status).toBe(202);
-    const v4 = String(rp.body.runId);
-    expect((await jobsDone(v4)).status).toBe('READY');
-    for (const l of await loadsOf(v4)) expect((await allowancesOf(l.id))!.length).toBe(0);
+    const v5 = String(rp.body.runId);
+    expect((await jobsDone(v5)).status).toBe('READY');
+    for (const l of await loadsOf(v5)) expect((await allowancesOf(l.id))!.length).toBe(0);
   });
 
   it('D-13 an allowance changed between the check and the save: DAY_CHANGED, nothing written', async () => {

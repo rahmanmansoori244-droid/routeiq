@@ -13,6 +13,8 @@ import {
   EDIT_ERROR_TEXT,
   MAX_EDIT_OPS,
   OVERRIDE_CAPACITY_MAX_PCT,
+  OVERRIDE_REASON_MIN,
+  overrideReasonOk,
   positionChoices,
   signedOmr,
   type EditIssue,
@@ -111,12 +113,49 @@ export function opOfChoices(subject: EditSubject, truckId: string, choice: LoadC
   return before === undefined ? null : { kind: 'MOVE_STOPS', stops, to: { truckId, loadId: null, before } };
 }
 
-/** The issues a save confirms (not carried), and whether each is ticked with a reason (3 characters or more). */
+/** The issues a save confirms (not carried), and whether each is ticked with a reason (3 letters or digits or more). */
 export function overridesToSend(ov: OverridePreview | null, ticks: Record<string, boolean>, reasons: Record<string, string>): { complete: boolean; list: { id: string; reason: string }[]; toConfirm: number; carried: number } {
   const need = (ov?.needed ?? []).filter((n) => !n.carried && n.id);
   const list = need.filter((n) => ticks[n.id!]).map((n) => ({ id: n.id!, reason: (reasons[n.id!] ?? '').trim() }));
-  const complete = list.length === need.length && list.every((x) => x.reason.length >= 3);
+  const complete = list.length === need.length && list.every((x) => overrideReasonOk(x.reason));
   return { complete, list, toConfirm: need.length, carried: (ov?.needed ?? []).length - need.length };
+}
+
+/**
+ * The red list of a checked change (review F1). When it can be saved with rules allowed by hand: exactly the issues
+ * that would be allowed, with the figures that would be SAVED (the timetable with them allowed - a late arrival with
+ * the driver break before it, say), never the strict check's earliest timetable; otherwise the strict check's issues.
+ */
+export function redIssuesOf(preview: Pick<PlanEditPreview, 'issues' | 'overrides'>): { issues: EditIssue[]; asSaved: boolean } {
+  const ov = preview.overrides;
+  if (ov?.ok && ov.needed.length) return { issues: ov.needed, asSaved: true };
+  return { issues: preview.issues ?? [], asSaved: false };
+}
+
+/** The loads a change list kept so far names (stops taken from or put on, moved, swapped): the plan marks them (review F3). */
+export function draftLoadIds(ops: readonly PlanEditOp[]): Set<string> {
+  const out = new Set<string>();
+  const ref = (r: EditStopRef) => {
+    if ('loadId' in r) out.add(r.loadId);
+  };
+  for (const op of ops) {
+    if (op.kind === 'MOVE' || op.kind === 'REMOVE') ref(op.from);
+    if (op.kind === 'MOVE_STOPS' || op.kind === 'REMOVE_STOPS') op.stops.forEach(ref);
+    if (op.kind === 'MOVE' || op.kind === 'PLACE' || op.kind === 'MOVE_STOPS') {
+      if (op.to.loadId) out.add(op.to.loadId);
+      if (typeof op.to.before === 'string' && op.to.before !== 'BEST') out.add(op.to.before);
+      (op.to.order ?? []).forEach(ref);
+    }
+    if (op.kind === 'MOVE_LOAD') {
+      out.add(op.loadId);
+      if (typeof op.to.before === 'string' && op.to.before !== 'BEST') out.add(op.to.before);
+    }
+    if (op.kind === 'SWAP_LOADS') {
+      out.add(op.a);
+      out.add(op.b);
+    }
+  }
+  return out;
 }
 
 /**
@@ -294,7 +333,7 @@ export function MoveStopDialog({
         : subject.kind === 'STOPS'
           ? `Move ${stopsText(subject.refs.length)} (${subject.refs.reduce((a, r) => a + r.cases, 0)} cases)`
           : subject.kind === 'REMOVE_STOPS'
-            ? `Take ${stopsText(subject.refs.length)} off the plan`
+            ? `Take ${stopsText(subject.refs.filter((r) => 'loadId' in r.ref).length)} off the plan`
             : subject.kind === 'MOVE_LOAD'
               ? `Move ${loadWords(subject.load)} (${stopsText(subject.load.stops.length)}, ${subject.load.cases} cases)`
               : subject.kind === 'SWAP_LOADS'
@@ -310,7 +349,7 @@ export function MoveStopDialog({
       : `Save as version ${nextVersion} (keeps ${send.carried} rule${send.carried === 1 ? '' : 's'} allowed earlier)`
     : `Save as version ${nextVersion}`;
   const saveOn = withOverrides ? ov!.canSave && send.complete : !!preview?.canSave;
-  const note = withOverrides ? (ov!.saveNote ?? (send.complete ? null : 'Tick each rule to allow and give a reason (at least 3 characters).')) : (preview?.saveNote ?? null);
+  const note = withOverrides ? (ov!.saveNote ?? (send.complete ? null : `Tick each rule to allow and give a reason (at least ${OVERRIDE_REASON_MIN} letters or digits).`)) : (preview?.saveNote ?? null);
   const canDraft = !!preview?.draftable && !!onAddToDraft && preview.ops.length < MAX_EDIT_OPS;
 
   return (
@@ -347,6 +386,7 @@ export function MoveStopDialog({
             {subject.refs.map((r, i) => (
               <li key={i}>
                 {r.label} · {r.cases} cs · from {r.from}
+                {subject.kind === 'REMOVE_STOPS' && !('loadId' in r.ref) ? <span className="text-muted-foreground"> (unserved already: it stays unserved)</span> : null}
               </li>
             ))}
           </ul>
@@ -592,7 +632,9 @@ function IssueLine({ i }: { i: EditIssue }) {
   return (
     <li>
       {i.text}{' '}
-      {i.overridable ? (
+      {i.carried ? (
+        <span className="rounded bg-violet-100 px-1 text-[10px] font-semibold text-violet-800">Allowed earlier: kept</span>
+      ) : i.overridable ? (
         <span className="rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800">Can be allowed by hand</span>
       ) : (
         <span className="rounded bg-red-100 px-1 text-[10px] font-semibold text-red-800" title={i.whyNot ?? undefined}>
@@ -603,22 +645,24 @@ function IssueLine({ i }: { i: EditIssue }) {
   );
 }
 
-function PreviewPanel({ preview, onOption, busy }: { preview: PlanEditPreview; onOption: (m: PlanEditOp) => void; busy: boolean }) {
+/** The result of a Check (exported for its tests). */
+export function PreviewPanel({ preview, onOption, busy }: { preview: PlanEditPreview; onOption: (m: PlanEditOp) => void; busy: boolean }) {
   const broken = preview.trucks.flatMap((t) => t.violations.map((v) => ({ truck: t.truckCode, v })));
-  const issues = preview.issues ?? [];
+  const { issues, asSaved } = redIssuesOf(preview);
   return (
     <div className="space-y-3 rounded-md border p-3" data-testid="move-preview">
       <p className="text-sm font-medium">{preview.title}</p>
       {preview.ok ? (
         <p className="flex items-center gap-1 text-sm text-green-700" data-testid="move-ok">
           <CheckCircle2 className="h-4 w-4" /> Fits every rule.
-          {preview.deltaCostOmr !== null ? ` Day cost of these trucks ${signedOmr(preview.deltaCostOmr)} OMR.` : ''}
+          {preview.deltaCostOmr !== null && Math.abs(preview.deltaCostOmr) >= 0.005 ? ` Day cost of these trucks ${signedOmr(preview.deltaCostOmr)} OMR.` : ''}
         </p>
       ) : (
         <div className="text-sm text-red-700" data-testid="move-refused">
           <p className="flex items-center gap-1 font-medium">
             <AlertTriangle className="h-4 w-4" /> Cannot be moved{preview.overrides?.ok ? ' as it is - see what can be allowed by hand below' : ''}:
           </p>
+          {asSaved ? <p className="text-xs text-muted-foreground" data-testid="move-issues-as-saved">As it would be saved with them allowed by hand:</p> : null}
           <ul className="ml-5 list-disc">
             {issues.length
               ? issues.map((i, k) => <IssueLine key={k} i={i} />)
@@ -634,7 +678,7 @@ function PreviewPanel({ preview, onOption, busy }: { preview: PlanEditPreview; o
       )}
       {preview.overrides?.ok ? (
         <details className="text-xs">
-          <summary className="cursor-pointer text-muted-foreground">Timetable keeping every rule (as checked)</summary>
+          <summary className="cursor-pointer text-muted-foreground" data-testid="move-strict-timetable">Timetable as checked, without allowing anything (it breaks the rules above)</summary>
           <TruckDays trucks={preview.trucks} />
         </details>
       ) : (

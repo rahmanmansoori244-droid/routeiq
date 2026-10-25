@@ -15,7 +15,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Host, elements, textOf } from './hook-host';
+import { Host, elements, textOf, typeName } from './hook-host';
 import type { PlanEditPreview } from '@/lib/dispatch/plan-edit-view';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
@@ -293,10 +293,10 @@ describe('part 2: several stops, whole loads, the change list and allow by hand 
   });
 
   it('a PLANNER sees the panel but cannot save new allowances; only carried ones save for any role', async () => {
-    const d = await mountWith(allowable([issue('ovr_a')], { canSave: false, saveNote: 'Only a supervisor or company admin can allow rules by hand. Ask one to open this change.' }), false);
+    const d = await mountWith(allowable([issue('ovr_a')], { canSave: false, saveNote: 'Only a supervisor or company admin can allow rules by hand: ask one to make this change (it is not saved).' }), false);
     expect(d.panel()!.props.canOverride).toBe(false);
     expect(d.byId('move-save')!.props.disabled).toBe(true);
-    expect(textOf(d.byId('move-save-note'))).toBe('Only a supervisor or company admin can allow rules by hand. Ask one to open this change.');
+    expect(textOf(d.byId('move-save-note'))).toBe('Only a supervisor or company admin can allow rules by hand: ask one to make this change (it is not saved).');
     const carried = await mountWith(allowable([issue('ovr_a', { carried: { fromId: 'ovr_0', reason: 'agreed', byName: 'Ahmed', byRole: 'SUPERVISOR', at: '2026-10-24T17:40:00.000Z' } })]), false);
     expect(textOf(carried.byId('move-save'))).toBe('Save as version 4 (keeps 1 rule allowed earlier)');
     expect(carried.byId('move-save')!.props.disabled).toBe(false);
@@ -313,6 +313,43 @@ describe('part 2: several stops, whole loads, the change list and allow by hand 
     expect(no.byId('move-add-change')).toBeUndefined();
   });
 
+  it('F1: the red list shows the figures that would be saved (the allow box\'s), and the strict timetable is labelled as breaking the rules', async () => {
+    const { redIssuesOf } = await import('@/app/t/[slug]/dispatch/move-stop-dialog');
+    const strict = issue('ovr_a', { text: 'C15 on T02 L2 arrives 10:42, after its receiving hours 07:00–10:00: 42 min late', amount: { unit: 'min', value: 642, limit: 600, over: 42 } });
+    const saved = issue('ovr_a', { text: 'C15 on T02 L2 arrives 11:42, after its receiving hours 07:00–10:00: 102 min late', amount: { unit: 'min', value: 702, limit: 600, over: 102 } });
+    const p = allowable([saved], {}, { issues: [strict, issue('x', { id: null, code: 'NO_TIMETABLE', kind: null, overridable: false, text: 'No timetable' })] as never });
+    expect(redIssuesOf(p)).toEqual({ issues: [saved], asSaved: true });
+    // Nothing can be allowed: the strict issues as they are.
+    const refused = { ...p, overrides: { ...p.overrides!, ok: false, needed: [] } };
+    expect(redIssuesOf(refused).asSaved).toBe(false);
+    expect(redIssuesOf(refused).issues.map((i) => i.text)).toEqual([strict.text, 'No timetable']);
+    const { PreviewPanel } = await import('@/app/t/[slug]/dispatch/move-stop-dialog');
+    const tree = elements(PreviewPanel({ preview: p, onOption: () => undefined, busy: false }));
+    const lines = tree.filter((e) => typeName(e) === 'IssueLine').map((e) => e.props.i.text);
+    expect(lines).toEqual([saved.text]);
+    const byId = (id: string) => tree.find((e) => e.props?.['data-testid'] === id);
+    expect(textOf(byId('move-issues-as-saved'))).toBe('As it would be saved with them allowed by hand:');
+    expect(textOf(byId('move-strict-timetable'))).toBe('Timetable as checked, without allowing anything (it breaks the rules above)');
+  });
+
+  it('a reason needs 3 letters or digits (zero-width spaces or dots never pass); the change list marks the loads it names', async () => {
+    const { overridesToSend, draftLoadIds } = await import('@/app/t/[slug]/dispatch/move-stop-dialog');
+    const ov = allowable([issue('ovr_a')]).overrides;
+    const ticks = { ovr_a: true };
+    expect(overridesToSend(ov, ticks, { ovr_a: '​​​' }).complete).toBe(false);
+    expect(overridesToSend(ov, ticks, { ovr_a: '...' }).complete).toBe(false);
+    expect(overridesToSend(ov, ticks, { ovr_a: 'ok1' }).complete).toBe(true);
+    expect([
+      ...draftLoadIds([
+        { kind: 'MOVE_LOAD', loadId: 'A1', to: { truckId: 'T03', before: 'C1' } },
+        { kind: 'SWAP_LOADS', a: 'A2', b: 'B1' },
+        { kind: 'MOVE_STOPS', stops: [{ loadId: 'D1', sequence: 1 }, { orderId: 'o9' }], to: { truckId: 'T05', loadId: 'E1', order: [{ loadId: 'E1', sequence: 1 }] } },
+        { kind: 'REMOVE', from: { loadId: 'F1', sequence: 2 } },
+        { kind: 'PLACE', orderId: 'o8', to: { truckId: 'T06', loadId: null, before: 'BEST' } },
+      ]),
+    ].sort()).toEqual(['A1', 'A2', 'B1', 'C1', 'D1', 'E1', 'F1']);
+  });
+
   it('the plan screen: a tick per stop and per unserved customer, the selection bar, the load actions, the change list banner, allowances shown', () => {
     const src = readFileSync(path.resolve(__dirname, '../../app/t/[slug]/dispatch/plan-view.tsx'), 'utf8');
     expect(src).toMatch(/data-testid="stop-select"/);
@@ -324,5 +361,9 @@ describe('part 2: several stops, whole loads, the change list and allow by hand 
     expect(src).toMatch(/canOverride=\{canOverride\}/);
     expect(src).toMatch(/st\.handAllowed \? 'text-violet-700' : 'text-red-600'/);
     expect(src).toMatch(/allowances: allowancesOnPlannedText\(d\.allowedByHand\)/);
+    // Review F3 and F11: the loads the change list names are marked; the ticks say which stop; take-off gets the whole selection.
+    expect(src).toMatch(/data-testid=\{`load-in-draft-\$\{l\.truckCode\}-\$\{l\.loadNo\}`\}/);
+    expect(src).toMatch(/aria-label=\{`Select \$\{st\.customerName\}/);
+    expect(src).toMatch(/setMoveFor\(\{ kind: 'REMOVE_STOPS', refs: selected \}\)/);
   });
 });

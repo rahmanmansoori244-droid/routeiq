@@ -335,6 +335,12 @@ export interface TruckDayEdit {
   after: Map<string, string[][]>;
   /** The stored load each of `after`'s loads continues (null = a new load). */
   afterLoadIds: Map<string, (string | null)[]>;
+  /**
+   * The stored load each of `after`'s loads came from, wherever it is now (null = made by the list): what a later
+   * op, or a best place written out, names it by (review F3). Equal to afterLoadIds except for loads moved or
+   * swapped to another truck.
+   */
+  afterRefs?: Map<string, (string | null)[]>;
   /** Best place (only in the last operation): sent to the solver; its stops are in no `after` load then. */
   best: RetimeBest | null;
   /** The stops the change moves, puts on or takes off (the preview marks them). */
@@ -380,7 +386,12 @@ export interface ApplyContext {
   loadText?: (loadId: string) => string;
 }
 
-type Slot = { loadId: string | null; stops: string[] };
+/**
+ * A load of the working layout. `loadId`: the stored load it continues on its own truck (null = a new load);
+ * `ref`: the stored load it came from, wherever it is now (a load moved or swapped to another truck keeps its
+ * ref, so a later op of the list can still name it: review F3).
+ */
+type Slot = { loadId: string | null; ref: string | null; stops: string[] };
 type BestMark =
   | { kind: 'LOAD'; truckId: string; slot: Slot; stops: string[] }
   | { kind: 'NEW'; truckId: string; stops: string[] }
@@ -406,9 +417,12 @@ const samePerm = (a: readonly string[], b: readonly string[]) => a.length === b.
 export function applyOps(ops: readonly PlanEditOp[], planned: ReadonlyMap<string, readonly PlannedDayLoad[]>, ctx: ApplyContext): { ok: true; edit: TruckDayEdit } | EditRefusal {
   const work = new Map<string, Slot[]>();
   const listOf = (truckId: string) => {
-    if (!work.has(truckId)) work.set(truckId, (planned.get(truckId) ?? []).map((l) => ({ loadId: l.loadId, stops: [...l.stops] })));
+    if (!work.has(truckId)) work.set(truckId, (planned.get(truckId) ?? []).map((l) => ({ loadId: l.loadId, ref: l.loadId, stops: [...l.stops] })));
     return work.get(truckId)!;
   };
+  // The truck each stored load is on before the list (a load named with its stored truck after an earlier op moved it).
+  const homeOf = new Map<string, string>();
+  for (const [t, list] of planned) for (const l of list) homeOf.set(l.loadId, t);
   for (const t of planned.keys()) listOf(t);
   const initial = new Set([...planned.values()].flat().flatMap((l) => l.stops));
   const edited: string[] = [];
@@ -428,14 +442,26 @@ export function applyOps(ops: readonly PlanEditOp[], planned: ReadonlyMap<string
     }
     return null;
   };
+  // A load named by an op: wherever it is now (its id on its own truck, or its ref after a move or swap).
   const findLoad = (loadId: string) => {
     for (const [t, list] of work) {
-      const i = list.findIndex((s) => s.loadId === loadId);
+      const i = list.findIndex((s) => s.loadId === loadId || s.ref === loadId);
       if (i >= 0) return { t, list, i, slot: list[i]! };
     }
     return null;
   };
   const gone = (loadId: string) => refusal(422, 'UNKNOWN_LOAD', `${text(loadId)} has no stop left after the change before it.`);
+  /**
+   * A load named as a target on truck `truckId` (stops into it, or a new load before it): found where it is now -
+   * on that truck, or moved away from it by an earlier op (it is named with its stored truck: then where it went).
+   */
+  const locate = (loadId: string, truckId: string): { t: string; list: Slot[]; i: number; slot: Slot } | EditRefusal => {
+    const at = findLoad(loadId);
+    if (!at) return gone(loadId);
+    if (at.t !== truckId && homeOf.get(loadId) !== truckId) return refusal(422, 'UNKNOWN_LOAD', `${text(loadId)} is not on that truck: check the change again.`);
+    return at;
+  };
+  const isRefusal = (x: unknown): x is EditRefusal => !!x && typeof x === 'object' && (x as { ok?: unknown }).ok === false;
   const resolveAll = (refs: readonly EditStopRef[]): string[] | EditRefusal => {
     const ids: string[] = [];
     for (const ref of refs) {
@@ -470,11 +496,12 @@ export function applyOps(ops: readonly PlanEditOp[], planned: ReadonlyMap<string
         if (!initial.has(id) && !placed.includes(id)) placed.push(id);
       }
       const t = op.to;
-      touch(t.truckId);
-      const list = listOf(t.truckId);
       if (t.loadId) {
-        const slot = list.find((s) => s.loadId === t.loadId);
-        if (!slot) return gone(t.loadId);
+        // The target load where it is now (an earlier op of the list may have moved it to another truck).
+        const found = locate(t.loadId, t.truckId);
+        if (isRefusal(found)) return found;
+        const { slot, list } = found;
+        touch(found.t);
         if (t.order) {
           const want = resolveAll(t.order);
           if (!Array.isArray(want)) return want;
@@ -490,28 +517,38 @@ export function applyOps(ops: readonly PlanEditOp[], planned: ReadonlyMap<string
           if (!slot.stops.length && ids.length === 1) return refusal(409, 'NO_CHANGE', 'Nothing changes: the stop is already there.');
           if (!slot.stops.length) {
             // Every stop of the load moves into it again: the load made again at its place, in the best order.
-            best = { kind: 'NEW_AT', truckId: t.truckId, list, at: list.indexOf(slot), stops: ids };
-          } else best = { kind: 'LOAD', truckId: t.truckId, slot, stops: ids };
+            best = { kind: 'NEW_AT', truckId: found.t, list, at: list.indexOf(slot), stops: ids };
+          } else best = { kind: 'LOAD', truckId: found.t, slot, stops: ids };
         }
-      } else if (t.order) {
-        if (t.before === 'BEST') return refusal(422, 'BAD_ORDER', 'A new load in a given order needs a place: choose where it goes.');
-        const want = resolveAll(t.order);
-        if (!Array.isArray(want)) return want;
-        if (want.length !== t.order.length || !samePerm(want, ids)) return refusal(422, 'BAD_ORDER', 'The order given for the new load does not list exactly the stops moved: check the change again.');
-        const at = t.before ? list.findIndex((s) => s.loadId === t.before) : list.length;
-        if (at < 0) return gone(t.before as string);
-        list.splice(at, 0, { loadId: null, stops: want });
       } else if (t.before === 'BEST') {
+        if (t.order) return refusal(422, 'BAD_ORDER', 'A new load in a given order needs a place: choose where it goes.');
         if (!last) return refusal(422, 'BEST_NOT_LAST', 'Only the last change can use Best place: check the earlier ones first.');
+        touch(t.truckId);
+        listOf(t.truckId);
         best = { kind: 'NEW', truckId: t.truckId, stops: ids };
       } else {
-        const at = t.before ? list.findIndex((s) => s.loadId === t.before) : list.length;
-        if (at < 0) return gone(t.before as string);
-        if (ids.length === 1) list.splice(at, 0, { loadId: null, stops: [ids[0]!] });
+        // A new load before a load (where that load is now) or after the truck's last load.
+        let truck = t.truckId;
+        let list = listOf(truck);
+        let at = list.length;
+        if (t.before) {
+          const found = locate(t.before, t.truckId);
+          if (isRefusal(found)) return found;
+          truck = found.t;
+          list = found.list;
+          at = found.i;
+        }
+        touch(truck);
+        if (t.order) {
+          const want = resolveAll(t.order);
+          if (!Array.isArray(want)) return want;
+          if (want.length !== t.order.length || !samePerm(want, ids)) return refusal(422, 'BAD_ORDER', 'The order given for the new load does not list exactly the stops moved: check the change again.');
+          list.splice(at, 0, { loadId: null, ref: null, stops: want });
+        } else if (ids.length === 1) list.splice(at, 0, { loadId: null, ref: null, stops: [ids[0]!] });
         else {
           // Several stops as a new load at a given place: the solver orders them (best order inside).
           if (!last) return refusal(422, 'BEST_NOT_LAST', 'Only the last change can use Best place: check the earlier ones first.');
-          best = { kind: 'NEW_AT', truckId: t.truckId, list, at, stops: ids };
+          best = { kind: 'NEW_AT', truckId: truck, list, at, stops: ids };
         }
       }
     } else if (op.kind === 'REMOVE_STOPS') {
@@ -535,17 +572,26 @@ export function applyOps(ops: readonly PlanEditOp[], planned: ReadonlyMap<string
       const at = findLoad(op.loadId);
       if (!at) return gone(op.loadId);
       if (op.to.before === op.loadId) return refusal(409, 'NO_CHANGE', `Nothing changes: ${text(op.loadId)} cannot go before itself.`);
+      // Where it goes: before a load (where that load is now) or after the last load of the truck, or BEST.
+      let truck = op.to.truckId;
+      if (op.to.before && op.to.before !== 'BEST') {
+        const where = locate(op.to.before, op.to.truckId);
+        if (isRefusal(where)) return where;
+        truck = where.t;
+      }
       at.list.splice(at.i, 1);
       touch(at.t);
-      touch(op.to.truckId);
+      touch(truck);
       for (const id of at.slot.stops) moved.add(id);
-      const list = listOf(op.to.truckId);
-      const slot: Slot = { loadId: at.t === op.to.truckId ? op.loadId : null, stops: at.slot.stops };
+      const list = listOf(truck);
+      // On its own stored truck it continues its stored load (a reorder); elsewhere it is a new load that keeps its ref.
+      const home = homeOf.get(op.loadId) === truck;
+      const slot: Slot = { loadId: home ? op.loadId : null, ref: op.loadId, stops: at.slot.stops };
       if (op.to.before === 'BEST') {
         if (!last) return refusal(422, 'BEST_NOT_LAST', 'Only the last change can use Best place: check the earlier ones first.');
-        best = slot.stops.length === 1 ? { kind: 'NEW', truckId: op.to.truckId, stops: slot.stops } : { kind: 'LOAD_KEEP', truckId: op.to.truckId, stops: slot.stops };
+        best = slot.stops.length === 1 ? { kind: 'NEW', truckId: truck, stops: slot.stops } : { kind: 'LOAD_KEEP', truckId: truck, stops: slot.stops };
       } else {
-        const i = op.to.before ? list.findIndex((s) => s.loadId === op.to.before) : list.length;
+        const i = op.to.before ? list.findIndex((s) => s.loadId === op.to.before || s.ref === op.to.before) : list.length;
         if (i < 0) return gone(op.to.before as string);
         list.splice(i, 0, slot);
       }
@@ -555,16 +601,16 @@ export function applyOps(ops: readonly PlanEditOp[], planned: ReadonlyMap<string
       if (!a) return gone(op.a);
       const b = findLoad(op.b);
       if (!b) return gone(op.b);
+      if (a.slot === b.slot) return refusal(422, 'SAME_LOAD', 'Choose another load to swap with.');
       touch(a.t);
       touch(b.t);
       for (const id of [...a.slot.stops, ...b.slot.stops]) moved.add(id);
-      if (a.t === b.t) {
-        a.list[a.i] = b.slot;
-        a.list[b.i] = a.slot;
-      } else {
-        a.list[a.i] = { loadId: null, stops: b.slot.stops };
-        b.list[b.i] = { loadId: null, stops: a.slot.stops };
-      }
+      // Each load takes the other's place; it continues its stored load only when that place is on its own stored truck.
+      const into = (x: Slot, t: string): Slot => ({ loadId: x.ref && homeOf.get(x.ref) === t ? x.ref : null, ref: x.ref, stops: x.stops });
+      const sa = a.slot;
+      const sb = b.slot;
+      a.list[a.i] = into(sb, a.t);
+      b.list[b.i] = into(sa, b.t);
     }
     // A NEW_AT best counts its place among the loads that stay (dropped ones before it move it up).
     if (best && best.kind === 'NEW_AT' && last) best = { ...best, at: best.list.slice(0, best.at).filter((s) => s.stops.length > 0).length };
@@ -577,11 +623,13 @@ export function applyOps(ops: readonly PlanEditOp[], planned: ReadonlyMap<string
   const before = new Map<string, string[][]>();
   const after = new Map<string, string[][]>();
   const afterLoadIds = new Map<string, (string | null)[]>();
+  const afterRefs = new Map<string, (string | null)[]>();
   for (const truck of edited) {
     const kept = listOf(truck);
     before.set(truck, (planned.get(truck) ?? []).map((l) => [...l.stops]));
     after.set(truck, kept.map((l) => [...l.stops]));
     afterLoadIds.set(truck, kept.map((l) => l.loadId));
+    afterRefs.set(truck, kept.map((l) => l.loadId ?? l.ref));
   }
   let retimeBest: RetimeBest | null = null;
   if (best) {
@@ -601,7 +649,7 @@ export function applyOps(ops: readonly PlanEditOp[], planned: ReadonlyMap<string
   if (!retimeBest && edited.every((t) => JSON.stringify(before.get(t)) === JSON.stringify(after.get(t)))) {
     return refusal(409, 'NO_CHANGE', ops.length === 1 && isV1Op(ops[0]!) ? 'Nothing changes: the stop is already there.' : 'Nothing changes: every load is already as asked.');
   }
-  return { ok: true, edit: { edited, before, after, afterLoadIds, best: retimeBest, movedStops: moved, removedStops: removed, placedStops: placed } };
+  return { ok: true, edit: { edited, before, after, afterLoadIds, afterRefs, best: retimeBest, movedStops: moved, removedStops: removed, placedStops: placed } };
 }
 
 /**
@@ -813,7 +861,16 @@ export interface JudgeContext {
   relaxedPresent: boolean;
 }
 
-const pctOver = (figure: number, capacity: number) => (capacity > 0 ? Math.round((figure / capacity - 1) * 100) : 0);
+/**
+ * How far over the truck's own capacity, in %: whole numbers, except above the cap, where it is rounded UP to one
+ * decimal so it never reads as the cap itself ("20.3%", never "20%" for 285 cases on a 237-case truck: review F4).
+ */
+export function pctOver(figure: number, capacity: number): number {
+  if (!(capacity > 0)) return 0;
+  const pct = (figure / capacity - 1) * 100;
+  if (figure > overrideCapUnits(capacity) && Math.round(pct) <= OVERRIDE_CAPACITY_MAX_PCT) return Math.ceil(pct * 10 - 1e-9) / 10;
+  return Math.round(pct);
+}
 
 /**
  * One solver violation as an issue (design 3.7, one function for Check and Save): its kind, whether it can be
@@ -909,10 +966,18 @@ export function judgeIssue(v: FeasibilityViolation, c: JudgeContext): JudgedIssu
       amount = { unit: 'kg', value: kg, limit: limit ?? capacityUnits / 10, over: Math.round((kg - (limit ?? capacityUnits / 10)) * 10) / 10, capacity: capacityUnits / 10, overPct: pctOver(figure, capacityUnits) };
       capacityWords = `the truck's payload of ${(capacityUnits / 10).toLocaleString('en-US')} kg`;
     }
-    const withinCap = capacityUnits > 0 && figure <= overrideCapUnits(capacityUnits);
+    const capUnits = overrideCapUnits(capacityUnits);
+    const withinCap = capacityUnits > 0 && figure <= capUnits;
     const overridable = v.overridable === true && agree && withinCap;
     const solverFigure = typeof v.value === 'number' ? v.value : null;
     const unitWord = kind === 'CAPACITY_PALLETS' ? 'pallets' : kind === 'CAPACITY_CASES' ? 'cases' : 'kg';
+    // The most that can be allowed on this truck, in the issue's unit (review F4: the limit, not only a %).
+    const capText =
+      kind === 'CAPACITY_PALLETS'
+        ? `${(Math.floor(capUnits / 100) / 10).toLocaleString('en-US', { maximumFractionDigits: 1 })} pallets`
+        : kind === 'CAPACITY_CASES'
+          ? `${capUnits.toLocaleString('en-US')} cases`
+          : `${(capUnits / 10).toLocaleString('en-US', { maximumFractionDigits: 1 })} kg`;
     const whyNot = overridable
       ? null
       : !agree && solverFigure !== null
@@ -920,7 +985,9 @@ export function judgeIssue(v: FeasibilityViolation, c: JudgeContext): JudgedIssu
         : !agree
           ? notJudged
           : !withinCap
-            ? `${amount.overPct}% over ${capacityWords}: more than the ${OVERRIDE_CAPACITY_MAX_PCT}% that can be allowed by hand.`
+            ? capacityUnits > 0
+              ? `${amount.overPct}% over ${capacityWords}: at most ${capText} (${OVERRIDE_CAPACITY_MAX_PCT}% over) can be allowed by hand on this truck.`
+              : `The truck has no ${kind === 'CAPACITY_KG' ? 'payload' : unitWord} capacity set: it cannot be allowed by hand.`
             : v.overridable === false
               ? WHY_NOT_TEXT.DEFAULT
               : notJudged;
@@ -982,8 +1049,9 @@ const maxOf = (a: HandAllowance) => (a.kind === 'LATE' ? (a.maxLateMin ?? 0) : (
  * Carrying allowances forward (design 3.8, D6): a needed issue is carried - kept without asking, with no role -
  * when one stored allowance of the same truck covers it: LATE the same rule, the same rows, the same hours today
  * and no more minutes late than approved; CAPACITY_* the same kind, the load's rows a subset, the figure no more
- * than approved and the truck's capacity unchanged; NO_BREAK any NO_BREAK of the truck-day under today's break
- * rule. Several: the largest maximum, then the latest. Otherwise a same-kind allowance on the same stop / rows /
+ * than approved and the truck's capacity unchanged; NO_BREAK a NO_BREAK on one of the truck's PLANNED loads under
+ * today's break rule (one on a locked or later load is only `previous`: review RA-3). Several: the largest
+ * maximum, then the latest. Otherwise a same-kind allowance on the same stop / rows /
  * truck is `previous` (its reason pre-fills the input; the issue needs approval).
  */
 export function carryIssues(needed: readonly JudgedIssue[], stored: readonly StoredAllowance[], config: Pick<DispatchRequest['config'], 'break_min' | 'break_start_from_min' | 'break_start_to_min'>): JudgedIssue[] {
@@ -1006,8 +1074,11 @@ export function carryIssues(needed: readonly JudgedIssue[], stored: readonly Sto
           issue.amount.over <= (a.maxLateMin ?? 0),
       );
     } else if (issue.kind === 'NO_BREAK') {
+      // Carried only from the truck's PLANNED loads (the loads being made again): one stored on a locked or
+      // later load pre-fills the reason but needs a supervisor again (review RA-3).
+      const onPlanned = stored.filter((s) => s.truckId === issue.truckId && s.allowance.kind === 'NO_BREAK' && s.status === 'PLANNED').map((s) => s.allowance);
       previous = mine;
-      covers = mine.filter((a) => a.breakMin === (config.break_min ?? undefined) && a.breakFromMin === (config.break_start_from_min ?? undefined) && a.breakToMin === (config.break_start_to_min ?? undefined));
+      covers = onPlanned.filter((a) => a.breakMin === (config.break_min ?? undefined) && a.breakFromMin === (config.break_start_from_min ?? undefined) && a.breakToMin === (config.break_start_to_min ?? undefined));
     } else {
       previous = mine.filter((a) => a.rowKeys.some((k) => keys.has(k)));
       covers = mine.filter((a) => subset(a) && !!issue.amount && issue.amount.value <= (a.maxValue ?? -1) + 1e-9 && a.capacity === issue.amount.capacity);
@@ -1716,10 +1787,9 @@ export async function checkPlanEdit(
 
   // 1. Every load an op names: of this version, PLANNED, of the target truck, the stop on it.
   const named = namedLoadsOf(asked);
-  for (const x of named) {
-    const l = loadById.get(x.id);
-    if (!l || (x.truckId !== undefined && l.truckId !== x.truckId)) throw refuse(422, 'UNKNOWN_LOAD', 'Unknown load: reload the plan.');
-  }
+  // A target named with another truck than its own is checked by applyOps (it may have been moved there by an
+  // earlier op of the list: review F3); every load named must be of this version.
+  for (const x of named) if (!loadById.get(x.id)) throw refuse(422, 'UNKNOWN_LOAD', 'Unknown load: reload the plan.');
   for (const x of named.filter((n) => !n.onto)) if (loadById.get(x.id)!.status !== 'PLANNED') throw frozenRefusal(loadById.get(x.id)!, false);
   for (const x of named) {
     const l = loadById.get(x.id)!;
@@ -1844,10 +1914,13 @@ export async function checkPlanEdit(
     throw refuse(409, 'TOO_MANY_STOPS', `This change re-times ${count} stops on ${edited.map((t) => truckCodes.get(t) ?? t).join(', ')}; a check takes at most ${RETIME_MAX_STOPS}. RE-PLAN the day instead.`);
   }
 
-  // 7. The allowances by hand the edited trucks carry now, and the times of `before` with them.
+  // 7. The allowances by hand the edited trucks carry now, and the times of `before` with them. With the switch
+  // off the solver is still asked when the edited trucks carry allowances, so what was allowed before is kept
+  // (carried) and their current loads are timed with it - nothing new can be allowed (review F5).
   const stored = storedAllowancesOf(loads, editedSet);
-  const skipBreak = [...new Set(input.skipBreak ?? [])].filter((t) => editedSet.has(t));
-  const beforeRelax = overridesOn ? beforeRelaxOf(stored, planStops, stopOf) : null;
+  const relaxAsked = overridesOn || stored.length > 0;
+  const skipBreak = overridesOn ? [...new Set(input.skipBreak ?? [])].filter((t) => editedSet.has(t)) : [];
+  const beforeRelax = relaxAsked ? beforeRelaxOf(stored, planStops, stopOf) : null;
 
   // 8-9. The solver.
   const body: RetimeRequest = {
@@ -1855,7 +1928,7 @@ export async function checkPlanEdit(
     truck_days: edited.map((t) => ({ truck_id: t, loads: edit.after.get(t)! })),
     before: edited.map((t) => ({ truck_id: t, loads: edit.before.get(t)! })),
     ...(edit.best ? { best: edit.best } : {}),
-    ...(overridesOn ? { relax: { late: true, capacity_factor: 1 + OVERRIDE_CAPACITY_MAX_PCT / 100, no_break: true, seed_no_break: skipBreak } } : {}),
+    ...(relaxAsked ? { relax: { late: true, capacity_factor: 1 + OVERRIDE_CAPACITY_MAX_PCT / 100, no_break: true, seed_no_break: skipBreak } } : {}),
     ...(beforeRelax ? { before_relax: beforeRelax } : {}),
   };
   const reply = await callRetimeTruckDays(body);
@@ -1886,7 +1959,7 @@ export async function checkPlanEdit(
     const S = fromRelaxed ? relaxed!.loads.find((d) => d.truck_id === bt)?.loads : option0 ? option0.loads : v2 ? answer.loads?.find((d) => d.truck_id === bt)?.loads : undefined;
     if (S) {
       const place = resolveLayout(edit.after.get(bt) ?? [], S, bestStops);
-      const rewritten = place ? rewriteBest(lastAsked, place, { truckId: bt, wIds: edit.afterLoadIds.get(bt) ?? [], S, bestStops, refOf: (id) => refOfStop.get(id)! }) : 'MISMATCH';
+      const rewritten = place ? rewriteBest(lastAsked, place, { truckId: bt, wIds: (edit.afterRefs ?? edit.afterLoadIds).get(bt) ?? [], S, bestStops, refOf: (id) => refOfStop.get(id)! }) : 'MISMATCH';
       if (rewritten === 'NO_EXPLICIT_PLACE') throw refuse(409, 'NO_EXPLICIT_PLACE', 'Choose where the new load goes: its best place is before a load made by an earlier step of this change.');
       if (rewritten === 'MISMATCH') {
         console.error('plan edit: the best place does not resolve to its loads', { runId, truckId: bt, loads: S });
@@ -1945,10 +2018,13 @@ export async function checkPlanEdit(
   const movedKeys = new Set([...edit.movedStops].map((id) => planStopById.get(id)).filter((p): p is PlanStop => !!p).map((p) => stopKeyOf(p.loadId, p.sequence)));
   let ov: EditCheck['overrides'] = null;
   let overrides: OverridePreview | null = null;
-  if (overridesOn && !answer.ok && v2) {
+  if (relaxAsked && !answer.ok && v2) {
     if (relaxed) {
       const rctx = { ...judgeCtx, loadStops: layoutOf(relaxed.loads) };
-      const needed = carryIssues(dedupeIssues(relaxed.trucks.flatMap((t) => t.allowed ?? []).map((v) => judgeIssue(v, rctx))), stored, built.request.config);
+      // With the switch off only what is carried from an earlier approval can be kept: anything new cannot.
+      const needed = carryIssues(dedupeIssues(relaxed.trucks.flatMap((t) => t.allowed ?? []).map((v) => judgeIssue(v, rctx))), stored, built.request.config).map((n) =>
+        overridesOn || n.carried ? n : { ...n, overridable: false, whyNot: WHY_NOT_TEXT.OVERRIDES_OFF },
+      );
       const remaining = dedupeIssues(relaxed.trucks.flatMap((t) => t.violations).map((v) => judgeIssue(v, rctx)));
       const carried = needed.filter((n) => n.carried && n.id).map((n): [string, string] => [n.id!, n.carried!.fromId]);
       const ok = relaxed.ok && remaining.length === 0 && needed.length > 0;
@@ -1966,7 +2042,7 @@ export async function checkPlanEdit(
             : mode !== 'ON'
               ? EDIT_ERROR_TEXT.CHECK_ONLY
               : !input.canOverride && needsRole
-                ? 'Only a supervisor or company admin can allow rules by hand. Ask one to open this change.'
+                ? EDIT_ERROR_TEXT.ASK_APPROVER
                 : null;
       const lateAllowed = new Set(relaxed.relaxations.late_stop_ids ?? []);
       const neededTrucks = new Set(needed.filter((n) => n.kind === 'LATE').map((n) => n.truckId));
@@ -1983,13 +2059,16 @@ export async function checkPlanEdit(
         deltaCostOmr: relaxed.delta_money_omr ?? null,
         deltaKm: relaxed.delta_km ?? null,
         skipBreak,
-        breakAlternative: [
-          ...(relaxed.break_alternative ?? []).map((t) => ({ truckId: t, truckCode: truckCodes.get(t) ?? t, only: true })),
-          ...edited.filter((t) => neededTrucks.has(t) && breakDue.has(t) && !skipBreak.includes(t) && !(relaxed.break_alternative ?? []).includes(t)).map((t) => ({ truckId: t, truckCode: truckCodes.get(t) ?? t, only: false })),
-        ],
+        // Skipping a driver break is a new allowance: never offered with the switch off.
+        breakAlternative: !overridesOn
+          ? []
+          : [
+              ...(relaxed.break_alternative ?? []).map((t) => ({ truckId: t, truckCode: truckCodes.get(t) ?? t, only: true })),
+              ...edited.filter((t) => neededTrucks.has(t) && breakDue.has(t) && !skipBreak.includes(t) && !(relaxed.break_alternative ?? []).includes(t)).map((t) => ({ truckId: t, truckCode: truckCodes.get(t) ?? t, only: false })),
+            ],
       };
       ov = { needed, remaining, carried };
-    } else if (issues.some((i) => i.overridable)) {
+    } else if (overridesOn && issues.some((i) => i.overridable)) {
       const outOfTime = (answer.warnings ?? []).some((w) => /Out of time while checking what can be allowed by hand/i.test(w));
       overrides = {
         ok: false,
@@ -2036,7 +2115,8 @@ export async function checkPlanEdit(
     stopOf,
     hash,
     builtAt,
-    issues: issues.map(issueView),
+    // With the switch off an issue can be allowed only when an earlier approval is kept for it (review F5).
+    issues: (overridesOn ? issues : issues.map((i) => (i.overridable && !(i.id && ov?.carried.some(([id]) => id === i.id)) ? { ...i, overridable: false, whyNot: WHY_NOT_TEXT.OVERRIDES_OFF } : i))).map(issueView),
     overrides,
     draftable: !edit.best,
     extraWarnings,
@@ -2128,7 +2208,7 @@ function loadOptionsOf(x: {
     if (JSON.stringify(o.loads) === JSON.stringify(x.askedEdit.before.get(o.truck_id))) continue;
     const place = resolveLayout(x.askedEdit.after.get(o.truck_id) ?? [], o.loads, bestStops);
     if (!place) continue;
-    const op = rewriteBest(x.asked, place, { truckId: o.truck_id, wIds: x.askedEdit.afterLoadIds.get(o.truck_id) ?? [], S: o.loads, bestStops, refOf: x.refOf });
+    const op = rewriteBest(x.asked, place, { truckId: o.truck_id, wIds: (x.askedEdit.afterRefs ?? x.askedEdit.afterLoadIds).get(o.truck_id) ?? [], S: o.loads, bestStops, refOf: x.refOf });
     if (op === 'NO_EXPLICIT_PLACE' || op === 'MISMATCH') continue;
     const others = x.answer.trucks.filter((t) => t.truck_id !== o.truck_id);
     const beforeAll = x.answer.trucks.map((t) => t.before?.money_omr);
@@ -2143,20 +2223,32 @@ function loadOptionsOf(x: {
   return out;
 }
 
+/**
+ * A load named on truck `code` in words: "L2" on its own truck, "T01 L2 (moved to T03)" when an earlier op of the
+ * list moved it there (review F3).
+ */
+function loadOnText(id: string, truckId: string, loads: ReadonlyMap<string, EditLoad>, code: string): string {
+  const l = loads.get(id);
+  if (!l) return 'L?';
+  return l.truckId === truckId ? `L${l.loadNo}` : `${loadText(l)} (moved to ${code})`;
+}
+
 function newLoadPlaceText(op: PlanEditOp, loads: ReadonlyMap<string, EditLoad>, code: string): string {
   const before = op.kind === 'MOVE_LOAD' ? op.to.before : op.kind !== 'REMOVE' && op.kind !== 'REMOVE_STOPS' && op.kind !== 'SWAP_LOADS' ? op.to.before : null;
+  const truckId = op.kind === 'MOVE_LOAD' || (op.kind !== 'REMOVE' && op.kind !== 'REMOVE_STOPS' && op.kind !== 'SWAP_LOADS') ? op.to.truckId : '';
   if (before === 'BEST') return `${code}, a new load (best place in its day)`;
-  return before ? `${code}, a new load before L${loads.get(before)?.loadNo ?? '?'}` : `${code}, a new load after its last load`;
+  return before ? `${code}, a new load before ${loadOnText(before, truckId, loads, code)}` : `${code}, a new load after its last load`;
 }
 
 /** The target in words: "T08 L1, stop 4", "T08, a new load before L2". */
 function targetText(t: EditTarget, loads: ReadonlyMap<string, EditLoad>, code: string): string {
   if (t.loadId) {
     const l = loads.get(t.loadId);
-    return `${code} L${l?.loadNo ?? '?'}${t.order ? '' : typeof t.position === 'number' ? `, stop ${t.position + 1}` : ' (best place)'}`;
+    const name = l && l.truckId !== t.truckId ? loadOnText(t.loadId, t.truckId, loads, code) : `${code} L${l?.loadNo ?? '?'}`;
+    return `${name}${t.order ? '' : typeof t.position === 'number' ? `, stop ${t.position + 1}` : ' (best place)'}`;
   }
   if (t.before === 'BEST') return `${code}, a new load (best place in its day)`;
-  return t.before ? `${code}, a new load before L${loads.get(t.before)?.loadNo ?? '?'}` : `${code}, a new load after its last load`;
+  return t.before ? `${code}, a new load before ${loadOnText(t.before, t.truckId, loads, code)}` : `${code}, a new load after its last load`;
 }
 
 /** One op in words ("Swap T03 L2 and T08 L1", "Move 3 stops to T05 L1 (best place)"); a list is joined with "; ". */
@@ -2182,7 +2274,7 @@ export function opTitle(op: PlanEditOp, c: { loads: ReadonlyMap<string, EditLoad
       return op.stops.length === 1 ? `Take ${c.nameOf(op.stops[0]!)} off the plan (from ${from(op.stops[0]!)})` : `Take ${op.stops.length} stops off the plan`;
     case 'MOVE_LOAD': {
       const code = c.code(op.to.truckId);
-      const where = op.to.before === 'BEST' ? `${code} (best place in its day)` : op.to.before ? `${code}, before L${c.loads.get(op.to.before)?.loadNo ?? '?'}` : `${code}, after its last load`;
+      const where = op.to.before === 'BEST' ? `${code} (best place in its day)` : op.to.before ? `${code}, before ${loadOnText(op.to.before, op.to.truckId, c.loads, code)}` : `${code}, after its last load`;
       return `Move ${loadWords(op.loadId)} to ${where}`;
     }
     case 'SWAP_LOADS':

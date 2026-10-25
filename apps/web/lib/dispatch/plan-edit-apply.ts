@@ -73,7 +73,17 @@ import {
   type JudgedIssue,
   type ManualEdit,
 } from './plan-edit';
-import { EDIT_ERROR_TEXT, planEditOverridesOn, type PlanEditMove, type PlanEditOp, type PlanEditSaved } from './plan-edit-view';
+import {
+  allowedCountText,
+  cleanOverrideReason,
+  EDIT_ERROR_TEXT,
+  OVERRIDE_REASON_MIN,
+  overrideReasonOk,
+  planEditOverridesOn,
+  type PlanEditMove,
+  type PlanEditOp,
+  type PlanEditSaved,
+} from './plan-edit-view';
 import type { ExpectedDay } from './start-optimize';
 import { PlanError } from './plan-errors';
 
@@ -94,10 +104,12 @@ class EditCheckFailed extends PlanError {
   }
 }
 
-/** A reason typed by hand: trimmed, control characters out (it is printed on the sheets and sent on WhatsApp). */
+/**
+ * A reason typed by hand: trimmed, control and Unicode format characters out (zero-width, bidi: review RA-2), as
+ * it is printed on the sheets and sent on WhatsApp (plan-edit-view.ts cleanOverrideReason).
+ */
 export function cleanReason(raw: string): string {
-  // eslint-disable-next-line no-control-regex
-  return raw.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleanOverrideReason(raw);
 }
 
 const APPROVER_ROLES = ['SUPERVISOR', 'TENANT_ADMIN', 'SUPER_ADMIN'] as const;
@@ -149,10 +161,14 @@ export async function savePlanEdit(
   const role = (user.role ?? null) as Role | null;
   const canOverride = !!role && canApproveOverride(role);
   const confirmed = new Map((input.overrides ?? []).map((o) => [o.id, cleanReason(o.reason)]));
+  const overridesOn = planEditOverridesOn();
   if (withOverrides) {
-    if (!planEditOverridesOn()) throw refuse(409, 'OVERRIDES_OFF', EDIT_ERROR_TEXT.OVERRIDES_OFF);
+    // Switched off: nothing new can be allowed; a save that only keeps earlier approvals (none confirmed) still can (review F5).
+    if (!overridesOn && confirmed.size > 0) throw refuse(409, 'OVERRIDES_OFF', EDIT_ERROR_TEXT.OVERRIDES_OFF);
     if (confirmed.size > 0 && !canOverride) throw refuse(403, 'OVERRIDE_ROLE', EDIT_ERROR_TEXT.OVERRIDE_ROLE);
-    for (const [id, reason] of confirmed) if (reason.length < 3) throw refuse(422, 'BAD_REASON', `The reason for ${id} is too short: say why it is allowed.`);
+    for (const [id, reason] of confirmed) {
+      if (!overrideReasonOk(reason)) throw refuse(422, 'BAD_REASON', `The reason for ${id} is too short: say why it is allowed (at least ${OVERRIDE_REASON_MIN} letters or digits).`);
+    }
   }
   const check = await checkPlanEdit(tenantId, runId, { move: input.move, ops: input.ops, skipBreak: input.skipBreak, expect: input.expect, now: builtAt, mode: 'ON', canOverride });
   if (!withOverrides) {
@@ -170,6 +186,7 @@ export async function savePlanEdit(
     if (ov.previewHash !== input.previewHash) throw refuse(409, 'PREVIEW_CHANGED', EDIT_ERROR_TEXT.PREVIEW_CHANGED, { preview: check.preview });
     // d. Exactly the needed issues that are not carried are confirmed.
     const want = new Set(judged.needed.filter((n) => !n.carried).map((n) => n.id ?? ''));
+    if (want.size && !overridesOn) throw refuse(409, 'OVERRIDES_OFF', EDIT_ERROR_TEXT.OVERRIDES_OFF, { preview: check.preview });
     if (want.size && !canOverride) throw refuse(403, 'OVERRIDE_ROLE', EDIT_ERROR_TEXT.OVERRIDE_ROLE);
     if (want.size !== confirmed.size || [...want].some((id) => !confirmed.has(id))) throw refuse(409, 'OVERRIDES_CHANGED', EDIT_ERROR_TEXT.OVERRIDES_CHANGED, { preview: check.preview });
     // e. Every needed issue judged again on the web's own figures (a solver bug can never store more than allowed).
@@ -200,7 +217,9 @@ export async function savePlanEdit(
         const basisNow = editBasis({ request: again.request, edited: check.edit.edited, stopIds: stopIdsOf(check), loads: loadsNow, chosenScenarioId: locked.chosenScenarioId, unserved: unservedNow });
         if (basisNow !== check.basis) throw new DayChanged();
 
-        const allowedNote = withOverrides && check.overrides?.needed.length ? `; ${check.overrides.needed.length} rule${check.overrides.needed.length === 1 ? '' : 's'} allowed by hand` : '';
+        const neededNow = withOverrides ? (check.overrides?.needed ?? []) : [];
+        const countText = allowedCountText(neededNow.filter((n) => !n.carried).length, neededNow.filter((n) => !!n.carried).length);
+        const allowedNote = countText ? `; ${countText}` : '';
         const { child } = await createNextVersionTx(tx, tenantId, runId, 'MANUAL_ADJUSTMENT', `By hand: ${check.preview.title}`.slice(0, 500 - allowedNote.length) + allowedNote, user.id);
         // The edited orders' kg as the solver was sent them (usually nothing to do).
         const orders = editedOrderIds(check);
@@ -221,7 +240,8 @@ export async function savePlanEdit(
               action: 'RULE_ALLOWED_BY_HAND',
               entity: 'RunPlan',
               entityId: child.id,
-              afterJson: { parentRunId: run.id, runId: child.id, version: child.version, byRole: role, confirmed: applied.allowed, carried: applied.carried, overrides: applied.overrides } as never,
+              // keptOnly: nothing new was allowed in this save; it only kept earlier approvals (their approvers are in `overrides[].carried`; review F7).
+              afterJson: { parentRunId: run.id, runId: child.id, version: child.version, byRole: role, confirmed: applied.allowed, carried: applied.carried, keptOnly: applied.allowed === 0, overrides: applied.overrides } as never,
               ip,
             },
             tx,
@@ -300,7 +320,13 @@ export async function applyPlanEdit(
 
   // The rules allowed by hand on the new loads: the needed issues, confirmed now or carried from earlier.
   const needed = relaxedSave ? (check.overrides?.needed ?? []) : [];
-  const approver: ApproverRole = (APPROVER_ROLES as readonly string[]).includes(String(user.role)) ? (user.role as ApproverRole) : 'SUPERVISOR';
+  const allowedCount = needed.filter((n) => !n.carried).length;
+  const carriedCount = needed.filter((n) => !!n.carried).length;
+  // A new approval is stored with the approver's own role. A role that may not approve never gets here (savePlanEdit
+  // refuses it first); if it did, nothing is saved rather than a wrong "by" label (review RA-5).
+  const isApprover = (APPROVER_ROLES as readonly string[]).includes(String(user.role));
+  if (allowedCount > 0 && !isApprover) throw refuse(403, 'OVERRIDE_ROLE', EDIT_ERROR_TEXT.OVERRIDE_ROLE);
+  const approver = (isApprover ? user.role : 'SUPERVISOR') as ApproverRole;
   const allowances = allowancesOfSave({
     needed,
     confirmed: args.overrides ?? new Map(),
@@ -310,8 +336,6 @@ export async function applyPlanEdit(
     newLoads: sc.loads,
     config: check.built.request.config,
   });
-  const allowedCount = needed.filter((n) => !n.carried).length;
-  const carriedCount = needed.filter((n) => !!n.carried).length;
 
   // The option in use with the edited trucks re-timed (refs mapped back, critic M3).
   const frozenTruckIds = childLoads.filter((l) => l.status !== 'PLANNED').map((l) => l.truckId);
@@ -345,7 +369,7 @@ export async function applyPlanEdit(
     frozenTruckIds,
     truckOrder: check.built.request.trucks.map((t) => t.id),
     manual,
-    warning: `Changed by hand by ${user.name || 'a dispatcher'} at ${clock}: ${check.preview.title}${kept ? ` (${kept} rule${kept === 1 ? '' : 's'} allowed by hand)` : ''}.`,
+    warning: `Changed by hand by ${user.name || 'a dispatcher'} at ${clock}: ${check.preview.title}${kept ? ` (${allowedCountText(allowedCount, carriedCount)})` : ''}.`,
     unserved: {
       placedOrderIds: check.placedOrderIds,
       removed: check.removedStops.map((r) => ({

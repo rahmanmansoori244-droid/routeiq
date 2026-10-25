@@ -29,6 +29,7 @@ import {
   mergeSolverReport,
   overrideId,
   overridesHash,
+  pctOver,
   planStopsOf,
   resolveLayout,
   rewriteBest,
@@ -45,7 +46,10 @@ import {
   allowancesOnPlannedText,
   allowedBadge,
   allowedByHandText,
+  allowedCountText,
+  cleanOverrideReason,
   issueText,
+  overrideReasonOk,
   overrideCapUnits,
   planEditConfigNote,
   planEditOverridesOn,
@@ -59,6 +63,7 @@ import { checkPlanFeasibility, inputHash, type FeasLoad, type FeasStop } from '@
 import { keptReport, type KeptLoadInput } from '@/lib/dispatch/kept-changes';
 import { planEditCheckSchema, planEditSaveSchema } from '@/lib/schemas';
 import { cleanReason } from '@/lib/dispatch/plan-edit-apply';
+import { showBreakAllowanceOnce } from '@/lib/dispatch/plan-detail';
 
 // ---------------------------------------------------------------------------------------------
 // The change list
@@ -164,6 +169,47 @@ describe('applyOps: several stops, whole loads and swaps (owner items 1 and 2)',
     expect(run([{ kind: 'MOVE_STOPS', stops: [s('A1', 1)], to: { truckId: 'T02', loadId: null, before: 'BEST', order: [s('A1', 1)] } }])).toMatchObject({ ok: false, code: 'BAD_ORDER', message: 'A new load in a given order needs a place: choose where it goes.' });
   });
 
+  it('F3: a load moved to another truck by an earlier op can still be named - swapped, moved again, stops put in it, a load before it', () => {
+    const moveA1 = { kind: 'MOVE_LOAD', loadId: 'A1', to: { truckId: 'T03', before: null } } as const;
+    const first = run([moveA1]);
+    expect(first.ok && first.edit.afterLoadIds.get('T03')).toEqual(['C1', null]);
+    expect(first.ok && first.edit.afterRefs?.get('T03')).toEqual(['C1', 'A1']);
+    // Swapped with B1 afterwards: found on T03 (not "no stop left").
+    const swap = run([moveA1, { kind: 'SWAP_LOADS', a: 'A1', b: 'B1' }]);
+    expect([after(swap, 'T02'), after(swap, 'T03')]).toEqual([[['c1', 'c2', 'c3']], [['c7'], ['c5', 'c6']]]);
+    expect(swap.ok && swap.edit.afterRefs?.get('T02')).toEqual(['A1']);
+    // Moved back home: it continues its stored load again.
+    const back = run([moveA1, { kind: 'MOVE_LOAD', loadId: 'A1', to: { truckId: 'T01', before: 'A2' } }]);
+    expect(back).toMatchObject({ ok: false, code: 'NO_CHANGE' });
+    // Stops put into it, named with its stored truck (the plan screen's) or the truck it is on now.
+    for (const truckId of ['T01', 'T03']) {
+      const into = run([moveA1, { kind: 'MOVE_STOPS', stops: [s('B1', 1)], to: { truckId, loadId: 'A1', position: 0 } }]);
+      expect(after(into, 'T03')).toEqual([['c7'], ['c5', 'c1', 'c2', 'c3']]);
+    }
+    // A best place in it: the best of the truck it is on now.
+    const best = run([moveA1, { kind: 'MOVE_STOPS', stops: [s('B1', 1)], to: { truckId: 'T01', loadId: 'A1' } }]);
+    expect(best.ok && best.edit.best).toEqual({ stop_id: 'c5', truck_id: 'T03', load_index: 1 });
+    // A new load before it: on the truck it is on now.
+    const before = run([moveA1, { kind: 'MOVE_STOPS', stops: [s('B1', 1)], to: { truckId: 'T01', loadId: null, before: 'A1' } }]);
+    expect(after(before, 'T03')).toEqual([['c7'], ['c5'], ['c1', 'c2', 'c3']]);
+    // Named with a truck it is neither on nor from: refused.
+    expect(run([moveA1, { kind: 'MOVE_STOPS', stops: [s('B1', 1)], to: { truckId: 'T02', loadId: 'A1', position: 0 } }])).toMatchObject({ ok: false, code: 'UNKNOWN_LOAD', message: 'A1 is not on that truck: check the change again.' });
+    // A load emptied by an earlier op is still "no stop left".
+    expect(run([{ kind: 'MOVE_STOPS', stops: [s('A2', 1)], to: { truckId: 'T03', loadId: 'C1', position: 0 } }, { kind: 'SWAP_LOADS', a: 'A2', b: 'B1' }])).toMatchObject({ ok: false, code: 'UNKNOWN_LOAD' });
+  });
+
+  it('F3: a best place written out names a moved load by its ref (no NO_EXPLICIT_PLACE)', () => {
+    const refOf = (id: string): EditStopRef => ({ loadId: 'B1', sequence: id === 'c5' ? 1 : 2 });
+    const op: PlanEditOp = { kind: 'MOVE_STOPS', stops: [s('B1', 1)], to: { truckId: 'T03', loadId: null, before: 'BEST' } };
+    // T03 after a move of A1 there: ['C1', 'A1'] by ref; the best new load goes before A1.
+    expect(rewriteBest(op, { kind: 'NEW', q: 1 }, { truckId: 'T03', wIds: ['C1', 'A1'], S: [['c7'], ['c5'], ['c1', 'c2', 'c3']], bestStops: ['c5'], refOf })).toEqual({
+      ...op,
+      to: { truckId: 'T03', loadId: null, before: 'A1', order: [{ loadId: 'B1', sequence: 1 }] },
+    });
+    const resolved = run([{ kind: 'MOVE_LOAD', loadId: 'A1', to: { truckId: 'T03', before: null } }, { kind: 'MOVE_STOPS', stops: [s('B1', 1)], to: { truckId: 'T03', loadId: null, before: 'A1', order: [s('B1', 1)] } }]);
+    expect(after(resolved, 'T03')).toEqual([['c7'], ['c5'], ['c1', 'c2', 'c3']]);
+  });
+
   it('at most 6 edited trucks (TOO_MANY_TRUCKS); nothing changing is NO_CHANGE', () => {
     const many = new Map<string, PlannedDayLoad[]>([...Array(7).keys()].map((i) => [`T${i}`, [{ loadId: `L${i}`, stops: [`x${i}`] }]]));
     const ctx2 = { stopOf: (r: EditStopRef) => ('loadId' in r ? `x${r.loadId.slice(1)}` : null) };
@@ -261,7 +307,10 @@ describe('judgeIssue (design 3.7; F1, F2, F17)', () => {
     };
     expect(cases(1199)).toMatchObject({ kind: 'CAPACITY_CASES', overridable: true, amount: { unit: 'cases', value: 1199, limit: 1000, capacity: 1000, overPct: 20 } });
     expect(cases(1200).overridable).toBe(true);
-    expect(cases(1201)).toMatchObject({ overridable: false, whyNot: "20% over the truck's 1,000 cases: more than the 20% that can be allowed by hand." });
+    // Just above the cap the % is never the cap itself, and the limit is given in cases (review F4).
+    expect(cases(1201)).toMatchObject({ overridable: false, amount: { overPct: 20.1 }, whyNot: "20.1% over the truck's 1,000 cases: at most 1,200 cases (20% over) can be allowed by hand on this truck." });
+    expect(cases(1201).text).toBe('T08 L1 carries 1,201 cases; the truck takes 1,000: 201 cases (20.1%) over');
+    expect(cases(1300)).toMatchObject({ amount: { overPct: 30 }, whyNot: "30% over the truck's 1,000 cases: at most 1,200 cases (20% over) can be allowed by hand on this truck." });
     expect(cases(1150, 1149)).toMatchObject({ overridable: false, whyNot: "The optimizer's figures for this load do not match the plan's (1149 / 1150 cases): re-plan the day." });
     expect(cases(1150, 1151).overridable).toBe(false);
     // Pallets from bays (12 bays = 12,000 units: 13,000 is 108 %), never from the 98 % room.
@@ -330,10 +379,13 @@ describe('carrying an allowance forward (D6, F9)', () => {
     expect(carryIssues([{ ...cap, rowKeys: ['o1|*', 'o9|*'] }], [stored(a1)], CFG)[0]!.carried).toBeNull();
   });
 
-  it('NO_BREAK: from any load of the truck-day, a frozen one too, under the same break rule', () => {
+  it('NO_BREAK: carried from a PLANNED load of the truck under the same break rule; one on a locked load only pre-fills the reason (RA-3)', () => {
     const nb = issue({ kind: 'NO_BREAK', code: 'BREAK', rowKeys: [], amount: null });
     const a = allowance({ kind: 'NO_BREAK', rowKeys: [], breakMin: 60, breakFromMin: 720, breakToMin: 840 });
-    expect(carryIssues([nb], [stored(a, 'LOCKED')], CFG)[0]!.carried).not.toBeNull();
+    expect(carryIssues([nb], [stored(a)], CFG)[0]!.carried).not.toBeNull();
+    const locked = carryIssues([nb], [stored(a, 'LOCKED')], CFG)[0]!;
+    expect(locked).toMatchObject({ carried: null, previous: { reason: 'agreed with customer', byName: 'Ahmed' } });
+    expect(carryIssues([nb], [stored(a, 'LOCKED'), stored(a)], CFG)[0]!.carried).not.toBeNull();
     expect(carryIssues([nb], [stored(a)], { ...CFG, break_min: 45 })[0]!.carried).toBeNull();
     // storedAllowancesOf: PLANNED loads every kind, frozen loads NO_BREAK only.
     const load = (status: string, list: HandAllowance[]) => ({ id: `L-${status}`, truckId: 'T1', loadNo: 1, status, truckSnapshotJson: { v: 1, capacityCases: 1, handAllowed: list } }) as unknown as EditLoad;
@@ -490,6 +542,64 @@ describe('the timetable gate honours an allowance by hand, never more (D5)', () 
   });
 });
 
+describe('the gate and the solver\'s own report: covered only where the web judged it allowed (review RA-1)', () => {
+  const withSolver = (loads: FeasLoad[], violations: FeasibilityViolation[]) => checkPlanFeasibility({ scenarioId: 'sc', solver: { status: 'VIOLATED', timing: 'EXACT', violations }, loads });
+  const solverOf = (r: ReturnType<typeof withSolver>) => r.violations.filter((x) => x.source === 'SOLVER').map((x) => [x.code, x.severity, x.allowedByHand?.id ?? null]);
+
+  it('a solver late finding on C9 is a BLOCK although C7 of the same load is allowed late; a late finding is never covered there', () => {
+    const two = fload({
+      stops: [fstop(), fstop({ orderId: 'o2', rowKey: 'o2|*', sequence: 2, label: 'C9', etaMin: 830, serviceStartMin: 830, departureMin: 845, hardWindowOk: true, hardEndMin: 900 })],
+      allowances: [allowance({ rowKeys: ['o1|*'], maxLateMin: 20 })],
+    });
+    const late = { code: 'HARD_WINDOW', truck_id: 't1', load_no: 1, stop_id: 'C9', message: 'T08 load 1: C9 is served late' } as FeasibilityViolation;
+    const r = withSolver([two], [late]);
+    expect(solverOf(r)).toEqual([['HARD_WINDOW', 'BLOCK', null]]);
+    expect(r.ok).toBe(false);
+    // The web's own finding of C7 stays the allowed warning it is.
+    expect(r.violations.filter((x) => x.source === 'WEB').map((x) => [x.code, x.severity])).toEqual([['HARD_WINDOW', 'WARN']]);
+  });
+
+  it('capacity: covered when the web allowed that load\'s same rule; an allowance above the cap, or another load\'s, never', () => {
+    const over = (allowances: HandAllowance[], cases = 115) => fload({ stops: [fstop({ cases, etaMin: 700, serviceStartMin: 700, departureMin: 715, hardWindowOk: true })], allowances });
+    const finding = { code: 'CAPACITY_CASES', truck_id: 't1', load_no: 1, message: 'T08 load 1 carries 115 cases' } as FeasibilityViolation;
+    const ok = allowance({ id: 'ovr_c', kind: 'CAPACITY_CASES', rowKeys: ['o1|*'], maxValue: 115, capacity: 100 });
+    expect(solverOf(withSolver([over([ok])], [finding]))).toEqual([['CAPACITY_CASES', 'WARN', 'ovr_c']]);
+    expect(withSolver([over([ok])], [finding]).ok).toBe(true);
+    // A forged allowance above the 120 % cap: the web ignores it, so the solver's finding blocks too.
+    const forged = allowance({ id: 'ovr_f', kind: 'CAPACITY_CASES', rowKeys: ['o1|*'], maxValue: 500, capacity: 100 });
+    expect(solverOf(withSolver([over([forged], 90)], [{ ...finding, message: 'T08 load 1 carries 400 cases' }]))).toEqual([['CAPACITY_CASES', 'BLOCK', null]]);
+    // Another kind's allowance, or none on the web side: a BLOCK.
+    expect(solverOf(withSolver([over([{ ...ok, kind: 'CAPACITY_KG' }])], [finding]))).toEqual([['CAPACITY_CASES', 'BLOCK', null]]);
+    // The finding of load 2 is not covered by load 1's allowance.
+    expect(solverOf(withSolver([over([ok]), fload({ id: 'L2', loadNo: 2, departMin: 950, returnMin: 1000, stops: [fstop({ orderId: 'o5', rowKey: 'o5|*', etaMin: 960, serviceStartMin: 960, departureMin: 975, hardWindowOk: true, hardEndMin: null })] })], [{ ...finding, load_no: 2 }]))).toEqual([['CAPACITY_CASES', 'BLOCK', null]]);
+  });
+
+  it('the break: covered when the web allowed the truck-day\'s break under the same rule; otherwise a BLOCK', () => {
+    const rules = { ...RULES, break: { lengthMin: 60, startFromMin: 720, startToMin: 840 } };
+    const day = (allowances: HandAllowance[]) => [fload({ rules, departMin: 600, returnMin: 1000, stops: [fstop({ etaMin: 700, serviceStartMin: 700, departureMin: 715, hardWindowOk: true })], allowances })];
+    const nb = allowance({ id: 'ovr_nb', kind: 'NO_BREAK', rowKeys: [], breakMin: 60, breakFromMin: 720, breakToMin: 840 });
+    const finding = { code: 'BREAK', truck_id: 't1', load_no: null, message: 'No place for the driver break' } as unknown as FeasibilityViolation;
+    expect(solverOf(withSolver(day([nb]), [finding]))).toEqual([['BREAK', 'WARN', 'ovr_nb']]);
+    expect(solverOf(withSolver(day([{ ...nb, breakMin: 45 }]), [finding]))).toEqual([['BREAK', 'BLOCK', null]]);
+    expect(solverOf(withSolver(day([]), [finding]))).toEqual([['BREAK', 'BLOCK', null]]);
+  });
+});
+
+describe('a driver break allowed by hand is shown once per truck-day (review F8)', () => {
+  const nb = allowance({ id: 'ovr_nb', kind: 'NO_BREAK', rowKeys: [], breakMin: 60, breakFromMin: 720, breakToMin: 840 });
+  const late = allowance({ id: 'ovr_l' });
+  const L = (loadNo: number, departMin: number, returnMin: number, list: HandAllowance[], truckId = 'T2') => ({ truckId, loadNo, departMin, returnMin, handAllowed: list });
+  it('on the load the break window falls in; the other loads keep their other allowances', () => {
+    const loads = showBreakAllowanceOnce([L(1, 360, 450, [nb]), L(2, 600, 900, [nb, late]), L(3, 960, 1100, [nb]), L(1, 360, 900, [nb], 'T3')]);
+    expect(loads.map((l) => (l.handAllowed ?? []).map((a) => a.id))).toEqual([[], ['ovr_nb', 'ovr_l'], [], ['ovr_nb']]);
+    expect(loads[0]).not.toHaveProperty('handAllowed');
+  });
+  it('no load over the window: the last that leaves before it ends, else the first', () => {
+    expect(showBreakAllowanceOnce([L(1, 360, 450, [nb]), L(2, 500, 700, [nb]), L(3, 900, 1000, [nb])]).map((l) => (l.handAllowed ?? []).length)).toEqual([0, 1, 0]);
+    expect(showBreakAllowanceOnce([L(1, 900, 950, [nb]), L(2, 1000, 1100, [nb])]).map((l) => (l.handAllowed ?? []).length)).toEqual([1, 0]);
+  });
+});
+
 describe('the kept-load warning with a late arrival allowed by hand (design 6.3)', () => {
   const kept = (endNow: number): KeptLoadInput => ({
     loadId: 'L1', truckId: 't1', truckCode: 'T08', loadNo: 1, status: 'LOCKED', rules: RULES, truckSmallNow: true,
@@ -539,6 +649,16 @@ describe('the requests (lib/schemas.ts, design 3.5)', () => {
     expect(planEditSaveSchema.safeParse({ move, ...save, overrides: Array.from({ length: 201 }, (_, i) => o(`ovr_${i.toString(16).padStart(16, '0')}`)) }).success).toBe(false);
     expect(cleanReason(' agreed\u0000 with\ncustomer ')).toBe('agreed with customer');
   });
+  it('a reason: zero-width and bidi characters out, at least 3 letters or digits in any script (RA-2)', () => {
+    expect(cleanReason('\u200b\u200b\u200b')).toBe('');
+    expect(cleanOverrideReason('ok \u202eeman\u2066x\u2069')).toBe('ok emanx');
+    expect(overrideReasonOk('\u200b\u200b\u200b')).toBe(false);
+    expect(overrideReasonOk('...')).toBe(false);
+    expect(overrideReasonOk(' a b ')).toBe(false);
+    expect(overrideReasonOk('ok1')).toBe(true);
+    expect(overrideReasonOk('موافق')).toBe(true);
+    expect(overrideReasonOk('a\u200bb\u200bc')).toBe(true);
+  });
 });
 
 describe('the words (plan-edit-view.ts)', () => {
@@ -569,9 +689,16 @@ describe('the words (plan-edit-view.ts)', () => {
     expect(issueText({ kind: 'CAPACITY_CASES', truckCode: 'T08', loadNo: 2, stopLabel: null, amount: { unit: 'cases', value: 1260, limit: 1140, over: 120, overPct: 11 }, message: '' })).toBe(
       'T08 L2 carries 1,260 cases; the truck takes 1,140: 120 cases (11%) over',
     );
+    // One sentence about a RE-PLAN (F10); new approvals and kept ones said apart (F7).
     expect(savedText({ runId: 'r', version: 4, reprint: ['T08 L1'], gone: [], trucks: [], allowed: 2, carried: 1 })).toBe(
-      'Saved as version 4. Print the sheets again for T08 L1 (load sheet, driver sheet). 3 rules were allowed by hand: they are printed on the load sheet and the driver sheet. A RE-PLAN plans the Planned loads again with every rule: lock them to keep this. A RE-PLAN plans unlocked loads again and may undo this change: lock the load to keep it.',
+      'Saved as version 4. Print the sheets again for T08 L1 (load sheet, driver sheet). 2 rules allowed by hand and 1 kept from an earlier approval: they are printed on the load sheet and the driver sheet. A RE-PLAN plans unlocked loads again with every rule and may undo this change and what was allowed by hand: lock the load to keep it.',
     );
+    expect(savedText({ runId: 'r', version: 5, reprint: [], gone: [], trucks: [], allowed: 1 })).toBe(
+      'Saved as version 5. 1 rule allowed by hand: it is printed on the load sheet and the driver sheet. A RE-PLAN plans unlocked loads again with every rule and may undo this change and what was allowed by hand: lock the load to keep it.',
+    );
+    expect(savedText({ runId: 'r', version: 5, reprint: [], gone: [], trucks: [], allowed: 0, carried: 1 })).toContain(' 1 rule kept from an earlier approval: it is printed');
+    expect([allowedCountText(0, 0), allowedCountText(3, 0), allowedCountText(0, 2), allowedCountText(1, 1)]).toEqual(['', '3 rules allowed by hand', '2 rules kept from an earlier approval', '1 rule allowed by hand and 1 kept from an earlier approval']);
+    expect([pctOver(1199, 1000), pctOver(1201, 1000), pctOver(285, 237), pctOver(1300, 1000), pctOver(5, 0)]).toEqual([20, 20.1, 20.3, 30, 0]);
   });
 });
 
